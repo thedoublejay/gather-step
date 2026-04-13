@@ -1,0 +1,45 @@
+---
+const withBase = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\//, '')}`;
+---
+
+<footer class="bp-footer">
+  <div class="bp-footer__top">
+    <div>
+      <div class="bp-footer__brand">
+        <img src="/gs_side_logo_transparent.webp" alt="" width="48" height="40" />
+        gather-step
+      </div>
+      <p class="bp-footer__tagline">
+        Index your repos. Trace the connections.<br />
+        Give your AI assistant the full picture.
+      </p>
+    </div>
+    <nav class="bp-footer__columns" aria-label="Footer navigation">
+      <div class="bp-footer__col">
+        <h4>Get started</h4>
+        <a href={withBase('/guides/getting-started/')}>Quickstart</a>
+        <a href={withBase('/guides/installation/')}>Installation</a>
+        <a href={withBase('/guides/workspace-setup/')}>Workspace setup</a>
+      </div>
+      <div class="bp-footer__col">
+        <h4>Reference</h4>
+        <a href={withBase('/reference/cli/')}>CLI</a>
+        <a href={withBase('/reference/configuration/')}>Configuration</a>
+        <a href={withBase('/reference/mcp-tools/')}>MCP tools</a>
+      </div>
+      <div class="bp-footer__col">
+        <h4>Project</h4>
+        <a href="https://github.com/thedoublejay/gather-step" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href={withBase('/changelog/')}>Changelog</a>
+        <a href={withBase('/about/')}>About</a>
+      </div>
+    </nav>
+  </div>
+  <div class="bp-footer__bottom">
+    <span>© 2026 Gather Step</span>
+    <span>
+      Built by
+      <a href="https://josejai.me" target="_blank" rel="noopener noreferrer">JJ Adonis</a>
+    </span>
+  </div>
+</footer>

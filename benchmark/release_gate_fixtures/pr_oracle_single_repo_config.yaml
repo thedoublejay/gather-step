@@ -1,0 +1,21 @@
+allow_listed_repos: []
+repos:
+  - name: sampled_repo
+    path: .
+    depth: null
+github: null
+jira: null
+indexing:
+  exclude:
+    - node_modules
+    - dist
+    - '*.min.js'
+    - '*.map'
+    - '*.lock'
+    - '*.d.ts'
+  language_excludes: []
+  include_languages: []
+  include_dotfiles: false
+  min_file_size: null
+  max_file_size: 1MB
+  workspace_concurrency: null

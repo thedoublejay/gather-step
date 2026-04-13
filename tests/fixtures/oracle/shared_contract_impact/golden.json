@@ -1,0 +1,20 @@
+{
+  "event": "impact_completed",
+  "symbol": "CreateOrderInput",
+  "matches": [
+    {
+      "source_repo": "__virtual__",
+      "source_file": "__shared__@workspace/shared-contracts__CreateOrderInput",
+      "source_symbol": "__shared__@workspace/shared-contracts__CreateOrderInput",
+      "primary": true,
+      "impacted_files": [
+        {
+          "repo": "backend_standard"
+        },
+        {
+          "repo": "frontend_standard"
+        }
+      ]
+    }
+  ]
+}

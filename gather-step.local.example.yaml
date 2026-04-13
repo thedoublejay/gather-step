@@ -1,0 +1,61 @@
+# gather-step local profile configuration
+#
+# Copy this file to .gather-step.local.yaml and customize.
+# The .local.yaml file is gitignored — it should never be committed.
+#
+# When present, this file overrides auto-detected framework packs with
+# explicit profile assignments per repo. When absent, gather-step falls
+# back to auto-detection from package.json.
+
+version: 1
+
+# Named bundles of semantic packs.
+# Each profile lists which extraction packs to activate.
+profiles:
+  - name: backend_standard
+    packs:
+      - nestjs
+      - mongoose
+      - azure
+      - launch_darkly
+      - shared_lib
+
+  - name: frontend_standard
+    packs:
+      - react
+      - react_router
+      - react_hook_form
+      - storybook
+      - redux
+      - zustand
+      - launch_darkly
+      - shared_lib
+
+  - name: full_stack
+    extends:
+      - backend_standard
+      - frontend_standard
+
+  # Profiles can include per-pack options for tuning.
+  - name: backend_custom
+    packs:
+      - nestjs
+      - id: mongoose
+        options:
+          skip_migrations: true
+      - id: shared_lib
+        options:
+          package_prefixes:
+            - "@myorg/"
+
+# Per-repo profile assignments.
+# Repos not listed here fall back to auto-detection.
+repos:
+  - path: /path/to/backend-service
+    profile: backend_standard
+
+  - path: /path/to/frontend-app
+    profile: frontend_standard
+
+  - path: /path/to/monorepo
+    profile: full_stack

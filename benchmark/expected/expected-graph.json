@@ -1,0 +1,87 @@
+{
+  "description": "Hand-curated expected graph for the curated-monorepo fixture. Each entry describes a node or edge the parser is expected to extract. Used by the graph recall/precision benchmark to compute quality scores.",
+  "expected_nodes": [
+    {
+      "file": "apps/backend_api/src/controllers/auth.controller.ts",
+      "kind": "Class",
+      "name": "AuthController"
+    },
+    {
+      "file": "apps/backend_api/src/controllers/auth.controller.ts",
+      "kind": "Function",
+      "name": "refreshToken"
+    },
+    {
+      "file": "apps/backend_api/src/controllers/orders.controller.ts",
+      "kind": "Class",
+      "name": "OrdersController"
+    },
+    {
+      "file": "apps/backend_api/src/controllers/orders.controller.ts",
+      "kind": "Function",
+      "name": "listOrders"
+    },
+    {
+      "file": "apps/backend_api/src/controllers/orders.controller.ts",
+      "kind": "Function",
+      "name": "createOrder"
+    },
+    {
+      "file": "apps/backend_api/src/services/orders.service.ts",
+      "kind": "Class",
+      "name": "OrdersService"
+    },
+    {
+      "file": "apps/backend_api/src/services/orders.service.ts",
+      "kind": "Function",
+      "name": "createOrder"
+    },
+    {
+      "file": "apps/backend_api/src/services/orders.service.ts",
+      "kind": "Function",
+      "name": "listOrders"
+    },
+    {
+      "file": "apps/backend_api/src/modules/orders.module.ts",
+      "kind": "Class",
+      "name": "OrdersModule"
+    },
+    {
+      "file": "apps/frontend_app/src/api/orders.api.ts",
+      "kind": "Function",
+      "name": "listOrders"
+    },
+    {
+      "file": "apps/frontend_app/src/api/orders.api.ts",
+      "kind": "Function",
+      "name": "createOrder"
+    },
+    {
+      "file": "apps/frontend_app/src/hooks/useAuthentication.ts",
+      "kind": "Function",
+      "name": "refreshAuthToken"
+    },
+    {
+      "file": "apps/frontend_app/src/hooks/useAuthentication.ts",
+      "kind": "Function",
+      "name": "useAuthentication"
+    }
+  ],
+  "expected_edges": [
+    {
+      "source_file": "apps/backend_api/src/modules/orders.module.ts",
+      "target_file": "apps/backend_api/src/controllers/orders.controller.ts",
+      "kind": "Imports"
+    },
+    {
+      "source_file": "apps/backend_api/src/modules/orders.module.ts",
+      "target_file": "apps/backend_api/src/services/orders.service.ts",
+      "kind": "Imports"
+    },
+    {
+      "source_file": "apps/backend_api/src/controllers/orders.controller.ts",
+      "target_file": "apps/backend_api/src/services/orders.service.ts",
+      "kind": "Imports"
+    }
+  ]
+}

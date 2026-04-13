@@ -1,0 +1,130 @@
+---
+const tasks = [
+  {
+    id: 'Frontend hook',
+    title: 'Change a shared frontend auth/session type.',
+    manual: 42,
+    gatherStep: 2.48,
+  },
+  {
+    id: 'Event flow',
+    title: 'Change a backend event/schema flow across repos.',
+    manual: 24,
+    gatherStep: 1.97,
+  },
+  {
+    id: 'Shared API',
+    title: 'Roll out a shared contracts API to backend services.',
+    manual: 16,
+    gatherStep: 4.7,
+  },
+];
+
+const scale = [
+  { label: 'Repos', value: '26' },
+  { label: 'Files', value: '13.6K' },
+  { label: 'Symbols', value: '171K' },
+  { label: 'Edges', value: '405K' },
+  { label: 'Cross-repo edges', value: '88K' },
+];
+
+const totalManual = tasks.reduce((sum, task) => sum + task.manual, 0);
+const totalGatherStep = tasks.reduce((sum, task) => sum + task.gatherStep, 0);
+const maxBar = totalManual;
+const speedup = (totalManual / totalGatherStep).toFixed(1);
+---
+
+<section class="bp-sec" id="benchmark">
+  <div class="bp-bench">
+    <div class="bp-bench__head">
+      <div>
+        <span class="bp-sec__num">DET-06 · Planning benchmark</span>
+        <h2 class="bp-h2" style="margin-top: 12px;">
+          Manual planning, in the time your assistant <span class="u">needs to read an answer.</span>
+        </h2>
+        <p class="bp-lede" style="margin-top: 14px;">
+          Same three planning tasks, same 26-repo workspace. Left bar is an operator clicking
+          through repos. Right bar is a single Gather Step pack query.
+        </p>
+      </div>
+      <span class="bp-stamp">v1.0 · 2026-04-27</span>
+    </div>
+
+    <div class="bp-bench__hero">
+      <div class="bp-bench__stat">
+        <span class="bp-bench__stat__label">End-to-end planning</span>
+        <div class="bp-bench__stat__big">
+          {speedup}×<span class="unit"> faster</span>
+        </div>
+        <div class="bp-bench__stat__small">
+          <b>{totalManual}s</b> of manual exploration, compressed into <b>{totalGatherStep.toFixed(2)}s</b> of
+          pack queries once the graph is built. The latest release gate indexed the 26-repo workspace in 118.2s.
+        </div>
+      </div>
+
+      <div class="bp-bench__chart" aria-label="Manual vs Gather Step planning time by task">
+        {
+          tasks.map((task) => (
+            <div class="bp-bench__row">
+              <div class="bp-bench__row__head">
+                <b>{task.id}</b>
+                <span class="bp-bench__speedup">{(task.manual / task.gatherStep).toFixed(1)}× faster</span>
+              </div>
+              <div class="bp-bench__bar">
+                <div class="bp-bench__bar__fill bp-bench__bar__fill--manual" style={`width: ${(task.manual / maxBar) * 100}%`}></div>
+                <span class="bp-bench__bar__val">{task.manual}s manual</span>
+              </div>
+              <div class="bp-bench__bar">
+                <div
+                  class="bp-bench__bar__fill bp-bench__bar__fill--gather-step"
+                  style={`width: ${Math.max((task.gatherStep / maxBar) * 100, 8)}%`}
+                ></div>
+                <span class="bp-bench__bar__val">{task.gatherStep.toFixed(2)}s Gather Step</span>
+              </div>
+            </div>
+          ))
+        }
+        <div class="bp-bench__legend">
+          <span><i class="k-manual"></i>Manual exploration</span>
+          <span><i class="k-gather-step"></i>Gather Step pack</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="bp-bench__tasks">
+      {
+        tasks.map((task) => (
+          <div class="bp-bench__task">
+            <span class="bp-bench__task__tag">{task.id}</span>
+            <h4>{task.title}</h4>
+            <div class="bp-bench__task__row"><span>Manual</span><b>{task.manual}s</b></div>
+            <div class="bp-bench__task__row"><span>Gather Step</span><b>{task.gatherStep.toFixed(2)}s</b></div>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="bp-bench__scale">
+      {
+        scale.map((item) => (
+          <div class="bp-bench__chip">
+            <span class="bp-bench__chip__k">{item.label}</span>
+            <span class="bp-bench__chip__v">{item.value}</span>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="bp-bench__note">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 2px;">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <div>
+        <b>Latest gate.</b> The 2026-04-27 v1.0 release gate passed all HIGH probes across planning,
+        event tracing, and change impact. PR-oracle median F1 and recall both scored 1.000.
+      </div>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,14 @@
+name: auth_flow
+description: Auth refresh flow across frontend and backend
+anchor: apps/frontend_app/src/hooks/useAuthentication.ts
+expected_repos:
+  - backend_api
+  - frontend_app
+expected_files:
+  - apps/backend_api/src/controllers/auth.controller.ts
+expected_edges:
+  - kind: ConsumesApiFrom
+missed_repos_max: 1
+missed_files_max: 3
+false_positives_max: 5
+cross_boundary_precision_min: 0.85

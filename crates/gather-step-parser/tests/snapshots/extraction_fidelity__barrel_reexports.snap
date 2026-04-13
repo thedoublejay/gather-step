@@ -1,0 +1,134 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&barrel)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "File",
+            name: "barrel_reexports.ts",
+            qualified_name: Some(
+                "extraction-fixtures::barrel_reexports.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "*",
+            qualified_name: Some(
+                "barrel_reexports.ts::*",
+            ),
+            external_id: None,
+            signature: Some(
+                "from ./x",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Y",
+            qualified_name: Some(
+                "barrel_reexports.ts::Y",
+            ),
+            external_id: None,
+            signature: Some(
+                "from ./y",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "./x",
+            qualified_name: Some(
+                "module-import::./x",
+            ),
+            external_id: Some(
+                "module-import::./x",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "./y",
+            qualified_name: Some(
+                "module-import::./y",
+            ),
+            external_id: Some(
+                "module-import::./y",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "barrel_reexports.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::barrel_reexports.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::barrel_reexports.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::barrel_reexports.ts",
+            target: "barrel_reexports.ts::*",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::barrel_reexports.ts",
+            target: "barrel_reexports.ts::Y",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::barrel_reexports.ts",
+            target: "module::extraction-fixtures::barrel_reexports.ts",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::barrel_reexports.ts",
+            target: "module-import::./x",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::barrel_reexports.ts",
+            target: "module-import::./y",
+        },
+    ],
+    symbols: [],
+    imports: [
+        ImportSummary {
+            local_name: "*",
+            imported_name: Some(
+                "*",
+            ),
+            source: "./x",
+            resolved_path: Some(
+                "x.ts",
+            ),
+            is_default: false,
+            is_namespace: true,
+        },
+        ImportSummary {
+            local_name: "Y",
+            imported_name: Some(
+                "Y",
+            ),
+            source: "./y",
+            resolved_path: Some(
+                "y.ts",
+            ),
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

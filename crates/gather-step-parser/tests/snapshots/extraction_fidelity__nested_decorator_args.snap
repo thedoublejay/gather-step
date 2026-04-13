@@ -1,0 +1,141 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&parsed)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "DecoratedHandler",
+            qualified_name: Some(
+                "DecoratedHandler",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "SetMetadata",
+            qualified_name: Some(
+                "DecoratedHandler.handle::@SetMetadata",
+            ),
+            external_id: None,
+            signature: Some(
+                "'roles', ['admin', 'ops']",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "nested_decorator_args.ts",
+            qualified_name: Some(
+                "extraction-fixtures::nested_decorator_args.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "SetMetadata",
+            qualified_name: Some(
+                "SetMetadata",
+            ),
+            external_id: None,
+            signature: Some(
+                "SetMetadata(..._args: unknown[])",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "handle",
+            qualified_name: Some(
+                "DecoratedHandler.handle",
+            ),
+            external_id: None,
+            signature: Some(
+                "handle('roles', ['admin', 'ops'])",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "nested_decorator_args.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::nested_decorator_args.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::nested_decorator_args.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_decorator_args.ts",
+            target: "DecoratedHandler",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_decorator_args.ts",
+            target: "DecoratedHandler.handle",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_decorator_args.ts",
+            target: "SetMetadata",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_decorator_args.ts",
+            target: "module::extraction-fixtures::nested_decorator_args.ts",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::nested_decorator_args.ts",
+            target: "DecoratedHandler",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::nested_decorator_args.ts",
+            target: "DecoratedHandler.handle",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "DecoratedHandler.handle",
+            target: "DecoratedHandler.handle::@SetMetadata",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "DecoratedHandler",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "SetMetadata",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "handle",
+            decorators: [
+                (
+                    "SetMetadata",
+                    [
+                        "roles",
+                        "['admin', 'ops']",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [],
+    call_sites: [],
+    constant_strings: {},
+}

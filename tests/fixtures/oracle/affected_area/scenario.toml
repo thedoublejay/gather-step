@@ -1,0 +1,27 @@
+name = "affected_area"
+mode = "change_impact"
+
+[target]
+kind = "symbol"
+qn = "listOrders"
+
+[oracle]
+expected_files = [
+  "src/controller.ts",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+expected_primary_symbol_name = "listOrders"
+expected_primary_symbol_kind = "function"
+expected_primary_repo = "backend_standard"
+expected_primary_file = "src/controller.ts"
+expected_resolved_symbol_kind = "function"
+expected_confirmed_downstream_repos = ["frontend_standard"]
+max_probable_downstream_repos = 0
+expected_resolution = "search_resolved"
+expected_confidence_model_version = "v1.0"
+max_response_bytes = 18000

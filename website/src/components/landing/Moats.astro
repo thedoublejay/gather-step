@@ -1,0 +1,69 @@
+---
+const moats = [
+  {
+    n: '01',
+    tag: 'Flagship',
+    title: 'Event-driven topology mapping',
+    body:
+      'Producer-consumer graphs, blast-radius traces, and orphan-topic checks across Kafka, NATS, SQS, Redis Streams, and NestJS.',
+  },
+  {
+    n: '02',
+    tag: 'Architecture',
+    title: 'Native polyrepo graph with virtual-node edges',
+    body:
+      'A Kafka producer in repo A and a consumer in repo B share the same topic node. It is not a federation of isolated graphs; it is one graph.',
+  },
+  {
+    n: '03',
+    tag: 'Semantic',
+    title: 'Framework-aware extraction',
+    body:
+      'NestJS, React hooks, routers, Storybook, gateway proxies, Mongoose, Prisma, Drizzle, and Bull/BullMQ surfaces become graph edges.',
+  },
+  {
+    n: '04',
+    tag: 'Safety gate',
+    title: 'Proof-backed contracts and impact',
+    body:
+      'Contract drift, shared API rollout, confirmed/probable downstream repos, and advisory co-change evidence stay separated.',
+  },
+  {
+    n: '05',
+    tag: 'Operations',
+    title: 'Release gates, recovery, and traces',
+    body:
+      'Release-gate artifacts, PR-oracle scoring, schema recovery, compaction, and MCP tool traces make the graph auditable.',
+  },
+  {
+    n: '06',
+    tag: 'Delivery',
+    title: 'Task-shaped context packs',
+    body:
+      'Plan, debug, fix, review, and change-impact packs carry proof-aware anchors and budgeted context instead of raw graph dumps.',
+  },
+];
+---
+
+<section class="bp-sec" id="moats">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-04 · What actually makes it different</span>
+      <h2 class="bp-h2">Six feature groups built for <span class="u">release-grade context.</span></h2>
+      <p class="bp-lede">
+      Partial context is worse than no context. Gather Step keeps topology, proof,
+      storage health, and assistant retrieval in one local workflow.
+    </p>
+  </div>
+  <div class="bp-moats">
+    {
+      moats.map((moat) => (
+        <div class="bp-moat">
+          <span class="bp-moat__num">{moat.n} / 06</span>
+          <span class="bp-moat__tag">{moat.tag}</span>
+          <h3>{moat.title}</h3>
+          <p>{moat.body}</p>
+        </div>
+      ))
+    }
+  </div>
+</section>

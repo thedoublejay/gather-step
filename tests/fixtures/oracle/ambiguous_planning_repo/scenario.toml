@@ -1,0 +1,37 @@
+name = "ambiguous_planning_repo"
+mode = "planning"
+repo = "frontend_standard"
+
+[target]
+kind = "symbol"
+qn = "useAuthentication"
+
+[oracle]
+expected_files = [
+  "src/auth_api.ts",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+expected_primary_symbol_name = "useAuthentication"
+expected_primary_symbol_kind = "function"
+expected_primary_repo = "frontend_standard"
+expected_primary_file = "src/auth_api.ts"
+expected_resolved_symbol_kind = "function"
+# Cross-repo planning caller: `backend_standard/src/auth_consumer.ts`
+# imports `useAuthentication` from `@workspace/shared-contracts` and calls
+# it. The planning-mode upstream widening in
+# `widen_planning_upstream_for_shared_peers` finds the virtual
+# `SharedSymbol` peer by name and promotes the referring file as a cross-repo
+# caller — without upgrading the imported call site into confirmed
+# downstream evidence.
+expected_cross_repo_caller_repos = ["backend_standard"]
+forbidden_confirmed_downstream_repos = ["backend_standard"]
+max_probable_downstream_repos = 0
+forbidden_warnings = ["target could not be resolved to a unique indexed symbol"]
+expected_resolution = "search_ranked_resolved"
+expected_confidence_model_version = "v1.0"
+max_response_bytes = 18000

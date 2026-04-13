@@ -1,0 +1,245 @@
+---
+title: "gather-step MCP tools reference"
+description: "Reference for every MCP tool exposed by gather-step serve, organized by the kinds of questions an AI assistant uses them to answer automatically."
+---
+
+The `gather-step serve` command exposes a local stdio MCP server over the indexed workspace graph.
+
+In normal use, engineers do not call these tools manually. An MCP-aware assistant selects them automatically based on the task. This page exists as a reference so the tool surface is explicit, inspectable, and easier to debug.
+
+## Tool Groups
+
+- **Orientation**: understand what is indexed before deeper queries
+- **Search and traversal**: find symbols and walk local call relationships
+- **Topology and impact**: trace routes, events, and cross-repo blast radius
+- **Contracts**: inspect payload shape and producer-consumer drift
+- **Context retrieval**: return short summaries, combined context, and task-shaped packs
+- **Repo intelligence**: inspect ownership, dead code, conventions, and repo summaries
+
+## Orientation
+
+### `get_graph_schema`
+
+> "What kinds of graph nodes and edges are available in this workspace?"
+
+Used automatically at the start of a new session when the assistant needs a compact view of the indexed graph shape before issuing more specific calls.
+
+### `get_graph_schema_summary`
+
+> "Give me the quick schema summary for this workspace."
+
+Alias of `get_graph_schema`. It exists for client compatibility and returns the same compact graph-shape summary.
+
+### `list_repos`
+
+> "Which repositories are indexed right now, and are they fresh?"
+
+Used automatically when the assistant needs to confirm repo coverage, framework detection, file counts, symbol counts, and freshness before trusting later answers.
+
+## Search and Traversal
+
+### `search`
+
+> "Find `createOrder` in the indexed workspace."
+
+Used automatically to locate symbols, routes, topics, types, or files before deeper analysis. This is often the first step before `get_symbol`, `trace_route`, or a context pack.
+
+### `get_symbol`
+
+> "Show me the stored metadata for this symbol ID."
+
+Used automatically after `search` when the assistant needs the exact symbol record, including repo, file path, source span, and other stored metadata.
+
+### `get_callers`
+
+> "What calls into this function or method?"
+
+Used automatically when the assistant is debugging upstream entry points, understanding who depends on a function, or preparing review context.
+
+### `get_callees`
+
+> "What does this function call downstream?"
+
+Used automatically when the assistant needs the direct delegated work of a function, method, or handler before tracing broader impact.
+
+## Topology and Impact
+
+### `trace_impact`
+
+> "What features, repos, or pages could be affected if I change this symbol?"
+
+Used automatically to estimate cross-repo blast radius through routes, events, queues, topics, shared symbols, and other virtual graph surfaces.
+
+### `trace_event`
+
+> "Who produces and who consumes `order.created`?"
+
+Used automatically when the assistant needs the producer-consumer map for an event-like target across one or more repos.
+
+### `trace_route`
+
+> "Which clients call `POST /orders`, and which handler serves it?"
+
+Used automatically when the assistant needs the route surface for a known HTTP method and path, including callers and handlers attached to the same route node.
+
+### `crud_trace`
+
+> "Show me the end-to-end flow for `POST /orders`, including callers, handlers, and persistence touchpoints."
+
+Used automatically when the assistant needs a fuller request-path trace than `trace_route`, especially for debugging or implementation planning.
+
+### `event_blast_radius`
+
+> "If this event changes, what downstream code is likely affected?"
+
+Used automatically when the assistant needs a transitive downstream walk from an event-like node rather than only the direct producer and consumer list.
+
+### `list_orphan_topics`
+
+> "Which topics or events have only producers or only consumers?"
+
+Used automatically for event-topology audits, dead-path investigation, and integration checks where the assistant needs to surface incomplete or stale async wiring.
+
+### `cross_repo_deps`
+
+> "What other repositories does this repo depend on through shared graph surfaces?"
+
+Used automatically when the assistant needs repo-level dependency structure before a refactor, migration, or deployment-isolation discussion.
+
+### `get_shared_type_usage`
+
+> "Where is this shared type used across the workspace?"
+
+Used automatically when the assistant needs repo and file usage for a shared symbol or DTO before changing that contract.
+
+## Contracts
+
+### `payload_schema`
+
+> "What payload shape does this event or route appear to use?"
+
+Used automatically when the assistant needs the inferred producer and consumer schema for a virtual target so it can reason about fields instead of only symbol names.
+
+### `contract_drift`
+
+> "Are producers and consumers disagreeing on this payload contract?"
+
+Used automatically when the assistant needs mismatches between the producer-side and consumer-side inferred shapes for the same target.
+
+### `breaking_change_candidates`
+
+> "If I change this DTO or producer payload, which consumers are at risk?"
+
+Used automatically when the assistant needs a targeted breaking-change view tied to a producer symbol, DTO, or related contract surface.
+
+## Context Retrieval
+
+### `brief`
+
+> "Give me a one-screen summary of what this symbol is and why it matters."
+
+Used automatically for short summaries when the assistant needs lightweight orientation without spending budget on a deeper trace or pack.
+
+### `context`
+
+> "Give me the combined context around this target."
+
+Used automatically when the assistant needs a broader stitched view that combines symbol metadata, traversal, repo context, and impact hints in one call.
+
+### `context_pack`
+
+> "Build a focused context pack for this target."
+
+Used automatically when the assistant wants a bounded task-shaped retrieval and already knows which mode it wants, such as `planning`, `debug`, `fix`, `review`, or `change_impact`.
+
+### `get_context_pack`
+
+> "Return the context pack for this target."
+
+Alias of `context_pack`. It exists for client compatibility and returns the same bounded pack response.
+
+### `planning_pack`
+
+> "I’m about to work on this area. What do I need to understand first?"
+
+Used automatically when the assistant needs planning-oriented context focused on entry points, dependencies, related surfaces, and likely next investigation steps.
+
+### `plan_change`
+
+> "Help me plan this change."
+
+Alias of `planning_pack`. It exists for clients that prefer a more task-shaped name.
+
+### `debug_pack`
+
+> "This behavior is broken. Give me the most relevant debug context."
+
+Used automatically when the assistant needs inbound paths, nearby event surfaces, persistence touchpoints, and other debugging-oriented evidence.
+
+### `fix_pack`
+
+> "I know the issue. What is the smallest safe edit surface?"
+
+Used automatically when the assistant needs a narrower context set for applying a targeted fix without the wider planning surface.
+
+### `fix_surface`
+
+> "Show me the fix surface for this target."
+
+Alias of `fix_pack`. It exists for clients that frame the same retrieval in terms of edit surface rather than pack mode.
+
+### `review_pack`
+
+> "I’m reviewing this area. What should I think about before approving a change?"
+
+Used automatically when the assistant needs review-oriented context such as impacted relationships, conventions, ownership hints, and nearby hotspots.
+
+### `change_impact_pack`
+
+> "What is the full blast radius if this changes?"
+
+Used automatically when the assistant needs the richest impact-oriented context pack, including cross-repo dependents, bridges, and identified gaps.
+
+### `get_change_impact_pack`
+
+> "Return the change-impact pack for this target."
+
+Alias of `change_impact_pack`. It exists for client compatibility and returns the same impact-focused pack.
+
+### `batch_query`
+
+> "Run the search, context, and impact lookups together so I can answer this in one pass."
+
+Used automatically when the assistant wants multiple bounded Gather Step queries in one round trip instead of making several separate tool calls.
+
+## Repo Intelligence
+
+### `who_owns`
+
+> "Who has the strongest history of working in this file or symbol?"
+
+Used automatically when the assistant needs history-based ownership percentages, likely owners, or bus-factor hints for review routing and change risk.
+
+### `get_dead_code`
+
+> "What dead-code candidates exist in this repo?"
+
+Used automatically when the assistant needs graph-reachability-based dead-code candidates while reviewing cleanup work or repo health.
+
+### `get_conventions`
+
+> "What structural conventions does this repo seem to follow?"
+
+Used automatically when the assistant wants repeated patterns discovered from the indexed graph so it can align suggestions with existing code shape.
+
+### `get_overview`
+
+> "Give me the high-level overview of this repo."
+
+Used automatically when the assistant needs a repo summary that combines graph-level shape with git-derived signals and other indexed analytics.
+
+## Notes for Operators
+
+- All tools are read-only against the indexed state.
+- Results depend on index freshness. Run `index` again, or keep `watch` running, if the code has changed.
+- The assistant selects these tools automatically. The command names here are reference material, not a required manual workflow.

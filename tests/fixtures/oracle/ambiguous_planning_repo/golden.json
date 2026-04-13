@@ -1,0 +1,26 @@
+{
+  "event": "context_pack_completed",
+  "response_schema_version": 1,
+  "data": {
+    "mode": "planning",
+    "items": [
+      {
+        "symbol_name": "useAuthentication",
+        "symbol_kind": "function",
+        "repo": "frontend_standard",
+        "file_path": "src/auth_api.ts"
+      }
+    ],
+    "change_impact": {
+      "cross_repo_callers": [
+        {
+          "repo": "backend_standard"
+        }
+      ]
+    }
+  },
+  "meta": {
+    "resolution": "search_ranked_resolved",
+    "confidence_model_version": "v1.0"
+  }
+}

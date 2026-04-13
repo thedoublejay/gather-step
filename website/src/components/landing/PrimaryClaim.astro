@@ -1,0 +1,90 @@
+---
+const pillars = [
+  {
+    ix: '01',
+    tag: 'Unified',
+    heading: 'One graph, every repo.',
+    body:
+      'Not a federation of isolated per-repo indexes. A single knowledge graph that spans the whole workspace.',
+  },
+  {
+    ix: '02',
+    tag: 'Cross-repo',
+    heading: 'Event flows across services.',
+    body:
+      'Producer-to-consumer, through shared virtual nodes. Your AI finally sees the edges between repos, not just inside them.',
+  },
+  {
+    ix: '03',
+    tag: 'Right now',
+    heading: 'Derived from source, not docs.',
+    body:
+      'Re-indexes incrementally on every file save. What the code looks like today, not what a README said two years ago.',
+  },
+];
+
+const before = [
+  ['✕', 'Sees only the open repo'],
+  ['✕', 'Guesses at downstream consumers'],
+  ['✕', 'Re-explores the codebase each session'],
+];
+
+const after = [
+  ['✓', 'Sees every repo as one system'],
+  ['✓', 'Traces producer to consumer across services'],
+  ['✓', 'Starts with pre-computed structural context'],
+];
+---
+
+<section class="bp-sec" id="claim">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-02 · What it does</span>
+    <h2 class="bp-h2">
+      One knowledge graph across every repo,<br />
+      <span class="u">surfaced to your AI assistant.</span>
+    </h2>
+  </div>
+
+  <div class="bp-pillars">
+    {
+      pillars.map((pillar) => (
+        <div class="bp-pillar">
+          <div class="bp-pillar__num">{pillar.ix} / 03</div>
+          <div class="bp-pillar__tag">{pillar.tag}</div>
+          <h3>{pillar.heading}</h3>
+          <p>{pillar.body}</p>
+        </div>
+      ))
+    }
+  </div>
+
+  <div class="bp-contrast" aria-label="What an AI assistant sees, without vs. with Gather Step">
+    <div class="bp-contrast__col bp-contrast__col--before">
+      <span class="bp-contrast__label">Without Gather Step</span>
+      <div class="bp-contrast__list">
+        {
+          before.map(([mark, text]) => (
+            <div>
+              <span class="bp-contrast__mark">{mark}</span>
+              <span>{text}</span>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+    <div class="bp-contrast__arrow" aria-hidden="true">→</div>
+    <div class="bp-contrast__col bp-contrast__col--after">
+      <span class="bp-contrast__label">With Gather Step</span>
+      <div class="bp-contrast__list">
+        {
+          after.map(([mark, text]) => (
+            <div>
+              <span class="bp-contrast__mark">{mark}</span>
+              <span>{text}</span>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</section>

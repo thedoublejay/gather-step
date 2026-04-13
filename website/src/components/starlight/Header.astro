@@ -1,0 +1,268 @@
+---
+import config from 'virtual:starlight/user-config';
+
+import Search from 'virtual:starlight/components/Search';
+
+const shouldRenderSearch =
+  config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
+const withBase = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, '')}`;
+---
+
+<div class="header sl-flex gs-header">
+  <div class="gs-header__top">
+    <a href={withBase('/')} class="gs-header__brand">
+      <img
+        src="/gs_logo_transparent.webp"
+        alt=""
+        class="gs-header__logo"
+        width="52"
+        height="52"
+      />
+      <span class="gs-header__title">Gather Step</span>
+    </a>
+
+    <button
+      class="gs-hamburger"
+      aria-label="Toggle navigation"
+      aria-expanded="false"
+      aria-controls="gs-mobile-nav"
+    >
+      <svg class="gs-hamburger__open" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <line x1="4" y1="7" x2="20" y2="7" />
+        <line x1="4" y1="12" x2="20" y2="12" />
+        <line x1="4" y1="17" x2="20" y2="17" />
+      </svg>
+      <svg class="gs-hamburger__close" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <line x1="6" y1="6" x2="18" y2="18" />
+        <line x1="6" y1="18" x2="18" y2="6" />
+      </svg>
+    </button>
+  </div>
+
+  <div class="gs-header__right">
+    <nav id="gs-mobile-nav" class="gs-header__nav" aria-label="Primary">
+      <a href={withBase('/guides/getting-started/')}>Getting Started</a>
+      <a href={withBase('/reference/cli/')}>Docs</a>
+      <a href="https://github.com/thedoublejay/gather-step">GitHub</a>
+    </nav>
+
+    <div class="sl-flex gs-header__search">
+      {shouldRenderSearch && <Search />}
+    </div>
+  </div>
+</div>
+
+<script>
+  const btn = document.querySelector('.gs-hamburger');
+  const nav = document.getElementById('gs-mobile-nav');
+  if (btn && nav) {
+    btn.addEventListener('click', () => {
+      const open = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', String(!open));
+      nav.classList.toggle('gs-header__nav--open');
+    });
+  }
+</script>
+
+<style>
+  .header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 100%;
+    width: 100%;
+  }
+
+  .gs-header__top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .gs-header__brand {
+    display: flex;
+    align-items: center;
+    gap: 0.42rem;
+    text-decoration: none;
+    flex-shrink: 0;
+  }
+
+  .gs-header__logo {
+    width: 2rem;
+    height: 2rem;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+
+  .gs-header__title {
+    font-size: 0.84rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--sl-color-white);
+    text-transform: uppercase;
+    line-height: 1;
+  }
+
+  /* Hamburger button — mobile only */
+  .gs-hamburger {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.2rem;
+    height: 2.2rem;
+    padding: 0;
+    border: 1px solid rgba(127, 189, 227, 0.16);
+    border-radius: 0.625rem;
+    background: rgba(127, 189, 227, 0.06);
+    color: var(--sl-color-gray-3);
+    cursor: pointer;
+    z-index: 11;
+    transition: color 160ms ease, border-color 160ms ease;
+  }
+
+  .gs-hamburger:hover {
+    color: var(--sl-color-white);
+    border-color: rgba(255, 255, 255, 0.22);
+  }
+
+  .gs-hamburger__close {
+    display: none;
+  }
+
+  .gs-hamburger[aria-expanded='true'] .gs-hamburger__open {
+    display: none;
+  }
+
+  .gs-hamburger[aria-expanded='true'] .gs-hamburger__close {
+    display: block;
+  }
+
+  /* Mobile dropdown — absolutely positioned overlay */
+  .gs-header__right {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: -1rem;
+    right: -1rem;
+    z-index: 10;
+    padding: 0.75rem 1rem 1rem;
+    background: linear-gradient(180deg, rgba(8, 21, 36, 0.98), rgba(8, 21, 36, 0.96));
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(127, 189, 227, 0.14);
+    border-top: 0;
+    border-radius: 0 0 1rem 1rem;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .gs-header__right:has(.gs-header__nav--open) {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .gs-header__nav {
+    display: none;
+    flex-direction: column;
+    gap: 0.25rem;
+    align-items: stretch;
+  }
+
+  .gs-header__nav.gs-header__nav--open {
+    display: flex;
+  }
+
+  .gs-header__nav a {
+    color: var(--sl-color-gray-3);
+    font-size: 0.92rem;
+    font-weight: 600;
+    text-decoration: none;
+    padding: 0.65rem 0.85rem;
+    border-radius: 0.75rem;
+    border: 1px solid rgba(127, 189, 227, 0.14);
+    background: rgba(127, 189, 227, 0.06);
+    transition: color 160ms ease, background 160ms ease;
+  }
+
+  .gs-header__nav a:hover {
+    color: var(--sl-color-accent-high);
+    background: rgba(255, 255, 255, 0.07);
+  }
+
+  .gs-header__search {
+    display: flex;
+    justify-content: flex-start;
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+
+  /* Desktop: 50rem+ */
+  @media (min-width: 50rem) {
+    .gs-header__top {
+      flex: 0 1 auto;
+      width: auto;
+    }
+
+    .gs-hamburger {
+      display: none;
+    }
+
+    .gs-header__right {
+      display: flex;
+      position: static;
+      align-items: center;
+      justify-content: flex-end;
+      flex: 1 1 auto;
+      gap: 1rem;
+      width: auto;
+      padding: 0;
+      background: none;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .gs-header__nav {
+      display: flex;
+      flex-direction: row;
+      gap: 0.35rem;
+      align-items: center;
+    }
+
+    .gs-header__nav a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 2rem;
+      padding: 0.32rem 0.62rem;
+      font-size: 0.84rem;
+      border: 0;
+      background: transparent;
+      border-radius: 0.6rem;
+      line-height: 1;
+    }
+
+    .gs-header__nav a:hover {
+      background: rgba(127, 189, 227, 0.08);
+    }
+
+    .gs-header__search {
+      justify-content: flex-end;
+      width: min(21rem, 36vw);
+    }
+  }
+
+  @media (max-width: 30rem) {
+    .gs-header__logo {
+      width: 1.85rem;
+      height: 1.85rem;
+    }
+
+    .gs-header__title {
+      font-size: 0.8rem;
+    }
+  }
+</style>

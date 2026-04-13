@@ -1,0 +1,350 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&parsed)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "GenericController",
+            qualified_name: Some(
+                "GenericController",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Class",
+            name: "Repo<A, B>",
+            qualified_name: Some(
+                "__di__Repo<A, B>",
+            ),
+            external_id: Some(
+                "__di__Repo<A, B>",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Class",
+            name: "Service<Generic<T>>",
+            qualified_name: Some(
+                "__di__Service<Generic<T>>",
+            ),
+            external_id: Some(
+                "__di__Service<Generic<T>>",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Controller",
+            qualified_name: Some(
+                "GenericController.constructor::@Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "'generic'",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Controller",
+            qualified_name: Some(
+                "GenericController::@Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "'generic'",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "generic_constructor.ts",
+            qualified_name: Some(
+                "extraction-fixtures::generic_constructor.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "constructor",
+            qualified_name: Some(
+                "GenericController.constructor",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Controller",
+            qualified_name: Some(
+                "generic_constructor.ts::Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/common",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "@nestjs/common",
+            qualified_name: Some(
+                "module-import::@nestjs/common",
+            ),
+            external_id: Some(
+                "module-import::@nestjs/common",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "generic_constructor.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::generic_constructor.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::generic_constructor.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "A",
+            qualified_name: Some(
+                "A",
+            ),
+            external_id: None,
+            signature: Some(
+                "type A = string;",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "B",
+            qualified_name: Some(
+                "B",
+            ),
+            external_id: None,
+            signature: Some(
+                "type B = number;",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "Generic",
+            qualified_name: Some(
+                "Generic",
+            ),
+            external_id: None,
+            signature: Some(
+                "type Generic<T> = { value: T };",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "Repo",
+            qualified_name: Some(
+                "Repo",
+            ),
+            external_id: None,
+            signature: Some(
+                "type Repo<A, B> = { first: A; second: B };",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "Service",
+            qualified_name: Some(
+                "Service",
+            ),
+            external_id: None,
+            signature: Some(
+                "type Service<T> = { item: T };",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "T",
+            qualified_name: Some(
+                "T",
+            ),
+            external_id: None,
+            signature: Some(
+                "type T = string;",
+            ),
+            is_virtual: false,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "A",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "B",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "Generic",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "GenericController",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "GenericController.constructor",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "Repo",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "Service",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "T",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "generic_constructor.ts::Controller",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "module::extraction-fixtures::generic_constructor.ts",
+        },
+        EdgeSummary {
+            kind: "DependsOn",
+            source: "GenericController",
+            target: "__di__Repo<A, B>",
+        },
+        EdgeSummary {
+            kind: "DependsOn",
+            source: "GenericController",
+            target: "__di__Service<Generic<T>>",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::generic_constructor.ts",
+            target: "GenericController",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::generic_constructor.ts",
+            target: "GenericController.constructor",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::generic_constructor.ts",
+            target: "module-import::@nestjs/common",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "GenericController",
+            target: "GenericController::@Controller",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "GenericController.constructor",
+            target: "GenericController.constructor::@Controller",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "A",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "B",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "Generic",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "GenericController",
+            decorators: [
+                (
+                    "Controller",
+                    [
+                        "generic",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [
+                "Service<Generic<T>>",
+                "Repo<A, B>",
+            ],
+        },
+        SymbolSummary {
+            name: "Repo",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "Service",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "T",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "constructor",
+            decorators: [],
+            constructor_dependencies: [
+                "Service<Generic<T>>",
+                "Repo<A, B>",
+            ],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "Controller",
+            imported_name: Some(
+                "Controller",
+            ),
+            source: "@nestjs/common",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

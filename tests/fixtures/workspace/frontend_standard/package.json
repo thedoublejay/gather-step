@@ -1,0 +1,11 @@
+{
+  "name": "frontend-standard",
+  "dependencies": {
+    "@workspace/shared-contracts": "1.1.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/microservices": "^11.0.0",
+    "react": "^19.0.0",
+    "react-router-dom": "^7.0.0"
+  }
+}

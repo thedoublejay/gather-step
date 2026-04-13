@@ -1,0 +1,29 @@
+name = "shared_contract_rollout"
+mode = "planning"
+
+[target]
+kind = "symbol"
+qn = "CreateOrderInput"
+
+[oracle]
+expected_files = [
+  "__shared__@workspace/shared-contracts__CreateOrderInput",
+  "src/controller.ts",
+  "src/api.ts",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+expected_primary_symbol_name = "__shared__@workspace/shared-contracts__CreateOrderInput"
+expected_primary_symbol_kind = "shared_symbol"
+expected_primary_repo = "__virtual__"
+expected_primary_file = "__shared__@workspace/shared-contracts__CreateOrderInput"
+expected_resolved_symbol_kind = "shared_symbol"
+expected_confirmed_downstream_repos = ["backend_standard", "frontend_standard"]
+max_probable_downstream_repos = 0
+expected_resolution = "search_ranked_resolved"
+expected_confidence_model_version = "v1.0"
+max_response_bytes = 22000

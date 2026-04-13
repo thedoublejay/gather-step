@@ -1,0 +1,57 @@
+# HIGH change-impact gate for the producer-to-consumer rollout story scenario.
+#
+# Objective pass/fail criteria for the objective pass/fail criteria:
+#
+#   - One `change_impact` pack command must surface both the producer repo
+#     (`backend_standard`, which emits `reports.queue` via `sendMessage`) and
+#     the consumer repo (`frontend_standard`, which handles it via
+#     `@CustomEventPattern('reports.queue')`) as CONFIRMED downstream repos —
+#     not as probable or advisory.
+#
+#   - The canonical event virtual node must be the primary item, proving that
+#     the producer/consumer join resolved through the canonical `NodeKind::Event`
+#     identity rather than through a sibling hop or co-change evidence.
+#
+#   - `max_probable_downstream_repos = 0` enforces that no repo is only
+#     probabilistically reached — the bar requires strong structural evidence
+#     on both sides.
+#
+#   - `api_unresolved.ts` is forbidden (noise gate).
+#
+# Fixture: `backend_standard/src/report_producer.ts` emits
+# `Messaging.kafka.reports.queue` via `this.bus.sendMessage(...)`.
+# `frontend_standard/src/report_consumer.ts` handles it via
+# `@CustomEventPattern('reports.queue')`.
+#
+# If the canonical-identity join regresses (e.g. `sendMessage` reverts to
+# emitting `NodeKind::Topic` instead of `NodeKind::Event`), `frontend_standard`
+# disappears from `expected_confirmed_downstream_repos` and this scenario fails.
+
+name = "event_producer_consumer_rollout"
+mode = "change_impact"
+
+[target]
+kind = "event"
+qn = "reports.queue"
+
+[oracle]
+expected_files = [
+  "__event__kafka__reports.queue",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+expected_primary_symbol_name = "__event__kafka__reports.queue"
+expected_primary_symbol_kind = "event"
+expected_primary_repo = "__virtual__"
+expected_primary_file = "__event__kafka__reports.queue"
+expected_resolved_symbol_kind = "event"
+expected_confirmed_downstream_repos = ["backend_standard", "frontend_standard"]
+forbidden_confirmed_downstream_repos = []
+max_probable_downstream_repos = 0
+forbidden_warnings = ["target could not be resolved to a unique indexed symbol"]
+expected_resolution = "symbol_id"
+max_response_bytes = 18000

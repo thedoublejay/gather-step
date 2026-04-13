@@ -1,0 +1,45 @@
+---
+---
+
+<div class="gs-doc-frame">
+  <div class="gs-doc-frame__rail" aria-hidden="true">
+    <span></span>
+    <span></span>
+    <span></span>
+  </div>
+  <div class="sl-markdown-content gs-doc-frame__content">
+    <slot />
+  </div>
+</div>
+
+<style>
+  .gs-doc-frame {
+    position: relative;
+    display: grid;
+    gap: 1rem;
+  }
+
+  .gs-doc-frame__rail {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.2rem 0 0;
+  }
+
+  .gs-doc-frame__rail span {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 999px;
+    border: 1px solid rgba(127, 189, 227, 0.35);
+    background: rgba(127, 189, 227, 0.08);
+  }
+
+  .gs-doc-frame__rail span:first-child {
+    background: rgba(255, 178, 77, 0.18);
+    border-color: rgba(255, 178, 77, 0.48);
+  }
+
+  .gs-doc-frame__content {
+    position: relative;
+  }
+</style>

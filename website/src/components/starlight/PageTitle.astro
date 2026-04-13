@@ -1,0 +1,78 @@
+---
+const { entry } = Astro.locals.starlightRoute;
+const [sectionKey = 'docs'] = entry.id.split('/');
+const PAGE_TITLE_ID = '_top';
+
+const sectionLabels: Record<string, string> = {
+  about: 'Project',
+  changelog: 'Project',
+  guides: 'Guides',
+  concepts: 'Concepts',
+  reference: 'Reference',
+};
+
+const section = sectionLabels[sectionKey] ?? 'Docs';
+---
+
+<div class="gs-page-title">
+  <div class="gs-page-title__meta">
+    <span class="gs-page-title__eyebrow">{section}</span>
+    <span class="gs-page-title__stamp">DOCS</span>
+  </div>
+  <h1 id={PAGE_TITLE_ID}>{entry.data.title}</h1>
+</div>
+
+<style>
+  .gs-page-title {
+    display: grid;
+    gap: 0.9rem;
+    margin-top: 1.75rem;
+    margin-bottom: 1.35rem;
+    padding: 1.3rem 1.3rem 1.4rem;
+    border: 1px solid rgba(127, 189, 227, 0.18);
+    border-radius: 1rem;
+    background:
+      linear-gradient(90deg, rgba(127, 189, 227, 0.08), transparent 22%),
+      radial-gradient(480px 160px at 100% 0%, rgba(255, 178, 77, 0.08), transparent 65%),
+      rgba(8, 21, 36, 0.72);
+  }
+
+  .gs-page-title__meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .gs-page-title__eyebrow,
+  .gs-page-title__stamp {
+    font-family: var(--sl-font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .gs-page-title__eyebrow {
+    color: var(--sl-color-accent);
+  }
+
+  .gs-page-title__stamp {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.3rem 0.55rem;
+    border: 1px solid rgba(255, 178, 77, 0.45);
+    color: var(--sl-color-accent-high);
+    background: rgba(255, 178, 77, 0.08);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(1.85rem, 4vw, 2.75rem);
+    line-height: 1;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--sl-color-white);
+    text-transform: none;
+  }
+</style>

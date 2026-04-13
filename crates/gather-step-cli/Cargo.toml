@@ -1,0 +1,60 @@
+[package]
+name = "gather-step"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "CLI binary for Gather Step"
+
+[[bin]]
+name = "gather-step"
+path = "src/main.rs"
+
+[lib]
+name = "gather_step"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+console.workspace = true
+crossbeam-channel.workspace = true
+gather-step-analysis = { path = "../gather-step-analysis", version = "1.0.0" }
+gather-step-core.workspace = true
+gather-step-git = { path = "../gather-step-git", version = "1.0.0" }
+gather-step-mcp = { path = "../gather-step-mcp", version = "1.0.0" }
+gather-step-output = { path = "../gather-step-output", version = "1.0.0" }
+gather-step-parser.workspace = true
+gather-step-storage.workspace = true
+indicatif.workspace = true
+mimalloc = { version = "0.1.48", default-features = false }
+serde.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+pretty_assertions.workspace = true
+rusqlite.workspace = true
+tempfile = "3.27.0"
+toml.workspace = true
+
+[[bench]]
+name = "index_bench"
+harness = false
+
+[[bench]]
+name = "query_bench"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+{
+  "event": "context_pack_completed",
+  "response_schema_version": 1,
+  "data": {
+    "mode": "change_impact",
+    "items": [
+      {
+        "symbol_name": "listOrders",
+        "symbol_kind": "function",
+        "repo": "backend_standard",
+        "file_path": "src/controller.ts"
+      }
+    ],
+    "change_impact": {
+      "confirmed_downstream_repos": ["frontend_standard"]
+    }
+  },
+  "meta": {
+    "resolution": "search_resolved",
+    "confidence_model_version": "v1.0"
+  }
+}

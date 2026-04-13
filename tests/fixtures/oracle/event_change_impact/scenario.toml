@@ -1,0 +1,27 @@
+name = "event_change_impact"
+mode = "change_impact"
+
+[target]
+kind = "event"
+qn = "order.created"
+
+[oracle]
+expected_files = [
+  "__event__kafka__order.created",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+expected_primary_symbol_name = "__event__kafka__order.created"
+expected_primary_symbol_kind = "event"
+expected_primary_repo = "__virtual__"
+expected_primary_file = "__event__kafka__order.created"
+expected_resolved_symbol_kind = "event"
+expected_confirmed_downstream_repos = ["backend_standard", "frontend_standard"]
+max_probable_downstream_repos = 0
+forbidden_warnings = ["target could not be resolved to a unique indexed symbol"]
+expected_resolution = "symbol_id"
+max_response_bytes = 18000

@@ -1,0 +1,77 @@
+---
+const producers = [
+  { y: 30, name: 'service-orders', hint: '@Producer' },
+  { y: 130, name: 'service-billing', hint: 'kafka.publish()' },
+  { y: 230, name: 'service-checkout', hint: '@EventPattern' },
+];
+
+const consumers = [
+  { y: 10, name: 'service-inventory', hint: '@MessagePattern' },
+  { y: 100, name: 'service-notify', hint: '@EventPattern' },
+  { y: 190, name: 'service-analytics', hint: 'consumer.on()' },
+  { y: 280, name: 'service-ledger', hint: '@CustomEvent' },
+];
+---
+
+<section class="bp-sec" id="topology">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-03 · The moat</span>
+    <h2 class="bp-h2">
+      It maps what no other tool maps:<br />
+      <span class="u">event-driven topology.</span>
+    </h2>
+    <p class="bp-lede">
+      Producer-to-consumer graphs across repos. Cross-repo edges meet at shared virtual nodes,
+      so blast radius is a query, not a guess.
+    </p>
+  </div>
+
+  <figure class="bp-schematic">
+    <figcaption class="bp-schematic__cap">DET-03 · Producer-to-consumer schematic</figcaption>
+    <svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0 0 L10 5 L0 10 z" fill="var(--amber)"></path>
+        </marker>
+      </defs>
+
+      {
+        producers.map((producer) => (
+          <g>
+            <rect x="20" y={producer.y} width="180" height="54" fill="rgba(127,189,227,0.06)" stroke="var(--cyan)" stroke-dasharray="2 3"></rect>
+            <text x="32" y={producer.y + 20} font-family="Space Mono" font-size="10" fill="var(--cyan)" letter-spacing="1.4">REPO · PRODUCER</text>
+            <text x="32" y={producer.y + 38} font-family="Archivo" font-size="15" font-weight="800" fill="var(--ink)">{producer.name}</text>
+            <text x="32" y={producer.y + 50} font-family="Space Mono" font-size="10" fill="var(--ink-mute)">{producer.hint}</text>
+            <path d={`M 200 ${producer.y + 27} L 340 180`} stroke="var(--amber)" stroke-width="1.2" fill="none" marker-end="url(#arrC)"></path>
+          </g>
+        ))
+      }
+
+      <circle cx="400" cy="180" r="68" fill="rgba(255,178,77,0.12)" stroke="var(--amber)" stroke-width="1.2"></circle>
+      <circle cx="400" cy="180" r="48" fill="none" stroke="var(--amber)" stroke-width="1.2" stroke-dasharray="3 4"></circle>
+      <text x="400" y="166" text-anchor="middle" font-family="Space Mono" font-size="10" fill="var(--amber)" letter-spacing="1.6">VIRTUAL NODE</text>
+      <text x="400" y="186" text-anchor="middle" font-family="Archivo" font-size="16" font-weight="800" fill="var(--amber)">order.created</text>
+      <text x="400" y="202" text-anchor="middle" font-family="Space Mono" font-size="9" fill="var(--ink-soft)">kafka · topic</text>
+
+      {
+        consumers.map((consumer) => (
+          <g>
+            <rect x="570" y={consumer.y} width="180" height="46" fill="rgba(127,189,227,0.06)" stroke="var(--cyan)" stroke-dasharray="2 3"></rect>
+            <text x="582" y={consumer.y + 17} font-family="Space Mono" font-size="10" fill="var(--cyan)" letter-spacing="1.4">REPO · CONSUMER</text>
+            <text x="582" y={consumer.y + 33} font-family="Archivo" font-size="14" font-weight="800" fill="var(--ink)">{consumer.name}</text>
+            <text x="582" y={consumer.y + 43} font-family="Space Mono" font-size="9" fill="var(--ink-mute)">{consumer.hint}</text>
+            <path d={`M 468 180 L 570 ${consumer.y + 23}`} stroke="var(--amber)" stroke-width="1.2" fill="none" marker-end="url(#arrC)"></path>
+          </g>
+        ))
+      }
+
+      <g stroke="var(--cyan)" stroke-width="0.6" fill="var(--cyan)" font-family="Space Mono" font-size="9" letter-spacing="1">
+        <line x1="20" y1="335" x2="200" y2="335"></line>
+        <text x="110" y="350" text-anchor="middle">PRODUCERS · N=3</text>
+        <line x1="570" y1="335" x2="750" y2="335"></line>
+        <text x="660" y="350" text-anchor="middle">CONSUMERS · N=4</text>
+      </g>
+    </svg>
+    <span class="bp-stamp bp-schematic__stamp">Approved · v1.0</span>
+  </figure>
+</section>

@@ -1,0 +1,41 @@
+# Oracle for planning cross-repo caller widening.
+#
+# Locks the widened planning traversal: a function anchor whose cross-repo
+# consumer imports it through a shared-lib package (`@workspace/…`) surfaces
+# the consumer repo as a cross-repo caller even though the parser's
+# resolver landed the consumer's `useAuthentication()` call on the virtual
+# `SharedSymbol` peer rather than on the canonical declaration.
+#
+# Fixture: `backend_standard/src/auth_consumer.ts` imports
+# `useAuthentication` from `@workspace/shared-contracts` and calls it. The
+# parser emits a virtual `SharedSymbol` for the binding plus a `References`
+# edge from the consumer's file-node to that virtual peer. The planning-mode
+# upstream widening in `widen_planning_upstream_for_shared_peers`
+# (`gather-step-mcp/src/tools/packs.rs`) matches the peer by name tail and
+# promotes the referring file to a cross-repo caller, satisfying the
+# release-gate "at least one cross-repo caller … or confirmed downstream
+# repo beyond `frontend_standard`" criterion without upgrading that weaker
+# signal into `confirmed_downstream_repos`.
+#
+# If the widening regresses, `backend_standard` disappears from
+# `expected_cross_repo_caller_repos`.
+
+name = "planning_cross_repo_caller_widening"
+mode = "planning"
+repo = "frontend_standard"
+
+[target]
+kind = "symbol"
+qn = "useAuthentication"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+required_ambiguity_codes = []
+expected_primary_symbol_name = "useAuthentication"
+expected_primary_repo = "frontend_standard"
+expected_primary_file = "src/auth_api.ts"
+expected_cross_repo_caller_repos = ["backend_standard"]
+max_response_bytes = 12000

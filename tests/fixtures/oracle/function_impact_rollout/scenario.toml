@@ -1,0 +1,19 @@
+name = "function_impact_rollout"
+mode = "impact"
+repo = "frontend_standard"
+
+[target]
+kind = "symbol"
+qn = "useAuthentication"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 0
+min_confidence = 0
+required_ambiguity_codes = []
+expected_primary_symbol_name = "useAuthentication"
+expected_primary_repo = "frontend_standard"
+expected_primary_file = "src/auth_local.ts"
+expected_impact_repos = ["frontend_standard"]
+max_response_bytes = 12000

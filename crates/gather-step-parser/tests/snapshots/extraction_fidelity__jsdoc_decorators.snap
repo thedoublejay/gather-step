@@ -1,0 +1,180 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&jsdoc)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "DocController",
+            qualified_name: Some(
+                "DocController",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Controller",
+            qualified_name: Some(
+                "DocController.list::@Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "'docs'",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Controller",
+            qualified_name: Some(
+                "DocController::@Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "'docs'",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "jsdoc_decorators.ts",
+            qualified_name: Some(
+                "extraction-fixtures::jsdoc_decorators.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "list",
+            qualified_name: Some(
+                "DocController.list",
+            ),
+            external_id: None,
+            signature: Some(
+                "list()",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Controller",
+            qualified_name: Some(
+                "jsdoc_decorators.ts::Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/common",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "@nestjs/common",
+            qualified_name: Some(
+                "module-import::@nestjs/common",
+            ),
+            external_id: Some(
+                "module-import::@nestjs/common",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "jsdoc_decorators.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::jsdoc_decorators.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::jsdoc_decorators.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::jsdoc_decorators.ts",
+            target: "DocController",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::jsdoc_decorators.ts",
+            target: "DocController.list",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::jsdoc_decorators.ts",
+            target: "jsdoc_decorators.ts::Controller",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::jsdoc_decorators.ts",
+            target: "module::extraction-fixtures::jsdoc_decorators.ts",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::jsdoc_decorators.ts",
+            target: "DocController",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::jsdoc_decorators.ts",
+            target: "DocController.list",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::jsdoc_decorators.ts",
+            target: "module-import::@nestjs/common",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "DocController",
+            target: "DocController::@Controller",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "DocController.list",
+            target: "DocController.list::@Controller",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "DocController",
+            decorators: [
+                (
+                    "Controller",
+                    [
+                        "docs",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "list",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "Controller",
+            imported_name: Some(
+                "Controller",
+            ),
+            source: "@nestjs/common",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

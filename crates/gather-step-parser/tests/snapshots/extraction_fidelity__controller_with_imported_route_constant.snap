@@ -1,0 +1,292 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&route_controller)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "AccountController",
+            qualified_name: Some(
+                "AccountController",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Controller",
+            qualified_name: Some(
+                "AccountController.details::@Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Controller",
+            qualified_name: Some(
+                "AccountController::@Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Get",
+            qualified_name: Some(
+                "AccountController.details::@Get",
+            ),
+            external_id: None,
+            signature: Some(
+                "RouteConstants.v2.accounts.details",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "controller_with_imported_route_constant.ts",
+            qualified_name: Some(
+                "extraction-fixtures::controller_with_imported_route_constant.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "details",
+            qualified_name: Some(
+                "AccountController.details",
+            ),
+            external_id: None,
+            signature: Some(
+                "details(RouteConstants.v2.accounts.details)",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Controller",
+            qualified_name: Some(
+                "controller_with_imported_route_constant.ts::Controller",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/common",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Get",
+            qualified_name: Some(
+                "controller_with_imported_route_constant.ts::Get",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/common",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "RouteConstants",
+            qualified_name: Some(
+                "controller_with_imported_route_constant.ts::RouteConstants",
+            ),
+            external_id: None,
+            signature: Some(
+                "from ./route_constants",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "./route_constants",
+            qualified_name: Some(
+                "module-import::./route_constants",
+            ),
+            external_id: Some(
+                "module-import::./route_constants",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "@nestjs/common",
+            qualified_name: Some(
+                "module-import::@nestjs/common",
+            ),
+            external_id: Some(
+                "module-import::@nestjs/common",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "controller_with_imported_route_constant.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::controller_with_imported_route_constant.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::controller_with_imported_route_constant.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Route",
+            name: "__route__GET__/routeconstants.v2.accounts.details",
+            qualified_name: Some(
+                "__route__GET__/routeconstants.v2.accounts.details",
+            ),
+            external_id: Some(
+                "__route__GET__/routeconstants.v2.accounts.details",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "AccountController",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "AccountController.details",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "controller_with_imported_route_constant.ts::Controller",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "controller_with_imported_route_constant.ts::Get",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "controller_with_imported_route_constant.ts::RouteConstants",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "module::extraction-fixtures::controller_with_imported_route_constant.ts",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "AccountController",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "AccountController.details",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "module-import::./route_constants",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::controller_with_imported_route_constant.ts",
+            target: "module-import::@nestjs/common",
+        },
+        EdgeSummary {
+            kind: "Serves",
+            source: "AccountController.details",
+            target: "__route__GET__/routeconstants.v2.accounts.details",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "AccountController",
+            target: "AccountController::@Controller",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "AccountController.details",
+            target: "AccountController.details::@Controller",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "AccountController.details",
+            target: "AccountController.details::@Get",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "AccountController",
+            decorators: [
+                (
+                    "Controller",
+                    [],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "details",
+            decorators: [
+                (
+                    "Get",
+                    [
+                        "RouteConstants.v2.accounts.details",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "Controller",
+            imported_name: Some(
+                "Controller",
+            ),
+            source: "@nestjs/common",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+        ImportSummary {
+            local_name: "Get",
+            imported_name: Some(
+                "Get",
+            ),
+            source: "@nestjs/common",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+        ImportSummary {
+            local_name: "RouteConstants",
+            imported_name: Some(
+                "RouteConstants",
+            ),
+            source: "./route_constants",
+            resolved_path: Some(
+                "route_constants.ts",
+            ),
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

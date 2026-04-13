@@ -1,0 +1,46 @@
+# Auth/session anchor with no structural cross-repo proof.
+#
+# The anchor symbol (`authSessionHelper` in `auth_anchor_only`) has "auth" in
+# its qualified name.  No other repo calls or imports `authSessionHelper` — the
+# shared virtual-node connection via `@workspace/shared-contracts` does not
+# constitute structural proof.
+#
+# In this fixture:
+#   - `auth_anchor_only` imports `OrderRecord` from `@workspace/shared-contracts`.
+#   - `backend_standard` and `frontend_standard` also import from
+#     `@workspace/shared-contracts`, creating shared virtual-node connections.
+#   - Neither `backend_standard` nor `frontend_standard` has any import, call,
+#     or route edge to `authSessionHelper` itself.
+#
+# Correct behaviour: `confirmed_downstream_repos` must be empty because no
+# structural proof edge (DirectCall, ImportBridge, SharedContractConsumer, etc.)
+# reaches either of those repos via `authSessionHelper`.
+
+name = "auth_anchor_no_proof"
+mode = "planning"
+repo = "auth_anchor_only"
+
+[target]
+kind = "symbol"
+qn = "authSessionHelper"
+
+[oracle]
+expected_files = [
+  "src/auth_session_helper.ts",
+]
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 500
+required_ambiguity_codes = []
+expected_primary_symbol_name = "authSessionHelper"
+expected_primary_symbol_kind = "function"
+expected_primary_repo = "auth_anchor_only"
+expected_primary_file = "src/auth_session_helper.ts"
+# No structural cross-repo proof exists — confirmed_downstream_repos must be empty.
+expected_confirmed_downstream_repos = []
+# These repos share the OrderRecord SharedSymbol but do not call authSessionHelper.
+# The heuristic wrongly promotes them; that is the regression this gate catches.
+forbidden_confirmed_downstream_repos = ["backend_standard", "frontend_standard"]
+max_probable_downstream_repos = 3
+forbidden_warnings = []
+max_response_bytes = 18000

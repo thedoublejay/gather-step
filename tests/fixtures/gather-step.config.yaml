@@ -1,0 +1,23 @@
+repos:
+  - name: backend_standard
+    path: workspace/backend_standard
+  - name: frontend_standard
+    path: workspace/frontend_standard
+  - name: shared_contracts
+    path: workspace/shared_contracts
+  - name: route_constants
+    path: workspace/route_constants
+  - name: auth_anchor_only
+    path: workspace/auth_anchor_only
+  - name: service_a
+    path: workspace/service_a
+  - name: service_b
+    path: workspace/service_b
+  - name: service_c
+    path: workspace/service_c
+  - name: service_d
+    path: workspace/service_d
+  - name: service_e
+    path: workspace/service_e
+indexing:
+  workspace_concurrency: 1

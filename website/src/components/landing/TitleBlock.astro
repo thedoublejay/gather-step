@@ -1,0 +1,24 @@
+---
+export interface Props {
+  project: string;
+  drawing: string;
+  revision: string;
+}
+
+const { project, drawing, revision } = Astro.props;
+---
+
+<div class="bp-titleblock">
+  <div class="bp-titleblock__cell">
+    <div class="bp-titleblock__k">Project</div>
+    <div class="bp-titleblock__v big">{project}</div>
+  </div>
+  <div class="bp-titleblock__cell">
+    <div class="bp-titleblock__k">Drawing</div>
+    <div class="bp-titleblock__v">{drawing}</div>
+  </div>
+  <div class="bp-titleblock__cell">
+    <div class="bp-titleblock__k">Revision</div>
+    <div class="bp-titleblock__v">{revision}</div>
+  </div>
+</div>

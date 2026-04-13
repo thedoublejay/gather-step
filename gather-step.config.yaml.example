@@ -1,0 +1,9 @@
+repos:
+  - name: backend_standard
+    path: apps/backend_standard
+  - name: frontend_standard
+    path: apps/frontend_standard
+  - name: shared_contracts
+    path: packages/shared_contracts
+indexing:
+  workspace_concurrency: 4

@@ -1,0 +1,32 @@
+{
+  "scored_at": "2026-01-01T00:00:00Z",
+  "sample_path": "pr_sample.json",
+  "gather_step_bin": "target/release/gather-step",
+  "median_f1": 0.82,
+  "median_precision": 0.88,
+  "median_recall": 0.76,
+  "gate_high_passed": true,
+  "pr_scores": [
+    {
+      "pr_id": "fixture-pr-1",
+      "merge_commit": "aabbcc1122334455667788990011223344556677",
+      "pre_merge_commit": "aabbcc1122334455667788990011223344556677",
+      "change_category": "type_rollout",
+      "diff_size_bucket": "small",
+      "repo_count": 2,
+      "suggested_files": ["src/handler.ts", "src/service.ts"],
+      "precision": 0.88,
+      "recall": 0.76,
+      "f1": 0.82
+    }
+  ],
+  "strata": [
+    {
+      "stratum": "all",
+      "count": 1,
+      "median_f1": 0.82,
+      "median_precision": 0.88,
+      "median_recall": 0.76
+    }
+  ]
+}

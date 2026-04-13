@@ -1,0 +1,47 @@
+---
+const stats = [
+  {
+    label: 'Spec · Indexed',
+    value: '26 repos · 13,604 files · 171,124 symbols · 405,384 edges · 88,365 cross-repo',
+  },
+  {
+    label: 'Spec · Gate',
+    value: 'v1.0 release gate passed in 118.2s with HIGH probes and PR-oracle F1/recall at 1.000',
+  },
+  {
+    label: 'Spec · Deployment',
+    value: 'Local binary · MCP server · no API keys · nothing leaves your machine',
+  },
+];
+---
+
+<section class="bp-hero">
+  <div>
+    <span class="bp-kicker"><i></i>The code graph for AI coding assistants</span>
+    <h1 class="bp-hero__title">
+      Gather context<br />
+      <span class="u">before the move.</span>
+    </h1>
+    <p class="bp-hero__sub">
+      One unified graph across your repos, not a federation of isolated ones.
+      Built for teams running many services as one system.
+    </p>
+  </div>
+  <div class="bp-hero__callouts">
+    {
+      stats.map((stat) => (
+        <div class="bp-callout">
+          <div class="bp-cell-k">{stat.label}</div>
+          <div class="bp-cell-v">{stat.value}</div>
+        </div>
+      ))
+    }
+  </div>
+</section>
+
+<div class="bp-cli" role="text" aria-label="Install command">
+  <span class="arrow">▶</span>
+  <span>brew install thedoublejay/tap/gather-step</span>
+  <span class="cursor"></span>
+  <span class="stamp-inline">DET-01 · INSTALL</span>
+</div>

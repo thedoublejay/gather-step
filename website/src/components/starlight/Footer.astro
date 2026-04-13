@@ -1,0 +1,239 @@
+---
+import EditLink from 'virtual:starlight/components/EditLink';
+import LastUpdated from 'virtual:starlight/components/LastUpdated';
+import Pagination from 'virtual:starlight/components/Pagination';
+
+const withBase = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, '')}`;
+---
+
+<footer class="gs-footer">
+  <!-- Per-page doc meta: edit link + last updated timestamp -->
+  <div class="gs-footer__meta">
+    <EditLink />
+    <LastUpdated />
+  </div>
+
+  <!-- Prev / Next page navigation -->
+  <Pagination />
+
+  <!-- Site-wide footer card -->
+  <div class="gs-footer__site">
+    <div class="gs-footer__top">
+
+      <!-- Brand + tagline -->
+      <div class="gs-footer__intro">
+        <div class="gs-footer__brand">
+          <img
+            src="/gs_side_logo_transparent.webp"
+            alt=""
+            class="gs-footer__logo"
+            width="52"
+            height="44"
+          />
+          gather-step
+        </div>
+        <p class="gs-footer__tagline">
+          Index your repos. Trace the connections.<br />
+          Give your AI assistant the full picture.
+        </p>
+      </div>
+
+      <!-- Link columns -->
+      <nav class="gs-footer__columns" aria-label="Footer navigation">
+        <div class="gs-footer__col">
+          <h4 class="gs-footer__col-heading">Getting Started</h4>
+          <a href={withBase('/guides/getting-started/')}>Quickstart</a>
+          <a href={withBase('/guides/installation/')}>Installation</a>
+          <a href={withBase('/guides/workspace-setup/')}>Workspace setup</a>
+        </div>
+        <div class="gs-footer__col">
+          <h4 class="gs-footer__col-heading">Reference</h4>
+          <a href={withBase('/reference/cli/')}>CLI</a>
+          <a href={withBase('/reference/configuration/')}>Configuration</a>
+          <a href={withBase('/reference/mcp-tools/')}>MCP tools</a>
+        </div>
+        <div class="gs-footer__col">
+          <h4 class="gs-footer__col-heading">Project</h4>
+          <a href="https://github.com/thedoublejay/gather-step" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href={withBase('/changelog/')}>Changelog</a>
+          <a href={withBase('/about/')}>About</a>
+        </div>
+      </nav>
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="gs-footer__bottom">
+      <span class="gs-footer__copy">&copy; 2026 Gather Step</span>
+      <span class="gs-footer__credit">
+        Built by <a href="https://josejai.me" target="_blank" rel="noopener noreferrer">JJ Adonis</a>
+      </span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  /* ─── Wrapper ─────────────────────────────────────────────────────────── */
+  .gs-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    margin-top: 3rem;
+  }
+
+  /* ─── Doc-page meta row (EditLink + LastUpdated) ─────────────────────── */
+  .gs-footer__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 3rem;
+    justify-content: space-between;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+
+  /* Hide the row entirely when Starlight renders nothing into it */
+  .gs-footer__meta:empty {
+    display: none;
+  }
+
+  /* ─── Site footer card ────────────────────────────────────────────────── */
+  .gs-footer__site {
+    margin-top: 1rem;
+    padding: 2.25rem 2.25rem 1.5rem;
+    border-radius: var(--gs-radius-lg);
+    border: 1px solid rgba(127, 189, 227, 0.18);
+    background:
+      linear-gradient(90deg, rgba(127, 189, 227, 0.08), transparent 22%),
+      radial-gradient(ellipse at 85% 0%, rgba(255, 178, 77, 0.12) 0%, transparent 40%),
+      linear-gradient(180deg, rgba(8, 21, 36, 0.98) 0%, rgba(6, 16, 28, 0.98) 100%);
+  }
+
+  /* ─── Top section: brand + nav columns ───────────────────────────────── */
+  .gs-footer__top {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 2fr);
+    gap: 3rem;
+    padding-bottom: 1.75rem;
+    border-bottom: 1px solid rgba(127, 189, 227, 0.16);
+  }
+
+  /* ─── Brand ───────────────────────────────────────────────────────────── */
+  .gs-footer__brand {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.85rem;
+    font-size: 1.15rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--sl-color-white);
+    text-transform: uppercase;
+  }
+
+  .gs-footer__logo {
+    width: 3.25rem;
+    height: 2.75rem;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+
+  .gs-footer__tagline {
+    margin: 0;
+    max-width: 20rem;
+    color: var(--sl-color-gray-4);
+    font-size: 0.84rem;
+    line-height: 1.72;
+  }
+
+  /* ─── Nav columns ─────────────────────────────────────────────────────── */
+  .gs-footer__columns {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.5rem;
+  }
+
+  .gs-footer__col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .gs-footer__col-heading {
+    margin: 0 0 0.35rem;
+    font-size: 0.63rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-4);
+    font-family: var(--sl-font-mono);
+  }
+
+  .gs-footer__col a {
+    color: var(--sl-color-gray-3);
+    font-size: 0.87rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: color 160ms ease;
+  }
+
+  .gs-footer__col a:hover {
+    color: var(--sl-color-accent-high);
+  }
+
+  /* ─── Bottom bar ──────────────────────────────────────────────────────── */
+  .gs-footer__bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 1.25rem;
+    font-family: var(--sl-font-mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .gs-footer__copy,
+  .gs-footer__credit {
+    color: var(--sl-color-gray-5);
+    font-size: 0.68rem;
+  }
+
+  .gs-footer__credit a {
+    color: var(--sl-color-gray-4);
+    text-decoration: none;
+    transition: color 160ms ease;
+  }
+
+  .gs-footer__credit a:hover {
+    color: var(--sl-color-accent-high);
+  }
+
+  /* ─── Responsive: tablet / mobile ────────────────────────────────────── */
+  @media (max-width: 720px) {
+    .gs-footer__site {
+      padding: 1.5rem 1.25rem 1.25rem;
+    }
+
+    .gs-footer__top {
+      grid-template-columns: 1fr;
+      gap: 1.75rem;
+    }
+
+    .gs-footer__bottom {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.35rem;
+    }
+
+    .gs-footer__logo {
+      width: 2.8rem;
+      height: 2.35rem;
+    }
+  }
+
+  /* ─── Responsive: very narrow phones ─────────────────────────────────── */
+  @media (max-width: 400px) {
+    .gs-footer__columns {
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem 1rem;
+    }
+  }
+</style>

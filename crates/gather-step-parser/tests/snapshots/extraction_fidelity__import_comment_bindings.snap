@@ -1,0 +1,160 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&parsed)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "File",
+            name: "import_comment_bindings.ts",
+            qualified_name: Some(
+                "extraction-fixtures::import_comment_bindings.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "useImports",
+            qualified_name: Some(
+                "useImports",
+            ),
+            external_id: None,
+            signature: Some(
+                "useImports()",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "X",
+            qualified_name: Some(
+                "import_comment_bindings.ts::X",
+            ),
+            external_id: None,
+            signature: Some(
+                "from ./x",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Y",
+            qualified_name: Some(
+                "import_comment_bindings.ts::Y",
+            ),
+            external_id: None,
+            signature: Some(
+                "from ./y",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "./x",
+            qualified_name: Some(
+                "module-import::./x",
+            ),
+            external_id: Some(
+                "module-import::./x",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "./y",
+            qualified_name: Some(
+                "module-import::./y",
+            ),
+            external_id: Some(
+                "module-import::./y",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "import_comment_bindings.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::import_comment_bindings.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::import_comment_bindings.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "import_comment_bindings.ts::X",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "import_comment_bindings.ts::Y",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "module::extraction-fixtures::import_comment_bindings.ts",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "useImports",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::import_comment_bindings.ts",
+            target: "useImports",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "module-import::./x",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "module-import::./y",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "useImports",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "X",
+            imported_name: None,
+            source: "./x",
+            resolved_path: Some(
+                "x.ts",
+            ),
+            is_default: false,
+            is_namespace: true,
+        },
+        ImportSummary {
+            local_name: "Y",
+            imported_name: Some(
+                "Y",
+            ),
+            source: "./y",
+            resolved_path: Some(
+                "y.ts",
+            ),
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

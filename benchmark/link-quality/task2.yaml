@@ -1,0 +1,15 @@
+name: event_flow
+description: Order creation event flow across service boundary
+anchor: apps/backend_api/src/controllers/orders.controller.ts
+expected_repos:
+  - backend_api
+expected_files:
+  - apps/backend_api/src/services/orders.service.ts
+  - apps/backend_api/src/modules/orders.module.ts
+expected_edges:
+  - kind: Defines
+  - kind: Imports
+missed_repos_max: 1
+missed_files_max: 3
+false_positives_max: 5
+cross_boundary_precision_min: 0.85

@@ -1,0 +1,71 @@
+[package]
+name = "gather-step-parser"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AST parsing layer for Gather Step"
+
+[dependencies]
+gather-step-core.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+# swc-based TS/JS parser — replaces tree-sitter-{typescript,javascript}
+# for the TS/JS path. swc is a recursive-descent parser without the
+# exponential-backtracking edge cases that tree-sitter-typescript hits on
+# certain multi-line `as` union-type assertions.
+# Versions pinned per workspace convention (CLAUDE.md §4).
+swc_common = "=21.0.1"
+swc_ecma_ast = "=23.0.0"
+swc_ecma_parser = { version = "=39.0.1", features = ["typescript"] }
+thiserror.workspace = true
+ignore.workspace = true
+globset.workspace = true
+blake3.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+smallvec.workspace = true
+lru.workspace = true
+quick_cache.workspace = true
+camino.workspace = true
+aho-corasick.workspace = true
+memchr.workspace = true
+tracing.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+pretty_assertions.workspace = true
+proptest.workspace = true
+
+[features]
+test-support = []
+
+[[test]]
+name = "regression"
+path = "tests/regression.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "extension_classification"
+path = "tests/extension_classification.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "extraction_fidelity"
+required-features = ["test-support"]
+
+[[test]]
+name = "workspace_alias"
+
+[lints]
+workspace = true

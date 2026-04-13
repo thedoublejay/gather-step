@@ -1,0 +1,17 @@
+name: shared_api_rollout
+description: Shared contract propagation from shared_contracts to consumers
+anchor: apps/shared_contracts/src/dtos/order.dto.ts
+expected_repos:
+  - shared_contracts
+  - backend_api
+  - frontend_app
+expected_files:
+  - apps/backend_api/src/controllers/orders.controller.ts
+  - apps/backend_api/src/services/orders.service.ts
+  - apps/frontend_app/src/api/orders.api.ts
+expected_edges:
+  - kind: Imports
+missed_repos_max: 1
+missed_files_max: 3
+false_positives_max: 5
+cross_boundary_precision_min: 0.85

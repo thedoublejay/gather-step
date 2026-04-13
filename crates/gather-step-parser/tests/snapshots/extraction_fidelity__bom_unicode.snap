@@ -1,0 +1,71 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&parsed)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "File",
+            name: "bom_unicode.ts",
+            qualified_name: Some(
+                "extraction-fixtures::bom_unicode.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "run",
+            qualified_name: Some(
+                "run",
+            ),
+            external_id: None,
+            signature: Some(
+                "run()",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "bom_unicode.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::bom_unicode.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::bom_unicode.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::bom_unicode.ts",
+            target: "module::extraction-fixtures::bom_unicode.ts",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::bom_unicode.ts",
+            target: "run",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::bom_unicode.ts",
+            target: "run",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "run",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [],
+    call_sites: [],
+    constant_strings: {
+        "café": "😀",
+    },
+}

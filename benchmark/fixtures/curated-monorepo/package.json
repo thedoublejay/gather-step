@@ -1,0 +1,7 @@
+{
+  "name": "curated-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ]
+}

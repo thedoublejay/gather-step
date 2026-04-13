@@ -1,0 +1,71 @@
+---
+import LanguageSelect from 'virtual:starlight/components/LanguageSelect';
+import SocialIcons from 'virtual:starlight/components/SocialIcons';
+import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+---
+
+<div class="gs-mobile-preferences">
+  <div class="gs-mobile-preferences__meta">
+    <span class="gs-mobile-preferences__label">Preferences</span>
+    <span class="gs-mobile-preferences__stamp">Display</span>
+  </div>
+  <div class="gs-mobile-preferences__row">
+    <div class="social-icons">
+      <SocialIcons />
+    </div>
+    <ThemeSelect />
+    <LanguageSelect />
+  </div>
+</div>
+
+<style>
+  .gs-mobile-preferences {
+    display: grid;
+    gap: 0.75rem;
+    border-top: 1px solid rgba(127, 189, 227, 0.18);
+    padding: 0.9rem 0 0.25rem;
+    margin-top: 0.5rem;
+  }
+
+  .gs-mobile-preferences__meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  .gs-mobile-preferences__label,
+  .gs-mobile-preferences__stamp {
+    font-family: var(--sl-font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .gs-mobile-preferences__label {
+    color: var(--sl-color-gray-3);
+  }
+
+  .gs-mobile-preferences__stamp {
+    color: var(--sl-color-accent-high);
+  }
+
+  .gs-mobile-preferences__row {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.8rem 1rem;
+    align-items: center;
+  }
+
+  .social-icons {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-inline-end: auto;
+  }
+
+  .social-icons:empty {
+    display: none;
+  }
+</style>

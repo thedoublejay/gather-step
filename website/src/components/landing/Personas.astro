@@ -1,0 +1,52 @@
+---
+const personas = [
+  {
+    role: 'Developer',
+    heading: 'Know the blast radius before you touch the file.',
+    body: 'Stop guessing which downstream consumers break when you change a producer.',
+  },
+  {
+    role: 'Tech lead',
+    heading: 'Externalize the map that only lives in your head.',
+    body: 'Cross-repo migrations start with real structural data, not your best recollection.',
+  },
+  {
+    role: 'Code reviewer',
+    heading: 'See cross-repo impact inside the review.',
+    body: 'Twenty changed files; know which ones touch shared contracts and event flows.',
+  },
+  {
+    role: 'New hire',
+    heading: 'The system map from the code itself.',
+    body: 'Routes, services, event flows, and conventions, derived from the code, not stale docs.',
+  },
+  {
+    role: 'Eng manager',
+    heading: 'Bus-factor as a data point, not a surprise.',
+    body: 'Concentration risk across every service, event, and critical consumer, made visible.',
+  },
+];
+---
+
+<section class="bp-sec" id="personas">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-09 · Built for teams, not solo players</span>
+    <h2 class="bp-h2">Five roles. <span class="u">One graph.</span></h2>
+    <p class="bp-lede">
+      The problems Gather Step solves emerge from teams and scale with team size.
+      It is most valuable when no single engineer can hold the whole system in their head.
+    </p>
+  </div>
+
+  <div class="bp-personas">
+    {
+      personas.map((persona) => (
+        <div class="bp-persona">
+          <span class="bp-persona__role">{persona.role}</span>
+          <h3>{persona.heading}</h3>
+          <p>{persona.body}</p>
+        </div>
+      ))
+    }
+  </div>
+</section>

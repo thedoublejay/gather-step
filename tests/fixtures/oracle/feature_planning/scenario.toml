@@ -1,0 +1,18 @@
+name = "feature_planning"
+mode = "planning"
+
+[target]
+kind = "symbol"
+qn = "listOrders"
+
+[oracle]
+expected_files = [
+  "src/controller.ts",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+max_response_bytes = 18000

@@ -1,0 +1,41 @@
+# Oracle scenario: guard canonical-primary selection + cross-repo usage.
+#
+# Locks three rollout guarantees end-to-end against the committed
+# fixture workspace:
+#
+#   - `impact UserAuthGuard.canActivate` selects the canonical declaration
+#     in `shared_contracts` (a canonical-boundary repo — its name contains
+#     `contract`) rather than a local peer or a co-change-dominated result.
+#
+#   - The cross-repo `@UseGuards(UserAuthGuard)` import in
+#     `backend_standard` surfaces in `expected_impact_repos`. Reaching this
+#     repo requires the cross-repo virtual-SharedSymbol emission (the
+#     same-repo class-level edge is not enough on its own for cross-repo
+#     imports) plus the guard-class peer-matching extension in
+#     `shared_contract_candidate_ids`.
+#
+#   - If structural ranking ever regresses back to a `CoChangesWith`-dominated
+#     output, the oracle checks the primary strategy and edge kinds directly
+#     rather than inferring that regression from repo selection alone.
+
+name = "guard_canonical_primary"
+mode = "impact"
+
+[target]
+kind = "symbol"
+qn = "UserAuthGuard.canActivate"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 0
+min_confidence = 0
+required_ambiguity_codes = []
+expected_primary_symbol_name = "canActivate"
+expected_primary_repo = "shared_contracts"
+expected_primary_file = "src/auth.guard.ts"
+expected_primary_strategy = "shared_contract"
+expected_impact_repos = ["backend_standard"]
+required_primary_edge_kinds = ["UsesGuardFrom"]
+forbidden_primary_edge_kinds = ["CoChangesWith"]
+max_response_bytes = 12000

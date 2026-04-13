@@ -1,0 +1,48 @@
+[package]
+name = "gather-step-mcp"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP server for Gather Step"
+
+[features]
+test-support = []
+
+[dependencies]
+blake3.workspace = true
+gather-step-analysis = { path = "../gather-step-analysis", version = "1.0.0" }
+rustc-hash.workspace = true
+smallvec.workspace = true
+subtle.workspace = true
+gather-step-core.workspace = true
+gather-step-git = { path = "../gather-step-git", version = "1.0.0" }
+gather-step-output = { path = "../gather-step-output", version = "1.0.0" }
+gather-step-parser.workspace = true
+gather-step-storage.workspace = true
+rmcp = { version = "1.5.0", features = ["client", "server", "macros", "transport-io"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
+tokio-util.workspace = true
+getrandom = "=0.4.2"
+tracing.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+criterion.workspace = true
+insta.workspace = true
+pretty_assertions.workspace = true
+tempfile = "3.27.0"
+tracing-subscriber.workspace = true
+
+[[bench]]
+name = "budget_writer"
+harness = false
+
+[lints]
+workspace = true

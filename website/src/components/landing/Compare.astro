@@ -1,0 +1,91 @@
+---
+type Kind = 'check' | 'x' | 'eq';
+
+interface CompareRow {
+  label: string;
+  kind: Kind;
+  note: string;
+}
+
+interface CompareCol {
+  label: string;
+  heading: string;
+  rows: CompareRow[];
+  footer: string;
+}
+
+const columns: CompareCol[] = [
+  {
+    label: 'vs. Memory tools',
+    heading: 'Memory remembers.<br />Gather Step tracks truth.',
+    rows: [
+      { label: 'Stores past conversations', kind: 'eq', note: "They do · we don't" },
+      { label: 'Reflects current code structure', kind: 'check', note: 'From source, not history' },
+      { label: 'Event flows across repos', kind: 'check', note: 'Only here' },
+      { label: 'Stale when the codebase changes', kind: 'x', note: 'Re-indexes on every file save' },
+    ],
+    footer: 'Use both. They compound: memory tools work better when grounded in live structural truth.',
+  },
+  {
+    label: 'vs. Greptile · Sourcegraph',
+    heading: 'Search answers "where?".<br />Gather Step answers "what breaks?".',
+    rows: [
+      { label: 'Find code by name or pattern', kind: 'eq', note: 'They do · we do' },
+      { label: 'Cross-repo event topology', kind: 'x', note: 'Not modeled' },
+      { label: 'Producer-to-consumer tracing', kind: 'x', note: 'Not modeled' },
+      { label: 'Local-first, no data to vendor', kind: 'check', note: 'MIT' },
+    ],
+    footer: 'Different category. Search is navigation; this is structural reasoning.',
+  },
+  {
+    label: 'vs. Single-repo OSS',
+    heading: 'One unified graph,<br />not a federation.',
+    rows: [
+      { label: 'Indexes per repo', kind: 'eq', note: 'All do' },
+      { label: 'Cross-repo edges at virtual nodes', kind: 'check', note: 'Native, day-one' },
+      { label: 'CLAUDE.md for polyrepo systems', kind: 'check', note: 'System-wide, not per-service' },
+      { label: 'MIT commercial-friendly', kind: 'check', note: 'No AGPL friction' },
+    ],
+    footer: 'Serena, codebase-memory-mcp, and Repowise are single-repo primary. This is polyrepo-native.',
+  },
+];
+
+const glyph = (kind: Kind): string => (kind === 'check' ? '✓' : kind === 'x' ? '✕' : '≈');
+---
+
+<section class="bp-sec" id="compare">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-07 · How it relates to what you already use</span>
+    <h2 class="bp-h2">Complementary, <span class="u">not competitive.</span></h2>
+    <p class="bp-lede">
+      Gather Step does one thing completely: it provides a unified, accurate, always-current
+      knowledge graph of what your system actually looks like. It fits next to the tools
+      your team already ships with.
+    </p>
+  </div>
+
+  <div class="bp-compare">
+    {
+      columns.map((column) => (
+        <div class="bp-compare__card">
+          <span class="bp-compare__label">{column.label}</span>
+          <h3 set:html={column.heading}></h3>
+          <div class="bp-compare__rows">
+            {
+              column.rows.map((row) => (
+                <div class="bp-compare__row">
+                  <span class={`bp-compare__mark bp-compare__mark--${row.kind}`}>{glyph(row.kind)}</span>
+                  <div>
+                    <div>{row.label}</div>
+                    <span class="bp-compare__note">{row.note}</span>
+                  </div>
+                </div>
+              ))
+            }
+          </div>
+          <div class="bp-compare__footer">{column.footer}</div>
+        </div>
+      ))
+    }
+  </div>
+</section>

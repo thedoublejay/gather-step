@@ -1,0 +1,70 @@
+# HIGH change-impact gate for the shared API rollout evidence-split scenario.
+#
+# Objective pass/fail criteria:
+#
+#   - The canonical shared-contract type (`CreateOrderInput` from
+#     `shared_contracts`) must rank as the primary (top-1) item, proving that
+#     a canonical-boundary repo wins over same-name peers from non-contract
+#     repos.
+#
+#   - Structural consumers (`backend_standard` and `frontend_standard` both
+#     import `CreateOrderInput` from `@workspace/shared-contracts`) must appear
+#     in `expected_confirmed_downstream_repos`. This exercises the structural
+#     evidence path.
+#
+#   - `require_top1_canonical` asserts the canonical shared-contract virtual
+#     node is the top-1 primary. With the evidence-band split, this entry must
+#     appear in the structural section, not in the advisory / co-change-only
+#     section.
+#
+#   - `expected_structural_repos` lists the repos that must appear in the
+#     structural evidence section (separate from advisory / co-change-only).
+#     These fields are intentionally optional so the oracle compiles and runs
+#     even when the runner does not yet evaluate them.
+#
+#   - `forbidden_advisory_in_primary` lists repos that must NOT appear as the
+#     primary structural answer. These may appear under the advisory section
+#     after the evidence-band split, but must not pollute the structural
+#     primary.
+#
+#   - `api_unresolved.ts` is forbidden (noise gate).
+#
+# Fixture: `shared_contracts/src/order.ts` exports `CreateOrderInput`.
+# `backend_standard/src/controller.ts` and `frontend_standard/src/api.ts`
+# import it from `@workspace/shared-contracts`.
+
+name = "shared_api_rollout_split"
+mode = "change_impact"
+
+[target]
+kind = "symbol"
+qn = "CreateOrderInput"
+
+[oracle]
+expected_files = [
+  "__shared__@workspace/shared-contracts__CreateOrderInput",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 0
+required_ambiguity_codes = []
+expected_primary_symbol_name = "__shared__@workspace/shared-contracts__CreateOrderInput"
+expected_primary_symbol_kind = "shared_symbol"
+expected_primary_repo = "__virtual__"
+expected_primary_file = "__shared__@workspace/shared-contracts__CreateOrderInput"
+expected_resolved_symbol_kind = "shared_symbol"
+expected_confirmed_downstream_repos = ["backend_standard", "frontend_standard"]
+forbidden_confirmed_downstream_repos = []
+max_probable_downstream_repos = 0
+expected_resolution = "search_ranked_resolved"
+expected_confidence_model_version = "v1.0"
+
+# Evidence-band fields. The oracle runner enforces that structural consumers
+# stay separate from advisory / co-change-only output.
+require_top1_canonical = "__virtual__:__shared__@workspace/shared-contracts__CreateOrderInput"
+expected_structural_repos = ["backend_standard", "frontend_standard"]
+forbidden_advisory_in_primary = []
+
+max_response_bytes = 22000

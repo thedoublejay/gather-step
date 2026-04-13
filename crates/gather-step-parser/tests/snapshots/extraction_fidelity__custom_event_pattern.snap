@@ -1,0 +1,185 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&custom)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "CustomHandler",
+            qualified_name: Some(
+                "CustomHandler",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "CustomEventPattern",
+            qualified_name: Some(
+                "CustomHandler.handle::@CustomEventPattern",
+            ),
+            external_id: None,
+            signature: Some(
+                "'order.created'",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Event",
+            name: "order.created",
+            qualified_name: Some(
+                "__event__kafka__order.created",
+            ),
+            external_id: Some(
+                "__event__kafka__order.created",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "custom_event_pattern.ts",
+            qualified_name: Some(
+                "extraction-fixtures::custom_event_pattern.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "handle",
+            qualified_name: Some(
+                "CustomHandler.handle",
+            ),
+            external_id: None,
+            signature: Some(
+                "handle('order.created')",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "CustomEventPattern",
+            qualified_name: Some(
+                "custom_event_pattern.ts::CustomEventPattern",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/microservices",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "@nestjs/microservices",
+            qualified_name: Some(
+                "module-import::@nestjs/microservices",
+            ),
+            external_id: Some(
+                "module-import::@nestjs/microservices",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "custom_event_pattern.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::custom_event_pattern.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::custom_event_pattern.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Consumes",
+            source: "CustomHandler.handle",
+            target: "__event__kafka__order.created",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::custom_event_pattern.ts",
+            target: "CustomHandler",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::custom_event_pattern.ts",
+            target: "CustomHandler.handle",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::custom_event_pattern.ts",
+            target: "custom_event_pattern.ts::CustomEventPattern",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::custom_event_pattern.ts",
+            target: "module::extraction-fixtures::custom_event_pattern.ts",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::custom_event_pattern.ts",
+            target: "CustomHandler",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::custom_event_pattern.ts",
+            target: "CustomHandler.handle",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::custom_event_pattern.ts",
+            target: "module-import::@nestjs/microservices",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "CustomHandler.handle",
+            target: "CustomHandler.handle::@CustomEventPattern",
+        },
+        EdgeSummary {
+            kind: "UsesEventFrom",
+            source: "CustomHandler.handle",
+            target: "__event__kafka__order.created",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "CustomHandler",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "handle",
+            decorators: [
+                (
+                    "CustomEventPattern",
+                    [
+                        "order.created",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "CustomEventPattern",
+            imported_name: Some(
+                "CustomEventPattern",
+            ),
+            source: "@nestjs/microservices",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

@@ -1,0 +1,17 @@
+[store]
+dir = "target/nextest"
+
+[profile.default]
+fail-fast = false
+retries = 1
+slow-timeout = { period = "30s", terminate-after = 2 }
+status-level = "all"
+final-status-level = "slow"
+
+[profile.stress]
+fail-fast = true
+retries = 0
+test-threads = 4
+slow-timeout = { period = "30s", terminate-after = 2 }
+status-level = "fail"
+final-status-level = "slow"

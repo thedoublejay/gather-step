@@ -1,0 +1,33 @@
+# Documents the ranked-alternates path for shared-symbol queries.
+#
+# When the same function name (`process_payment`) exists across 5 or more
+# packages with no cross-repo edges and identical structural scores, the
+# confidence scorer cannot select a single winner: the margin between the top
+# candidate and the runner-up falls below PACK_CONFIDENCE_HIGH_MARGIN (125)
+# and PACK_CONFIDENCE_MEDIUM_MARGIN (75).
+#
+# Previously this produced a hard refusal: resolution = "ambiguous_search_match"
+# and found = false.
+#
+# Now the pack tool detects that all candidates cleared the noise floor and
+# emits a ranked-alternates response: resolution = "search_ranked_alternates",
+# found = true, and items contains each candidate as a "ranked_alternate" entry
+# so the LLM client can pick one and reissue with a node_id or repo filter.
+
+name = "pack_ambiguity_blocked"
+mode = "planning"
+
+[target]
+kind = "symbol"
+qn = "process_payment"
+
+[oracle]
+expected_resolution = "search_ranked_alternates"
+expected_files = ["src/payment.service.ts"]
+forbidden_files = []
+max_follow_ups = 6
+# min_confidence reflects the score emitted by ranked_alternate items.
+# Candidates score 450 in the fixture (above the noise floor = 250).
+min_confidence = 250
+required_ambiguity_codes = []
+max_response_bytes = 18000

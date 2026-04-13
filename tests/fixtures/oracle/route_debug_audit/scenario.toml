@@ -1,0 +1,18 @@
+name = "route_debug_audit"
+mode = "debug"
+
+[target]
+kind = "route"
+qn = "GET /orders/audit"
+
+[oracle]
+expected_files = [
+  "__route__GET__/orders/audit",
+]
+forbidden_files = [
+  "src/api_unresolved.ts",
+]
+max_follow_ups = 6
+min_confidence = 900
+required_ambiguity_codes = []
+max_response_bytes = 18000

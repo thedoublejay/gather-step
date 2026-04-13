@@ -1,0 +1,189 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&parsed)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "OuterController",
+            qualified_name: Some(
+                "OuterController",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "nested_class_declaration.ts",
+            qualified_name: Some(
+                "extraction-fixtures::nested_class_declaration.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "constructor",
+            qualified_name: Some(
+                "OuterController.constructor",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "run",
+            qualified_name: Some(
+                "OuterController.run",
+            ),
+            external_id: None,
+            signature: Some(
+                "run()",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "nested_class_declaration.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::nested_class_declaration.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::nested_class_declaration.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "InnerRepo",
+            qualified_name: Some(
+                "InnerRepo",
+            ),
+            external_id: None,
+            signature: Some(
+                "type InnerRepo = { value: string };",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "Repository",
+            qualified_name: Some(
+                "Repository",
+            ),
+            external_id: None,
+            signature: Some(
+                "type Repository<T> = { entity: T };",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Type",
+            name: "User",
+            qualified_name: Some(
+                "User",
+            ),
+            external_id: None,
+            signature: Some(
+                "type User = { id: string };",
+            ),
+            is_virtual: false,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "InnerRepo",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "OuterController",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "OuterController.constructor",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "OuterController.run",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "Repository",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "User",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::nested_class_declaration.ts",
+            target: "module::extraction-fixtures::nested_class_declaration.ts",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::nested_class_declaration.ts",
+            target: "OuterController",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::nested_class_declaration.ts",
+            target: "OuterController.constructor",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::nested_class_declaration.ts",
+            target: "OuterController.run",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "InnerRepo",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "OuterController",
+            decorators: [],
+            constructor_dependencies: [
+                "Repository<User>",
+            ],
+        },
+        SymbolSummary {
+            name: "Repository",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "User",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "constructor",
+            decorators: [],
+            constructor_dependencies: [
+                "Repository<User>",
+            ],
+        },
+        SymbolSummary {
+            name: "run",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [],
+    call_sites: [],
+    constant_strings: {},
+}

@@ -1,0 +1,9 @@
+disallowed-methods = [
+    { path = "str::to_ascii_lowercase", reason = "Allocates. Prefer `str::eq_ignore_ascii_case` for compares or `str::make_ascii_lowercase` for in-place. If a one-shot owned lowercase is genuinely needed (e.g. substring search), wrap the call in `#[expect(clippy::disallowed_methods, reason = \"...\")]` with a justification." },
+    { path = "str::to_lowercase", reason = "Allocates. Prefer `str::eq_ignore_ascii_case` for compares or `str::make_ascii_lowercase` for in-place. If a one-shot owned lowercase is genuinely needed (e.g. substring search), wrap the call in `#[expect(clippy::disallowed_methods, reason = \"...\")]` with a justification." },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "Use `rustc_hash::FxHashMap` for better performance. Or `BTreeMap` if deterministic iteration is needed." },
+    { path = "std::collections::HashSet", reason = "Use `rustc_hash::FxHashSet` for better performance." },
+]

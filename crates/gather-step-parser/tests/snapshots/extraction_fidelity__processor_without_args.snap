@@ -1,0 +1,229 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&processor)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "WorkerProcessor",
+            qualified_name: Some(
+                "WorkerProcessor",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Process",
+            qualified_name: Some(
+                "WorkerProcessor.handle::@Process",
+            ),
+            external_id: None,
+            signature: Some(
+                "'build'",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Processor",
+            qualified_name: Some(
+                "WorkerProcessor.handle::@Processor",
+            ),
+            external_id: None,
+            signature: Some(
+                "",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "Processor",
+            qualified_name: Some(
+                "WorkerProcessor::@Processor",
+            ),
+            external_id: None,
+            signature: Some(
+                "",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "processor_without_args.ts",
+            qualified_name: Some(
+                "extraction-fixtures::processor_without_args.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "handle",
+            qualified_name: Some(
+                "WorkerProcessor.handle",
+            ),
+            external_id: None,
+            signature: Some(
+                "handle('build')",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Process",
+            qualified_name: Some(
+                "processor_without_args.ts::Process",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/bull",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "Processor",
+            qualified_name: Some(
+                "processor_without_args.ts::Processor",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/bull",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "@nestjs/bull",
+            qualified_name: Some(
+                "module-import::@nestjs/bull",
+            ),
+            external_id: Some(
+                "module-import::@nestjs/bull",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "processor_without_args.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::processor_without_args.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::processor_without_args.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::processor_without_args.ts",
+            target: "WorkerProcessor",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::processor_without_args.ts",
+            target: "WorkerProcessor.handle",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::processor_without_args.ts",
+            target: "module::extraction-fixtures::processor_without_args.ts",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::processor_without_args.ts",
+            target: "processor_without_args.ts::Process",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::processor_without_args.ts",
+            target: "processor_without_args.ts::Processor",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::processor_without_args.ts",
+            target: "WorkerProcessor",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::processor_without_args.ts",
+            target: "WorkerProcessor.handle",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::processor_without_args.ts",
+            target: "module-import::@nestjs/bull",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "WorkerProcessor",
+            target: "WorkerProcessor::@Processor",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "WorkerProcessor.handle",
+            target: "WorkerProcessor.handle::@Process",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "WorkerProcessor.handle",
+            target: "WorkerProcessor.handle::@Processor",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "WorkerProcessor",
+            decorators: [
+                (
+                    "Processor",
+                    [],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "handle",
+            decorators: [
+                (
+                    "Process",
+                    [
+                        "build",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "Process",
+            imported_name: Some(
+                "Process",
+            ),
+            source: "@nestjs/bull",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+        ImportSummary {
+            local_name: "Processor",
+            imported_name: Some(
+                "Processor",
+            ),
+            source: "@nestjs/bull",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}

@@ -1,0 +1,9 @@
+[files]
+extend-exclude = [
+    "target",
+    "website/node_modules",
+]
+
+[default.extend-words]
+# Intentional typo used to exercise Tantivy's fuzzy-search fallback in tests.
+oreder = "oreder"

@@ -1,0 +1,17 @@
+{
+  "event": "impact_completed",
+  "symbol": "useAuthentication",
+  "matches": [
+    {
+      "source_repo": "frontend_standard",
+      "source_file": "src/auth_local.ts",
+      "source_symbol": "useAuthentication",
+      "primary": true,
+      "impacted_files": [
+        {
+          "repo": "frontend_standard"
+        }
+      ]
+    }
+  ]
+}

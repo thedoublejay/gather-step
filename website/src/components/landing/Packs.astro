@@ -1,0 +1,62 @@
+---
+const packs = [
+  {
+    tag: 'plan.pack',
+    heading: 'Plan pack',
+    body:
+      'Entry points, cross-repo dependency chains, convention conformance, affected event surface.',
+    meta: 'Returns ~8K tokens · shaped for the planning step.',
+  },
+  {
+    tag: 'debug.pack',
+    heading: 'Debug pack',
+    body:
+      'Hotspot history, recent co-changes, ownership, upstream producers, downstream consumers.',
+    meta: 'Returns ~8K tokens · shaped for the debugging step.',
+  },
+  {
+    tag: 'fix.pack',
+    heading: 'Fix pack',
+    body:
+      'Narrow edit surface, direct callers, likely tests, unresolved gaps, and the smallest safe path to a targeted change.',
+    meta: 'Returns ~8K tokens · shaped for the implementation step.',
+  },
+  {
+    tag: 'review.pack',
+    heading: 'Review pack',
+    body:
+      'Blast radius for this diff, convention checks, contract drift, cross-repo impact.',
+    meta: 'Returns ~8K tokens · shaped for the review step.',
+  },
+  {
+    tag: 'change-impact.pack',
+    heading: 'Change-impact pack',
+    body:
+      'Confirmed and probable downstream repos, semantic bridges, transport links, and ranked files for API or contract changes.',
+    meta: 'Returns ~8K tokens · shaped for rollout planning.',
+  },
+];
+---
+
+<section class="bp-sec" id="packs">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-05 · Task-shaped, not dump-the-graph</span>
+    <h2 class="bp-h2">Context packs, shaped to the step <span class="u">you're on.</span></h2>
+    <p class="bp-lede">
+      Precision over noise. Five canonical packs cover planning, debugging, fixing, review, and change impact.
+      Each returns exactly the subgraph the task requires.
+    </p>
+  </div>
+  <div class="bp-packs">
+    {
+      packs.map((pack) => (
+        <div class="bp-pack">
+          <span class="bp-pack__tag">{pack.tag}</span>
+          <h3>{pack.heading}</h3>
+          <p>{pack.body}</p>
+          <div class="bp-pack__meta">{pack.meta}</div>
+        </div>
+      ))
+    }
+  </div>
+</section>

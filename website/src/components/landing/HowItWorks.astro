@@ -1,0 +1,77 @@
+---
+interface CodeLine {
+  dim?: string;
+  line?: string;
+}
+
+interface Step {
+  num: string;
+  heading: string;
+  body: string;
+  code: CodeLine[];
+}
+
+const steps: Step[] = [
+  {
+    num: '01 · INDEX',
+    heading: 'Point it at your repos.',
+    body:
+      'Gather Step parses source, routes, entities, event producers and consumers, cross-repo dependencies, and builds one graph across the whole workspace.',
+    code: [
+      { dim: '# from your workspace root' },
+      { line: 'gather-step init ./services/*' },
+    ],
+  },
+  {
+    num: '02 · SERVE',
+    heading: 'Run the MCP server.',
+    body:
+      'Your AI coding assistant (Claude Code, Cursor, Copilot) connects over Model Context Protocol and pulls task-shaped context packs on demand.',
+    code: [
+      { dim: '# starts the local MCP endpoint' },
+      { line: 'gather-step serve --mcp' },
+    ],
+  },
+  {
+    num: '03 · SHIP',
+    heading: 'Ask what actually matters.',
+    body:
+      'Every prompt arrives with structural ground truth. Blast radius. Event consumers. Ownership. Conventions. No more 30K tokens of exploratory prompting.',
+    code: [
+      { dim: '# a question your AI can finally answer' },
+      { line: 'claude: what breaks if I change order.created?' },
+    ],
+  },
+];
+---
+
+<section class="bp-sec" id="how">
+  <div class="bp-sec__head">
+    <span class="bp-sec__num">DET-08 · From zero to answered questions</span>
+    <h2 class="bp-h2">Install, index, <span class="u">ask.</span></h2>
+    <p class="bp-lede">No API keys. No account. No data leaves your machine.</p>
+  </div>
+
+  <div class="bp-how">
+    {
+      steps.map((step) => (
+        <div class="bp-step">
+          <span class="bp-step__num">{step.num}</span>
+          <h3>{step.heading}</h3>
+          <p>{step.body}</p>
+          <div class="bp-step__code">
+            {
+              step.code.map((line) =>
+                'dim' in line ? (
+                  <div class="dim">{line.dim}</div>
+                ) : (
+                  <div>$ {line.line}</div>
+                )
+              )
+            }
+          </div>
+        </div>
+      ))
+    }
+  </div>
+</section>

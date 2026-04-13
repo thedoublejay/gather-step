@@ -1,0 +1,34 @@
+# Oracle for canonical-event-identity join.
+#
+# Every NestJS messaging decorator and client method emits on the canonical
+# `NodeKind::Event` virtual node (`__event__kafka__<name>`). A producer
+# using `this.bus.sendMessage(Messaging.kafka.reports.queue)` and a
+# consumer using `@CustomEventPattern('reports.queue')` share a single
+# `ref_node_id(NodeKind::Event, "__event__kafka__reports.queue")` id — the
+# previous split between `__topic__kafka__*` (sendMessage emitted
+# `NodeKind::Topic`) and `__event__kafka__*` (@CustomEventPattern emitted
+# `NodeKind::Event`) is gone, so the producer/consumer join now happens
+# on a single canonical target rather than through a sibling hop.
+#
+# `expected_confirmed_downstream_repos` locks the join: `backend_standard`
+# (producer) must reach `frontend_standard` (consumer) via the canonical
+# Event node. If the convergence regresses — e.g. `sendMessage` reverts
+# to emitting `NodeKind::Topic` — `frontend_standard` disappears from the
+# expected list.
+
+name = "event_canonical_topic_event_join"
+mode = "change_impact"
+
+[target]
+kind = "event"
+qn = "reports.queue"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+required_ambiguity_codes = []
+expected_confirmed_downstream_repos = ["backend_standard", "frontend_standard"]
+max_probable_downstream_repos = 0
+max_response_bytes = 18000

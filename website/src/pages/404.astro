@@ -1,0 +1,49 @@
+---
+import '../styles/custom.css';
+
+const withBase = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, '')}`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page not found | Gather Step</title>
+    <meta
+      name="description"
+      content="The page you requested could not be found. Start from the Gather Step homepage or return to the docs."
+    />
+    <meta name="robots" content="noindex,follow" />
+  </head>
+  <body>
+    <main class="landing-shell" style="max-width: 72rem; padding: 4rem 1.5rem;">
+      <section class="callout-panel">
+        <p>
+          <strong>Page not found:</strong> the documentation page you requested does not exist
+          or has moved.
+        </p>
+      </section>
+
+      <section class="landing-section-heading">
+        <h1>Nothing here to index.</h1>
+        <p>Start from the homepage or jump back into the docs from the getting started guide.</p>
+      </section>
+
+      <div class="landing-grid">
+        <article class="feature-card">
+          <h3>Home</h3>
+          <p><a href={withBase('/')}>Return to the landing page.</a></p>
+        </article>
+        <article class="feature-card">
+          <h3>Getting Started</h3>
+          <p><a href={withBase('/guides/getting-started/')}>Open the setup guide.</a></p>
+        </article>
+        <article class="feature-card">
+          <h3>CLI Reference</h3>
+          <p><a href={withBase('/reference/cli/')}>Browse commands and flags.</a></p>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>

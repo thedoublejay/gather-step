@@ -1,0 +1,48 @@
+[package]
+name = "gather-step-storage"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage backends for Gather Step"
+
+[dependencies]
+gather-step-core.workspace = true
+gather-step-parser.workspace = true
+bitcode.workspace = true
+blake3.workspace = true
+crossbeam-channel.workspace = true
+rayon.workspace = true
+redb.workspace = true
+rusqlite.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+notify.workspace = true
+ignore.workspace = true
+libc.workspace = true
+
+[features]
+## Exposes test-seam helpers (e.g. crash-injection methods) for integration
+## tests in other crates. Not intended for production use.
+test-support = []
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile = "3.27.0"
+# Enable test-support seams (crash-injection helpers) for integration tests
+# in this crate's own tests/ directory.
+gather-step-storage = { path = ".", features = ["test-support"] }
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

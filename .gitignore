@@ -1,0 +1,23 @@
+# Rust
+/target
+*.rs.bk
+rust_out
+
+# JavaScript / Astro / Starlight
+node_modules/
+dist/
+.astro/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Local profile config (never commit)
+.gather-step.local.yaml
+
+# Generated indexer state — test artifacts, CLI runs, etc.
+.gather-step/

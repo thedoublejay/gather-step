@@ -1,0 +1,23 @@
+[package]
+name = "gather-step-output"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Output formatters for Gather Step"
+
+[dependencies]
+chrono.workspace = true
+gather-step-analysis = { path = "../gather-step-analysis", version = "1.0.0" }
+gather-step-core.workspace = true
+gather-step-storage.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gather-step-storage.workspace = true
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

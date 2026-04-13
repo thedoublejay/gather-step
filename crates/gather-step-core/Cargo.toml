@@ -1,0 +1,24 @@
+[package]
+name = "gather-step-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types and schema for Gather Step"
+
+[dependencies]
+serde.workspace = true
+serde_yaml_ng.workspace = true
+bitcode.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,207 @@
+---
+source: crates/gather-step-parser/tests/extraction_fidelity.rs
+expression: summarize(&multi)
+---
+ParsedSummary {
+    nodes: [
+        NodeSummary {
+            kind: "Class",
+            name: "MultiPatternHandler",
+            qualified_name: Some(
+                "MultiPatternHandler",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Decorator",
+            name: "EventPattern",
+            qualified_name: Some(
+                "MultiPatternHandler.handle::@EventPattern",
+            ),
+            external_id: None,
+            signature: Some(
+                "['user.created', 'user.updated']",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Event",
+            name: "user.created",
+            qualified_name: Some(
+                "__event__kafka__user.created",
+            ),
+            external_id: Some(
+                "__event__kafka__user.created",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Event",
+            name: "user.updated",
+            qualified_name: Some(
+                "__event__kafka__user.updated",
+            ),
+            external_id: Some(
+                "__event__kafka__user.updated",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "File",
+            name: "multi_pattern_events.ts",
+            qualified_name: Some(
+                "extraction-fixtures::multi_pattern_events.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Function",
+            name: "handle",
+            qualified_name: Some(
+                "MultiPatternHandler.handle",
+            ),
+            external_id: None,
+            signature: Some(
+                "handle(['user.created', 'user.updated'])",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Import",
+            name: "EventPattern",
+            qualified_name: Some(
+                "multi_pattern_events.ts::EventPattern",
+            ),
+            external_id: None,
+            signature: Some(
+                "from @nestjs/microservices",
+            ),
+            is_virtual: false,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "@nestjs/microservices",
+            qualified_name: Some(
+                "module-import::@nestjs/microservices",
+            ),
+            external_id: Some(
+                "module-import::@nestjs/microservices",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+        NodeSummary {
+            kind: "Module",
+            name: "multi_pattern_events.ts",
+            qualified_name: Some(
+                "module::extraction-fixtures::multi_pattern_events.ts",
+            ),
+            external_id: Some(
+                "module::extraction-fixtures::multi_pattern_events.ts",
+            ),
+            signature: None,
+            is_virtual: true,
+        },
+    ],
+    edges: [
+        EdgeSummary {
+            kind: "Consumes",
+            source: "MultiPatternHandler.handle",
+            target: "__event__kafka__user.created",
+        },
+        EdgeSummary {
+            kind: "Consumes",
+            source: "MultiPatternHandler.handle",
+            target: "__event__kafka__user.updated",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::multi_pattern_events.ts",
+            target: "MultiPatternHandler",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::multi_pattern_events.ts",
+            target: "MultiPatternHandler.handle",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::multi_pattern_events.ts",
+            target: "module::extraction-fixtures::multi_pattern_events.ts",
+        },
+        EdgeSummary {
+            kind: "Defines",
+            source: "extraction-fixtures::multi_pattern_events.ts",
+            target: "multi_pattern_events.ts::EventPattern",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::multi_pattern_events.ts",
+            target: "MultiPatternHandler",
+        },
+        EdgeSummary {
+            kind: "Exports",
+            source: "module::extraction-fixtures::multi_pattern_events.ts",
+            target: "MultiPatternHandler.handle",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::multi_pattern_events.ts",
+            target: "module-import::@nestjs/microservices",
+        },
+        EdgeSummary {
+            kind: "UsesDecorator",
+            source: "MultiPatternHandler.handle",
+            target: "MultiPatternHandler.handle::@EventPattern",
+        },
+        EdgeSummary {
+            kind: "UsesEventFrom",
+            source: "MultiPatternHandler.handle",
+            target: "__event__kafka__user.created",
+        },
+        EdgeSummary {
+            kind: "UsesEventFrom",
+            source: "MultiPatternHandler.handle",
+            target: "__event__kafka__user.updated",
+        },
+    ],
+    symbols: [
+        SymbolSummary {
+            name: "MultiPatternHandler",
+            decorators: [],
+            constructor_dependencies: [],
+        },
+        SymbolSummary {
+            name: "handle",
+            decorators: [
+                (
+                    "EventPattern",
+                    [
+                        "['user.created', 'user.updated']",
+                    ],
+                ),
+            ],
+            constructor_dependencies: [],
+        },
+    ],
+    imports: [
+        ImportSummary {
+            local_name: "EventPattern",
+            imported_name: Some(
+                "EventPattern",
+            ),
+            source: "@nestjs/microservices",
+            resolved_path: None,
+            is_default: false,
+            is_namespace: false,
+        },
+    ],
+    call_sites: [],
+    constant_strings: {},
+}
