@@ -98,7 +98,7 @@ scoping rules.
 If a config already exists, `init` will not overwrite it. Remove or rename the
 existing config first if you want a fresh generated draft.
 
-For the full v2 onboarding flow, combine config generation with indexing,
+For the full onboarding flow, combine config generation with indexing,
 assistant summary generation, MCP registration, and watch handoff:
 
 ```bash

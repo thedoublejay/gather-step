@@ -36,7 +36,7 @@ gather-step --version
 
 ## 2. Run Guided Setup
 
-Point Gather Step at the directory that contains your repositories. For the normal v2 setup path, let `init` write the config, build the first index, generate assistant-facing summary files, and register Claude MCP settings:
+Point Gather Step at the directory that contains your repositories. Let `init` write the config, build the first index, generate assistant-facing summary files, and register Claude MCP settings:
 
 ```bash
 gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local

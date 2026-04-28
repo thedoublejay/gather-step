@@ -20,7 +20,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Improved operator feedback for startup, `status`, `index`, `reindex`, `watch`, `clean`, and `serve`.
 - Bumped the workspace and crate versions to `2.0.0`.
 - Added release workflow automation to open Homebrew tap update pull requests.
-- Refreshed the website landing page, feature copy, getting-started docs, installation docs, and CLI reference for the v2 flow.
+- Refreshed the website landing page, feature copy, getting-started docs, installation docs, and CLI reference.
 
 ### CLI Startup And Status
 
@@ -63,11 +63,11 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 
 ### Documentation And Website
 
-- Refreshed the CLI command reference for the v2 command surface.
-- Updated getting-started guidance around the single-command v2 setup path.
+- Refreshed the CLI command reference for the current command surface.
+- Updated getting-started guidance around the single-command setup path.
 - Updated workspace setup docs for init wizard flags and watch handoff.
 - Updated MCP client docs with the `setup-mcp` fast path.
-- Updated operator workflow docs to describe the release-gate baseline used during v2 preparation.
+- Updated operator workflow docs to describe the committed release-gate baseline.
 - Updated landing page feature copy, release stamps, onboarding flow, and install command behavior.
 - Made the landing install command copyable with click feedback.
 
