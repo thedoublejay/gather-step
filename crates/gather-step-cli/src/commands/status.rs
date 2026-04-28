@@ -104,12 +104,16 @@ fn render_unindexed_summary(app: &AppContext) {
 }
 
 fn mcp_state(app: &AppContext) -> &'static str {
+    mcp_state_with_home(app, std::env::var_os("HOME").as_deref())
+}
+
+fn mcp_state_with_home(app: &AppContext, home: Option<&std::ffi::OsStr>) -> &'static str {
     let local = app.workspace_path.join(".claude/settings.json");
     if json_has_gather_step(&local) {
         return "configured: local";
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = home {
         let global = std::path::PathBuf::from(home).join(".claude/settings.json");
         if json_has_gather_step(&global) {
             return "configured: global";
@@ -371,4 +375,60 @@ fn pack_cache_status(
         truncated_packs,
         unresolved_packs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use indicatif::MultiProgress;
+
+    use super::mcp_state_with_home;
+    use crate::app::AppContext;
+
+    fn app_for(workspace: &Path) -> AppContext {
+        AppContext {
+            workspace_path: workspace.to_path_buf(),
+            repo_filter: None,
+            json_output: false,
+            no_interactive: false,
+            stdin_is_tty: true,
+            stdout_is_tty: true,
+            ci_env_set: false,
+            show_banner: false,
+            multi_progress: MultiProgress::new(),
+        }
+    }
+
+    fn write_settings(path: &Path) {
+        fs::create_dir_all(path.parent().expect("settings parent")).expect("settings parent");
+        fs::write(
+            path,
+            r#"{"mcpServers":{"gather-step":{"command":"gather-step"}}}"#,
+        )
+        .expect("settings");
+    }
+
+    #[test]
+    fn mcp_state_reports_local_configuration_first() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_settings(&temp.path().join(".claude/settings.json"));
+
+        assert_eq!(
+            mcp_state_with_home(&app_for(temp.path()), None),
+            "configured: local"
+        );
+    }
+
+    #[test]
+    fn mcp_state_reports_global_configuration() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        write_settings(&home.path().join(".claude/settings.json"));
+
+        assert_eq!(
+            mcp_state_with_home(&app_for(workspace.path()), Some(home.path().as_os_str())),
+            "configured: global"
+        );
+    }
 }

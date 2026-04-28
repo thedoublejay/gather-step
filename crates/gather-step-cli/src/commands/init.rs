@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -9,8 +10,17 @@ use clap::Args;
 use gather_step_core::{GatherStepConfig, IndexingConfig, RepoConfig};
 use serde::Serialize;
 
-use crate::{app::AppContext, path_safety, path_safety::PathSafetyError};
+use crate::{
+    app::AppContext,
+    commands::{generate, index, setup_mcp, watch},
+    path_safety,
+    path_safety::PathSafetyError,
+};
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI flags are independent switches and clap requires explicit fields"
+)]
 #[derive(Debug, Args, Default)]
 pub struct InitArgs {
     #[arg(
@@ -20,6 +30,20 @@ pub struct InitArgs {
     pub config: Option<PathBuf>,
     #[arg(long, help = "Overwrite an existing config file")]
     pub force: bool,
+    #[arg(long, help = "Index discovered repos after writing the config")]
+    pub index: bool,
+    #[arg(long = "no-index", help = "Skip indexing", conflicts_with = "index")]
+    pub no_index: bool,
+    #[arg(long, help = "Start watch mode after indexing")]
+    pub watch: bool,
+    #[arg(long = "no-watch", conflicts_with = "watch")]
+    pub no_watch: bool,
+    #[arg(long, help = "Generate CLAUDE.gather.md and AGENTS.gather.md")]
+    pub generate_ai_files: bool,
+    #[arg(long = "no-generate-ai-files", conflicts_with = "generate_ai_files")]
+    pub no_generate_ai_files: bool,
+    #[arg(long, value_enum)]
+    pub setup_mcp: Option<setup_mcp::McpScope>,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,10 +66,10 @@ pub struct DiscoveredRepo {
     pub relative_path: String,
 }
 
-pub fn run(app: &AppContext, args: InitArgs) -> Result<()> {
-    let output = app.output();
+pub async fn run(app: &AppContext, args: InitArgs) -> Result<()> {
     let config_path = args
         .config
+        .clone()
         .unwrap_or_else(|| app.workspace_paths().config_path);
 
     if config_path.exists() && !args.force {
@@ -55,7 +79,110 @@ pub fn run(app: &AppContext, args: InitArgs) -> Result<()> {
         );
     }
 
+    if app.is_interactive() {
+        run_wizard(app, args).await
+    } else {
+        run_non_interactive(app, args).await
+    }
+}
+
+async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
+    write_default_config(app, &args)?;
+
+    if args.index && !args.no_index {
+        index::run(app, index::IndexArgs::default()).await?;
+    }
+    if args.generate_ai_files && !args.no_generate_ai_files {
+        generate::run_summary_pair(app)?;
+    }
+    if let Some(scope) = args.setup_mcp {
+        setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
+    }
+    if args.watch && !args.no_watch {
+        watch::run(app, watch::WatchArgs::default()).await?;
+    }
+
+    Ok(())
+}
+
+async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     let repos = discover_git_repos(&app.workspace_path)?;
+
+    let output = app.output();
+    output.line("gather-step workspace setup");
+    output.line(format!(
+        "Found {} git repo(s) in {}",
+        repos.len(),
+        app.workspace_path.display()
+    ));
+    for repo in &repos {
+        output.line(format!("  {} -> {}", repo.name, repo.relative_path));
+    }
+
+    let do_index = if args.index {
+        true
+    } else if args.no_index {
+        false
+    } else {
+        prompt_yes_no("Index these repos now?", true)?
+    };
+    let do_watch = if args.watch {
+        true
+    } else if args.no_watch {
+        false
+    } else {
+        prompt_yes_no("Watch for changes and re-index automatically?", false)?
+    };
+    let do_ai = if args.generate_ai_files {
+        true
+    } else if args.no_generate_ai_files {
+        false
+    } else {
+        prompt_yes_no(
+            "Generate AI tool context files (CLAUDE.gather.md, AGENTS.gather.md)?",
+            true,
+        )?
+    };
+    let scope = match args.setup_mcp {
+        Some(scope) => Some(scope),
+        None => prompt_mcp_scope()?,
+    };
+
+    write_default_config_with_repos(app, &args, repos)?;
+
+    if do_index {
+        index::run(app, index::IndexArgs::default()).await?;
+    }
+    if do_ai {
+        generate::run_summary_pair(app)?;
+    }
+    if let Some(scope) = scope {
+        setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
+    }
+    if do_watch {
+        watch::run(app, watch::WatchArgs::default()).await?;
+    }
+
+    output.line("Setup complete; gather-step is ready.");
+    Ok(())
+}
+
+fn write_default_config(app: &AppContext, args: &InitArgs) -> Result<()> {
+    let repos = discover_git_repos(&app.workspace_path)?;
+    write_default_config_with_repos(app, args, repos)
+}
+
+fn write_default_config_with_repos(
+    app: &AppContext,
+    args: &InitArgs,
+    repos: Vec<DiscoveredRepo>,
+) -> Result<()> {
+    let output = app.output();
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| app.workspace_paths().config_path);
+
     if repos.is_empty() {
         bail!(
             "no git repositories were found under {}",
@@ -105,6 +232,38 @@ pub fn run(app: &AppContext, args: InitArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{message} {suffix} ")?;
+    stdout.flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    match answer.trim() {
+        "y" | "Y" | "yes" | "YES" | "Yes" => Ok(true),
+        "n" | "N" | "no" | "NO" | "No" => Ok(false),
+        _ => Ok(default),
+    }
+}
+
+fn prompt_mcp_scope() -> Result<Option<setup_mcp::McpScope>> {
+    let mut stdout = io::stdout().lock();
+    write!(
+        stdout,
+        "Register gather-step as an MCP server? [local/global/skip] "
+    )?;
+    stdout.flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(match answer.trim() {
+        "global" => Some(setup_mcp::McpScope::Global),
+        "local" | "" => Some(setup_mcp::McpScope::Local),
+        _ => None,
+    })
 }
 
 /// Thin wrapper around the internal git-repo discovery used by [`run`].

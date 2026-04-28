@@ -8,7 +8,7 @@ use crate::{
     commands::{Cli, init, status},
 };
 
-pub fn run(app: &AppContext) -> Result<()> {
+pub async fn run(app: &AppContext) -> Result<()> {
     if !app.is_interactive() {
         Cli::command().print_help()?;
         std::io::stdout().write_all(b"\n")?;
@@ -18,7 +18,7 @@ pub fn run(app: &AppContext) -> Result<()> {
     if app.workspace_paths().config_path.exists() {
         status::run_default(app)
     } else {
-        init::run(app, init::InitArgs::default())
+        init::run(app, init::InitArgs::default()).await
     }
 }
 
@@ -30,8 +30,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn configured_unindexed_workspace_renders_status_summary() {
+    #[tokio::test]
+    async fn configured_unindexed_workspace_renders_status_summary() {
         let temp = tempfile::tempdir().expect("temp dir");
         fs::write(temp.path().join("gather-step.config.yaml"), "repos: []\n").expect("config");
 
@@ -47,6 +47,6 @@ mod tests {
             multi_progress: MultiProgress::new(),
         };
 
-        run(&app).expect("status summary should render");
+        run(&app).await.expect("status summary should render");
     }
 }

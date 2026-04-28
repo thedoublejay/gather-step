@@ -40,6 +40,19 @@ pub struct WatchArgs {
     pub error_backoff_ms: u64,
 }
 
+impl Default for WatchArgs {
+    fn default() -> Self {
+        Self {
+            config: None,
+            storage: None,
+            poll_interval_ms: 250,
+            debounce_ms: 2000,
+            consecutive_error_limit: 5,
+            error_backoff_ms: 5000,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct WatchEventOutput {
     event: &'static str,

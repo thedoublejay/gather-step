@@ -93,6 +93,31 @@ fn no_args_non_interactive_prints_help() {
     assert!(stdout.contains("--no-interactive"));
 }
 
+#[test]
+fn setup_mcp_local_writes_workspace_settings() {
+    let temp = TempDir::new("setup-mcp-local");
+
+    let output = run_ok(temp.path(), &["setup-mcp", "--scope", "local"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let settings_path = temp.path().join(".claude/settings.json");
+    let settings = fs::read_to_string(&settings_path).expect("settings file should be written");
+    let value: Value = serde_json::from_str(&settings).expect("settings json");
+
+    assert!(stdout.contains("Updated"));
+    assert_eq!(
+        value["mcpServers"]["gather-step"]["args"],
+        serde_json::json!([
+            "--workspace",
+            fs::canonicalize(temp.path())
+                .expect("canonical workspace")
+                .to_str()
+                .expect("utf-8 temp path"),
+            "mcp",
+            "serve"
+        ])
+    );
+}
+
 fn write_fixture_workspace(root: &Path) {
     let backend = root.join("apps/backend_standard");
     let frontend = root.join("apps/frontend_standard");

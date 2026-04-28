@@ -93,11 +93,11 @@ pub enum McpSubcommand {
 
 pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
     match cli.command {
-        Some(Command::Init(args)) => init::run(&app, args),
-        Some(Command::Index(args)) => index::run(&app, args),
+        Some(Command::Init(args)) => init::run(&app, args).await,
+        Some(Command::Index(args)) => index::run(&app, args).await,
         Some(Command::Clean(args)) => clean::run(&app, args),
         Some(Command::Compact(args)) => compact::run(&app, args),
-        Some(Command::Reindex(args)) => reindex::run(&app, args),
+        Some(Command::Reindex(args)) => reindex::run(&app, args).await,
         Some(Command::Serve(args)) => serve::run(&app, args).await,
         Some(Command::Watch(args)) => watch::run(&app, args).await,
         Some(Command::Search(args)) => search::run(&app, args),
@@ -113,7 +113,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Mcp(command)) => match command.command {
             McpSubcommand::Serve(args) => serve::run(&app, args).await,
         },
-        None => no_args::run(&app),
+        None => no_args::run(&app).await,
     }
 }
 
@@ -136,7 +136,7 @@ mod tests {
     use super::{Cli, Command};
     use crate::commands::{
         clean::CleanArgs, compact::CompactArgs, index::IndexArgs, reindex::ReindexArgs,
-        serve::ServeArgs, trace::TraceCommand, watch::WatchArgs,
+        serve::ServeArgs, setup_mcp::McpScope, trace::TraceCommand, watch::WatchArgs,
     };
 
     #[test]
@@ -173,6 +173,7 @@ mod tests {
                 artifact_path: None,
                 release_gate: false,
                 auto_recover: false,
+                watch: false,
             }
         );
     }
@@ -248,6 +249,7 @@ mod tests {
                     artifact_path: None,
                     release_gate: false,
                     auto_recover: false,
+                    watch: false,
                 },
             }
         );
@@ -436,5 +438,16 @@ mod tests {
             }
             _ => panic!("expected orphans subcommand"),
         }
+    }
+
+    #[test]
+    fn parses_setup_mcp_scope() {
+        let cli = Cli::parse_from(["gather-step", "setup-mcp", "--scope", "global"]);
+
+        let Some(Command::SetupMcp(args)) = cli.command else {
+            unreachable!("expected setup-mcp command");
+        };
+
+        assert!(matches!(args.scope, McpScope::Global));
     }
 }
