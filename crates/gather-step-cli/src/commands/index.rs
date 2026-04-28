@@ -324,10 +324,14 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bar = (!output.is_json()).then(|| {
         let bar = multi.add(ProgressBar::new(config.repos.len() as u64));
         bar.set_style(
-            ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} {msg}")
-                .expect("workspace progress template is valid")
-                .progress_chars("=> "),
+            ProgressStyle::with_template(
+                " {spinner:.cyan.bold} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}  {msg}",
+            )
+            .expect("workspace progress template is valid")
+            .progress_chars("█░░")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
         );
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
         bar
     });
 
@@ -582,11 +586,11 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let finalization_bar = (!output.is_json()).then(|| {
         let bar = multi.add(ProgressBar::new_spinner());
         bar.set_style(
-            ProgressStyle::with_template("  {spinner} {msg}")
+            ProgressStyle::with_template("  {spinner:.cyan.bold} {msg}")
                 .expect("finalization spinner template is valid")
-                .tick_strings(&["-", "\\", "|", "/"]),
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
         );
-        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
         bar
     });
 
