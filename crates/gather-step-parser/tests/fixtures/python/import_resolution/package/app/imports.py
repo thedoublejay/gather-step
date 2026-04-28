@@ -4,6 +4,8 @@ from .services import (
     Processor,
     Runner as TaskRunner,
 )
+from . import services as svc
+from .. import shared
 from ..shared import *
 
 
@@ -15,4 +17,4 @@ async def run_pipeline(payload: User) -> BillingAccount:
                 case "account":
                     return TaskRunner().run(item)
                 case _:
-                    return submodule.fallback(item)
+                    return svc.Runner().run(shared.SHARED) or submodule.fallback(item)

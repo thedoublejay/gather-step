@@ -2309,11 +2309,35 @@ fn parse_python_from_import_statement(
         ));
     }
 
+    if python_module_source_is_dots_only(&source) {
+        return bindings
+            .into_iter()
+            .filter_map(|binding| {
+                let imported_name = binding.imported_name.as_deref()?;
+                if imported_name == "*" {
+                    return Some((source.clone(), vec![binding]));
+                }
+                let binding_source = format!("{source}{imported_name}");
+                Some((
+                    binding_source.clone(),
+                    vec![ImportBinding {
+                        source: binding_source,
+                        ..binding
+                    }],
+                ))
+            })
+            .collect();
+    }
+
     if bindings.is_empty() {
         Vec::new()
     } else {
         vec![(source, bindings)]
     }
+}
+
+fn python_module_source_is_dots_only(source: &str) -> bool {
+    !source.is_empty() && source.chars().all(|ch| ch == '.')
 }
 
 fn python_import_item_name(item: Node<'_>, source_text: &str) -> Option<(String, String)> {

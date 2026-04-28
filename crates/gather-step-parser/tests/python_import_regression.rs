@@ -13,7 +13,7 @@ struct ImportSummary {
 }
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/phase5/python")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python/import_resolution")
 }
 
 fn parse_python_fixture(relative_path: &str) -> ParsedFile {
@@ -30,7 +30,7 @@ fn parse_python_fixture(relative_path: &str) -> ParsedFile {
         content_hash: [0; 32],
         source_bytes: None,
     };
-    parse_file("python-phase5", &root, &file).expect("fixture should parse")
+    parse_file("python-import-regression", &root, &file).expect("fixture should parse")
 }
 
 fn import_summary(parsed: &ParsedFile) -> BTreeSet<ImportSummary> {
@@ -90,6 +90,20 @@ fn python_import_extraction_is_ast_backed_and_deterministic() {
         imported_name: Some("Runner".to_owned()),
         is_namespace: false,
         resolved_path: Some("package/app/services.py".to_owned()),
+    }));
+    assert!(imports.contains(&ImportSummary {
+        source: ".services".to_owned(),
+        local_name: "svc".to_owned(),
+        imported_name: Some("services".to_owned()),
+        is_namespace: false,
+        resolved_path: Some("package/app/services.py".to_owned()),
+    }));
+    assert!(imports.contains(&ImportSummary {
+        source: "..shared".to_owned(),
+        local_name: "shared".to_owned(),
+        imported_name: Some("shared".to_owned()),
+        is_namespace: false,
+        resolved_path: Some("package/shared.py".to_owned()),
     }));
     assert!(imports.contains(&ImportSummary {
         source: "..shared".to_owned(),
