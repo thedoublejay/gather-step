@@ -16,6 +16,7 @@ These flags apply to every command. Pass them before the subcommand name.
 | `-v, --verbose` | count | 0 (warn level) | Increase log verbosity. Pass once for `info`, twice for `debug`, three or more times for `trace`. Overridden by the `GATHER_STEP_LOG` environment variable. |
 | `--json` | bool flag | false | Emit newline-delimited JSON to stdout instead of human-readable text. Tracing logs are still written to stderr in JSON format when this flag is set. |
 | `--no-banner` | bool flag | false | Suppress the startup banner printed to stderr. The banner is also suppressed when `--json` is active or when stderr is not a TTY. |
+| `--no-interactive` | bool flag | false | Disable interactive prompts and use command defaults. Use this for scripts and CI. |
 
 ## Command index
 
@@ -35,8 +36,10 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`pack`](#pack) — Return a bounded context pack for a target symbol.
 - [`conventions`](#conventions) — Derive repeated structural conventions from the indexed graph.
 - [`generate claude-md`](#generate-claude-md) — Generate assistant-facing CLAUDE.md rule files from the index.
+- [`generate agents-md`](#generate-agents-md) — Generate a workspace summary for Codex-style `AGENTS.md` workflows.
 - [`generate codeowners`](#generate-codeowners) — Generate a CODEOWNERS file from indexed ownership analytics.
 - [`watch`](#watch) — Watch for file changes and trigger incremental indexing.
+- [`setup-mcp`](#setup-mcp) — Register `gather-step mcp serve` in Claude settings.
 - [`serve`](#serve) — Start the stdio MCP server.
 
 ## Command details
@@ -46,13 +49,19 @@ These flags apply to every command. Pass them before the subcommand name.
 Discovers all git repositories nested under the workspace root and writes an initial `gather-step.config.yaml`. Skips `.git`, `.gather-step`, `node_modules`, `dist`, and `target` directories. Fails if no git repositories are found.
 
 ```bash
-gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force]
+gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
+  [--index | --no-index] [--watch | --no-watch] \
+  [--generate-ai-files | --no-generate-ai-files] [--setup-mcp <SCOPE>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--config <PATH>` | path | `<workspace>/gather-step.config.yaml` | Write the config to this path instead of the workspace default. |
 | `--force` | bool flag | false | Overwrite an existing config file. Without this flag, the command exits with an error if the config already exists. |
+| `--index` / `--no-index` | bool flag | prompt/default | Index discovered repos after writing the config, or skip indexing. |
+| `--watch` / `--no-watch` | bool flag | prompt/default | Start watch mode after setup, or return immediately. |
+| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `CLAUDE.gather.md` and `AGENTS.gather.md` after indexing. |
+| `--setup-mcp <SCOPE>` | enum | prompt/default | Register the MCP server in `local` or `global` Claude settings. |
 
 **Example**
 
@@ -76,7 +85,7 @@ Builds the complete workspace index: parses source files, constructs the code gr
 
 ```bash
 gather-step [GLOBAL FLAGS] index [--config <PATH>] [--registry <PATH>] [--storage <PATH>] \
-  [--depth <LEVEL>] [--artifact-path <PATH>] [--release-gate] [--auto-recover]
+  [--depth <LEVEL>] [--artifact-path <PATH>] [--release-gate] [--auto-recover] [--watch]
 ```
 
 | Flag | Type | Default | Description |
@@ -88,6 +97,7 @@ gather-step [GLOBAL FLAGS] index [--config <PATH>] [--registry <PATH>] [--storag
 | `--artifact-path <PATH>` | path | — | Write the index JSON payload to this path for release-pipeline archival. |
 | `--release-gate` | bool flag | false | Require a clean git worktree and enforce release-gate index summary invariants. |
 | `--auto-recover` | bool flag | false | Delete generated index state before rebuilding. Use when state is corrupt or uses an unsupported schema. |
+| `--watch` | bool flag | false | Enter watch mode after indexing completes. In interactive human mode, the CLI prompts for this when the flag is omitted. |
 
 **Example**
 
@@ -121,7 +131,7 @@ Clears existing registry and storage state, then runs a full `index` pass. Accep
 
 ```bash
 gather-step [GLOBAL FLAGS] reindex [--config <PATH>] [--registry <PATH>] [--storage <PATH>] \
-  [--depth <LEVEL>] [--artifact-path <PATH>] [--release-gate] [--auto-recover]
+  [--depth <LEVEL>] [--artifact-path <PATH>] [--release-gate] [--auto-recover] [--watch]
 ```
 
 Flags are identical to [`index`](#index). The clean step runs unconditionally before indexing begins.
@@ -469,16 +479,18 @@ gather-step --workspace /path/to/workspace --repo backend_standard conventions -
 
 ### `generate claude-md`
 
-Generates CLAUDE.md rule files for one or all repos in the workspace. Files are written to their default locations within the workspace unless `--output` is provided. When a single repo is targeted, a single file is written; when all repos are targeted, one file per repo is written.
+Generates CLAUDE.md rule files for one or all repos in the workspace. With `--target=rules`, files are graph-backed repo rule files. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
 
 ```bash
-gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>]
+gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] \
+  [--target <rules|summary>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--output <PATH>` | path | Workspace default locations | Explicit output file or directory. When multiple files are generated and this is an existing file, the command errors. Pass a trailing slash to force directory treatment. |
 | `--repo <NAME>` | string | — | Generate repo-scoped output for this repo only. Overrides the global `--repo` flag. |
+| `--target <rules|summary>` | enum | `rules` | Choose graph-backed repo rule files or the registry-only `CLAUDE.gather.md` summary. `--repo` is only valid with `rules`. |
 
 **Example**
 
@@ -490,6 +502,30 @@ gather-step --workspace /path/to/workspace generate claude-md --repo backend_sta
 **Output shape (`--json`)** — emits one line with `event: "generate_claude_md_completed"` and `files` array of `{path, bytes}`.
 
 **When to use** — after indexing, to produce context files for AI assistants working in each repo.
+
+---
+
+### `generate agents-md`
+
+Generates a registry-only workspace summary for Codex-style agent workflows and writes it to `AGENTS.gather.md` unless `--output` is provided.
+
+```bash
+gather-step [GLOBAL FLAGS] generate agents-md [--output <PATH>]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--output <PATH>` | path | `<workspace>/AGENTS.gather.md` | Explicit output path. |
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace generate agents-md
+```
+
+**Output shape (`--json`)** — emits one line with `event: "generate_agents_md_completed"` and `files` array of `{path, bytes}`.
+
+**When to use** — after indexing, to refresh lightweight workspace context for Codex or AGENTS.md-based assistants.
 
 ---
 
@@ -547,6 +583,30 @@ gather-step --workspace /path/to/workspace watch --debounce-ms 500 --poll-interv
 ```
 
 **When to use** — during active development, so AI assistant tools always query a fresh index.
+
+---
+
+### `setup-mcp`
+
+Writes an idempotent `mcpServers.gather-step` block that runs `gather-step mcp serve` pinned to the current workspace.
+
+```bash
+gather-step [GLOBAL FLAGS] setup-mcp [--scope <local|global>]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--scope <local|global>` | enum | `local` | Write `.claude/settings.json` in the workspace or `~/.claude/settings.json`. |
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace setup-mcp --scope local
+```
+
+**Output shape (`--json`)** — emits one line with `event: "setup_mcp_completed"`, `scope`, and `settings_path`.
+
+**When to use** — after setup, so Claude can launch the workspace-pinned MCP server automatically.
 
 ---
 
