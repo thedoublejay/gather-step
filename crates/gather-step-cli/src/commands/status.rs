@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
+use console::style;
 use gather_step_analysis::{
     GraphQuery, SemanticHealthReport, semantic_health_for_repo, semantic_health_for_workspace,
 };
@@ -8,7 +9,7 @@ use gather_step_core::{DepthLevel, RegistryStore};
 use gather_step_mcp::output::redact::relativize_to_workspace;
 use gather_step_storage::{ContextPackStats, GraphStore, StorageCoordinator};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
@@ -74,6 +75,66 @@ pub fn run(app: &AppContext, _args: StatusArgs) -> Result<()> {
         },
         run_rendered,
     )
+}
+
+pub fn run_default(app: &AppContext) -> Result<()> {
+    if !app.workspace_paths().registry_path.exists() {
+        render_unindexed_summary(app);
+        return Ok(());
+    }
+
+    run(app, StatusArgs::default())
+}
+
+fn render_unindexed_summary(app: &AppContext) {
+    let output = app.output();
+    output.line("");
+    output.line(format!(
+        "  {}",
+        style(format!("gather-step v{}", env!("CARGO_PKG_VERSION"))).bold()
+    ));
+    output.line("");
+    output.line(format!("  Workspace:   {}", app.workspace_path.display()));
+    output.line("  Index:       not indexed yet");
+    output.line(format!("  Watch:       {}", watch_state()));
+    output.line(format!("  MCP:         {}", mcp_state(app)));
+    output.line("");
+    output.line(format!("  Next: {}", style("gather-step index").cyan()));
+    output.line("");
+}
+
+fn mcp_state(app: &AppContext) -> &'static str {
+    mcp_state_with_home(app, std::env::var_os("HOME").as_deref())
+}
+
+fn mcp_state_with_home(app: &AppContext, home: Option<&std::ffi::OsStr>) -> &'static str {
+    let local = app.workspace_path.join(".claude/settings.json");
+    if json_has_gather_step(&local) {
+        return "configured: local";
+    }
+
+    if let Some(home) = home {
+        let global = std::path::PathBuf::from(home).join(".claude/settings.json");
+        if json_has_gather_step(&global) {
+            return "configured: global";
+        }
+    }
+
+    "not configured"
+}
+
+fn json_has_gather_step(path: &std::path::Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&body) else {
+        return false;
+    };
+    value.pointer("/mcpServers/gather-step").is_some()
+}
+
+fn watch_state() -> &'static str {
+    "not running"
 }
 
 pub(crate) fn run_rendered(app: &AppContext) -> Result<RenderedCommand> {
@@ -314,4 +375,60 @@ fn pack_cache_status(
         truncated_packs,
         unresolved_packs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use indicatif::MultiProgress;
+
+    use super::mcp_state_with_home;
+    use crate::app::AppContext;
+
+    fn app_for(workspace: &Path) -> AppContext {
+        AppContext {
+            workspace_path: workspace.to_path_buf(),
+            repo_filter: None,
+            json_output: false,
+            no_interactive: false,
+            stdin_is_tty: true,
+            stdout_is_tty: true,
+            ci_env_set: false,
+            show_banner: false,
+            multi_progress: MultiProgress::new(),
+        }
+    }
+
+    fn write_settings(path: &Path) {
+        fs::create_dir_all(path.parent().expect("settings parent")).expect("settings parent");
+        fs::write(
+            path,
+            r#"{"mcpServers":{"gather-step":{"command":"gather-step"}}}"#,
+        )
+        .expect("settings");
+    }
+
+    #[test]
+    fn mcp_state_reports_local_configuration_first() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        write_settings(&temp.path().join(".claude/settings.json"));
+
+        assert_eq!(
+            mcp_state_with_home(&app_for(temp.path()), None),
+            "configured: local"
+        );
+    }
+
+    #[test]
+    fn mcp_state_reports_global_configuration() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = tempfile::tempdir().expect("home");
+        write_settings(&home.path().join(".claude/settings.json"));
+
+        assert_eq!(
+            mcp_state_with_home(&app_for(workspace.path()), Some(home.path().as_os_str())),
+            "configured: global"
+        );
+    }
 }

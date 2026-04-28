@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -36,7 +37,7 @@ use crate::{
     path_safety,
 };
 
-#[derive(Debug, Args, PartialEq, Eq)]
+#[derive(Debug, Args, Default, PartialEq, Eq)]
 pub struct IndexArgs {
     #[arg(long, help = "Path to the workspace config file")]
     pub config: Option<PathBuf>,
@@ -65,6 +66,8 @@ pub struct IndexArgs {
         help = "Delete generated index state before rebuilding, recovering corrupt or old-schema state."
     )]
     pub auto_recover: bool,
+    #[arg(long, help = "Enter watch mode after indexing completes")]
+    pub watch: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,7 +247,7 @@ impl RepoAnalyticsStatus {
     }
 }
 
-pub fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
+pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let total_start = Instant::now();
     let output = app.output();
     let defaults = app.workspace_paths();
@@ -254,6 +257,7 @@ pub fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let artifact_path = args.artifact_path;
     let release_gate = args.release_gate;
     let auto_recover = args.auto_recover;
+    let watch = args.watch;
 
     // A release-gate run must be produced from a clean, committed worktree.
     // Fail fast here rather than emitting an artifact that cannot be reproduced.
@@ -783,7 +787,26 @@ pub fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         output.line(format!("Release-gate artifact: {}", path.display()));
     }
 
+    if watch || should_prompt_for_watch(app)? {
+        return crate::commands::watch::run(app, crate::commands::watch::WatchArgs::default())
+            .await;
+    }
+
     Ok(())
+}
+
+fn should_prompt_for_watch(app: &AppContext) -> Result<bool> {
+    if !app.is_interactive() {
+        return Ok(false);
+    }
+
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Start watching for changes? [y/N] ")?;
+    stdout.flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

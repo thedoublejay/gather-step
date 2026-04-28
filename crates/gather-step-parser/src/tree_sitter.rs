@@ -4812,7 +4812,7 @@ export class Handler implements Contracts.OrderDto {}
             temp_dir
                 .path()
                 .join("packages/shared_contracts/package.json"),
-            r#"{"name":"@vendor/shared_contracts","version":"1.0.0"}"#,
+            r#"{"name":"@vendor/shared_contracts","version":"2.0.0"}"#,
         )
         .expect("package manifest should write");
         fs::write(
@@ -4895,7 +4895,7 @@ export class Controller {
             temp_dir
                 .path()
                 .join("packages/shared_contracts/package.json"),
-            r#"{"name":"@vendor/shared_contracts","version":"1.0.0","types":"src/index.ts"}"#,
+            r#"{"name":"@vendor/shared_contracts","version":"2.0.0","types":"src/index.ts"}"#,
         )
         .expect("package manifest should write");
         fs::write(

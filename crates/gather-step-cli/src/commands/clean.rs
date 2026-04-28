@@ -236,6 +236,10 @@ mod tests {
             workspace_path,
             repo_filter: None,
             json_output: false,
+            no_interactive: true,
+            stdin_is_tty: false,
+            stdout_is_tty: false,
+            ci_env_set: true,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         }

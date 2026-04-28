@@ -21,7 +21,7 @@ jobs:
         with:
           toolchain: 1.94.1
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2.8.1
+      - uses: Swatinem/rust-cache@v2.9.1
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -70,7 +70,7 @@ jobs:
         with:
           toolchain: 1.94.1
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.8.1
+      - uses: Swatinem/rust-cache@v2.9.1
       - name: Build
         shell: bash
         # `--locked` ensures the release binary is built against the exact
@@ -138,12 +138,93 @@ jobs:
       contents: write
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8.0.1
         with:
           path: dist
           merge-multiple: true
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v3.0.0
         with:
           draft: true
           files: dist/*.tar.gz
+
+  bump-homebrew:
+    name: Bump Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v6.0.2
+        with:
+          repository: thedoublejay/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+      - name: Update formula URLs and checksums
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          aarch64_archive="gather-step-${REF_NAME}-aarch64-apple-darwin.tar.gz"
+          x86_archive="gather-step-${REF_NAME}-x86_64-apple-darwin.tar.gz"
+          export aarch64_sha
+          export x86_sha
+          export aarch64_url
+          export x86_url
+          aarch64_sha="$(shasum -a 256 "dist/${aarch64_archive}" | awk '{print $1}')"
+          x86_sha="$(shasum -a 256 "dist/${x86_archive}" | awk '{print $1}')"
+          aarch64_url="https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/${aarch64_archive}"
+          x86_url="https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/${x86_archive}"
+          ruby <<'RUBY'
+          path = "homebrew-tap/Formula/gather-step.rb"
+          formula = File.read(path)
+          replacements = {
+            /url "https:\/\/github\.com\/[^"]+\/releases\/download\/v[^"]+\/gather-step-v[^"]+-aarch64-apple-darwin\.tar\.gz"\n(\s*)sha256 "[0-9a-f]+"/ =>
+              "url \"#{ENV.fetch("aarch64_url")}\"\n\\1sha256 \"#{ENV.fetch("aarch64_sha")}\"",
+            /url "https:\/\/github\.com\/[^"]+\/releases\/download\/v[^"]+\/gather-step-v[^"]+-x86_64-apple-darwin\.tar\.gz"\n(\s*)sha256 "[0-9a-f]+"/ =>
+              "url \"#{ENV.fetch("x86_url")}\"\n\\1sha256 \"#{ENV.fetch("x86_sha")}\"",
+          }
+          replacements.each do |pattern, replacement|
+            before = formula
+            formula = formula.sub(pattern, replacement)
+            abort("formula pattern not found: #{pattern.inspect}") if formula == before
+          end
+          File.write(path, formula)
+          RUBY
+      - name: Open Homebrew tap PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          branch="bump-gather-step-${REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add Formula/gather-step.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git commit -m "gather-step ${REF_NAME}"
+          git push --force-with-lease origin "$branch"
+          if gh pr view "$branch" --repo thedoublejay/homebrew-tap >/dev/null 2>&1; then
+            echo "Homebrew tap PR already exists for ${branch}."
+          else
+            gh pr create \
+              --repo thedoublejay/homebrew-tap \
+              --base main \
+              --head "$branch" \
+              --title "gather-step ${REF_NAME}" \
+              --body "Updates gather-step macOS release URLs and SHA256 checksums for ${REF_NAME}. Do not merge until the GitHub release is no longer draft."
+          fi

@@ -268,7 +268,7 @@ mod tests {
                 "_authToken": "{secret}",
                 "dependencies": {{
                     "_authToken": "{secret}",
-                    "@workspace/shared-contracts": "1.0.0"
+                    "@workspace/shared-contracts": "2.0.0"
                 }}
             }}"#
         );

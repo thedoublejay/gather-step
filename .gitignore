@@ -21,3 +21,6 @@ dist/
 
 # Generated indexer state — test artifacts, CLI runs, etc.
 .gather-step/
+
+# Local-only planning docs (superpowers plans, drafts, scratch)
+docs/superpowers/

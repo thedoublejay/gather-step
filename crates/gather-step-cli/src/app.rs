@@ -15,11 +15,19 @@ use crate::{commands::Cli, path_safety};
 
 const BANNER: &str = include_str!("../assets/banner.txt");
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "AppContext centralizes independent CLI and environment flags"
+)]
 #[derive(Clone, Debug)]
 pub struct AppContext {
     pub workspace_path: PathBuf,
     pub repo_filter: Option<String>,
     pub json_output: bool,
+    pub no_interactive: bool,
+    pub stdin_is_tty: bool,
+    pub stdout_is_tty: bool,
+    pub ci_env_set: bool,
     pub show_banner: bool,
     pub multi_progress: MultiProgress,
 }
@@ -97,6 +105,10 @@ impl AppContext {
             workspace_path,
             repo_filter: cli.repo.clone(),
             json_output: cli.json,
+            no_interactive: cli.no_interactive,
+            stdin_is_tty: std::io::stdin().is_terminal(),
+            stdout_is_tty: std::io::stdout().is_terminal(),
+            ci_env_set: std::env::var("CI").is_ok_and(|value| !value.is_empty()),
             show_banner: !cli.no_banner,
             multi_progress,
         })
@@ -105,6 +117,15 @@ impl AppContext {
     #[must_use]
     pub fn output(&self) -> Output {
         Output::new(self.json_output)
+    }
+
+    #[must_use]
+    pub fn is_interactive(&self) -> bool {
+        self.stdin_is_tty
+            && self.stdout_is_tty
+            && !self.json_output
+            && !self.ci_env_set
+            && !self.no_interactive
     }
 
     #[must_use]
@@ -253,7 +274,14 @@ pub fn maybe_print_banner(app: &AppContext) {
     }
 
     eprintln!("{}", style(BANNER).dim());
-    eprintln!("{}", style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim());
+    eprintln!(
+        "{}",
+        style(format!(
+            "v{}  ·  © 2026 JJ Adonis",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .dim()
+    );
     eprintln!();
 }
 

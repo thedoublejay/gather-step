@@ -5,7 +5,7 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until a release pipeline is wired up to generate it automatically from release notes and tagged releases.
 
-## v1.0.0 (Draft)
+## v2.0.0 (Draft)
 
 First public release of Gather Step.
 

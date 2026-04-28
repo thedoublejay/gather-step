@@ -13,7 +13,7 @@ pub struct ReindexArgs {
     pub index: index::IndexArgs,
 }
 
-pub fn run(app: &AppContext, args: ReindexArgs) -> Result<()> {
+pub async fn run(app: &AppContext, args: ReindexArgs) -> Result<()> {
     let defaults = app.workspace_paths();
     let registry_path = args
         .index
@@ -33,5 +33,5 @@ pub fn run(app: &AppContext, args: ReindexArgs) -> Result<()> {
         &canonical_root,
     )?;
 
-    index::run(app, args.index)
+    index::run(app, args.index).await
 }

@@ -4483,7 +4483,7 @@ mod tests {
         let file_a = node("repo-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let file_b = node("repo-b", "src/b.ts", NodeKind::File, "src/b.ts", 0);
         let author = author_node("__author__git:bob");
-        let sym = shared_symbol_node("__shared__@pkg@1.0.0__Sym");
+        let sym = shared_symbol_node("__shared__@pkg@2.0.0__Sym");
 
         let import_edge = EdgeData {
             source: file_a.id,

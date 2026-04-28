@@ -454,7 +454,7 @@ mod tests {
             "shared_contracts",
             "src/types.ts",
             "OrderState",
-            shared_symbol_qn("@workspace/shared-contracts", "1.0.0", "OrderState"),
+            shared_symbol_qn("@workspace/shared-contracts", "2.0.0", "OrderState"),
         );
         graph
             .bulk_insert(

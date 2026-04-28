@@ -21,7 +21,9 @@ brew install thedoublejay/tap/gather-step
 ```
 
 The release workflow publishes prebuilt macOS artifacts through Homebrew. No
-Rust toolchain is required on the host machine.
+Rust toolchain is required on the host machine. Releases open an automatic tap
+update PR; updates appear after that PR is merged and the GitHub release is no
+longer draft.
 
 ### Verify the install
 
@@ -49,8 +51,8 @@ brew untap thedoublejay/tap
 The Homebrew tap is published at
 [`thedoublejay/homebrew-tap`](https://github.com/thedoublejay/homebrew-tap).
 If a release is not visible yet, check the
-[Releases page](https://github.com/thedoublejay/gather-step/releases) and use
-the source build below until the tag is published.
+[Releases page](https://github.com/thedoublejay/gather-step/releases) and the tap
+PR queue, then use the source build below until the tag is published.
 
 ### Platform scope
 

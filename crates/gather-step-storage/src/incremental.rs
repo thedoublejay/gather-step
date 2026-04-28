@@ -638,7 +638,7 @@ mod tests {
         .expect("added fixture should write");
         fs::write(
             repo_root.path().join("package.json"),
-            r#"{ "dependencies": { "@workspace/shared-contracts": "1.0.0" } }"#,
+            r#"{ "dependencies": { "@workspace/shared-contracts": "2.0.0" } }"#,
         )
         .expect("manifest should write");
 
@@ -698,7 +698,7 @@ mod tests {
                         path: "package.json".to_owned(),
                         path_id_bytes: b"package.json".to_vec(),
                         content_hash: blake3::hash(
-                            br#"{ "dependencies": { "@workspace/shared-contracts": "1.0.0" } }"#,
+                            br#"{ "dependencies": { "@workspace/shared-contracts": "2.0.0" } }"#,
                         )
                         .as_bytes()
                         .to_vec(),

@@ -6,7 +6,7 @@ pub mod sanitize;
 
 pub use context_md::{
     ClaudeMdOptions, ContextMdError, DEFAULT_RULE_BYTE_BUDGET, RuleFile, derive_conventions,
-    generate_rule_files,
+    generate_rule_files, render_workspace_summary_agents, render_workspace_summary_claude,
 };
 pub use evidence::render_evidence_chain;
 
