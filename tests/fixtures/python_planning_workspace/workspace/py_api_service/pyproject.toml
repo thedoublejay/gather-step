@@ -1,0 +1,7 @@
+[project]
+name = "py-api-service"
+version = "0.1.0"
+dependencies = [
+  "py-shared-models",
+  "py-transform-service",
+]

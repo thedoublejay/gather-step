@@ -1,0 +1,11 @@
+repos:
+  - name: py_scraper_service
+    path: workspace/py_scraper_service
+  - name: py_transform_service
+    path: workspace/py_transform_service
+  - name: py_shared_models
+    path: workspace/py_shared_models
+  - name: py_api_service
+    path: workspace/py_api_service
+indexing:
+  workspace_concurrency: 1

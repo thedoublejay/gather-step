@@ -1,0 +1,13 @@
+version: 1
+corpora:
+  - alias: py-private-alpha
+    path: "<local-private-repo-path>"
+    python_file_count: 0
+    init_file_count: 0
+    relative_import_count: 0
+    top_framework_decorator_families: []
+    package_markers: []
+    has_nested_python_subprojects: false
+    indexability:
+      status: pending
+      blocker: null

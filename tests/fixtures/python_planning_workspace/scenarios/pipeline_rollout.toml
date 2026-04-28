@@ -1,0 +1,42 @@
+name = "python_pipeline_rollout"
+mode = "planning"
+repo = "py_transform_service"
+
+[target]
+kind = "symbol"
+qn = "transform_batch"
+
+[oracle]
+expected_files = [
+  "src/transform_service/pipeline.py",
+  "src/transform_service/rules.py",
+  "src/shared_models/records.py",
+]
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 850
+required_ambiguity_codes = []
+expected_primary_symbol_name = "transform_batch"
+expected_primary_symbol_kind = "function"
+expected_primary_repo = "py_transform_service"
+expected_primary_file = "src/transform_service/pipeline.py"
+expected_cross_repo_caller_repos = ["py_api_service"]
+expected_structural_repos = ["py_shared_models"]
+expected_resolution = "search_ranked_resolved"
+max_response_bytes = 22000
+
+[python_oracle]
+expected_repos = [
+  "py_api_service",
+  "py_transform_service",
+  "py_shared_models",
+]
+expected_bridges = [
+  "py_api_service:transform_service.pipeline.transform_batch",
+  "py_transform_service:shared_models.records.ParsedDocument",
+]
+required_top_rank = 1
+max_unresolved_gaps = 2
+expected_resolution = "search_ranked_resolved"
+expected_completeness = "primary_and_structural_neighbors"
+required_warning_substrings = []

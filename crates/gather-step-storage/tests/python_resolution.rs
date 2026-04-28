@@ -1,6 +1,6 @@
-use std::fs;
+use std::{fs, path::PathBuf};
 
-use gather_step_core::{EdgeKind, NodeData, NodeKind};
+use gather_step_core::{EdgeKind, NodeData, NodeKind, config::GatherStepConfig};
 use gather_step_storage::{GraphStore, IndexingOptions, RepoIndexer};
 
 fn write_fixture(root: &std::path::Path, relative: &str, contents: &str) {
@@ -30,31 +30,31 @@ fn indexes_python_imported_module_calls_into_storage_graph() {
     write_fixture(
         repo_root.path(),
         "package/app/imports.py",
-        r#"
+        r"
 from . import services as svc
 import pkg.submodule as submodule
 
 def run_pipeline(item):
     runner = svc.Runner()
     return runner.run(item) or submodule.fallback(item)
-"#,
+",
     );
     write_fixture(
         repo_root.path(),
         "package/app/services.py",
-        r#"
+        r"
 class Runner:
     def run(self, item):
         return item
-"#,
+",
     );
     write_fixture(
         repo_root.path(),
         "pkg/submodule.py",
-        r#"
+        r"
 def fallback(item):
     return item
-"#,
+",
     );
 
     let indexer =
@@ -91,4 +91,40 @@ def fallback(item):
             && edge.target == fallback.id
             && edge.metadata.resolver.as_deref() == Some("import_map")
     }));
+}
+
+#[test]
+fn python_planning_workspace_fixture_indexes_from_config() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures/python_planning_workspace")
+        .canonicalize()
+        .expect("fixture workspace should exist");
+    let config = GatherStepConfig::from_yaml_file(repo_root.join("gather-step.config.yaml"))
+        .expect("fixture config should parse");
+    let storage_root = tempfile::tempdir().expect("storage tempdir should create");
+    let indexer =
+        RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+
+    assert_eq!(config.repos.len(), 4);
+    for repo in &config.repos {
+        indexer
+            .index_repo(&repo.name, repo_root.join(&repo.path), None)
+            .unwrap_or_else(|error| panic!("{} should index: {error}", repo.name));
+    }
+
+    let graph = indexer.storage().graph();
+    let transform_nodes = graph
+        .nodes_by_file("py_transform_service", "src/transform_service/pipeline.py")
+        .expect("transform nodes should load");
+    let shared_nodes = graph
+        .nodes_by_file("py_shared_models", "src/shared_models/records.py")
+        .expect("shared model nodes should load");
+    let api_nodes = graph
+        .nodes_by_file("py_api_service", "src/api_service/app.py")
+        .expect("api nodes should load");
+
+    find_node(&transform_nodes, NodeKind::Function, "transform_batch");
+    find_node(&shared_nodes, NodeKind::Class, "ParsedDocument");
+    find_node(&api_nodes, NodeKind::Function, "ingest_documents");
 }
