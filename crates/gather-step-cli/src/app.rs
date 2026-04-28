@@ -273,6 +273,7 @@ pub fn maybe_print_banner(app: &AppContext) {
         return;
     }
 
+    eprintln!();
     eprintln!("{}", style(BANNER).dim());
     eprintln!(
         "{}",
