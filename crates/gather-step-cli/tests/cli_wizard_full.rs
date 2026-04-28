@@ -38,6 +38,21 @@ fn init_flag_overrides_run_full_setup_without_prompting() {
     assert!(tmp.path().join(".gather-step/registry.json").exists());
     assert!(tmp.path().join("CLAUDE.gather.md").exists());
     assert!(tmp.path().join("AGENTS.gather.md").exists());
+    assert!(
+        tmp.path()
+            .join(".claude/rules/gather-step-architecture.md")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join(".claude/rules/gather-step-events.md")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join(".claude/rules/gather-step-routes.md")
+            .exists()
+    );
     assert!(tmp.path().join(".claude/settings.json").exists());
 }
 

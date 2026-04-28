@@ -181,6 +181,26 @@ fn run_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<()> {
 }
 
 pub fn run_summary_pair(app: &AppContext) -> Result<()> {
+    let output = app.output();
+    let paths = app.workspace_paths();
+    let metadata_path = paths.storage_root.join("metadata.sqlite");
+
+    if paths.graph_path.exists() && metadata_path.exists() {
+        run_claude_md_rules(
+            app,
+            GenerateClaudeMdArgs {
+                output: None,
+                repo: None,
+                target: ClaudeMdTarget::Rules,
+            },
+        )?;
+    } else {
+        output.line("warning: skipped .claude/rules/ generation because no workspace index exists");
+        output.line(
+            "hint: run `gather-step index`, then `gather-step generate claude-md --target rules`",
+        );
+    }
+
     run_claude_md_summary(
         app,
         GenerateClaudeMdArgs {
