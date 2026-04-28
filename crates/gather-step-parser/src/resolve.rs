@@ -537,7 +537,17 @@ impl<'a> SymbolIndex<'a> {
         import_map: &FxHashMap<String, Vec<&'a NodeData>>,
         import_bindings: &[ImportBinding],
     ) -> Option<(&'a NodeData, ResolutionStrategy, f32)> {
-        if let Some(imported) = import_map.get(&call_site.callee_name)
+        let qualified_hint_uses_import_head =
+            qualified_hint_import_head_matches(call_site, import_bindings);
+
+        if let Some((target, confidence)) =
+            self.resolve_qualified_import_call(call_site, import_bindings)
+        {
+            return Some((target, ResolutionStrategy::ImportMap, confidence));
+        }
+
+        if !qualified_hint_uses_import_head
+            && let Some(imported) = import_map.get(&call_site.callee_name)
             && let Some(target) = imported.first().copied()
         {
             return Some((
@@ -548,12 +558,6 @@ impl<'a> SymbolIndex<'a> {
                     imported.len(),
                 ),
             ));
-        }
-
-        if let Some((target, confidence)) =
-            self.resolve_qualified_import_call(call_site, import_bindings)
-        {
-            return Some((target, ResolutionStrategy::ImportMap, confidence));
         }
 
         let relative = self.get_relative_path(&call_site.source_path);
@@ -839,6 +843,21 @@ fn split_qualified_import_hint(qualified_hint: &str) -> Option<(&str, &str)> {
     Some((head, tail))
 }
 
+fn qualified_hint_import_head_matches(
+    call_site: &CallSite,
+    import_bindings: &[ImportBinding],
+) -> bool {
+    let Some(qualified_hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let Some((head, _)) = split_qualified_import_hint(qualified_hint) else {
+        return false;
+    };
+    import_bindings
+        .iter()
+        .any(|binding| binding.local_name == head)
+}
+
 #[expect(clippy::cast_precision_loss)]
 fn penalize(base: f32, candidate_count: usize) -> f32 {
     if candidate_count <= 1 {
@@ -1066,6 +1085,55 @@ mod tests {
         assert_eq!(resolved[0].edge.target, target.id);
         assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
         assert!(resolved[0].edge.is_cross_file);
+    }
+
+    #[test]
+    fn qualified_import_head_wins_over_competing_leaf_import() {
+        let root = PathBuf::from("/repo");
+        let target = class_node("package/app/services.py", "Runner");
+        let distractor = class_node("other.py", "Runner");
+        let owner = function_node("package/app/imports.py", "run_pipeline");
+        let resolved = resolve_calls(
+            &root,
+            &[target.clone(), distractor.clone(), owner.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("package/app/imports.py"),
+                import_bindings: vec![
+                    ImportBinding {
+                        local_name: "Runner".to_owned(),
+                        imported_name: Some("Runner".to_owned()),
+                        source: "other".to_owned(),
+                        resolved_path: Some(root.join("other.py")),
+                        is_default: false,
+                        is_namespace: false,
+                        is_type_only: false,
+                    },
+                    ImportBinding {
+                        local_name: "svc".to_owned(),
+                        imported_name: Some("services".to_owned()),
+                        source: ".services".to_owned(),
+                        resolved_path: Some(root.join("package/app/services.py")),
+                        is_default: false,
+                        is_namespace: false,
+                        is_type_only: false,
+                    },
+                ],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("package/app/imports.py"),
+                    callee_name: "Runner".to_owned(),
+                    callee_qualified_hint: Some("svc.Runner".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].edge.target, target.id);
+        assert_ne!(resolved[0].edge.target, distractor.id);
+        assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
     }
 
     #[test]
