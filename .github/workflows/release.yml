@@ -21,7 +21,7 @@ jobs:
         with:
           toolchain: 1.94.1
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2.8.1
+      - uses: Swatinem/rust-cache@v2.9.1
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -70,7 +70,7 @@ jobs:
         with:
           toolchain: 1.94.1
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.8.1
+      - uses: Swatinem/rust-cache@v2.9.1
       - name: Build
         shell: bash
         # `--locked` ensures the release binary is built against the exact
