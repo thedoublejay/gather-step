@@ -7,10 +7,12 @@ pub mod generate;
 pub mod impact;
 pub mod index;
 pub mod init;
+pub mod no_args;
 pub mod pack;
 pub mod reindex;
 pub mod search;
 pub mod serve;
+pub mod setup_mcp;
 pub mod status;
 pub mod trace;
 pub mod watch;
@@ -45,8 +47,14 @@ pub struct Cli {
     pub json: bool,
     #[arg(long, global = true, help = "Disable the startup banner")]
     pub no_banner: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Disable interactive prompts (forces all defaults)"
+    )]
+    pub no_interactive: bool,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +68,7 @@ pub enum Command {
     Trace(trace::TraceArgs),
     Serve(serve::ServeArgs),
     Watch(watch::WatchArgs),
+    SetupMcp(setup_mcp::SetupMcpArgs),
     Status(status::StatusArgs),
     Doctor(doctor::DoctorArgs),
     Generate(generate::GenerateCommand),
@@ -84,25 +93,27 @@ pub enum McpSubcommand {
 
 pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
     match cli.command {
-        Command::Init(args) => init::run(&app, args),
-        Command::Index(args) => index::run(&app, args),
-        Command::Clean(args) => clean::run(&app, args),
-        Command::Compact(args) => compact::run(&app, args),
-        Command::Reindex(args) => reindex::run(&app, args),
-        Command::Serve(args) => serve::run(&app, args).await,
-        Command::Watch(args) => watch::run(&app, args).await,
-        Command::Search(args) => search::run(&app, args),
-        Command::Trace(args) => trace::run(&app, args),
-        Command::Status(args) => status::run(&app, args),
-        Command::Doctor(args) => doctor::run(&app, args),
-        Command::Generate(command) => generate::run(&app, command),
-        Command::Impact(args) => impact::run(&app, args),
-        Command::Pack(args) => pack::run(&app, &args),
-        Command::Events(args) => events::run(&app, args),
-        Command::Conventions(args) => conventions::run(&app, args),
-        Command::Mcp(command) => match command.command {
+        Some(Command::Init(args)) => init::run(&app, args),
+        Some(Command::Index(args)) => index::run(&app, args),
+        Some(Command::Clean(args)) => clean::run(&app, args),
+        Some(Command::Compact(args)) => compact::run(&app, args),
+        Some(Command::Reindex(args)) => reindex::run(&app, args),
+        Some(Command::Serve(args)) => serve::run(&app, args).await,
+        Some(Command::Watch(args)) => watch::run(&app, args).await,
+        Some(Command::Search(args)) => search::run(&app, args),
+        Some(Command::Trace(args)) => trace::run(&app, args),
+        Some(Command::SetupMcp(args)) => setup_mcp::run(&app, args),
+        Some(Command::Status(args)) => status::run(&app, args),
+        Some(Command::Doctor(args)) => doctor::run(&app, args),
+        Some(Command::Generate(command)) => generate::run(&app, command),
+        Some(Command::Impact(args)) => impact::run(&app, args),
+        Some(Command::Pack(args)) => pack::run(&app, &args),
+        Some(Command::Events(args)) => events::run(&app, args),
+        Some(Command::Conventions(args)) => conventions::run(&app, args),
+        Some(Command::Mcp(command)) => match command.command {
             McpSubcommand::Serve(args) => serve::run(&app, args).await,
         },
+        None => no_args::run(&app),
     }
 }
 
@@ -148,7 +159,7 @@ mod tests {
         assert_eq!(cli.repo.as_deref(), Some("backend_standard"));
         assert_eq!(cli.json, true);
 
-        let Command::Index(args) = cli.command else {
+        let Some(Command::Index(args)) = cli.command else {
             unreachable!("expected index command");
         };
 
@@ -181,7 +192,7 @@ mod tests {
             "local-graph",
         ]);
 
-        let Command::Serve(args) = cli.command else {
+        let Some(Command::Serve(args)) = cli.command else {
             unreachable!("expected serve command");
         };
 
@@ -222,7 +233,7 @@ mod tests {
 
         assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
 
-        let Command::Reindex(args) = cli.command else {
+        let Some(Command::Reindex(args)) = cli.command else {
             unreachable!("expected reindex command");
         };
 
@@ -258,7 +269,7 @@ mod tests {
 
         assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
 
-        let Command::Clean(args) = cli.command else {
+        let Some(Command::Clean(args)) = cli.command else {
             unreachable!("expected clean command");
         };
 
@@ -285,7 +296,7 @@ mod tests {
 
         assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
 
-        let Command::Compact(args) = cli.command else {
+        let Some(Command::Compact(args)) = cli.command else {
             unreachable!("expected compact command");
         };
 
@@ -316,7 +327,7 @@ mod tests {
             "9000",
         ]);
 
-        let Command::Watch(args) = cli.command else {
+        let Some(Command::Watch(args)) = cli.command else {
             unreachable!("expected watch command");
         };
         assert_eq!(
@@ -346,7 +357,7 @@ mod tests {
             "12",
         ]);
 
-        let Command::Trace(args) = cli.command else {
+        let Some(Command::Trace(args)) = cli.command else {
             unreachable!("expected trace command");
         };
 
@@ -370,7 +381,7 @@ mod tests {
             "deadbeefdeadbeefdeadbeefdeadbeef",
         ]);
 
-        let Command::Trace(args) = cli.command else {
+        let Some(Command::Trace(args)) = cli.command else {
             unreachable!("expected trace command");
         };
 
@@ -396,7 +407,7 @@ mod tests {
             "CODEOWNERS",
         ]);
 
-        let Command::Generate(command) = cli.command else {
+        let Some(Command::Generate(command)) = cli.command else {
             unreachable!("expected generate command");
         };
 
@@ -404,7 +415,8 @@ mod tests {
             crate::commands::generate::GenerateSubcommand::Codeowners(args) => {
                 assert_eq!(args.output, Some("CODEOWNERS".into()));
             }
-            crate::commands::generate::GenerateSubcommand::ClaudeMd(_) => {
+            crate::commands::generate::GenerateSubcommand::ClaudeMd(_)
+            | crate::commands::generate::GenerateSubcommand::AgentsMd(_) => {
                 panic!("expected codeowners subcommand")
             }
         }
@@ -414,7 +426,7 @@ mod tests {
     fn parses_events_orphans_subcommand() {
         let cli = Cli::parse_from(["gather-step", "events", "orphans", "--limit", "12"]);
 
-        let Command::Events(args) = cli.command else {
+        let Some(Command::Events(args)) = cli.command else {
             unreachable!("expected events command");
         };
 

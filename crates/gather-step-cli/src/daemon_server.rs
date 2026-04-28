@@ -733,7 +733,8 @@ mod tests {
     impl TestWorkspace {
         fn new(name: &str) -> Self {
             let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!("gsd-{name}-{}-{id}", std::process::id()));
+            let root =
+                PathBuf::from("/tmp").join(format!("gsd-{name}-{}-{id}", std::process::id()));
             fs::create_dir_all(&root).expect("test workspace should exist");
             Self { root }
         }
@@ -754,6 +755,10 @@ mod tests {
             workspace_path: workspace_root.to_path_buf(),
             repo_filter: None,
             json_output: false,
+            no_interactive: true,
+            stdin_is_tty: false,
+            stdout_is_tty: false,
+            ci_env_set: true,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         }

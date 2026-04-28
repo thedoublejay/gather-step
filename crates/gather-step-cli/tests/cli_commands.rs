@@ -81,6 +81,18 @@ fn stdout_json(output: &process::Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should contain valid json")
 }
 
+#[test]
+fn no_args_non_interactive_prints_help() {
+    let temp = TempDir::new("no-args-help");
+
+    let output = run_ok(temp.path(), &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("Usage: gather-step"));
+    assert!(stdout.contains("init"));
+    assert!(stdout.contains("--no-interactive"));
+}
+
 fn write_fixture_workspace(root: &Path) {
     let backend = root.join("apps/backend_standard");
     let frontend = root.join("apps/frontend_standard");

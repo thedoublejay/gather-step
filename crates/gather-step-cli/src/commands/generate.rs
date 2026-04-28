@@ -5,9 +5,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use gather_step_core::{RegistryStore, WorkspaceRegistry};
-use gather_step_output::{ClaudeMdOptions, generate_rule_files};
+use gather_step_output::{
+    ClaudeMdOptions, generate_rule_files, render_workspace_summary_agents,
+    render_workspace_summary_claude,
+};
 use gather_step_storage::{GraphStoreDb, MetadataStore, MetadataStoreDb};
 use serde::Serialize;
 
@@ -22,7 +25,17 @@ pub struct GenerateCommand {
 #[derive(Debug, Subcommand)]
 pub enum GenerateSubcommand {
     ClaudeMd(GenerateClaudeMdArgs),
+    AgentsMd(GenerateAgentsMdArgs),
     Codeowners(GenerateCodeownersArgs),
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum ClaudeMdTarget {
+    /// Generate `.claude/rules/*.md` from the indexed graph.
+    #[default]
+    Rules,
+    /// Generate `CLAUDE.gather.md` from the workspace registry.
+    Summary,
 }
 
 #[derive(Debug, Args)]
@@ -31,6 +44,14 @@ pub struct GenerateClaudeMdArgs {
     pub output: Option<PathBuf>,
     #[arg(long, help = "Generate repo-scoped output")]
     pub repo: Option<String>,
+    #[arg(long, value_enum, default_value = "rules")]
+    pub target: ClaudeMdTarget,
+}
+
+#[derive(Debug, Args)]
+pub struct GenerateAgentsMdArgs {
+    #[arg(long, help = "Optional explicit output path")]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -54,11 +75,19 @@ struct GeneratedFileOutput {
 pub fn run(app: &AppContext, command: GenerateCommand) -> Result<()> {
     match command.command {
         GenerateSubcommand::ClaudeMd(args) => run_claude_md(app, args),
+        GenerateSubcommand::AgentsMd(args) => run_agents_md(app, args),
         GenerateSubcommand::Codeowners(args) => run_codeowners(app, args),
     }
 }
 
 fn run_claude_md(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
+    match args.target {
+        ClaudeMdTarget::Rules => run_claude_md_rules(app, args),
+        ClaudeMdTarget::Summary => run_claude_md_summary(app, args),
+    }
+}
+
+fn run_claude_md_rules(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
     let output = app.output();
     let repo_filter = args.repo.or_else(|| app.repo_filter.clone());
     let paths = app.workspace_paths();
@@ -101,6 +130,66 @@ fn run_claude_md(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_claude_md_summary(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
+    if args.repo.is_some() || app.repo_filter.is_some() {
+        bail!("--repo is only supported by `generate claude-md --target=rules`");
+    }
+
+    let output = app.output();
+    let paths = app.workspace_paths();
+    let registry = RegistryStore::open(&paths.registry_path)
+        .with_context(|| format!("opening {}", paths.registry_path.display()))?;
+    let content = render_workspace_summary_claude(registry.registry(), env!("CARGO_PKG_VERSION"));
+    let target = args
+        .output
+        .unwrap_or_else(|| app.workspace_path.join("CLAUDE.gather.md"));
+    let written = write_text_output(&target, &content)?;
+
+    let payload = GenerateOutput {
+        event: "generate_claude_md_completed",
+        files: vec![written],
+    };
+    output.emit(&payload)?;
+    for file in &payload.files {
+        output.line(format!("Wrote {}", file.path));
+    }
+    Ok(())
+}
+
+fn run_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<()> {
+    let output = app.output();
+    let paths = app.workspace_paths();
+    let registry = RegistryStore::open(&paths.registry_path)
+        .with_context(|| format!("opening {}", paths.registry_path.display()))?;
+    let content = render_workspace_summary_agents(registry.registry(), env!("CARGO_PKG_VERSION"));
+    let target = args
+        .output
+        .unwrap_or_else(|| app.workspace_path.join("AGENTS.gather.md"));
+    let written = write_text_output(&target, &content)?;
+
+    let payload = GenerateOutput {
+        event: "generate_agents_md_completed",
+        files: vec![written],
+    };
+    output.emit(&payload)?;
+    for file in &payload.files {
+        output.line(format!("Wrote {}", file.path));
+    }
+    Ok(())
+}
+
+pub fn run_summary_pair(app: &AppContext) -> Result<()> {
+    run_claude_md_summary(
+        app,
+        GenerateClaudeMdArgs {
+            output: None,
+            repo: None,
+            target: ClaudeMdTarget::Summary,
+        },
+    )?;
+    run_agents_md(app, GenerateAgentsMdArgs { output: None })
 }
 
 fn run_codeowners(app: &AppContext, args: GenerateCodeownersArgs) -> Result<()> {
@@ -193,6 +282,18 @@ fn write_explicit_output(
             Ok(written)
         }
     }
+}
+
+fn write_text_output(output_path: &Path, content: &str) -> Result<GeneratedFileOutput> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(output_path, content)
+        .with_context(|| format!("writing {}", output_path.display()))?;
+    Ok(GeneratedFileOutput {
+        path: output_path.display().to_string(),
+        bytes: content.len(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::{app::AppContext, path_safety, path_safety::PathSafetyError};
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Default)]
 pub struct InitArgs {
     #[arg(
         long,
