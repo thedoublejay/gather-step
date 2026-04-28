@@ -40,6 +40,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+crossterm = "0.29.0"
+ratatui = { version = "0.30.0", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
 criterion.workspace = true

@@ -384,7 +384,7 @@ mod tests {
     use indicatif::MultiProgress;
 
     use super::mcp_state_with_home;
-    use crate::app::AppContext;
+    use crate::app::{AppContext, ColorModeArg};
 
     fn app_for(workspace: &Path) -> AppContext {
         AppContext {
@@ -394,7 +394,9 @@ mod tests {
             no_interactive: false,
             stdin_is_tty: true,
             stdout_is_tty: true,
+            stderr_is_tty: true,
             ci_env_set: false,
+            color_mode: ColorModeArg::Auto,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         }

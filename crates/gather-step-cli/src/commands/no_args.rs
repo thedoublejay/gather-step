@@ -29,6 +29,7 @@ mod tests {
     use indicatif::MultiProgress;
 
     use super::*;
+    use crate::app::ColorModeArg;
 
     #[tokio::test]
     async fn configured_unindexed_workspace_renders_status_summary() {
@@ -42,7 +43,9 @@ mod tests {
             no_interactive: false,
             stdin_is_tty: true,
             stdout_is_tty: true,
+            stderr_is_tty: true,
             ci_env_set: false,
+            color_mode: ColorModeArg::Auto,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         };
