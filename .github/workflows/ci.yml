@@ -32,7 +32,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Spell check
-        uses: crate-ci/typos@v1.40.0
+        uses: crate-ci/typos@v1.45.1
 
   deny:
     name: Cargo Deny
