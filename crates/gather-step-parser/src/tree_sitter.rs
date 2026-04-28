@@ -58,6 +58,7 @@ pub struct SymbolCapture {
     pub class_decorators: Vec<DecoratorCapture>,
     pub constructor_dependencies: Vec<String>,
     pub implemented_interfaces: Vec<String>,
+    pub base_classes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1020,6 +1021,7 @@ impl<'a> ParseState<'a> {
             class_decorators,
             constructor_dependencies,
             implemented_interfaces: Vec::new(),
+            base_classes: Vec::new(),
         });
         node
     }
@@ -1035,6 +1037,20 @@ impl<'a> ParseState<'a> {
             .find(|symbol| symbol.node.id == node_id)
         {
             symbol.implemented_interfaces = implemented_interfaces;
+        }
+    }
+
+    pub(crate) fn set_symbol_base_classes(
+        &mut self,
+        node_id: gather_step_core::NodeId,
+        base_classes: Vec<String>,
+    ) {
+        if let Some(symbol) = self
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.node.id == node_id)
+        {
+            symbol.base_classes = base_classes;
         }
     }
 
@@ -1834,6 +1850,7 @@ fn visit_python(
             let name = child_text(node, "name", state.source)
                 .unwrap_or_else(|| "AnonymousClass".to_owned());
             let implemented_interfaces = collect_implemented_interfaces(node, state.source);
+            let base_classes = collect_python_base_classes(node, state.source);
             let class_node = state.push_symbol(
                 NodeKind::Class,
                 name.clone(),
@@ -1847,6 +1864,7 @@ fn visit_python(
                 collect_constructor_dependencies(node, state.source),
             );
             state.set_symbol_implemented_interfaces(class_node.id, implemented_interfaces);
+            state.set_symbol_base_classes(class_node.id, base_classes);
             recurse_children(node, |child| {
                 visit_python(
                     child,
@@ -2028,14 +2046,16 @@ fn collect_constructor_dependencies(node: Node<'_>, source: &str) -> Vec<String>
                     && child_text(child, "name", source).as_deref() == Some("constructor"));
             let is_python_init = child.kind() == "function_definition"
                 && child_text(child, "name", source).as_deref() == Some("__init__");
-            if is_constructor || is_python_init {
+            if is_python_init {
+                dependencies.extend(collect_python_constructor_dependencies(child, source));
+            } else if is_constructor {
                 let text = node_text(child, source);
                 if let Some(open) = text.find('(')
                     && let Some(close) = text[open + 1..].find(')')
                 {
-                    for parameter in text[open + 1..open + 1 + close].split(',') {
+                    for parameter in split_top_level_commas(&text[open + 1..open + 1 + close]) {
                         let parameter = parameter.trim();
-                        if parameter.is_empty() || parameter == "self" {
+                        if parameter.is_empty() || matches!(parameter, "self" | "this") {
                             continue;
                         }
                         let name = parameter
@@ -2065,6 +2085,39 @@ fn collect_constructor_dependencies(node: Node<'_>, source: &str) -> Vec<String>
     dependencies
 }
 
+fn collect_python_constructor_dependencies(function_node: Node<'_>, source: &str) -> Vec<String> {
+    let Some(parameters) = find_child_by_kind(function_node, "parameters") else {
+        return Vec::new();
+    };
+
+    let mut dependencies = Vec::new();
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        if parameter.kind() == "identifier" {
+            let name = node_text(parameter, source).trim();
+            if !matches!(name, "" | "self" | "cls") {
+                dependencies.push(name.to_owned());
+            }
+            continue;
+        }
+        if parameter.kind() == "keyword_separator" {
+            continue;
+        }
+        let Some(type_node) = parameter
+            .child_by_field_name("type")
+            .or_else(|| find_child_by_kind(parameter, "type"))
+        else {
+            continue;
+        };
+        let type_name = clean_python_type_annotation(node_text(type_node, source));
+        if !type_name.is_empty() {
+            dependencies.push(type_name);
+        }
+    }
+
+    dependencies
+}
+
 fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
     let Ok(text) = node.utf8_text(source.as_bytes()) else {
         return Vec::new();
@@ -2090,6 +2143,45 @@ fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
             (!head.is_empty()).then(|| head.to_owned())
         })
         .collect()
+}
+
+fn collect_python_base_classes(node: Node<'_>, source: &str) -> Vec<String> {
+    let Some(argument_list) = find_child_by_kind(node, "argument_list") else {
+        return Vec::new();
+    };
+
+    let mut bases = Vec::new();
+    let mut cursor = argument_list.walk();
+    for argument in argument_list.named_children(&mut cursor) {
+        if argument.kind() == "keyword_argument" {
+            continue;
+        }
+        let base = clean_python_type_annotation(node_text(argument, source));
+        if !base.is_empty() {
+            bases.push(base);
+        }
+    }
+
+    bases
+}
+
+fn clean_python_type_annotation(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_end_matches(',')
+        .trim()
+        .to_owned()
+}
+
+fn type_reference_head(reference: &str) -> &str {
+    reference
+        .trim()
+        .split(['<', '[', '(', ' ', '\n', '\r', '\t'])
+        .next()
+        .unwrap_or(reference)
+        .trim_end_matches(',')
+        .trim()
 }
 
 fn split_top_level_commas(input: &str) -> Vec<&str> {
@@ -3036,38 +3128,9 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
                 continue;
             };
 
-            // Prefer a shared-contract virtual node when the import comes from
-            // a known shared-contract package (e.g. `@workspace/contracts`).
-            // Fall back to a file node derived from the resolved path for any
-            // other resolvable import (e.g. `./contracts`).
-            let node = if let Some(shared_node) =
-                shared_contract_node_from_binding(parsed, binding, imported_symbol_name)
-            {
-                shared_node
-            } else if let Some(resolved) = binding.resolved_path.as_ref()
-                && let Ok(relative) = resolved.strip_prefix(repo_root)
-            {
-                let relative_utf8 = path_to_utf8(relative);
-                let relative_str = relative_utf8.as_str();
-                NodeData {
-                    id: node_id(
-                        &parsed.file_node.repo,
-                        relative_str,
-                        NodeKind::File,
-                        relative_str,
-                    ),
-                    kind: NodeKind::File,
-                    repo: parsed.file_node.repo.clone(),
-                    file_path: relative_str.to_owned(),
-                    name: relative_str.to_owned(),
-                    qualified_name: Some(format!("{}::{relative_str}", parsed.file_node.repo)),
-                    external_id: None,
-                    signature: None,
-                    visibility: None,
-                    span: None,
-                    is_virtual: false,
-                }
-            } else {
+            let Some(node) =
+                semantic_type_node_from_binding(parsed, repo_root, binding, imported_symbol_name)
+            else {
                 continue;
             };
 
@@ -3099,6 +3162,50 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
                 if seen_edge_keys.insert(key) {
                     added_edges.push(edge);
                 }
+            }
+        }
+
+        for base_class in &symbol.base_classes {
+            let base_head = type_reference_head(base_class);
+            if base_head.is_empty() {
+                continue;
+            }
+
+            let node = if let Some(node) = same_file_class_node(parsed, symbol.node.id, base_head) {
+                node
+            } else if let Some((binding, imported_symbol_name)) =
+                parsed.import_bindings.iter().find_map(|binding| {
+                    interface_symbol_from_binding(binding, base_head)
+                        .map(|symbol_name| (binding, symbol_name))
+                })
+            {
+                let Some(node) = semantic_type_node_from_binding(
+                    parsed,
+                    repo_root,
+                    binding,
+                    imported_symbol_name,
+                ) else {
+                    continue;
+                };
+                node
+            } else {
+                continue;
+            };
+
+            if seen_node_ids.insert(node.id) {
+                added_nodes.push(node.clone());
+            }
+            let edge = EdgeData {
+                source: symbol.node.id,
+                target: node.id,
+                kind: EdgeKind::Extends,
+                metadata: EdgeMetadata::default(),
+                owner_file: parsed.file_node.id,
+                is_cross_file: node.file_path != symbol.node.file_path,
+            };
+            let key = (edge.source, edge.target, edge.kind, edge.owner_file);
+            if seen_edge_keys.insert(key) {
+                added_edges.push(edge);
             }
         }
     }
@@ -3167,6 +3274,56 @@ fn semantic_import_edge(
     Some((target_file, edge))
 }
 
+fn semantic_type_node_from_binding(
+    parsed: &ParsedFile,
+    repo_root: &Path,
+    binding: &ImportBinding,
+    symbol_name: &str,
+) -> Option<NodeData> {
+    if let Some(shared_node) = shared_contract_node_from_binding(parsed, binding, symbol_name) {
+        return Some(shared_node);
+    }
+
+    let resolved = binding.resolved_path.as_ref()?;
+    let relative = resolved.strip_prefix(repo_root).ok()?;
+    let relative_utf8 = path_to_utf8(relative);
+    let relative_str = relative_utf8.as_str();
+    Some(NodeData {
+        id: node_id(
+            &parsed.file_node.repo,
+            relative_str,
+            NodeKind::File,
+            relative_str,
+        ),
+        kind: NodeKind::File,
+        repo: parsed.file_node.repo.clone(),
+        file_path: relative_str.to_owned(),
+        name: relative_str.to_owned(),
+        qualified_name: Some(format!("{}::{relative_str}", parsed.file_node.repo)),
+        external_id: None,
+        signature: None,
+        visibility: None,
+        span: None,
+        is_virtual: false,
+    })
+}
+
+fn same_file_class_node(
+    parsed: &ParsedFile,
+    source_id: gather_step_core::NodeId,
+    base_name: &str,
+) -> Option<NodeData> {
+    parsed
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.node.kind == NodeKind::Class
+                && symbol.node.id != source_id
+                && symbol.node.name == base_name
+        })
+        .map(|symbol| symbol.node.clone())
+}
+
 fn shared_contract_node_from_binding(
     parsed: &ParsedFile,
     binding: &ImportBinding,
@@ -3206,6 +3363,7 @@ fn interface_symbol_from_binding<'a>(
     binding: &'a ImportBinding,
     interface_name: &'a str,
 ) -> Option<&'a str> {
+    let interface_name = type_reference_head(interface_name);
     if binding.is_namespace {
         interface_name
             .strip_prefix(binding.local_name.as_str())

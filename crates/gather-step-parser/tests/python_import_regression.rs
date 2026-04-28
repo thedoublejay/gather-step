@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use gather_step_core::{EdgeKind, NodeKind};
 use gather_step_parser::{FileEntry, ImportBinding, Language, ParsedFile, parse_file};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,4 +139,36 @@ fn python_parser_accepts_stubs_and_malformed_files_without_panics() {
             .iter()
             .any(|symbol| symbol.node.name == "StillUseful")
     );
+}
+
+#[test]
+fn python_class_bases_and_constructor_dependencies_are_preserved() {
+    let parsed = parse_python_fixture("package/app/services.py");
+    let processor = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.node.name == "Processor")
+        .expect("Processor symbol should exist");
+    let runner = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.node.name == "Runner")
+        .expect("Runner symbol should exist");
+    let base_file = parsed
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::File && node.file_path == "package/app/base.py")
+        .expect("imported base file node should exist");
+
+    assert_eq!(
+        processor.constructor_dependencies,
+        vec!["SessionClient", "Account"]
+    );
+    assert_eq!(runner.base_classes, vec!["BaseRunner"]);
+    assert!(parsed.edges.iter().any(|edge| {
+        edge.kind == EdgeKind::Extends
+            && edge.source == runner.node.id
+            && edge.target == base_file.id
+            && edge.is_cross_file
+    }));
 }
