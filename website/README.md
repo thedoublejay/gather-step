@@ -79,6 +79,6 @@ This scaffolding is the shell. To make the docs truly "living":
 - [ ] Add a docs build step that regenerates `reference/cli.md` and
       `reference/api.md` from source (e.g. via TypeDoc) so they can never
       drift from the code.
-- [ ] Enable versioned docs when the first stable release ships — Starlight
-      supports this via multiple content collections or via
+- [ ] Evaluate versioned docs before the next breaking documentation split —
+      Starlight supports this via multiple content collections or via
       [`starlight-versions`](https://github.com/HiDeoo/starlight-versions).

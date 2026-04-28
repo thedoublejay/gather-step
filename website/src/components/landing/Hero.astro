@@ -5,12 +5,12 @@ const stats = [
     value: '26 repos · 13,604 files · 171,124 symbols · 405,384 edges · 88,365 cross-repo',
   },
   {
-    label: 'Spec · Gate',
-    value: 'v1.0 release gate passed in 118.2s with HIGH probes and PR-oracle F1/recall at 1.000',
+    label: 'Spec · Release',
+    value: 'v2.0 release prep · no-args startup · init wizard · setup-mcp · watch handoff',
   },
   {
     label: 'Spec · Deployment',
-    value: 'Local binary · MCP server · no API keys · nothing leaves your machine',
+    value: 'Local binary · guided MCP setup · Homebrew release automation · nothing leaves your machine',
   },
 ];
 ---
@@ -39,9 +39,41 @@ const stats = [
   </div>
 </section>
 
-<div class="bp-cli" role="text" aria-label="Install command">
+<button
+  type="button"
+  class="bp-cli"
+  data-copy-command="brew install thedoublejay/tap/gather-step"
+  aria-label="Copy install command"
+>
   <span class="arrow">▶</span>
-  <span>brew install thedoublejay/tap/gather-step</span>
+  <span class="bp-cli__command">brew install thedoublejay/tap/gather-step</span>
   <span class="cursor"></span>
-  <span class="stamp-inline">DET-01 · INSTALL</span>
-</div>
+  <span class="stamp-inline" aria-live="polite">DET-01 · INSTALL</span>
+</button>
+
+<script>
+  const copyButtons = document.querySelectorAll('[data-copy-command]');
+
+  copyButtons.forEach((button) => {
+    const feedback = button.querySelector('.stamp-inline');
+    const defaultLabel = feedback?.textContent ?? '';
+
+    button.addEventListener('click', async () => {
+      const command = button.getAttribute('data-copy-command');
+      if (!command || !feedback) return;
+
+      try {
+        await navigator.clipboard.writeText(command);
+        button.classList.add('is-copied');
+        feedback.textContent = 'COPIED';
+      } catch {
+        feedback.textContent = 'COPY FAILED';
+      }
+
+      window.setTimeout(() => {
+        button.classList.remove('is-copied');
+        feedback.textContent = defaultLabel;
+      }, 1600);
+    });
+  });
+</script>

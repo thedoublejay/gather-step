@@ -20,6 +20,18 @@ Before connecting a client:
 2. **The built binary** on your `PATH` or at a known absolute path. See
    [Installation](/guides/installation/) for build instructions.
 
+## Fast Path for Claude
+
+For Claude Code, Gather Step can write the workspace-local MCP settings entry:
+
+```bash
+gather-step --workspace /path/to/workspace setup-mcp --scope local
+```
+
+Use `--scope global` only when you want the same workspace-pinned server entry
+in `~/.claude/settings.json`. The command is idempotent and updates the
+`mcpServers.gather-step` block without touching other server entries.
+
 ## Start the Server (Smoke Test)
 
 Verify the server starts cleanly before wiring up a client:

@@ -98,6 +98,21 @@ scoping rules.
 If a config already exists, `init` will not overwrite it. Remove or rename the
 existing config first if you want a fresh generated draft.
 
+For the full v2 onboarding flow, combine config generation with indexing,
+assistant summary generation, MCP registration, and watch handoff:
+
+```bash
+gather-step --workspace /path/to/workspace init \
+  --index \
+  --generate-ai-files \
+  --setup-mcp local \
+  --watch
+```
+
+Use `--force` only when you intentionally want to overwrite an existing config.
+Use `--no-index`, `--no-generate-ai-files`, or `--no-watch` to make a scripted
+setup return immediately after writing the config.
+
 ## Generated State
 
 After `gather-step index` completes, the workspace looks like this:

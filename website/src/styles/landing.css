@@ -354,11 +354,28 @@ a {
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: 15px;
+  cursor: pointer;
+  appearance: none;
+  text-align: left;
+}
+
+.bp-cli:hover,
+.bp-cli:focus-visible {
+  border-color: var(--amber);
+}
+
+.bp-cli:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
 }
 
 .bp-cli .arrow {
   color: var(--amber);
   font-weight: 700;
+}
+
+.bp-cli__command {
+  overflow-wrap: anywhere;
 }
 
 .bp-cli .stamp-inline {
@@ -369,6 +386,10 @@ a {
   text-transform: uppercase;
   color: var(--cyan);
   white-space: nowrap;
+}
+
+.bp-cli.is-copied .stamp-inline {
+  color: var(--amber);
 }
 
 .bp-cli .cursor {
