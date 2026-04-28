@@ -39,7 +39,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`generate agents-md`](#generate-agents-md) — Generate a workspace summary for Codex-style `AGENTS.md` workflows.
 - [`generate codeowners`](#generate-codeowners) — Generate a CODEOWNERS file from indexed ownership analytics.
 - [`watch`](#watch) — Watch for file changes and trigger incremental indexing.
-- [`setup-mcp`](#setup-mcp) — Register `gather-step mcp serve` in Claude settings.
+- [`setup-mcp`](#setup-mcp) — Register workspace-pinned Claude MCP settings.
 - [`serve`](#serve) — Start the stdio MCP server.
 
 ## Command details
@@ -67,6 +67,7 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 
 ```bash
 gather-step --workspace /path/to/workspace init
+gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
 ```
 
 **Output shape (`--json`)** — emits one line:
@@ -588,7 +589,7 @@ gather-step --workspace /path/to/workspace watch --debounce-ms 500 --poll-interv
 
 ### `setup-mcp`
 
-Writes an idempotent `mcpServers.gather-step` block that runs `gather-step mcp serve` pinned to the current workspace.
+Writes an idempotent `mcpServers.gather-step` block pinned to the current workspace. The generated entry uses the current `gather-step` binary path and launches the stdio MCP server for that workspace.
 
 ```bash
 gather-step [GLOBAL FLAGS] setup-mcp [--scope <local|global>]

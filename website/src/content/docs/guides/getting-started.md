@@ -34,15 +34,17 @@ Verify the binary:
 gather-step --version
 ```
 
-## 2. Create a Workspace Config
+## 2. Run Guided Setup
 
-Point Gather Step at the directory that contains your repositories:
+Point Gather Step at the directory that contains your repositories. Let `init` write the config, build the first index, generate assistant-facing summary files, and register Claude MCP settings:
 
 ```bash
-gather-step --workspace /path/to/workspace init
+gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
 ```
 
-That writes `/path/to/workspace/gather-step.config.yaml`.
+That writes `/path/to/workspace/gather-step.config.yaml`, indexes the workspace, generates `CLAUDE.gather.md` and `AGENTS.gather.md`, and updates workspace-local Claude settings.
+
+Running `gather-step` with no subcommand also starts the guided flow in an interactive workspace without a config. In a configured workspace, no-args mode shows the status summary instead.
 
 Example:
 
@@ -60,9 +62,9 @@ indexing:
 
 Use neutral logical names in the config. The `name` field is what appears in CLI output, MCP responses, and repo-scoped filters.
 
-## 3. Build the Index
+## 3. Build or Refresh the Index
 
-Run a full index:
+If you skipped indexing during setup, run a full index:
 
 ```bash
 gather-step --workspace /path/to/workspace index
@@ -77,6 +79,14 @@ This creates `.gather-step/` inside the workspace and stores:
 
 Source repositories are not modified.
 
+During active development, keep the index fresh:
+
+```bash
+gather-step --workspace /path/to/workspace watch
+```
+
+You can also pass `--watch` to `init` or `index` when you want setup to continue into watch mode.
+
 ## 4. Check That the Workspace Is Healthy
 
 Before wiring in an AI client, confirm the index is usable:
@@ -90,7 +100,13 @@ Use `status` to confirm the expected repos were indexed. Use `doctor` to surface
 
 ## 5. Connect an MCP Client
 
-Configure your client to launch the local stdio server:
+If you did not pass `--setup-mcp local` during setup, register Claude settings now:
+
+```bash
+gather-step --workspace /path/to/workspace setup-mcp --scope local
+```
+
+For other MCP clients, configure the client to launch the local stdio server:
 
 ```json
 {

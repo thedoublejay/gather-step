@@ -43,10 +43,11 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 
 - Local-first CLI and stdio MCP server
 - Multi-repo indexing into `WORKSPACE/.gather-step/`
+- Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
 - Route, event, shared-symbol, and payload-contract graph surfaces
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
 - Workspace health commands such as `status`, `doctor`, and `watch`
-- Derived outputs for assistant rules and ownership files
+- Derived outputs for assistant summaries, rules, and ownership files
 - Local release validation with high-contract probes and PR-oracle scoring
 
 ## What It Helps With
@@ -99,7 +100,7 @@ Source repositories are never modified.
 ## Requirements
 
 - Rust `1.94.1` for source builds
-- A workspace root containing `gather-step.config.yaml`
+- A workspace root containing the repos you want to index. `gather-step init` can generate `gather-step.config.yaml`.
 
 Minimal config:
 
@@ -127,17 +128,21 @@ Or build from source:
 cargo build -p gather-step --release
 ```
 
-Create a config, build the index, and start the MCP server:
+Create a config, build the index, generate AI-facing summaries, and register Claude MCP settings:
 
 ```bash
-gather-step --workspace /path/to/workspace init
-gather-step --workspace /path/to/workspace index
-gather-step --workspace /path/to/workspace serve
+gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
 ```
 
 Generated state is stored under `WORKSPACE/.gather-step/`.
 
-Once the server is configured in an MCP-aware client, the assistant calls the right Gather Step tools automatically. The CLI remains available for direct inspection when you want it.
+During active development, keep the index fresh:
+
+```bash
+gather-step --workspace /path/to/workspace watch
+```
+
+Once the server is configured in an MCP-aware client, the assistant launches Gather Step locally and calls the right tools automatically. The CLI remains available for direct inspection when you want it.
 
 If you want the full walkthrough, start with [Getting started](website/src/content/docs/guides/getting-started.md) or the published docs at <https://gatherstep.dev>.
 
@@ -160,7 +165,10 @@ gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace impact CreateOrderInput
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
 gather-step --workspace /path/to/workspace conventions
+gather-step --workspace /path/to/workspace generate claude-md --target summary
+gather-step --workspace /path/to/workspace generate agents-md
 gather-step --workspace /path/to/workspace generate codeowners
+gather-step --workspace /path/to/workspace setup-mcp --scope local
 gather-step --workspace /path/to/workspace compact
 gather-step --workspace /path/to/workspace watch
 ```

@@ -315,7 +315,7 @@ planning-pack quality, event tracing, change-impact parity, and PR-oracle
 scores. Operators pass explicit planning, event, and impact targets so the
 gate cannot accidentally reuse one target shape for all checks.
 
-Latest committed release evidence for v1.0 came from the 2026-04-27 release gate:
+The committed release-gate baseline came from the 2026-04-27 gate:
 
 | Metric | Value |
 |---|---:|

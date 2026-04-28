@@ -13,30 +13,30 @@ interface Step {
 
 const steps: Step[] = [
   {
-    num: '01 · INDEX',
-    heading: 'Point it at your repos.',
+    num: '01 · INIT',
+    heading: 'Let it guide workspace setup.',
     body:
-      'Gather Step parses source, routes, entities, event producers and consumers, cross-repo dependencies, and builds one graph across the whole workspace.',
+      'The v2 init flow discovers repos, writes the workspace config, can index immediately, generate AI summary files, register Claude MCP settings, and hand off to watch mode.',
     code: [
       { dim: '# from your workspace root' },
-      { line: 'gather-step init ./services/*' },
+      { line: 'gather-step init --index --generate-ai-files --setup-mcp local' },
     ],
   },
   {
-    num: '02 · SERVE',
-    heading: 'Run the MCP server.',
+    num: '02 · WATCH',
+    heading: 'Keep the graph fresh.',
     body:
-      'Your AI coding assistant (Claude Code, Cursor, Copilot) connects over Model Context Protocol and pulls task-shaped context packs on demand.',
+      'Run watch during active development, or let `init --watch` continue after the first index pass. The MCP server can also run with `--watch` in one process.',
     code: [
-      { dim: '# starts the local MCP endpoint' },
-      { line: 'gather-step serve --mcp' },
+      { dim: '# incremental updates while you edit' },
+      { line: 'gather-step watch' },
     ],
   },
   {
     num: '03 · SHIP',
     heading: 'Ask what actually matters.',
     body:
-      'Every prompt arrives with structural ground truth. Blast radius. Event consumers. Ownership. Conventions. No more 30K tokens of exploratory prompting.',
+      'Every prompt arrives with structural ground truth. Blast radius. Event consumers. Ownership. Conventions. No more large exploratory prompts before the actual work starts.',
     code: [
       { dim: '# a question your AI can finally answer' },
       { line: 'claude: what breaks if I change order.created?' },
@@ -48,7 +48,7 @@ const steps: Step[] = [
 <section class="bp-sec" id="how">
   <div class="bp-sec__head">
     <span class="bp-sec__num">DET-08 · From zero to answered questions</span>
-    <h2 class="bp-h2">Install, index, <span class="u">ask.</span></h2>
+    <h2 class="bp-h2">Initialize, watch, <span class="u">ask.</span></h2>
     <p class="bp-lede">No API keys. No account. No data leaves your machine.</p>
   </div>
 
