@@ -99,7 +99,7 @@ If a config already exists, `init` will not overwrite it. Remove or rename the
 existing config first if you want a fresh generated draft.
 
 For the full onboarding flow, combine config generation with indexing,
-assistant summary generation, MCP registration, and watch handoff:
+assistant context generation, MCP registration, and watch handoff:
 
 ```bash
 gather-step --workspace /path/to/workspace init \
@@ -112,6 +112,16 @@ gather-step --workspace /path/to/workspace init \
 Use `--force` only when you intentionally want to overwrite an existing config.
 Use `--no-index`, `--no-generate-ai-files`, or `--no-watch` to make a scripted
 setup return immediately after writing the config.
+
+`--generate-ai-files` writes `.claude/rules/` only after an index exists because
+the rule files are graph-backed. When you intentionally skip indexing, Gather
+Step still writes `CLAUDE.gather.md` and `AGENTS.gather.md`, then prints a
+warning with the follow-up command:
+
+```bash
+gather-step --workspace /path/to/workspace index
+gather-step --workspace /path/to/workspace generate claude-md --target rules
+```
 
 ## Generated State
 

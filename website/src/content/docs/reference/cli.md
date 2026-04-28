@@ -15,6 +15,7 @@ These flags apply to every command. Pass them before the subcommand name.
 | `--repo <NAME>` | string | — | Restrict the command to one configured repo name. The name must match a repo listed in the config. |
 | `-v, --verbose` | count | 0 (warn level) | Increase log verbosity. Pass once for `info`, twice for `debug`, three or more times for `trace`. Overridden by the `GATHER_STEP_LOG` environment variable. |
 | `--json` | bool flag | false | Emit newline-delimited JSON to stdout instead of human-readable text. Tracing logs are still written to stderr in JSON format when this flag is set. |
+| `--color <auto\|always\|never>` | enum | `auto` | Control ANSI color. `auto` respects TTY detection, `NO_COLOR`, `FORCE_COLOR`, and `TERM=dumb`; `--json` disables color in stdout payloads. |
 | `--no-banner` | bool flag | false | Suppress the startup banner printed to stderr. The banner is also suppressed when `--json` is active or when stderr is not a TTY. |
 | `--no-interactive` | bool flag | false | Disable interactive prompts and use command defaults. Use this for scripts and CI. |
 
@@ -39,6 +40,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`generate agents-md`](#generate-agents-md) — Generate a workspace summary for Codex-style `AGENTS.md` workflows.
 - [`generate codeowners`](#generate-codeowners) — Generate a CODEOWNERS file from indexed ownership analytics.
 - [`watch`](#watch) — Watch for file changes and trigger incremental indexing.
+- [`tui`](#tui) — Open the opt-in full-screen workspace dashboard.
 - [`setup-mcp`](#setup-mcp) — Register workspace-pinned Claude MCP settings.
 - [`serve`](#serve) — Start the stdio MCP server.
 
@@ -60,7 +62,7 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 | `--force` | bool flag | false | Overwrite an existing config file. Without this flag, the command exits with an error if the config already exists. |
 | `--index` / `--no-index` | bool flag | prompt/default | Index discovered repos after writing the config, or skip indexing. |
 | `--watch` / `--no-watch` | bool flag | prompt/default | Start watch mode after setup, or return immediately. |
-| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `CLAUDE.gather.md` and `AGENTS.gather.md` after indexing. |
+| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.claude/rules/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
 | `--setup-mcp <SCOPE>` | enum | prompt/default | Register the MCP server in `local` or `global` Claude settings. |
 
 **Example**
@@ -69,6 +71,8 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 gather-step --workspace /path/to/workspace init
 gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
 ```
+
+Interactive `init` asks whether to index, generate AI context, register MCP, and start watch mode. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
 
 **Output shape (`--json`)** — emits one line:
 
@@ -564,7 +568,7 @@ In `--json` mode all events go to stdout as newline-delimited JSON. In human mod
 ```bash
 gather-step [GLOBAL FLAGS] watch [--config <PATH>] [--storage <PATH>] \
   [--poll-interval-ms <N>] [--debounce-ms <N>] \
-  [--consecutive-error-limit <N>] [--error-backoff-ms <N>]
+  [--consecutive-error-limit <N>] [--error-backoff-ms <N>] [--tui]
 ```
 
 | Flag | Type | Default | Description |
@@ -575,15 +579,37 @@ gather-step [GLOBAL FLAGS] watch [--config <PATH>] [--storage <PATH>] \
 | `--debounce-ms <N>` | u64 | 2000 | Debounce window in milliseconds before triggering an indexing run after the last detected change. |
 | `--consecutive-error-limit <N>` | u32 | 5 | Number of consecutive indexing errors before the watcher enters backoff. |
 | `--error-backoff-ms <N>` | u64 | 5000 | Backoff duration in milliseconds after reaching the consecutive error limit. |
+| `--tui` | bool flag | false | Open the full-screen TUI dashboard with watch mode enabled. Requires an interactive terminal. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace watch
 gather-step --workspace /path/to/workspace watch --debounce-ms 500 --poll-interval-ms 100
+gather-step --workspace /path/to/workspace watch --tui
 ```
 
+Visible terminals show a spinner and labeled status lines. Non-TTY and CI runs keep stable stderr lines such as `watch:start`, `watch:indexing_complete`, and `watch:status`. `--json` emits NDJSON events on stdout and hides progress.
+
 **When to use** — during active development, so AI assistant tools always query a fresh index.
+
+---
+
+### `tui`
+
+Opens the opt-in full-screen workspace dashboard. The dashboard shows indexed repos, copyable next commands, selected repo details, and a compact event log. It never starts automatically from scripted commands.
+
+```bash
+gather-step [GLOBAL FLAGS] tui [--watch]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--watch` | bool flag | false | Start with watch mode marked on in the dashboard. |
+
+Primary keys: `q` quit, `?` help, `/` filter, `Tab` next pane, `Enter` detail, `r` reindex selected, `w` toggle watch, `c` clear, `1`/`2`/`3` switch Symbols/Routes/Events.
+
+The TUI requires stdin, stdout, and stderr to be TTYs. In scripts or CI, use `status`, `watch`, or `--json` instead.
 
 ---
 
