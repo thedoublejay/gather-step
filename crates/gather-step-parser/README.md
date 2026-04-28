@@ -148,6 +148,26 @@ Instead:
 
 That is a deliberate design choice for a fast local indexing pipeline.
 
+## Python Parser Policy
+
+Python uses one canonical parser path: `tree-sitter` `=0.26.8` with
+`tree-sitter-python` `=0.25.0`. This pair was selected because docs.rs listed
+them as the latest compatible published crates on 2026-04-28, and the existing
+workspace lock already resolved to that pair.
+
+Current support contract:
+
+- Python source floor: Python 3.10+ syntax, with Python 3.12 constructs parsed
+  where `tree-sitter-python` recognizes them
+- File extensions: `.py` and `.pyi`
+- Package shapes: regular packages, `__init__.py`, and namespace-package style
+  layouts when imports resolve to checked-in files
+- Imports: absolute, dot-relative, multi-import, aliased, parenthesized
+  `from ... import (...)`, and wildcard imports
+- Failure semantics: read failures are typed as `ReadFile`; tree-sitter language
+  setup failures are typed as `Language`; parser interruption is typed as
+  `Timeout`; recoverable malformed Python returns partial graph data
+
 ## Module Map
 
 - `traverse`: repo walking, language classification, and file hashing

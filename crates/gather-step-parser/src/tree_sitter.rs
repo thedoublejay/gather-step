@@ -2,7 +2,9 @@ use std::{
     cell::RefCell,
     fs,
     num::NonZeroUsize,
+    ops::ControlFlow,
     path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use camino::Utf8PathBuf;
@@ -101,9 +103,12 @@ pub enum ParseError {
     Language(#[from] tree_sitter::LanguageError),
     #[error("tree-sitter produced no parse tree for {path}")]
     MissingTree { path: PathBuf },
+    #[error("tree-sitter parsing timed out for {path} after {timeout_ms}ms")]
+    Timeout { path: PathBuf, timeout_ms: u64 },
 }
 
 const MAX_VISITOR_DEPTH: usize = 256;
+const TREE_SITTER_PARSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Process-wide built-in registry — reused across all `parse_file_core` calls.
 /// `PackRegistry::builtin()` allocates a 15-entry `Vec<PackEntry>`.
@@ -306,39 +311,13 @@ fn parse_file_core(
             let tree = PARSER.with_borrow_mut(|parser| -> Result<_, ParseError> {
                 let language = parser_language(file);
                 parser.set_language(&language)?;
-                let timeout = std::time::Duration::from_secs(5);
-                let mut timed_out = false;
-                let mut progress_cb = |_: &tree_sitter::ParseState| -> std::ops::ControlFlow<()> {
-                    if fallback_start.elapsed() >= timeout {
-                        timed_out = true;
-                        std::ops::ControlFlow::Break(())
-                    } else {
-                        std::ops::ControlFlow::Continue(())
-                    }
-                };
-                let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress_cb);
-                let len = source.len();
-                let bytes = source.as_bytes();
-                parser
-                    .parse_with_options(
-                        &mut |i, _| {
-                            if i < len { &bytes[i..] } else { &[] }
-                        },
-                        None,
-                        Some(options),
-                    )
-                    .ok_or_else(|| {
-                        if timed_out {
-                            tracing::warn!(
-                                path = %absolute_path.display(),
-                                timeout_s = timeout.as_secs(),
-                                "tree-sitter TS/JS fallback timed out"
-                            );
-                        }
-                        ParseError::MissingTree {
-                            path: absolute_path.clone(),
-                        }
-                    })
+                parse_tree_with_timeout(
+                    parser,
+                    &source,
+                    fallback_start,
+                    &absolute_path,
+                    "tree-sitter TS/JS fallback",
+                )
             })?;
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
@@ -417,28 +396,13 @@ fn parse_file_core(
     let tree = PARSER.with_borrow_mut(|parser| -> Result<_, ParseError> {
         let language = parser_language(file);
         parser.set_language(&language)?;
-        let timeout = std::time::Duration::from_secs(5);
-        let mut progress_cb = |_: &tree_sitter::ParseState| -> std::ops::ControlFlow<()> {
-            if parse_start.elapsed() >= timeout {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        };
-        let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress_cb);
-        let len = source.len();
-        let bytes = source.as_bytes();
-        parser
-            .parse_with_options(
-                &mut |i, _| {
-                    if i < len { &bytes[i..] } else { &[] }
-                },
-                None,
-                Some(options),
-            )
-            .ok_or_else(|| ParseError::MissingTree {
-                path: absolute_path.clone(),
-            })
+        parse_tree_with_timeout(
+            parser,
+            &source,
+            parse_start,
+            &absolute_path,
+            "tree-sitter parser",
+        )
     })?;
 
     let file_path_utf8 = path_to_utf8(&file.path);
@@ -603,6 +567,54 @@ fn parse_file_core(
     };
     apply_workspace_semantic_edges(&mut parsed, repo_root);
     Ok(parsed)
+}
+
+fn parse_tree_with_timeout(
+    parser: &mut Parser,
+    source: &str,
+    started_at: Instant,
+    path: &Path,
+    timeout_context: &'static str,
+) -> Result<tree_sitter::Tree, ParseError> {
+    let mut timed_out = false;
+    let mut progress_cb = |_: &tree_sitter::ParseState| -> ControlFlow<()> {
+        if started_at.elapsed() >= TREE_SITTER_PARSE_TIMEOUT {
+            timed_out = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress_cb);
+    let len = source.len();
+    let bytes = source.as_bytes();
+    let tree = parser.parse_with_options(
+        &mut |i, _| {
+            if i < len { &bytes[i..] } else { &[] }
+        },
+        None,
+        Some(options),
+    );
+    tree.ok_or_else(|| {
+        if timed_out {
+            let timeout_ms =
+                u64::try_from(TREE_SITTER_PARSE_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
+            tracing::warn!(
+                path = %path.display(),
+                timeout_ms,
+                timeout_context,
+                "tree-sitter parse timed out"
+            );
+            ParseError::Timeout {
+                path: path.to_path_buf(),
+                timeout_ms,
+            }
+        } else {
+            ParseError::MissingTree {
+                path: path.to_path_buf(),
+            }
+        }
+    })
 }
 
 /// Maximum number of package-import resolution entries retained per rayon
@@ -1068,85 +1080,93 @@ impl<'a> ParseState<'a> {
 
     fn push_imports(&mut self, statement: Node<'_>) {
         let raw = node_text(statement, self.source);
-        let (source, bindings) = if self.file.language == Language::Python {
-            let Some((source, bindings)) = parse_python_import_bindings(raw) else {
-                return;
-            };
-            (source, bindings)
+        let import_groups = if self.file.language == Language::Python {
+            let groups = parse_python_import_groups(statement, self.source);
+            if groups.is_empty() {
+                parse_python_import_groups_from_raw(raw)
+            } else {
+                groups
+            }
         } else {
             let Some(source) = parse_import_source(raw) else {
                 return;
             };
             let bindings = parse_ts_import_bindings(raw, &source);
-            (source, bindings)
+            vec![(source, bindings)]
         };
-        let resolved_path = resolve_import_path(
-            self.repo_root,
-            &self.file.path,
-            &source,
-            self.file.language,
-            self.path_aliases,
-        );
-        let mut is_new_module = false;
-        let module_id = *self.module_cache.entry(source.clone()).or_insert_with(|| {
-            is_new_module = true;
-            ref_node_id(NodeKind::Module, &format!("module-import::{source}"))
-        });
-        if is_new_module {
-            self.nodes.push(NodeData {
-                id: module_id,
-                kind: NodeKind::Module,
-                repo: self.repo.to_owned(),
-                file_path: self.file_path().to_owned(),
-                name: source.clone(),
-                qualified_name: Some(format!("module-import::{source}")),
-                external_id: Some(format!("module-import::{source}")),
-                signature: None,
-                visibility: Some(Visibility::Public),
-                span: Some(span_from(statement)),
-                is_virtual: true,
-            });
-        }
-        self.edges.push(EdgeData {
-            source: self.file_node.id,
-            target: module_id,
-            kind: EdgeKind::Imports,
-            metadata: EdgeMetadata::default(),
-            owner_file: self.file_node.id,
-            is_cross_file: true,
-        });
 
-        for binding in bindings {
-            // Import identity: file-path-scoped local name, stable across
-            // reordering of other imports in the same file.
-            let import_qn = format!("{}::{}", self.file_path(), binding.local_name);
-            let import_node = NodeData {
-                id: node_id(self.repo, self.file_path(), NodeKind::Import, &import_qn),
-                kind: NodeKind::Import,
-                repo: self.repo.to_owned(),
-                file_path: self.file_path().to_owned(),
-                name: binding.local_name.clone(),
-                qualified_name: Some(import_qn),
-                external_id: None,
-                signature: Some(format!("from {source}")),
-                visibility: None,
-                span: Some(span_from(statement)),
-                is_virtual: false,
-            };
-            self.nodes.push(import_node.clone());
+        for (source, bindings) in import_groups {
+            if source.is_empty() || bindings.is_empty() {
+                continue;
+            }
+            let resolved_path = resolve_import_path(
+                self.repo_root,
+                &self.file.path,
+                &source,
+                self.file.language,
+                self.path_aliases,
+            );
+            let mut is_new_module = false;
+            let module_id = *self.module_cache.entry(source.clone()).or_insert_with(|| {
+                is_new_module = true;
+                ref_node_id(NodeKind::Module, &format!("module-import::{source}"))
+            });
+            if is_new_module {
+                self.nodes.push(NodeData {
+                    id: module_id,
+                    kind: NodeKind::Module,
+                    repo: self.repo.to_owned(),
+                    file_path: self.file_path().to_owned(),
+                    name: source.clone(),
+                    qualified_name: Some(format!("module-import::{source}")),
+                    external_id: Some(format!("module-import::{source}")),
+                    signature: None,
+                    visibility: Some(Visibility::Public),
+                    span: Some(span_from(statement)),
+                    is_virtual: true,
+                });
+            }
             self.edges.push(EdgeData {
                 source: self.file_node.id,
-                target: import_node.id,
-                kind: EdgeKind::Defines,
+                target: module_id,
+                kind: EdgeKind::Imports,
                 metadata: EdgeMetadata::default(),
                 owner_file: self.file_node.id,
-                is_cross_file: false,
+                is_cross_file: true,
             });
-            self.import_bindings.push(ImportBinding {
-                resolved_path: resolved_path.clone(),
-                source: source.clone(),
-                ..binding
-            });
+
+            for binding in bindings {
+                // Import identity: file-path-scoped local name, stable across
+                // reordering of other imports in the same file.
+                let import_qn = format!("{}::{}", self.file_path(), binding.local_name);
+                let import_node = NodeData {
+                    id: node_id(self.repo, self.file_path(), NodeKind::Import, &import_qn),
+                    kind: NodeKind::Import,
+                    repo: self.repo.to_owned(),
+                    file_path: self.file_path().to_owned(),
+                    name: binding.local_name.clone(),
+                    qualified_name: Some(import_qn),
+                    external_id: None,
+                    signature: Some(format!("from {source}")),
+                    visibility: None,
+                    span: Some(span_from(statement)),
+                    is_virtual: false,
+                };
+                self.nodes.push(import_node.clone());
+                self.edges.push(EdgeData {
+                    source: self.file_node.id,
+                    target: import_node.id,
+                    kind: EdgeKind::Defines,
+                    metadata: EdgeMetadata::default(),
+                    owner_file: self.file_node.id,
+                    is_cross_file: false,
+                });
+                self.import_bindings.push(ImportBinding {
+                    resolved_path: resolved_path.clone(),
+                    source: source.clone(),
+                    ..binding
+                });
+            }
         }
     }
 
@@ -2217,63 +2237,213 @@ fn parse_named_imports(raw: &str, source: &str, is_type_only: bool) -> Vec<Impor
         .collect()
 }
 
-fn parse_python_import_bindings(raw: &str) -> Option<(String, Vec<ImportBinding>)> {
+fn parse_python_import_groups(
+    statement: Node<'_>,
+    source_text: &str,
+) -> Vec<(String, Vec<ImportBinding>)> {
+    match statement.kind() {
+        "import_statement" => parse_python_import_statement(statement, source_text),
+        "import_from_statement" => parse_python_from_import_statement(statement, source_text),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_python_import_statement(
+    statement: Node<'_>,
+    source_text: &str,
+) -> Vec<(String, Vec<ImportBinding>)> {
+    let mut groups = Vec::new();
+    let mut cursor = statement.walk();
+    for child in statement.named_children(&mut cursor) {
+        let Some((imported_name, local_name)) = python_import_item_name(child, source_text) else {
+            continue;
+        };
+        groups.push((
+            imported_name.clone(),
+            vec![python_import_binding(local_name, None, imported_name, true)],
+        ));
+    }
+    groups
+}
+
+fn parse_python_from_import_statement(
+    statement: Node<'_>,
+    source_text: &str,
+) -> Vec<(String, Vec<ImportBinding>)> {
+    let Some(module_node) = statement.child_by_field_name("module_name") else {
+        return Vec::new();
+    };
+    let source = normalize_python_module_text(node_text(module_node, source_text));
+    if source.is_empty() {
+        return Vec::new();
+    }
+
+    let mut bindings = Vec::new();
+    let module_range = module_node.byte_range();
+    let mut cursor = statement.walk();
+    for child in statement.named_children(&mut cursor) {
+        if child.byte_range() == module_range {
+            continue;
+        }
+        let Some((imported_name, local_name)) = python_import_item_name(child, source_text) else {
+            continue;
+        };
+        bindings.push(python_import_binding(
+            local_name,
+            Some(imported_name),
+            source.clone(),
+            false,
+        ));
+    }
+
+    let raw = node_text(statement, source_text);
+    if raw
+        .split_once(" import ")
+        .is_some_and(|(_, tail)| tail.trim_start().starts_with('*'))
+    {
+        bindings.push(python_import_binding(
+            "*".to_owned(),
+            Some("*".to_owned()),
+            source.clone(),
+            false,
+        ));
+    }
+
+    if bindings.is_empty() {
+        Vec::new()
+    } else {
+        vec![(source, bindings)]
+    }
+}
+
+fn python_import_item_name(item: Node<'_>, source_text: &str) -> Option<(String, String)> {
+    match item.kind() {
+        "aliased_import" => {
+            let imported_name = child_text(item, "name", source_text)
+                .map(|value| normalize_python_module_text(&value))?;
+            let local_name = child_text(item, "alias", source_text)?;
+            Some((imported_name, local_name))
+        }
+        "dotted_name" => {
+            let imported_name = normalize_python_module_text(node_text(item, source_text));
+            if imported_name.is_empty() {
+                None
+            } else {
+                let local_name = python_import_local_name(&imported_name);
+                Some((imported_name, local_name))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_python_module_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+}
+
+fn python_import_local_name(imported_name: &str) -> String {
+    imported_name
+        .rsplit('.')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(imported_name)
+        .to_owned()
+}
+
+fn python_import_binding(
+    local_name: String,
+    imported_name: Option<String>,
+    source: String,
+    is_namespace: bool,
+) -> ImportBinding {
+    ImportBinding {
+        local_name,
+        imported_name,
+        source,
+        resolved_path: None,
+        is_default: false,
+        is_namespace,
+        is_type_only: false,
+    }
+}
+
+fn parse_python_import_groups_from_raw(raw: &str) -> Vec<(String, Vec<ImportBinding>)> {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("from ") {
-        let (source, imported) = rest.split_once(" import ")?;
-        let source = source.trim().to_owned();
+        let Some((source, imported)) = rest.split_once(" import ") else {
+            return Vec::new();
+        };
+        let source = normalize_python_module_text(source);
         let bindings = imported
             .split(',')
             .filter_map(|piece| {
-                let piece = piece.trim();
+                let piece = piece
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .trim();
                 if piece.is_empty() {
                     return None;
                 }
                 let (imported_name, local_name) =
                     if let Some((left, right)) = piece.split_once(" as ") {
-                        (left.trim().to_owned(), right.trim().to_owned())
+                        (
+                            normalize_python_module_text(left),
+                            normalize_python_module_text(right),
+                        )
                     } else {
-                        (piece.to_owned(), piece.to_owned())
+                        let imported_name = normalize_python_module_text(piece);
+                        let local_name = python_import_local_name(&imported_name);
+                        (imported_name, local_name)
                     };
-                Some(ImportBinding {
+                Some(python_import_binding(
                     local_name,
-                    imported_name: Some(imported_name),
-                    source: source.clone(),
-                    resolved_path: None,
-                    is_default: false,
-                    is_namespace: false,
-                    is_type_only: false,
-                })
+                    Some(imported_name),
+                    source.clone(),
+                    false,
+                ))
             })
             .collect::<Vec<_>>();
-        return Some((source, bindings));
+        return if bindings.is_empty() {
+            Vec::new()
+        } else {
+            vec![(source, bindings)]
+        };
     }
 
-    let rest = trimmed.strip_prefix("import ")?;
-    let source = rest
-        .split(',')
-        .next()?
-        .split_whitespace()
-        .next()?
-        .trim()
-        .to_owned();
-    let local_name = if let Some((_, alias)) = source.rsplit_once('.') {
-        alias.to_owned()
-    } else {
-        source.clone()
+    let Some(rest) = trimmed.strip_prefix("import ") else {
+        return Vec::new();
     };
-    Some((
-        source.clone(),
-        vec![ImportBinding {
-            local_name,
-            imported_name: None,
-            source,
-            resolved_path: None,
-            is_default: false,
-            is_namespace: true,
-            is_type_only: false,
-        }],
-    ))
+    rest.split(',')
+        .filter_map(|piece| {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                return None;
+            }
+            let (source, local_name) = if let Some((left, right)) = piece.split_once(" as ") {
+                (
+                    normalize_python_module_text(left),
+                    normalize_python_module_text(right),
+                )
+            } else {
+                let source = normalize_python_module_text(
+                    piece.split_whitespace().next().unwrap_or_default(),
+                );
+                let local_name = python_import_local_name(&source);
+                (source, local_name)
+            };
+            if source.is_empty() || local_name.is_empty() {
+                None
+            } else {
+                Some((
+                    source.clone(),
+                    vec![python_import_binding(local_name, None, source, true)],
+                ))
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn resolve_import_path_pub(
@@ -2305,6 +2475,8 @@ fn resolve_import_path(
                 .unwrap_or_else(|| Path::new(""))
                 .join(source),
         )
+    } else if language == Language::Python && source.starts_with('.') {
+        ImportBase::Relative(python_relative_import_path(current_file, source)?)
     } else if let Some(rewritten) = aliases.rewrite(source) {
         // tsconfig.json / workspace alias — prefer when present since it's the
         // repo's declared intent. Most rewrites are repo-relative, but
@@ -2323,6 +2495,8 @@ fn resolve_import_path(
         ImportBase::Relative(PathBuf::from("src").join(alias))
     } else if let Some(absolute) = resolve_workspace_or_sibling_package_cached(repo_root, source) {
         return Some(absolute);
+    } else if language == Language::Python {
+        ImportBase::Relative(PathBuf::from(source.replace('.', "/")))
     } else {
         return None;
     };
@@ -2333,7 +2507,9 @@ fn resolve_import_path(
     let candidates = match language {
         Language::Python => vec![
             base_path.with_extension("py"),
+            base_path.with_extension("pyi"),
             base_path.join("__init__.py"),
+            base_path.join("__init__.pyi"),
         ],
         _ => vec![
             base_path.clone(),
@@ -2359,6 +2535,30 @@ fn resolve_import_path(
             ImportBase::Absolute(_) => Some(candidate),
         })
         .find(|candidate| import_path_exists_inside_allowed_roots(repo_root, candidate))
+}
+
+fn python_relative_import_path(current_file: &Path, source: &str) -> Option<PathBuf> {
+    let leading_dots = source.chars().take_while(|ch| *ch == '.').count();
+    if leading_dots == 0 {
+        return None;
+    }
+
+    let mut base = current_file
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    for _ in 1..leading_dots {
+        if !base.pop() {
+            return None;
+        }
+    }
+
+    let remainder = source.trim_start_matches('.');
+    if remainder.is_empty() {
+        Some(base)
+    } else {
+        Some(base.join(remainder.replace('.', "/")))
+    }
 }
 
 fn normalize_repo_relative_path(path: &Path) -> Option<PathBuf> {
