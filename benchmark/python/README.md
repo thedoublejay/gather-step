@@ -13,3 +13,18 @@ Both paths are gitignored. Use aliases such as `py-private-alpha` and
 `py-private-beta` in summaries and comparable output. The checked-in example
 manifest documents the fields expected by the private corpus harness without
 including real paths.
+
+Neutral fixture check:
+
+```sh
+cargo run -p gather-step-bench -- planning-oracle \
+  --fixture tests/fixtures/python_planning_workspace \
+  --scenarios tests/fixtures/python_planning_workspace/scenarios \
+  --thresholds benchmark/python/thresholds.yaml \
+  --output-dir /tmp/gather-step-python-oracle
+```
+
+The neutral scenario may use a `[python_oracle]` table for Python-specific
+repo, bridge, rank, warning, resolution, completeness, and unresolved-gap
+assertions. Private corpus manifests should use the same alias-only vocabulary
+when comparable summaries are needed.
