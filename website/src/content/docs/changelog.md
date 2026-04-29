@@ -7,7 +7,7 @@ This changelog lists significant user-visible changes. It is maintained manually
 
 ## v2.1.0 (Draft)
 
-This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph, and promotes Python to first-class parsing parity with TypeScript and JavaScript.
+This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph, promotes Python to first-class parsing parity with TypeScript and JavaScript, and adds static projection-impact tracing.
 
 ### Highlights
 
@@ -18,6 +18,16 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.1.0`.
 - Refreshed Cargo dependencies with `cargo update`, including moving `gix` from the yanked `0.82.0` line to `0.83.0`.
 - Promoted Python to first-class parsing alongside TypeScript and JavaScript (see [Language Support](/concepts/language-support/)).
+- Added projection-impact tracing for derived fields, persisted projections, filters, indexes, and backfills.
+
+### Projection Impact
+
+- Added the `projection-impact --target <FIELD>` CLI command and `projection_impact` MCP tool for static field-level projection tracing.
+- Added `DataField` graph nodes plus `ReadsField`, `WritesField`, `DerivesFieldFrom`, `FiltersOnField`, `IndexesField`, and `BackfillsField` edges.
+- Planning and change-impact packs can now include short projection hints and `projection_impact:*` gap markers while the full evidence stays behind the dedicated projection tool.
+- Added oracle, CLI/MCP serialization, integration, and parser extraction-fidelity coverage for projection chains, Mongo-style mappings, JSON/YAML index mappings, and false-positive fixtures.
+- Deployment note: v2.1 projection impact changes the generated graph schema. Existing `.gather-step` storage should be rebuilt with `gather-step clean --storage` followed by `gather-step index` before relying on projection-impact output.
+- Projection impact intentionally does not infer deployed runtime ownership; verify deployment owners separately when duplicate or transitioning services exist.
 
 ### Python Parsing
 

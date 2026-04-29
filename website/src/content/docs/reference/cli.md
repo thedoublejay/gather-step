@@ -34,6 +34,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`events blast-radius`](#events-blast-radius) — Trace transitive downstream impact from an event-like target.
 - [`events orphans`](#events-orphans) — List event-like targets that have only producers or only consumers.
 - [`impact`](#impact) — Summarize which repos are touched by a symbol's cross-repo virtual targets.
+- [`projection-impact`](#projection-impact) — Trace static source-to-projection field impact.
 - [`pack`](#pack) — Return a bounded context pack for a target symbol.
 - [`conventions`](#conventions) — Derive repeated structural conventions from the indexed graph.
 - [`generate claude-md`](#generate-claude-md) — Generate assistant-facing CLAUDE.md rule files from the index.
@@ -430,6 +431,31 @@ gather-step --workspace /path/to/workspace impact OrderCreatedDto
 **Output shape (`--json`)** — emits one line with `event: "impact_completed"` and `matches` array items each containing `source_repo`, `source_file`, `source_symbol`, and a `virtual_targets` list of touched cross-repo surfaces.
 
 **When to use** — to quickly understand the blast radius of modifying a shared DTO or service class.
+
+---
+
+### `projection-impact`
+
+Traces static field-level projection relationships for a target field. The report includes source fields, projected fields, derivation edges, readers, writers, filters, indexes, backfills, missing evidence, and planning risk hints.
+
+```bash
+gather-step [GLOBAL FLAGS] projection-impact --target <FIELD> [--limit <N>]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--target <FIELD>` | string | required | Field or projected field name to inspect. |
+| `--limit <N>` | usize | 20 | Maximum field candidates to inspect. |
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace --repo backend projection-impact --target subtaskIds --json
+```
+
+**Output shape (`--json`)** — emits one serialized projection-impact report with `target`, `resolved`, `candidates`, `source_fields`, `projected_fields`, `derivation_edges`, `readers`, `writers`, `filters`, `indexes`, `backfills`, `risk_hints`, `missing_evidence`, and `confidence`.
+
+**When to use** — before changing a persisted projection, denormalized field, query filter, search mapping, or backfill-sensitive derived value.
 
 ---
 

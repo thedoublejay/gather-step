@@ -126,6 +126,12 @@ Used automatically when the assistant needs the inferred producer and consumer s
 
 Used automatically when the assistant needs mismatches between the producer-side and consumer-side inferred shapes for the same target.
 
+### `projection_impact`
+
+> "If this field changes, which source fields, projected fields, filters, indexes, and backfills need review?"
+
+Used automatically when the assistant needs static field-level evidence for denormalized or persisted projections. The tool returns source and projected fields, derivation edges, read/write/filter/index/backfill evidence, and risk hints such as `backfill_unproven`, `index_or_search_mapping_unproven`, and `deployed_owner_unchecked`.
+
 ### `breaking_change_candidates`
 
 > "If I change this DTO or producer payload, which consumers are at risk?"

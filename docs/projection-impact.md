@@ -56,6 +56,14 @@ gather-step clean --storage
 gather-step index
 ```
 
+## Deployment Notes
+
+For v2.1 deployments, treat projection impact as a generated-state schema change. Stop any long-running `watch` process, rebuild the local `.gather-step` storage, then restart indexing or watch mode.
+
+If generated AI context files are committed in the workspace, regenerate them after the rebuild so the MCP tool table includes `projection_impact`.
+
+Projection impact only traces static code and config evidence. It does not decide which service is deployed in production; verify deployed runtime ownership separately when multiple repos can serve the same business capability.
+
 ## RegASK Usage
 
 The extractor is generic. RegASK-specific strength should come from fixtures, repo profiles, and Braingent advisory learnings. Core graph facts must come from indexed code/config evidence, not project names or ticket-specific assumptions.
