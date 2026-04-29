@@ -352,6 +352,23 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .join(".claude/rules/gather-step-repo-backend_standard.md")
             .exists()
     );
+    let file_like_output = temp.path().join("CLAUDE.md");
+    let file_like_output_str = file_like_output.to_str().expect("utf-8 temp path");
+    let repo_generate_file = run_fail(
+        temp.path(),
+        &[
+            "generate",
+            "claude-md",
+            "--repo",
+            "backend_standard",
+            "--output",
+            file_like_output_str,
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&repo_generate_file.stderr)
+            .contains("explicit file output requires a single generated file")
+    );
 
     let metadata = MetadataStoreDb::open(
         temp.path()

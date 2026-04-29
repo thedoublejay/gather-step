@@ -48,7 +48,7 @@ Useful flags for the `serve` command:
 
 | Flag | Purpose |
 |---|---|
-| `--max-limit <N>` | Cap the number of results returned per tool call (default is unbounded within internal limits) |
+| `--max-limit <N>` | Cap the number of results returned per tool call (default `1000`) |
 | `--server-name <NAME>` | Override the MCP server name reported to clients (useful for distinguishing multiple workspaces) |
 | `--graph <PATH>` | Override the default `graph.redb` path if you store it outside `.gather-step/` |
 | `--registry <PATH>` | Override the default `registry.json` path |

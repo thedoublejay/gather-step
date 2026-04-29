@@ -352,40 +352,18 @@ mod tests {
                 debounce_ms: 1500,
                 consecutive_error_limit: 3,
                 error_backoff_ms: 9000,
-                tui: false,
-            }
-        );
-    }
-
-    #[test]
-    fn parses_watch_tui_flag() {
-        let cli = Cli::parse_from(["gather-step", "watch", "--tui"]);
-
-        let Some(Command::Watch(args)) = cli.command else {
-            unreachable!("expected watch command");
-        };
-        assert_eq!(
-            args,
-            WatchArgs {
-                config: None,
-                storage: None,
-                poll_interval_ms: 250,
-                debounce_ms: 2000,
-                consecutive_error_limit: 5,
-                error_backoff_ms: 5000,
-                tui: true,
             }
         );
     }
 
     #[test]
     fn parses_tui_args() {
-        let cli = Cli::parse_from(["gather-step", "tui", "--watch"]);
+        let cli = Cli::parse_from(["gather-step", "tui"]);
 
         let Some(Command::Tui(args)) = cli.command else {
             unreachable!("expected tui command");
         };
-        assert_eq!(args, TuiArgs { watch: true });
+        assert_eq!(args, TuiArgs {});
     }
 
     #[test]

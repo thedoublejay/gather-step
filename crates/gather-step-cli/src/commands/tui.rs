@@ -1,7 +1,9 @@
 use std::{
     collections::VecDeque,
     io::{self, Stdout},
+    panic,
     path::PathBuf,
+    sync::Once,
     time::Duration,
 };
 
@@ -25,11 +27,8 @@ use ratatui::{
 
 use crate::app::AppContext;
 
-#[derive(Debug, Args, Clone, Copy, PartialEq, Eq)]
-pub struct TuiArgs {
-    #[arg(long, help = "Start with workspace watch mode enabled")]
-    pub watch: bool,
-}
+#[derive(Debug, Args, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TuiArgs {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Pane {
@@ -46,7 +45,7 @@ enum DetailTab {
     Events,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputMode {
     Normal,
     Filter,
@@ -75,7 +74,6 @@ pub(crate) struct TuiState {
     filter: String,
     input_mode: InputMode,
     tab: DetailTab,
-    watch_enabled: bool,
     repos: Vec<RepoRow>,
     events: VecDeque<EventRow>,
     help_open: bool,
@@ -94,8 +92,6 @@ enum TuiAction {
     MoveDown,
     MoveUp,
     SelectTab(DetailTab),
-    ToggleWatch,
-    ReindexSelected,
     OpenDetail,
 }
 
@@ -110,12 +106,12 @@ pub fn run_with_options(app: &AppContext, args: TuiArgs) -> Result<()> {
         );
     }
 
-    let state = TuiState::load(app, args.watch)?;
+    let state = TuiState::load(app, args)?;
     run_terminal(state)
 }
 
 impl TuiState {
-    fn load(app: &AppContext, watch_enabled: bool) -> Result<Self> {
+    fn load(app: &AppContext, _args: TuiArgs) -> Result<Self> {
         let paths = app.workspace_paths();
         let registry = RegistryStore::open(&paths.registry_path)
             .with_context(|| format!("opening {}", paths.registry_path.display()))?;
@@ -136,16 +132,8 @@ impl TuiState {
             .collect::<Vec<_>>();
         let mut events = VecDeque::new();
         events.push_back(EventRow {
-            label: if watch_enabled {
-                "watch".to_owned()
-            } else {
-                "ready".to_owned()
-            },
-            message: if watch_enabled {
-                "watch dashboard started".to_owned()
-            } else {
-                "dashboard started".to_owned()
-            },
+            label: "ready".to_owned(),
+            message: "dashboard snapshot loaded".to_owned(),
         });
 
         Ok(Self {
@@ -155,7 +143,6 @@ impl TuiState {
             filter: String::new(),
             input_mode: InputMode::Normal,
             tab: DetailTab::Symbols,
-            watch_enabled,
             repos,
             events,
             help_open: false,
@@ -231,38 +218,11 @@ impl TuiState {
                 self.selected_repo = self.selected_repo.saturating_sub(1);
             }
             TuiAction::SelectTab(tab) => self.tab = tab,
-            TuiAction::ToggleWatch => {
-                self.watch_enabled = !self.watch_enabled;
-                self.push_event(
-                    "watch",
-                    if self.watch_enabled {
-                        "watch enabled"
-                    } else {
-                        "watch disabled"
-                    },
-                );
-            }
-            TuiAction::ReindexSelected => {
-                let repo_name = self
-                    .selected_repo()
-                    .map_or_else(|| "workspace".to_owned(), |repo| repo.name.clone());
-                self.push_event("index", format!("queued reindex for {repo_name}"));
-            }
             TuiAction::OpenDetail => {
                 self.selected_pane = Pane::Detail;
             }
         }
         false
-    }
-
-    fn push_event(&mut self, label: impl Into<String>, message: impl Into<String>) {
-        if self.events.len() >= 100 {
-            self.events.pop_front();
-        }
-        self.events.push_back(EventRow {
-            label: label.into(),
-            message: message.into(),
-        });
     }
 
     #[cfg(test)]
@@ -272,10 +232,9 @@ impl TuiState {
             .selected_repo()
             .map_or("no repo", |repo| repo.name.as_str());
         format!(
-            "workspace={} repo={repo} filter={} watch={} tab={:?} help={}",
+            "workspace={} repo={repo} filter={} tab={:?} help={}",
             self.workspace.display(),
             self.filter,
-            self.watch_enabled,
             self.tab,
             self.help_open,
         )
@@ -284,10 +243,11 @@ impl TuiState {
 
 fn run_terminal(mut state: TuiState) -> Result<()> {
     let (mut terminal, _guard) = enter_terminal()?;
+    install_terminal_panic_hook();
     loop {
         terminal.draw(|frame| render_state(frame, &state))?;
         if event::poll(Duration::from_millis(200))?
-            && let Some(action) = action_from_event(&event::read()?)
+            && let Some(action) = action_from_event(&event::read()?, state.input_mode)
             && state.apply(action)
         {
             break;
@@ -307,13 +267,29 @@ fn enter_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, TerminalGuard
     Ok((terminal, guard))
 }
 
+static TERMINAL_PANIC_HOOK: Once = Once::new();
+
+fn install_terminal_panic_hook() {
+    TERMINAL_PANIC_HOOK.call_once(|| {
+        let previous_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
+            restore_terminal();
+            previous_hook(panic_info);
+        }));
+    });
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, Show, LeaveAlternateScreen);
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, LeaveAlternateScreen);
+        restore_terminal();
     }
 }
 
@@ -327,19 +303,23 @@ fn ascii_contains_ignore_case(haystack: &str, needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn action_from_event(event: &Event) -> Option<TuiAction> {
+fn action_from_event(event: &Event, input_mode: InputMode) -> Option<TuiAction> {
     let Event::Key(key) = event else {
         return None;
     };
     if key.kind != KeyEventKind::Press {
         return None;
     }
-    action_from_key(*key)
+    action_from_key(*key, input_mode)
 }
 
-fn action_from_key(key: KeyEvent) -> Option<TuiAction> {
+fn action_from_key(key: KeyEvent, input_mode: InputMode) -> Option<TuiAction> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         return Some(TuiAction::Quit);
+    }
+
+    if matches!(input_mode, InputMode::Filter) {
+        return action_from_filter_key(key);
     }
 
     match key.code {
@@ -353,12 +333,22 @@ fn action_from_key(key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('1') => Some(TuiAction::SelectTab(DetailTab::Symbols)),
         KeyCode::Char('2') => Some(TuiAction::SelectTab(DetailTab::Routes)),
         KeyCode::Char('3') => Some(TuiAction::SelectTab(DetailTab::Events)),
-        KeyCode::Char('w') => Some(TuiAction::ToggleWatch),
-        KeyCode::Char('r') => Some(TuiAction::ReindexSelected),
         KeyCode::Char('c') => Some(TuiAction::Clear),
         KeyCode::Enter => Some(TuiAction::OpenDetail),
+        _ => None,
+    }
+}
+
+fn action_from_filter_key(key: KeyEvent) -> Option<TuiAction> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => Some(TuiAction::ExitOverlay),
         KeyCode::Backspace => Some(TuiAction::FilterBackspace),
-        KeyCode::Char(ch) => Some(TuiAction::FilterChar(ch)),
+        KeyCode::Char(ch)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(TuiAction::FilterChar(ch))
+        }
         _ => None,
     }
 }
@@ -408,7 +398,6 @@ pub(crate) fn render_state(frame: &mut Frame<'_>, state: &TuiState) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let watch = if state.watch_enabled { "on" } else { "off" };
     let filter = if state.filter.is_empty() {
         "none".to_owned()
     } else {
@@ -423,20 +412,16 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
                 Style::default().fg(Color::Cyan),
             ),
         ]),
-        Line::from(format!(
-            "index: registry snapshot  watch: {watch}  filter: {filter}"
-        )),
+        Line::from(format!("index: registry snapshot  filter: {filter}")),
     ])
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, area);
 }
 
 fn render_repos(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
-    let rows = state
-        .visible_repos()
+    let rows = visible_repo_markers(state)
         .into_iter()
-        .map(|(idx, repo)| {
-            let marker = if idx == state.selected_repo { ">" } else { " " };
+        .map(|(marker, repo)| {
             Row::new(vec![
                 marker.to_owned(),
                 repo.name.clone(),
@@ -467,6 +452,22 @@ fn render_repos(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
     .header(Row::new(vec!["", "Repo", "Files", "Symbols"]))
     .block(Block::default().title("Repos (/)").borders(Borders::ALL));
     frame.render_widget(table, area);
+}
+
+fn visible_repo_markers(state: &TuiState) -> Vec<(&'static str, &RepoRow)> {
+    state
+        .visible_repos()
+        .into_iter()
+        .enumerate()
+        .map(|(visible_idx, (_, repo))| {
+            let marker = if visible_idx == state.selected_repo {
+                ">"
+            } else {
+                " "
+            };
+            (marker, repo)
+        })
+        .collect()
 }
 
 fn render_results(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
@@ -553,7 +554,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         InputMode::Filter => "filter",
     };
     let footer = Paragraph::new(format!(
-        "q quit  ? help  / filter  tab pane  enter detail  r reindex  w watch  c clear  mode: {mode}"
+        "q quit  ? help  / filter  tab pane  enter detail  c clear  mode: {mode}"
     ));
     frame.render_widget(footer, area);
 }
@@ -568,9 +569,8 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Tab              next pane"),
         Line::from("1 / 2 / 3        symbols, routes, events"),
         Line::from("Enter            open detail"),
-        Line::from("r                queue selected repo reindex"),
-        Line::from("w                toggle watch state"),
         Line::from("c                clear filter or event log"),
+        Line::from("Esc / Enter      leave filter mode"),
     ])
     .block(Block::default().title("Help").borders(Borders::ALL));
     frame.render_widget(Clear, area);
@@ -609,7 +609,6 @@ mod tests {
             filter: String::new(),
             input_mode: InputMode::Normal,
             tab: DetailTab::Symbols,
-            watch_enabled: false,
             repos: vec![
                 RepoRow {
                     name: "api".to_owned(),
@@ -628,7 +627,7 @@ mod tests {
             ],
             events: VecDeque::from([EventRow {
                 label: "ready".to_owned(),
-                message: "dashboard started".to_owned(),
+                message: "dashboard snapshot loaded".to_owned(),
             }]),
             help_open: false,
         }
@@ -649,12 +648,67 @@ mod tests {
     }
 
     #[test]
+    fn filtered_repo_selection_marks_visible_position() {
+        let mut state = state();
+        state.apply(TuiAction::FilterChar('b'));
+
+        let markers = visible_repo_markers(&state)
+            .into_iter()
+            .map(|(marker, repo)| (marker, repo.name.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(markers, vec![(">", "web")]);
+    }
+
+    #[test]
     fn key_actions_cover_primary_bindings() {
         let key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
-        assert_eq!(action_from_key(key), Some(TuiAction::ToggleWatch));
+        assert_eq!(action_from_key(key, InputMode::Normal), None);
+
+        let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(key, InputMode::Normal),
+            Some(TuiAction::StartFilter)
+        );
 
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(action_from_key(key), Some(TuiAction::Quit));
+        assert_eq!(
+            action_from_key(key, InputMode::Normal),
+            Some(TuiAction::Quit)
+        );
+    }
+
+    #[test]
+    fn filter_mode_treats_printable_keys_as_filter_input() {
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(key, InputMode::Filter),
+            Some(TuiAction::FilterChar('q'))
+        );
+
+        let key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(key, InputMode::Filter),
+            Some(TuiAction::FilterChar('w'))
+        );
+
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(key, InputMode::Filter),
+            Some(TuiAction::FilterChar('r'))
+        );
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(key, InputMode::Filter),
+            Some(TuiAction::ExitOverlay)
+        );
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            action_from_key(key, InputMode::Filter),
+            Some(TuiAction::Quit)
+        );
     }
 
     #[test]

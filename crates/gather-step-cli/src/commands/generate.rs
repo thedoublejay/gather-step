@@ -42,7 +42,7 @@ pub enum ClaudeMdTarget {
 pub struct GenerateClaudeMdArgs {
     #[arg(long, help = "Optional explicit output file or directory")]
     pub output: Option<PathBuf>,
-    #[arg(long, help = "Generate repo-scoped output")]
+    #[arg(long, help = "Limit graph-backed rule output to one repo")]
     pub repo: Option<String>,
     #[arg(long, value_enum, default_value = "rules")]
     pub target: ClaudeMdTarget,
@@ -345,6 +345,11 @@ fn classify_output_path(
     }
 
     if generated_files > 1 {
+        if path_looks_like_file(output_path) {
+            bail!(
+                "explicit file output requires a single generated file; use a directory path instead"
+            );
+        }
         return Ok(ExplicitOutputTarget::Directory);
     }
 
@@ -358,6 +363,10 @@ fn classify_output_path(
 fn path_ends_with_separator(path: &Path) -> bool {
     let path = path.to_string_lossy();
     path.ends_with(std::path::MAIN_SEPARATOR) || path.ends_with('/') || path.ends_with('\\')
+}
+
+fn path_looks_like_file(path: &Path) -> bool {
+    !path_ends_with_separator(path) && path.extension().is_some()
 }
 
 fn render_codeowners(
@@ -480,6 +489,28 @@ mod tests {
             error
                 .to_string()
                 .contains("explicit file output requires a single generated file")
+        );
+    }
+
+    #[test]
+    fn reject_multi_file_output_to_nonexistent_file_like_path() {
+        let temp = TestDir::new("file-like-output");
+        let target = temp.path().join("CLAUDE.md");
+        let error = classify_output_path(&target, 2).expect_err("classification should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("explicit file output requires a single generated file")
+        );
+    }
+
+    #[test]
+    fn classify_nonexistent_extensionless_multi_output_as_directory() {
+        let temp = TestDir::new("multi-dir");
+        let target = temp.path().join("rules");
+        assert_eq!(
+            classify_output_path(&target, 2).expect("classification should succeed"),
+            ExplicitOutputTarget::Directory
         );
     }
 

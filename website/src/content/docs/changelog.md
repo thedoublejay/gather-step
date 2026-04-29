@@ -14,9 +14,9 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 ### Highlights
 
 - Added a richer no-args startup path: interactive unconfigured workspaces enter setup, configured workspaces show status, and non-interactive shells print help without hanging.
-- Completed the `init` wizard for repository discovery, config writing, optional indexing, AI summary generation, MCP registration, and watch handoff.
+- Completed the `init` wizard for repository discovery, config writing, optional indexing, AI context generation, MCP registration, and watch handoff.
 - Added `setup-mcp` for idempotent workspace-local or global Claude settings updates.
-- Added AI-facing workspace summary generation through `CLAUDE.gather.md` and `AGENTS.gather.md`.
+- Added AI-facing context generation through graph-backed `.claude/rules/` plus `CLAUDE.gather.md` and `AGENTS.gather.md` summaries.
 - Improved operator feedback for startup, `status`, `index`, `reindex`, `watch`, `clean`, and `serve`.
 - Bumped the workspace and crate versions to `2.0.0`.
 - Added release workflow automation to open Homebrew tap update pull requests.
@@ -49,6 +49,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - `setup-mcp --scope local` writes `.claude/settings.json` under the workspace.
 - `setup-mcp --scope global` writes `~/.claude/settings.json`.
 - MCP settings are updated idempotently without removing unrelated server entries.
+- Added `generate claude-md` / `--target rules` for graph-backed Claude Code project rules under `.claude/rules/`.
 - Added `generate claude-md --target summary` for `CLAUDE.gather.md`.
 - Added `generate agents-md` for Codex-style `AGENTS.gather.md` workflows.
 - Reused the same workspace summary renderer in the init wizard and explicit generate commands.

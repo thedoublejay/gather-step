@@ -40,8 +40,6 @@ pub struct WatchArgs {
     pub consecutive_error_limit: u32,
     #[arg(long, default_value_t = 5000)]
     pub error_backoff_ms: u64,
-    #[arg(long, help = "Open the full-screen TUI dashboard in watch mode")]
-    pub tui: bool,
 }
 
 impl Default for WatchArgs {
@@ -53,7 +51,6 @@ impl Default for WatchArgs {
             debounce_ms: 2000,
             consecutive_error_limit: 5,
             error_backoff_ms: 5000,
-            tui: false,
         }
     }
 }
@@ -106,13 +103,6 @@ fn log_value(value: &str) -> String {
 }
 
 pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
-    if args.tui {
-        return crate::commands::tui::run_with_options(
-            app,
-            crate::commands::tui::TuiArgs { watch: true },
-        );
-    }
-
     let output = app.output();
     let daemon_metadata;
     let defaults = app.workspace_paths();

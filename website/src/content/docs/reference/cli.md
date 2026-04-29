@@ -484,7 +484,7 @@ gather-step --workspace /path/to/workspace --repo backend_standard conventions -
 
 ### `generate claude-md`
 
-Generates CLAUDE.md rule files for one or all repos in the workspace. With `--target=rules`, files are graph-backed repo rule files. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
+Generates Claude Code rule files for the workspace. With `--target=rules`, the command writes multiple graph-backed rule files under `.claude/rules/`. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
 
 ```bash
 gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] \
@@ -493,15 +493,16 @@ gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] 
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--output <PATH>` | path | Workspace default locations | Explicit output file or directory. When multiple files are generated and this is an existing file, the command errors. Pass a trailing slash to force directory treatment. |
-| `--repo <NAME>` | string | — | Generate repo-scoped output for this repo only. Overrides the global `--repo` flag. |
-| `--target <rules|summary>` | enum | `rules` | Choose graph-backed repo rule files or the registry-only `CLAUDE.gather.md` summary. `--repo` is only valid with `rules`. |
+| `--output <PATH>` | path | Workspace default locations | Explicit output file or directory. `rules` generates multiple files, so pass a directory path such as `./claude-rules/`; file-like paths such as `CLAUDE.md` are rejected. |
+| `--repo <NAME>` | string | — | Limit graph-backed rule content to one repo. This still writes the shared rule files plus the repo-specific rule file. Overrides the global `--repo` flag. |
+| `--target <rules|summary>` | enum | `rules` | Choose graph-backed rule files or the registry-only `CLAUDE.gather.md` summary. `--repo` is only valid with `rules`. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace generate claude-md
-gather-step --workspace /path/to/workspace generate claude-md --repo backend_standard --output ./CLAUDE.md
+gather-step --workspace /path/to/workspace generate claude-md --repo backend_standard --output ./claude-rules/
+gather-step --workspace /path/to/workspace generate claude-md --target summary --output ./CLAUDE.gather.md
 ```
 
 **Output shape (`--json`)** — emits one line with `event: "generate_claude_md_completed"` and `files` array of `{path, bytes}`.
@@ -568,7 +569,7 @@ In `--json` mode all events go to stdout as newline-delimited JSON. In human mod
 ```bash
 gather-step [GLOBAL FLAGS] watch [--config <PATH>] [--storage <PATH>] \
   [--poll-interval-ms <N>] [--debounce-ms <N>] \
-  [--consecutive-error-limit <N>] [--error-backoff-ms <N>] [--tui]
+  [--consecutive-error-limit <N>] [--error-backoff-ms <N>]
 ```
 
 | Flag | Type | Default | Description |
@@ -579,14 +580,12 @@ gather-step [GLOBAL FLAGS] watch [--config <PATH>] [--storage <PATH>] \
 | `--debounce-ms <N>` | u64 | 2000 | Debounce window in milliseconds before triggering an indexing run after the last detected change. |
 | `--consecutive-error-limit <N>` | u32 | 5 | Number of consecutive indexing errors before the watcher enters backoff. |
 | `--error-backoff-ms <N>` | u64 | 5000 | Backoff duration in milliseconds after reaching the consecutive error limit. |
-| `--tui` | bool flag | false | Open the full-screen TUI dashboard with watch mode enabled. Requires an interactive terminal. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace watch
 gather-step --workspace /path/to/workspace watch --debounce-ms 500 --poll-interval-ms 100
-gather-step --workspace /path/to/workspace watch --tui
 ```
 
 Visible terminals show a spinner and labeled status lines. Non-TTY and CI runs keep stable stderr lines such as `watch:start`, `watch:indexing_complete`, and `watch:status`. `--json` emits NDJSON events on stdout and hides progress.
@@ -597,17 +596,13 @@ Visible terminals show a spinner and labeled status lines. Non-TTY and CI runs k
 
 ### `tui`
 
-Opens the opt-in full-screen workspace dashboard. The dashboard shows indexed repos, copyable next commands, selected repo details, and a compact event log. It never starts automatically from scripted commands.
+Opens the opt-in full-screen workspace dashboard. The dashboard shows the current registry snapshot, copyable next commands, selected repo details, and a compact event log. It does not run the file watcher or mutate index state; use `watch`, `index`, or `reindex` for backend work. It never starts automatically from scripted commands.
 
 ```bash
-gather-step [GLOBAL FLAGS] tui [--watch]
+gather-step [GLOBAL FLAGS] tui
 ```
 
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--watch` | bool flag | false | Start with watch mode marked on in the dashboard. |
-
-Primary keys: `q` quit, `?` help, `/` filter, `Tab` next pane, `Enter` detail, `r` reindex selected, `w` toggle watch, `c` clear, `1`/`2`/`3` switch Symbols/Routes/Events.
+Primary keys: `q` quit, `?` help, `/` filter, `Tab` next pane, `Enter` detail, `c` clear, `1`/`2`/`3` switch Symbols/Routes/Events. In filter mode, printable keys edit the filter; `Esc` or `Enter` exits filter mode.
 
 The TUI requires stdin, stdout, and stderr to be TTYs. In scripts or CI, use `status`, `watch`, or `--json` instead.
 
@@ -654,7 +649,7 @@ gather-step [GLOBAL FLAGS] serve [--graph <PATH>] [--registry <PATH>] \
 | `--graph <PATH>` | path | `<workspace>/.gather-step/storage/graph.redb` | Path to the graph store file. |
 | `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Path to the workspace registry. |
 | `--config <PATH>` | path | `<workspace>/gather-step.config.yaml` | Path to workspace config, used by `--watch`. |
-| `--max-limit <N>` | usize | server default | Per-call result limit cap applied to all MCP tools. |
+| `--max-limit <N>` | usize | 1000 | Per-call result limit cap applied to all MCP tools. |
 | `--server-name <NAME>` | string | `"gather-step"` | Server name reported to MCP clients in the `server_info` handshake. |
 | `--watch` | bool flag | false | Run the filesystem watcher in the same process so the MCP server stays fresh during development. |
 | `--poll-interval-ms <N>` | u64 | 250 | Watch-loop cadence in milliseconds. |

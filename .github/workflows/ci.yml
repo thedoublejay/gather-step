@@ -192,13 +192,76 @@ jobs:
     if: always()
     steps:
       - name: Report CI routing
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+          WEBSITE_CHANGED: ${{ needs.changes.outputs.website }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          DENY_RESULT: ${{ needs.deny.result }}
+          UNUSED_DEPS_RESULT: ${{ needs['unused-deps'].result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          MVCC_STRESS_RESULT: ${{ needs['mvcc-stress'].result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
         run: |
-          echo "rust_changed=${{ needs.changes.outputs.rust }}"
-          echo "website_changed=${{ needs.changes.outputs.website }}"
-          echo "docs_only=${{ needs.changes.outputs.docs_only }}"
-          echo "lint=${{ needs.lint.result }}"
-          echo "deny=${{ needs.deny.result }}"
-          echo "unused_deps=${{ needs['unused-deps'].result }}"
-          echo "test=${{ needs.test.result }}"
-          echo "mvcc_stress=${{ needs['mvcc-stress'].result }}"
-          echo "msrv=${{ needs.msrv.result }}"
+          set -euo pipefail
+
+          echo "changes=$CHANGES_RESULT"
+          echo "rust_changed=$RUST_CHANGED"
+          echo "website_changed=$WEBSITE_CHANGED"
+          echo "docs_only=$DOCS_ONLY"
+          echo "lint=$LINT_RESULT"
+          echo "deny=$DENY_RESULT"
+          echo "unused_deps=$UNUSED_DEPS_RESULT"
+          echo "test=$TEST_RESULT"
+          echo "mvcc_stress=$MVCC_STRESS_RESULT"
+          echo "msrv=$MSRV_RESULT"
+
+          failed=false
+
+          require_success() {
+            local name="$1"
+            local result="$2"
+            if [ "$result" != "success" ]; then
+              echo "::error::$name finished with result '$result'"
+              failed=true
+            fi
+          }
+
+          allow_success_or_skipped() {
+            local name="$1"
+            local result="$2"
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "::error::$name finished with result '$result'"
+              failed=true
+            fi
+          }
+
+          require_success "changes" "$CHANGES_RESULT"
+
+          case "$RUST_CHANGED" in
+            true)
+              require_success "lint" "$LINT_RESULT"
+              require_success "deny" "$DENY_RESULT"
+              require_success "unused-deps" "$UNUSED_DEPS_RESULT"
+              require_success "test" "$TEST_RESULT"
+              require_success "mvcc-stress" "$MVCC_STRESS_RESULT"
+              require_success "msrv" "$MSRV_RESULT"
+              ;;
+            false)
+              allow_success_or_skipped "lint" "$LINT_RESULT"
+              allow_success_or_skipped "deny" "$DENY_RESULT"
+              allow_success_or_skipped "unused-deps" "$UNUSED_DEPS_RESULT"
+              allow_success_or_skipped "test" "$TEST_RESULT"
+              allow_success_or_skipped "mvcc-stress" "$MVCC_STRESS_RESULT"
+              allow_success_or_skipped "msrv" "$MSRV_RESULT"
+              ;;
+            *)
+              echo "::error::changes did not produce a valid rust output: '$RUST_CHANGED'"
+              failed=true
+              ;;
+          esac
+
+          if [ "$failed" = true ]; then
+            exit 1
+          fi
