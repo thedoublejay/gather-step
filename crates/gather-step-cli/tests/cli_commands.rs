@@ -352,6 +352,33 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .join(".claude/rules/gather-step-repo-backend_standard.md")
             .exists()
     );
+    let repo_rule_path = temp
+        .path()
+        .join(".claude/rules/gather-step-repo-backend_standard.md");
+    let repo_rule = fs::read_to_string(&repo_rule_path).expect("repo rule should be readable");
+    assert!(
+        repo_rule.contains("Path: `apps/backend_standard`"),
+        "repo rule should render a workspace-relative repo path:\n{repo_rule}"
+    );
+    for forbidden_prefix in [
+        temp.path().display().to_string(),
+        fs::canonicalize(temp.path())
+            .expect("canonical temp path")
+            .display()
+            .to_string(),
+    ] {
+        assert!(
+            !repo_rule.contains(&forbidden_prefix),
+            "repo rule must not contain absolute temp path prefix {forbidden_prefix:?}:\n{repo_rule}"
+        );
+    }
+    if let Some(home) = env::var_os("HOME").and_then(|home| home.into_string().ok()) {
+        assert!(
+            !repo_rule.contains(&home),
+            "repo rule must not contain absolute home path prefix {home:?}:\n{repo_rule}"
+        );
+    }
+
     let file_like_output = temp.path().join("CLAUDE.md");
     let file_like_output_str = file_like_output.to_str().expect("utf-8 temp path");
     let repo_generate_file = run_fail(

@@ -109,6 +109,7 @@ fn run_claude_md_rules(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<(
         registry.registry(),
         &ClaudeMdOptions {
             repo_filter,
+            workspace_root: Some(app.workspace_path.clone()),
             ..ClaudeMdOptions::default()
         },
     )?;
