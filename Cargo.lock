@@ -1245,6 +1245,7 @@ dependencies = [
  "swc_ecma_ast",
  "swc_ecma_parser",
  "thiserror",
+ "toml",
  "tracing",
  "tree-sitter",
  "tree-sitter-go",

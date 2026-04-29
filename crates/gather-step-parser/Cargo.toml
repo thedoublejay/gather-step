@@ -33,6 +33,7 @@ rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+toml.workspace = true
 smallvec.workspace = true
 lru.workspace = true
 quick_cache.workspace = true

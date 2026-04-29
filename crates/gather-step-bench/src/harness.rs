@@ -2,7 +2,9 @@
 
 use std::{fs, path::Path, time::Instant};
 
-use gather_step_core::{ConfigError, GatherStepConfig, RegistryError, RegistryStore};
+use gather_step_core::{
+    ConfigError, GatherStepConfig, RegistryError, RegistryStore, WorkspaceIndexError,
+};
 use gather_step_storage::{
     GraphStoreError, IndexingOptions, RepoIndexer, RepoIndexerError, index_workspace_with_storage,
 };
@@ -16,7 +18,10 @@ use crate::metrics::capture_rss;
 pub struct StorageMetrics {
     pub graph_bytes: u64,
     pub metadata_bytes: u64,
-    pub metadata_wal_bytes: u64,
+    /// Combined size of `SQLite` sidecar files (`metadata.sqlite-wal` and
+    /// `metadata.sqlite-shm`).  Named "sidecar" rather than "wal" because the
+    /// shared-memory file is not a write-ahead log.
+    pub metadata_sidecar_bytes: u64,
     pub search_bytes: u64,
     pub total_bytes: u64,
 }
@@ -61,7 +66,7 @@ pub enum HarnessError {
     #[error("registry error: {0}")]
     Registry(#[from] RegistryError),
     #[error("workspace index error: {0}")]
-    Workspace(String),
+    Workspace(#[from] Box<WorkspaceIndexError<RepoIndexerError>>),
 }
 
 /// Run a full indexing pass over `fixture_path` and collect metrics.
@@ -72,11 +77,31 @@ pub enum HarnessError {
 ///
 /// `repo_name` is used as the logical repository name inside the graph store.
 ///
+/// # Cross-mode comparability
+///
+/// Node IDs are derived from `(repo, file_path, kind, qualified_name)`.  This
+/// function uses the literal `repo_name` argument; the workspace counterpart
+/// [`run_workspace_index_pass`] uses each repo's configured `name` from
+/// `gather-step.config.yaml`.  When the same on-disk file is indexed under
+/// both modes with different repo names, the resulting node IDs will differ.
+/// Do not compare node-set sizes or IDs across the two modes unless the
+/// caller passes the configured `name` as `repo_name` here.
+///
+/// If `fixture_path` is itself inside a workspace that has a
+/// `gather-step.config.yaml`, an info-level log is emitted as a hint that
+/// [`run_workspace_index_pass`] may be the intended entry point.
+///
 /// # Errors
 ///
 /// Returns a [`HarnessError`] when the indexer fails to open, the index pass
 /// fails, or the graph counts cannot be read.
 pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetrics, HarnessError> {
+    if fixture_path.join("gather-step.config.yaml").is_file() {
+        tracing::info!(
+            fixture = %fixture_path.display(),
+            "fixture contains gather-step.config.yaml; run_index_pass will key nodes by the supplied repo_name, not the configured name. Use run_workspace_index_pass for cross-repo comparability."
+        );
+    }
     let storage_dir = tempdir_for_pass(fixture_path)?;
     let _guard = StorageDirGuard(storage_dir.clone());
 
@@ -117,6 +142,10 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
 /// `fixture_path` must contain a `gather-step.config.yaml` file. The workspace
 /// is indexed into a temporary storage directory and the resulting graph and
 /// storage metrics are returned.
+///
+/// Each repo's nodes are keyed by its configured `name`, not by the
+/// directory basename.  See [`run_index_pass`] for the single-repo
+/// counterpart and a note on cross-mode node-ID comparability.
 pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, HarnessError> {
     let storage_dir = tempdir_for_pass(fixture_path)?;
     let _guard = StorageDirGuard(storage_dir.clone());
@@ -132,8 +161,7 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
         &mut registry,
         &storage_dir,
         IndexingOptions::default(),
-    )
-    .map_err(|error| HarnessError::Workspace(error.to_string()))?;
+    )?;
     let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let rss_after = capture_rss();
@@ -274,7 +302,7 @@ fn tempdir_for_pass(fixture_path: &Path) -> Result<std::path::PathBuf, HarnessEr
 fn collect_storage_metrics(storage_dir: &Path) -> Result<StorageMetrics, HarnessError> {
     let graph_bytes = file_size(storage_dir.join("graph.redb"))?;
     let metadata_bytes = file_size(storage_dir.join("metadata.sqlite"))?;
-    let metadata_wal_bytes = file_size(storage_dir.join("metadata.sqlite-wal"))?
+    let metadata_sidecar_bytes = file_size(storage_dir.join("metadata.sqlite-wal"))?
         + file_size(storage_dir.join("metadata.sqlite-shm"))?;
     let search_bytes = path_size(storage_dir.join("search"))?;
     let total_bytes = path_size(storage_dir)?;
@@ -282,7 +310,7 @@ fn collect_storage_metrics(storage_dir: &Path) -> Result<StorageMetrics, Harness
     Ok(StorageMetrics {
         graph_bytes,
         metadata_bytes,
-        metadata_wal_bytes,
+        metadata_sidecar_bytes,
         search_bytes,
         total_bytes,
     })

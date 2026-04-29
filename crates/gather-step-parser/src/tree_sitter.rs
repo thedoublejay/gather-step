@@ -472,7 +472,16 @@ fn parse_file_core(
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
         Language::Python => {
-            visit_python(tree.root_node(), &mut state, None, None, false, &[], 0);
+            visit_python(
+                tree.root_node(),
+                &mut state,
+                None,
+                None,
+                None,
+                false,
+                &[],
+                0,
+            );
         }
         Language::Rust | Language::Go | Language::Java => {}
     }
@@ -627,10 +636,49 @@ const PACKAGE_IMPORT_CACHE_CAPACITY: usize = 1024;
 const IMPORT_PATH_EXISTS_CACHE_CAPACITY: usize = 4_096;
 const WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY: usize = 64;
 
+/// Maximum number of ancestor directories of a repo root to scan for sibling
+/// Python projects.  Six levels covers `monorepo/services/<repo>` (1),
+/// `monorepo/<repo>` (2), `monorepo/<group>/<repo>` (2), and a comfortable
+/// margin for nested layouts without making `read_dir` quadratic on
+/// pathological depths.  Increase only if a real layout requires it.
+const PYTHON_SIBLING_SEARCH_ANCESTORS: usize = 6;
+
+/// Maximum number of directory levels to climb from a parsed file looking for
+/// a `gather-step.config.yaml`.  Twelve covers all configured layouts seen in
+/// the project's fixtures and real users (deepest known is around eight).  A
+/// hard cap prevents pathological filesystem walks when the file is outside
+/// any configured workspace.
+const GATHER_STEP_CONFIG_MAX_ASCEND: usize = 12;
+
+/// Identity of a configured repo within a workspace.  Constructed only via
+/// [`WorkspaceRepoIdentity::new`] from a canonical, non-empty
+/// (`name`, `root`) pair so callers cannot accidentally fall back to
+/// `root.file_name()` as a name (the bug fixed in 5a5563a).  Fields are kept
+/// private; use the accessors.
 #[derive(Clone, Debug)]
 struct WorkspaceRepoIdentity {
     name: String,
-    root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+impl WorkspaceRepoIdentity {
+    fn new(name: String, canonical_root: PathBuf) -> Option<Self> {
+        if name.is_empty() || !canonical_root.is_absolute() {
+            return None;
+        }
+        Some(Self {
+            name,
+            canonical_root,
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn root(&self) -> &Path {
+        &self.canonical_root
+    }
 }
 
 thread_local! {
@@ -796,13 +844,6 @@ impl<'a> ParseState<'a> {
 
     pub(crate) fn file_path(&self) -> &str {
         self.cached_file_path.as_str()
-    }
-
-    fn qualified_name_for_node(&self, node_id: gather_step_core::NodeId) -> Option<String> {
-        self.nodes
-            .iter()
-            .find(|node| node.id == node_id)
-            .and_then(|node| node.qualified_name.clone())
     }
 
     /// Test-only constructor that builds a minimal `ParseState` suitable for
@@ -1805,6 +1846,7 @@ fn visit_python(
     state: &mut ParseState<'_>,
     parent_class: Option<&NodeData>,
     owner: Option<gather_step_core::NodeId>,
+    owner_qname: Option<&str>,
     force_exported: bool,
     class_decorators: &[DecoratorCapture],
     depth: usize,
@@ -1820,6 +1862,7 @@ fn visit_python(
                     state,
                     parent_class,
                     owner,
+                    owner_qname,
                     force_exported,
                     class_decorators,
                     depth + 1,
@@ -1837,6 +1880,7 @@ fn visit_python(
                             state,
                             parent_class,
                             owner,
+                            owner_qname,
                             force_exported,
                             &decorators,
                             depth + 1,
@@ -1855,6 +1899,7 @@ fn visit_python(
                             state,
                             parent_class,
                             owner,
+                            owner_qname,
                             force_exported,
                             &merged,
                             depth + 1,
@@ -1890,6 +1935,7 @@ fn visit_python(
                     state,
                     Some(&class_node),
                     Some(class_node.id),
+                    Some(name.as_str()),
                     force_exported,
                     class_decorators,
                     depth + 1,
@@ -1899,15 +1945,14 @@ fn visit_python(
         "function_definition" => {
             let name =
                 child_text(node, "name", state.source).unwrap_or_else(|| "anonymous".to_owned());
-            let qualified_name = owner
-                .and_then(|owner_id| state.qualified_name_for_node(owner_id))
-                .map(|owner_name| format!("{owner_name}.{name}"))
-                .or_else(|| parent_class.map(|class_node| format!("{}.{}", class_node.name, name)))
-                .or_else(|| Some(name.clone()));
+            let qualified_name = match owner_qname {
+                Some(parent) => format!("{parent}.{name}"),
+                None => name.clone(),
+            };
             let function_node = state.push_symbol(
                 NodeKind::Function,
                 name,
-                qualified_name,
+                Some(qualified_name.clone()),
                 Some(span_from(node)),
                 function_signature(node, state.source),
                 Some(Visibility::Public),
@@ -1922,6 +1967,7 @@ fn visit_python(
                     state,
                     parent_class,
                     Some(function_node.id),
+                    Some(qualified_name.as_str()),
                     force_exported,
                     class_decorators,
                     depth + 1,
@@ -1952,6 +1998,7 @@ fn visit_python(
                     state,
                     parent_class,
                     owner,
+                    owner_qname,
                     force_exported,
                     class_decorators,
                     depth + 1,
@@ -1964,6 +2011,7 @@ fn visit_python(
                 state,
                 parent_class,
                 owner,
+                owner_qname,
                 force_exported,
                 class_decorators,
                 depth + 1,
@@ -2815,15 +2863,50 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
     None
 }
 
+/// Resolve a top-level Python import like `package_a.module_b` against
+/// repositories that live next to (or near) `repo_root` in a multi-repo
+/// monorepo layout.
+///
+/// Walks up to [`PYTHON_SIBLING_SEARCH_ANCESTORS`] ancestors of `repo_root`
+/// and inspects each ancestor's children for directories that look like
+/// Python projects (have a `pyproject.toml`/`setup.py`/`setup.cfg`).  The
+/// first match whose package layout (`src/<pkg>/...` or `<pkg>/...`) resolves
+/// the import wins.
+///
+/// The current repo itself is filtered out — see
+/// [`resolve_python_current_package_import`] for in-repo resolution.
 fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
     let (package_name, tail) = python_package_root_and_tail(source)?;
     let canonical_repo_root = fs::canonicalize(repo_root).ok();
 
-    for root in repo_root.ancestors().skip(1).take(6) {
-        let Ok(entries) = fs::read_dir(root) else {
-            continue;
+    for root in repo_root
+        .ancestors()
+        .skip(1)
+        .take(PYTHON_SIBLING_SEARCH_ANCESTORS)
+    {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    dir = %root.display(),
+                    error = %error,
+                    "failed to enumerate ancestor while resolving Python sibling import; skipping"
+                );
+                continue;
+            }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %root.display(),
+                        error = %error,
+                        "skipping unreadable entry while resolving Python sibling import"
+                    );
+                    continue;
+                }
+            };
             let package_dir = entry.path();
             let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, root) else {
                 continue;
@@ -2848,6 +2931,10 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
     None
 }
 
+/// Resolve an absolute Python import (`my_pkg.submodule`) against the current
+/// repo's package layout, supporting both `src/<pkg>/...` and flat
+/// `<pkg>/...` conventions.  Used after relative-import handling and before
+/// sibling-repo lookup.
 fn resolve_python_current_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
     let (package_name, tail) = python_package_root_and_tail(source)?;
     let package_dir = fs::canonicalize(repo_root).ok()?;
@@ -3468,6 +3555,15 @@ fn external_file_node_from_resolved_path(repo_root: &Path, resolved: &Path) -> O
     })
 }
 
+/// Resolve the (repo name, repo-relative path) of an externally-owned file.
+///
+/// Tier 1: configured `gather-step.config.yaml` lookup (the 5a5563a fix).
+/// Tier 2: walk ancestors looking for a project marker
+/// (`pyproject.toml`, `setup.py`, `setup.cfg`, `package.json`).  When the
+/// marker is `pyproject.toml`, prefer the declared `[project].name`; otherwise
+/// fall back to the directory basename.
+/// Tier 3: scan siblings of the *current* repo's parent for a directory that
+/// contains the resolved file.  Same name-resolution policy as tier 2.
 fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(String, PathBuf)> {
     let canonical_resolved = fs::canonicalize(resolved).ok()?;
     let canonical_repo_root = fs::canonicalize(repo_root).ok()?;
@@ -3488,7 +3584,7 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
             || ancestor.join("setup.cfg").is_file()
             || ancestor.join("package.json").is_file()
         {
-            let repo = ancestor.file_name()?.to_string_lossy().to_string();
+            let repo = repo_name_from_manifest_dir(ancestor)?;
             let relative = canonical_resolved
                 .strip_prefix(ancestor)
                 .ok()?
@@ -3498,10 +3594,29 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
     }
 
     let workspace_root = canonical_repo_root.parent()?;
-    let Ok(entries) = fs::read_dir(workspace_root) else {
-        return None;
+    let entries = match fs::read_dir(workspace_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                workspace_root = %workspace_root.display(),
+                error = %error,
+                "failed to enumerate workspace root while resolving external repo identity; cross-repo edge will be unresolved"
+            );
+            return None;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    workspace_root = %workspace_root.display(),
+                    error = %error,
+                    "skipping unreadable entry while resolving external repo identity"
+                );
+                continue;
+            }
+        };
         let package_dir = entry.path();
         let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, workspace_root)
         else {
@@ -3510,7 +3625,7 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
         if package_dir == canonical_repo_root || !canonical_resolved.starts_with(&package_dir) {
             continue;
         }
-        let repo = package_dir.file_name()?.to_string_lossy().to_string();
+        let repo = repo_name_from_manifest_dir(&package_dir)?;
         let relative = canonical_resolved
             .strip_prefix(&package_dir)
             .ok()?
@@ -3521,6 +3636,55 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
     None
 }
 
+/// Best-effort repo name for a directory that contains a recognized project
+/// manifest.  Prefers `pyproject.toml`'s `[project].name` so a Python repo
+/// whose package name differs from its directory basename produces stable
+/// cross-repo node IDs.  Falls back to the directory basename for non-Python
+/// manifests or when the TOML cannot be parsed.
+fn repo_name_from_manifest_dir(dir: &Path) -> Option<String> {
+    if let Some(name) = python_project_name_from_pyproject(&dir.join("pyproject.toml")) {
+        return Some(name);
+    }
+    Some(dir.file_name()?.to_string_lossy().into_owned())
+}
+
+fn python_project_name_from_pyproject(pyproject_path: &Path) -> Option<String> {
+    if !pyproject_path.is_file() {
+        return None;
+    }
+    let text = match fs::read_to_string(pyproject_path) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                pyproject = %pyproject_path.display(),
+                error = %error,
+                "failed to read pyproject.toml while deriving repo name; falling back to directory basename"
+            );
+            return None;
+        }
+    };
+    let value = match text.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                pyproject = %pyproject_path.display(),
+                error = %error,
+                "failed to parse pyproject.toml while deriving repo name; falling back to directory basename"
+            );
+            return None;
+        }
+    };
+    let name = value
+        .get("project")
+        .and_then(|project| project.get("name"))
+        .and_then(toml::Value::as_str)?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
 fn configured_external_repo_file_identity(
     repo_root: &Path,
     canonical_resolved: &Path,
@@ -3528,20 +3692,26 @@ fn configured_external_repo_file_identity(
     let canonical_repo_root = fs::canonicalize(repo_root).ok()?;
     let repos = configured_workspace_repo_identities(&canonical_repo_root)?;
     for repo in repos {
-        if repo.root == canonical_repo_root || !canonical_resolved.starts_with(&repo.root) {
+        if repo.root() == canonical_repo_root || !canonical_resolved.starts_with(repo.root()) {
             continue;
         }
         let relative = canonical_resolved
-            .strip_prefix(&repo.root)
+            .strip_prefix(repo.root())
             .ok()?
             .to_path_buf();
-        return Some((repo.name, relative));
+        return Some((repo.name().to_owned(), relative));
     }
     None
 }
 
 fn configured_workspace_repo_identities(repo_root: &Path) -> Option<Vec<WorkspaceRepoIdentity>> {
-    let key = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    // Only cache under a canonical key.  A non-canonical fallback key would
+    // miss on every subsequent call (the file-system view of `repo_root` is
+    // canonicalized by inner helpers), forcing the identity loader to re-run
+    // for every import in the file.
+    let Ok(key) = fs::canonicalize(repo_root) else {
+        return load_configured_workspace_repo_identities(repo_root);
+    };
     if let Some(hit) =
         WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| cache.get(&key).cloned())
     {
@@ -3558,24 +3728,76 @@ fn configured_workspace_repo_identities(repo_root: &Path) -> Option<Vec<Workspac
 fn load_configured_workspace_repo_identities(
     repo_root: &Path,
 ) -> Option<Vec<WorkspaceRepoIdentity>> {
-    let config_root = find_gather_step_config_root(repo_root, 12)?;
-    let canonical_config_root = fs::canonicalize(&config_root).ok()?;
-    let config =
-        GatherStepConfig::from_yaml_file(config_root.join("gather-step.config.yaml")).ok()?;
-    let mut repos = Vec::with_capacity(config.repos.len());
+    let config_root = find_gather_step_config_root(repo_root, GATHER_STEP_CONFIG_MAX_ASCEND)?;
+    let canonical_config_root = match fs::canonicalize(&config_root) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                config_root = %config_root.display(),
+                error = %error,
+                "failed to canonicalize gather-step config root; falling back to directory-basename heuristic"
+            );
+            return None;
+        }
+    };
+    let config_path = config_root.join("gather-step.config.yaml");
+    let config = match GatherStepConfig::from_yaml_file(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                config_path = %config_path.display(),
+                error = %error,
+                "failed to parse gather-step.config.yaml; falling back to directory-basename heuristic"
+            );
+            return None;
+        }
+    };
+    let total = config.repos.len();
+    let mut repos = Vec::with_capacity(total);
     for repo in config.repos {
-        let Ok(canonical_repo_root) = fs::canonicalize(config_root.join(&repo.path)) else {
-            continue;
+        let absolute = config_root.join(&repo.path);
+        let canonical_repo_root = match fs::canonicalize(&absolute) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    repo = %repo.name,
+                    repo_path = %absolute.display(),
+                    error = %error,
+                    "failed to canonicalize configured repo path; cross-repo edges from this repo will fall back to directory-basename heuristic"
+                );
+                continue;
+            }
         };
         if !canonical_repo_root.starts_with(&canonical_config_root) {
+            tracing::warn!(
+                repo = %repo.name,
+                repo_root = %canonical_repo_root.display(),
+                config_root = %canonical_config_root.display(),
+                "configured repo root escapes the gather-step config root; ignoring"
+            );
             continue;
         }
-        repos.push(WorkspaceRepoIdentity {
-            name: repo.name,
-            root: canonical_repo_root,
-        });
+        let Some(identity) = WorkspaceRepoIdentity::new(repo.name.clone(), canonical_repo_root)
+        else {
+            tracing::warn!(
+                repo = %repo.name,
+                "configured repo entry has empty name or non-absolute root after canonicalization; ignoring"
+            );
+            continue;
+        };
+        repos.push(identity);
     }
-    if repos.is_empty() { None } else { Some(repos) }
+    if repos.is_empty() {
+        if total > 0 {
+            tracing::warn!(
+                config_path = %config_path.display(),
+                "gather-step.config.yaml present but no repo entries resolved; falling back to directory-basename heuristic"
+            );
+        }
+        None
+    } else {
+        Some(repos)
+    }
 }
 
 fn find_gather_step_config_root(start_dir: &Path, max_depth: usize) -> Option<PathBuf> {
@@ -4123,7 +4345,10 @@ mod tests {
 
     use crate::{Language, tsconfig::PathAliases};
 
-    use super::{parse_file, parse_file_with_context, resolve_import_path};
+    use super::{
+        WorkspaceRepoIdentity, load_configured_workspace_repo_identities, parse_file,
+        parse_file_with_context, resolve_import_path,
+    };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -5918,5 +6143,59 @@ export class Controller {
         );
         // Content is still correct after cloning.
         assert!(cloned.contains("const x"));
+    }
+
+    /// Locks the contract that `load_configured_workspace_repo_identities`
+    /// returns the configured names for repos under the workspace, so the
+    /// 5a5563a fix (cross-repo nodes use the configured `name` field rather
+    /// than the directory basename) cannot regress silently.
+    #[test]
+    fn load_configured_workspace_repo_identities_returns_configured_names() {
+        let dir = TestDir::new("identities-valid");
+        let workspace = dir.path();
+        let repo_a = workspace.join("services/alpha");
+        let repo_b = workspace.join("services/beta");
+        fs::create_dir_all(&repo_a).expect("repo a created");
+        fs::create_dir_all(&repo_b).expect("repo b created");
+        fs::write(
+            workspace.join("gather-step.config.yaml"),
+            "repos:\n  - name: configured_alpha\n    path: services/alpha\n  - name: configured_beta\n    path: services/beta\n",
+        )
+        .expect("config written");
+
+        let identities = load_configured_workspace_repo_identities(&repo_a)
+            .expect("identities should resolve from configured workspace");
+        let names: Vec<&str> = identities.iter().map(WorkspaceRepoIdentity::name).collect();
+        assert!(
+            names.contains(&"configured_alpha") && names.contains(&"configured_beta"),
+            "expected configured names, got {names:?}"
+        );
+        let alpha = identities
+            .iter()
+            .find(|repo| repo.name() == "configured_alpha")
+            .expect("configured_alpha entry");
+        assert_eq!(alpha.root(), canonical(&repo_a));
+    }
+
+    /// Locks the diagnostic fallback path: a malformed `gather-step.config.yaml`
+    /// must return `None` so callers fall back to the directory-basename
+    /// heuristic instead of crashing or partially loading.
+    #[test]
+    fn load_configured_workspace_repo_identities_falls_back_on_malformed_yaml() {
+        let dir = TestDir::new("identities-malformed");
+        let workspace = dir.path();
+        let repo_a = workspace.join("services/alpha");
+        fs::create_dir_all(&repo_a).expect("repo a created");
+        fs::write(
+            workspace.join("gather-step.config.yaml"),
+            "repos:\n  - name: configured_alpha\n    path:\n      this is not valid yaml: [unclosed",
+        )
+        .expect("malformed config written");
+
+        let identities = load_configured_workspace_repo_identities(&repo_a);
+        assert!(
+            identities.is_none(),
+            "malformed config should fall back to None, got {identities:?}"
+        );
     }
 }
