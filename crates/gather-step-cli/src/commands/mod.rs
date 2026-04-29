@@ -9,6 +9,7 @@ pub mod index;
 pub mod init;
 pub mod no_args;
 pub mod pack;
+pub mod projection_impact;
 pub mod reindex;
 pub mod search;
 pub mod serve;
@@ -83,6 +84,7 @@ pub enum Command {
     Doctor(doctor::DoctorArgs),
     Generate(generate::GenerateCommand),
     Impact(impact::ImpactArgs),
+    ProjectionImpact(projection_impact::ProjectionImpactArgs),
     Pack(pack::PackArgs),
     Events(events::EventsArgs),
     Conventions(conventions::ConventionsArgs),
@@ -118,6 +120,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Doctor(args)) => doctor::run(&app, args),
         Some(Command::Generate(command)) => generate::run(&app, command),
         Some(Command::Impact(args)) => impact::run(&app, args),
+        Some(Command::ProjectionImpact(args)) => projection_impact::run(&app, args),
         Some(Command::Pack(args)) => pack::run(&app, &args),
         Some(Command::Events(args)) => events::run(&app, args),
         Some(Command::Conventions(args)) => conventions::run(&app, args),

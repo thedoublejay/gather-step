@@ -163,6 +163,7 @@ gather-step --workspace /path/to/workspace search createOrder
 gather-step --workspace /path/to/workspace trace crud --method POST --path /orders
 gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace impact CreateOrderInput
+gather-step --workspace /path/to/workspace projection-impact --target subtaskIds
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
 gather-step --workspace /path/to/workspace conventions
 gather-step --workspace /path/to/workspace generate claude-md
@@ -225,6 +226,7 @@ Reference:
 - [CLI reference](website/src/content/docs/reference/cli.md)
 - [Configuration reference](website/src/content/docs/reference/configuration.md)
 - [MCP tools reference](website/src/content/docs/reference/mcp-tools.md)
+- [Projection impact](docs/projection-impact.md)
 
 Concepts:
 - [Polyrepo graph](website/src/content/docs/concepts/polyrepo-graph.md)

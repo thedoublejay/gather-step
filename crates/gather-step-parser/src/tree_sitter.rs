@@ -389,6 +389,7 @@ fn parse_file_core(
             constant_strings: state.constant_strings,
             parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
         };
+        crate::projection::augment_projection_fields(&mut parsed);
         apply_workspace_semantic_edges(&mut parsed, repo_root);
         return Ok(parsed);
     }
@@ -566,6 +567,7 @@ fn parse_file_core(
         constant_strings: state.constant_strings,
         parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
+    crate::projection::augment_projection_fields(&mut parsed);
     apply_workspace_semantic_edges(&mut parsed, repo_root);
     Ok(parsed)
 }

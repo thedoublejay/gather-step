@@ -679,6 +679,7 @@ mod tests {
         assert!(tool_names.contains(&"get_conventions"));
         assert!(tool_names.contains(&"get_overview"));
         assert!(tool_names.contains(&"get_context_pack"));
+        assert!(tool_names.contains(&"projection_impact"));
         assert!(tool_names.contains(&"plan_change"));
         assert!(
             !tool_names.contains(&"debug_route"),

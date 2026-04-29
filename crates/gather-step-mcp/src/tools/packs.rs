@@ -10,6 +10,7 @@ use gather_step_analysis::proofs::{
 };
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
+use gather_step_analysis::{ProjectionImpactRequest, projection_impact};
 use gather_step_core::{EdgeKind, NodeId, NodeKind, PlanningProof, node_id};
 use gather_step_output::evidence::render_evidence_chain;
 use gather_step_storage::GraphStore;
@@ -1185,6 +1186,7 @@ fn assemble_context_pack_for_symbol(
             warnings,
         }),
     };
+    apply_projection_impact_summary(ctx, request, planning_repo_filter, &mut response);
     let budget = apply_response_budget(
         options.budget_tool,
         request.budget_bytes,
@@ -1208,6 +1210,54 @@ fn assemble_context_pack_for_symbol(
     refresh_context_pack_completeness(&mut response);
 
     Ok(AssembledPack { response })
+}
+
+fn apply_projection_impact_summary(
+    ctx: &McpContext,
+    request: &ContextPackRequest,
+    repo_filter: Option<&str>,
+    response: &mut ContextPackResponse,
+) {
+    let Ok(report) = projection_impact(
+        ctx.graph(),
+        ProjectionImpactRequest {
+            target: request.target.clone(),
+            repo: repo_filter.map(str::to_owned),
+            max_results: 10,
+        },
+    ) else {
+        return;
+    };
+    if !report.resolved || report.derivation_edges.is_empty() {
+        return;
+    }
+
+    let projected = report
+        .projected_fields
+        .iter()
+        .map(|field| field.field_path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sources = report
+        .source_fields
+        .iter()
+        .map(|field| field.field_path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    response.data.next_steps.push(format!(
+        "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
+    ));
+
+    for hint in report.risk_hints {
+        let gap = format!("projection_impact:{hint}");
+        if !response.data.unresolved_gaps.contains(&gap) {
+            response.data.unresolved_gaps.push(gap);
+        }
+    }
+    if let Some(meta) = &mut response.meta {
+        meta.warnings
+            .push("projection impact evidence is available for this target".to_owned());
+    }
 }
 
 fn pack_is_structurally_weak(response: &ContextPackResponse) -> bool {

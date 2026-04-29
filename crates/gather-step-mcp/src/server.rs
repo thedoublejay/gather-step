@@ -48,6 +48,10 @@ use crate::{
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
             review_pack_tool as run_review_pack,
         },
+        projection_impact::{
+            ProjectionImpactRequest, ProjectionImpactResponse,
+            projection_impact_tool as run_projection_impact,
+        },
         repo_intelligence::{
             ConventionResponse, DeadCodeRequest, DeadCodeResponse, OverviewResponse,
             RepoScopedRequest, WhoOwnsRequest, WhoOwnsResponse,
@@ -589,6 +593,25 @@ impl GatherStepMcpServer {
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("context_pack", &args, move || {
             run_context_pack(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "projection_impact",
+        description = "Return source/projected field chains, runtime surfaces, and planning risk hints for a data field.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn projection_impact_tool(
+        &self,
+        Parameters(request): Parameters<ProjectionImpactRequest>,
+    ) -> Result<Json<ProjectionImpactResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("projection_impact", &args, move || {
+            run_projection_impact(&ctx, request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })

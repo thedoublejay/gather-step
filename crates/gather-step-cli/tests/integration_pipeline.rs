@@ -14,6 +14,7 @@ use gather_step_mcp::{
         crud_trace::{CrudTraceRequest, crud_trace_tool},
         events::{TraceEventRequest, TraceRouteRequest, trace_event_tool, trace_route_tool},
         packs::{ContextPackRequest, context_pack_tool},
+        projection_impact::{ProjectionImpactRequest, projection_impact_tool},
     },
 };
 use gather_step_storage::{IndexingOptions, RepoIndexer};
@@ -523,6 +524,124 @@ fn integration_pipeline_runs_on_committed_fixture_workspace() {
     )
     .expect("cross_repo_deps should succeed");
     assert_eq!(dependencies.data.repo, "frontend_standard");
+}
+
+#[test]
+fn projection_impact_cli_and_mcp_report_field_chain() {
+    let temp = TempDir::new("projection-impact");
+    fs::write(
+        temp.path().join("gather-step.config.yaml"),
+        r"repos:
+  - name: backend_standard
+    path: workspace/backend_standard
+indexing:
+  workspace_concurrency: 1
+",
+    )
+    .expect("projection config should write");
+    fs::create_dir_all(
+        temp.path()
+            .join("workspace/backend_standard/src/migrations"),
+    )
+    .expect("projection workspace should exist");
+    fs::write(
+        temp.path().join("workspace/backend_standard/package.json"),
+        r#"{"name":"backend-standard","dependencies":{}}"#,
+    )
+    .expect("package fixture should write");
+    fs::write(
+        temp.path()
+            .join("workspace/backend_standard/src/task_projection.ts"),
+        r"
+type Task = {
+  subtasks: Array<{ id: string }>;
+  subtaskIds: string[];
+};
+
+export function projectTask(task: Task) {
+  return {
+    subtaskIds: task.subtasks?.map((subtask) => subtask.id) ?? [],
+  };
+}
+
+export async function findBySubtask(TaskModel: any, subtaskId: string) {
+  return TaskModel.find({ subtaskIds: subtaskId });
+}
+
+TaskSchema.index({ subtaskIds: 1 });
+",
+    )
+    .expect("projection fixture should write");
+    fs::write(
+        temp.path()
+            .join("workspace/backend_standard/src/migrations/backfill_subtask_ids.ts"),
+        r"
+export async function backfill(TaskModel: any) {
+  await TaskModel.updateMany({}, { $set: { subtaskIds: [] } });
+}
+",
+    )
+    .expect("backfill fixture should write");
+
+    run_ok_json(temp.path(), &["index"]);
+
+    let cli_report = run_ok_json(
+        temp.path(),
+        &[
+            "--repo",
+            "backend_standard",
+            "projection-impact",
+            "--target",
+            "subtaskIds",
+        ],
+    );
+    assert_eq!(cli_report["resolved"], true);
+    assert!(
+        cli_report["source_fields"]
+            .as_array()
+            .expect("source fields should be an array")
+            .iter()
+            .any(|field| field["field_path"] == "subtasks")
+    );
+    assert!(
+        cli_report["projected_fields"]
+            .as_array()
+            .expect("projected fields should be an array")
+            .iter()
+            .any(|field| field["field_path"] == "subtaskIds")
+    );
+    assert!(
+        cli_report["risk_hints"]
+            .as_array()
+            .expect("risk hints should be an array")
+            .iter()
+            .any(|hint| hint == "filter_contract_impacted")
+    );
+
+    let mcp_report = projection_impact_tool(
+        &mcp_context(temp.path()),
+        ProjectionImpactRequest {
+            target: "subtaskIds".to_owned(),
+            repo: Some("backend_standard".to_owned()),
+            limit: 20,
+        },
+    )
+    .expect("projection impact MCP tool should succeed");
+    assert!(mcp_report.data.resolved);
+    assert!(
+        mcp_report
+            .data
+            .projected_fields
+            .iter()
+            .any(|field| field.field_path == "subtaskIds")
+    );
+    assert!(
+        mcp_report
+            .data
+            .backfills
+            .iter()
+            .any(|item| item.file_path.contains("backfill_subtask_ids"))
+    );
 }
 
 #[test]

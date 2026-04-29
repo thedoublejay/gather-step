@@ -45,6 +45,7 @@ pub enum NodeKind {
     Comment = 22,
     Author = 23,
     Ticket = 24,
+    DataField = 25,
 }
 
 #[derive(
@@ -106,6 +107,12 @@ pub enum EdgeKind {
     PropagatesEvent = 84,
     DriftsFrom = 85,
     ContractOn = 86,
+    ReadsField = 90,
+    WritesField = 91,
+    DerivesFieldFrom = 92,
+    FiltersOnField = 93,
+    IndexesField = 94,
+    BackfillsField = 95,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -140,7 +147,8 @@ impl NodeKind {
             | Self::PayloadContract
             | Self::Repo
             | Self::Convention
-            | Self::Service => true,
+            | Self::Service
+            | Self::DataField => true,
             Self::Import
             | Self::Decorator
             | Self::Commit
@@ -179,6 +187,7 @@ impl NodeKind {
             Self::Comment,
             Self::Author,
             Self::Ticket,
+            Self::DataField,
         ]
     }
 }
@@ -259,6 +268,12 @@ impl EdgeKind {
             Self::PropagatesEvent,
             Self::DriftsFrom,
             Self::ContractOn,
+            Self::ReadsField,
+            Self::WritesField,
+            Self::DerivesFieldFrom,
+            Self::FiltersOnField,
+            Self::IndexesField,
+            Self::BackfillsField,
         ]
     }
 }
@@ -293,6 +308,7 @@ impl TryFrom<u8> for NodeKind {
             22 => Ok(Self::Comment),
             23 => Ok(Self::Author),
             24 => Ok(Self::Ticket),
+            25 => Ok(Self::DataField),
             _ => Err(DiscriminantError {
                 kind: "NodeKind",
                 value,
@@ -344,6 +360,12 @@ impl TryFrom<u8> for EdgeKind {
             84 => Ok(Self::PropagatesEvent),
             85 => Ok(Self::DriftsFrom),
             86 => Ok(Self::ContractOn),
+            90 => Ok(Self::ReadsField),
+            91 => Ok(Self::WritesField),
+            92 => Ok(Self::DerivesFieldFrom),
+            93 => Ok(Self::FiltersOnField),
+            94 => Ok(Self::IndexesField),
+            95 => Ok(Self::BackfillsField),
             _ => Err(DiscriminantError {
                 kind: "EdgeKind",
                 value,
@@ -517,6 +539,7 @@ mod tests {
     fn search_indexable_policy_excludes_structural_and_temporal_kinds() {
         assert!(NodeKind::Function.is_search_indexable());
         assert!(NodeKind::Event.is_search_indexable());
+        assert!(NodeKind::DataField.is_search_indexable());
         assert!(!NodeKind::Import.is_search_indexable());
         assert!(!NodeKind::Decorator.is_search_indexable());
         assert!(!NodeKind::PR.is_search_indexable());
@@ -525,7 +548,7 @@ mod tests {
 
     #[test]
     fn node_kind_invalid_u8_rejects() {
-        for value in [25_u8, 50, 100, 255] {
+        for value in [26_u8, 50, 100, 255] {
             assert!(NodeKind::try_from(value).is_err(), "{value} should reject");
         }
     }

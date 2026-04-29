@@ -15,6 +15,7 @@ pub mod evidence;
 pub mod impact;
 pub mod overview;
 pub mod pack_assembly;
+pub mod projection_impact;
 pub mod proofs;
 pub mod query;
 pub mod semantic_health;
@@ -52,6 +53,10 @@ pub use overview::{ModuleSummary, OverviewError, RepoOverview, build_overview};
 pub use pack_assembly::{
     CandidateKey, Pack, PackAssembler, PackItem, PackMode, QueryShape, SimplePackAssembler,
     classify_query_shape,
+};
+pub use projection_impact::{
+    ProjectionDerivation, ProjectionEvidence, ProjectionField, ProjectionImpactError,
+    ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
 };
 pub use proofs::{
     MAX_PROOFS_PER_REPO, ProofCaller, ProofEngineError, ProofEngineOptions, ProofEngineOutput,
