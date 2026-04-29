@@ -36,39 +36,48 @@ gather-step --version
 
 ## 2. Run Guided Setup
 
-Point Gather Step at the directory that contains your repositories. Let `init` write the config, build the first index, generate assistant-facing context files, and register Claude MCP settings:
+Run `gather-step init` from the workspace root: the directory that contains the repositories you want Gather Step to index.
 
-```bash
-gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
+```text
+workspace/
+|-- backend/
+|-- frontend/
+|-- shared/
+`-- shared_contracts/
 ```
 
-That writes `/path/to/workspace/gather-step.config.yaml`, indexes the workspace, generates `.claude/rules/`, `CLAUDE.gather.md`, and `AGENTS.gather.md`, and updates workspace-local Claude settings.
+```bash
+cd /path/to/workspace
+gather-step init
+```
+
+The guided defaults cover the common path: write `gather-step.config.yaml`, index the discovered repos, generate assistant-facing context files, register workspace-local Claude MCP settings, and leave watch mode off unless you opt in.
 
 Running `gather-step` with no subcommand also starts the guided flow in an interactive workspace without a config. In a configured workspace, no-args mode shows the status summary instead.
 
 ### Interactive wizard
 
-If you run `gather-step --workspace /path/to/workspace init` with no flags in an interactive terminal, the setup wizard asks four questions:
+Press Enter to accept the default shown by each prompt. In the common path, that means index now, generate AI context files, register local MCP settings, and skip foreground watch mode.
 
 ```text
-  gather-step workspace setup
+  Gather Step workspace setup
   Found 3 git repo(s) in /path/to/workspace
-    backend  -> repos/backend
-    frontend -> repos/frontend
-    shared   -> repos/shared
+    backend  -> backend
+    frontend -> frontend
+    shared   -> shared
 
 Index these repos now? [Y/n]
 Generate AI context files (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md)? [Y/n]
-Register as an MCP server? [local/global/skip]
+Register as an MCP server? [local/global/skip] (default: local)
 Watch for changes and re-index automatically? [y/N]
 ```
 
-| Wizard prompt | Equivalent flag |
-|---|---|
-| Index these repos now? | `--index` |
-| Generate AI context files? | `--generate-ai-files` |
-| Register as an MCP server? | `--setup-mcp local` or `--setup-mcp global` |
-| Watch for changes automatically? | `--watch` |
+| Wizard prompt | Default | Equivalent flag |
+|---|---|---|
+| Index these repos now? | Yes | `--index` |
+| Generate AI context files? | Yes | `--generate-ai-files` |
+| Register as an MCP server? | Local | `--setup-mcp local` |
+| Watch for changes automatically? | No | `--watch` |
 
 The watcher runs in the foreground only if you opt in. Use `Ctrl+C` to stop it; indexed state is preserved.
 
@@ -77,7 +86,8 @@ The watcher runs in the foreground only if you opt in. Use `Ctrl+C` to stop it; 
 Pass flags explicitly to skip prompts in scripts or CI:
 
 ```bash
-gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
+cd /path/to/workspace
+gather-step init --index --generate-ai-files --setup-mcp local
 ```
 
 When an index exists, `--generate-ai-files` writes Claude Code project rules under `.claude/rules/` and keeps `CLAUDE.gather.md` / `AGENTS.gather.md` as root-level summaries. If no index exists yet, it writes the summaries and prints a warning explaining that rules generation requires `gather-step index`.

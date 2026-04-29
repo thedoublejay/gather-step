@@ -8,7 +8,8 @@ fn claude_summary_lists_repos_and_includes_mcp_pointer() {
 
     assert!(body.contains("# gather-step workspace context"));
     assert!(body.contains("## About Gather Step"));
-    assert!(body.contains("## How to Acknowledge Gather Step"));
+    assert!(!body.contains("## How to Acknowledge Gather Step"));
+    assert!(!body.contains("Planning guided by Gather Step"));
     assert!(body.contains("## Available MCP Tools"));
     for tool in [
         "list_repos",

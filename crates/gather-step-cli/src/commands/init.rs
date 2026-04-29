@@ -105,7 +105,7 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
     }
     if args.watch && !args.no_watch {
         output.line(format!(
-            "\n  {} gather-step is ready.",
+            "\n  {} Gather Step is ready.",
             style("✓ Setup complete.").green().bold()
         ));
         watch::run(app, watch::WatchArgs::default()).await?;
@@ -120,7 +120,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     let output = app.output();
     output.line(format!(
         "\n  {}",
-        style("gather-step workspace setup").bold()
+        style("Gather Step workspace setup").bold()
     ));
     output.line(format!(
         "  Found {} git repo(s) in {}",
@@ -270,7 +270,10 @@ fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
 
 fn prompt_mcp_scope() -> Result<Option<setup_mcp::McpScope>> {
     let mut stdout = io::stdout().lock();
-    write!(stdout, "Register as an MCP server? [local/global/skip] ")?;
+    write!(
+        stdout,
+        "Register as an MCP server? [local/global/skip] (default: local) "
+    )?;
     stdout.flush()?;
 
     let mut answer = String::new();

@@ -1,6 +1,6 @@
 ---
-title: "gather-step CLI reference"
-description: "Complete command and flag reference for the gather-step CLI. Covers commands, global flags, output modes, and exit codes."
+title: "Gather Step CLI Reference"
+description: "Complete command and flag reference for the Gather Step CLI. Covers commands, global flags, output modes, and exit codes."
 ---
 
 The `gather-step` binary is the primary interface for managing workspace indexes and running the local MCP server. Every command reads its defaults from `gather-step.config.yaml` and the workspace-local state directory at `.gather-step/`.
@@ -68,11 +68,14 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 **Example**
 
 ```bash
-gather-step --workspace /path/to/workspace init
-gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
+cd /path/to/workspace
+gather-step init
+
+# non-interactive equivalent
+gather-step init --index --generate-ai-files --setup-mcp local --no-watch
 ```
 
-Interactive `init` asks whether to index, generate AI context, register MCP, and start watch mode. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
+Interactive `init` asks whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
 
 **Output shape (`--json`)** — emits one line:
 
