@@ -5,6 +5,24 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## v2.1.0 (Draft)
+
+This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph for the PR #3 release branch.
+
+### Highlights
+
+- Made `gather-step init` the primary setup path in docs and landing copy, with a workspace directory diagram and explicit prompt defaults.
+- Updated init output casing to "Gather Step" and made the local MCP default visible in the interactive prompt.
+- Kept generated Claude workspace context factual by removing acknowledgement/sign-off instructions while preserving the MCP tool reference table.
+- Updated the website workflow to Node 24 and refreshed GitHub Actions used by CI and website builds.
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.1.0`.
+- Refreshed Cargo dependencies with `cargo update`, including moving `gix` from the yanked `0.82.0` line to `0.83.0`.
+
+### Verification Coverage
+
+- Website build and Cloudflare Pages checks.
+- Rust CI summary: format, clippy, cargo-deny, cargo-shear, macOS tests, MVCC stress, and MSRV check.
+
 ## v2.0.0 (Draft)
 
 CLI onboarding, local MCP setup, release automation, and documentation refresh.

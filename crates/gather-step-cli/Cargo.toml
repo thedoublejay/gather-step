@@ -23,11 +23,11 @@ clap.workspace = true
 comfy-table.workspace = true
 console.workspace = true
 crossbeam-channel.workspace = true
-gather-step-analysis = { path = "../gather-step-analysis", version = "2.0.0" }
+gather-step-analysis = { path = "../gather-step-analysis", version = "2.1.0" }
 gather-step-core.workspace = true
-gather-step-git = { path = "../gather-step-git", version = "2.0.0" }
-gather-step-mcp = { path = "../gather-step-mcp", version = "2.0.0" }
-gather-step-output = { path = "../gather-step-output", version = "2.0.0" }
+gather-step-git = { path = "../gather-step-git", version = "2.1.0" }
+gather-step-mcp = { path = "../gather-step-mcp", version = "2.1.0" }
+gather-step-output = { path = "../gather-step-output", version = "2.1.0" }
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
 indicatif.workspace = true
