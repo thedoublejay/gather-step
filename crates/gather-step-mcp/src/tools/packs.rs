@@ -1277,6 +1277,7 @@ fn projection_impact_targets(
         .items
         .iter()
         .take(10)
+        .filter(|item| item.category == "target")
         .filter(|item| repo_filter.is_none_or(|repo| item.repo == repo))
         .map(|item| (item.repo.as_str(), item.file_path.as_str()))
         .collect::<BTreeSet<_>>();

@@ -678,9 +678,10 @@ pub fn classify_language(path: impl AsRef<Path>) -> Option<Language> {
     } else if ["js", "jsx", "mjs", "cjs"]
         .iter()
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
-        || ["json", "yaml", "yml"]
+        || (["json", "yaml", "yml"]
             .iter()
             .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            && is_static_mapping_path(path.as_ref()))
     {
         Some(Language::JavaScript)
     } else if ["py", "pyi"]
@@ -697,6 +698,22 @@ pub fn classify_language(path: impl AsRef<Path>) -> Option<Language> {
     } else {
         None
     }
+}
+
+fn is_static_mapping_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    ["mapping", "index", "search", "projection"]
+        .iter()
+        .any(|token| contains_ascii_case(file_name, token))
+}
+
+fn contains_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn is_binary_path(path: &Path) -> bool {
@@ -1009,8 +1026,16 @@ mod tests {
         fs::write(temp_dir.path().join("b.mts"), "export const mts = 1;\n").expect("mts");
         fs::write(temp_dir.path().join("c.cts"), "export const cts = 1;\n").expect("cts");
         fs::write(temp_dir.path().join("d.js"), "export const js = 1;\n").expect("js");
-        fs::write(temp_dir.path().join("e.json"), r#"{"name":"fixture"}"#).expect("json");
-        fs::write(temp_dir.path().join("f.yaml"), "name: fixture\n").expect("yaml");
+        fs::write(
+            temp_dir.path().join("e.search-index.json"),
+            r#"{"name":"fixture"}"#,
+        )
+        .expect("json");
+        fs::write(
+            temp_dir.path().join("f.search-index.yaml"),
+            "name: fixture\n",
+        )
+        .expect("yaml");
         fs::write(temp_dir.path().join("g.py"), "x = 1\n").expect("py");
         fs::write(temp_dir.path().join("h.pyi"), "x: int\n").expect("pyi");
 
@@ -1029,8 +1054,8 @@ mod tests {
                 (PathBuf::from("b.mts"), Language::TypeScript),
                 (PathBuf::from("c.cts"), Language::TypeScript),
                 (PathBuf::from("d.js"), Language::JavaScript),
-                (PathBuf::from("e.json"), Language::JavaScript),
-                (PathBuf::from("f.yaml"), Language::JavaScript),
+                (PathBuf::from("e.search-index.json"), Language::JavaScript),
+                (PathBuf::from("f.search-index.yaml"), Language::JavaScript),
                 (PathBuf::from("g.py"), Language::Python),
                 (PathBuf::from("h.pyi"), Language::Python),
             ]
@@ -1220,6 +1245,8 @@ mod tests {
             classify_language("src/search-index.yml"),
             Some(Language::JavaScript)
         );
+        assert_eq!(classify_language("package.json"), None);
+        assert_eq!(classify_language("tsconfig.json"), None);
         assert_eq!(classify_language("src/main.py"), Some(Language::Python));
         assert_eq!(classify_language("src/main.pyi"), Some(Language::Python));
         assert_eq!(classify_language("src/main.rs"), Some(Language::Rust));
