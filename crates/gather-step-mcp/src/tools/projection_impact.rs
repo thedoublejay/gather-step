@@ -23,7 +23,7 @@ pub struct ProjectionImpactResponse {
 pub struct ProjectionImpactData {
     pub target: String,
     pub resolved: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ambiguity: Option<String>,
     pub candidates: Vec<ProjectionFieldItem>,
     pub source_fields: Vec<ProjectionFieldItem>,
@@ -43,7 +43,7 @@ pub struct ProjectionImpactData {
 pub struct ProjectionFieldItem {
     pub repo: String,
     pub field_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub qualified_name: Option<String>,
 }
 
@@ -59,7 +59,7 @@ pub struct ProjectionEvidenceItem {
     pub file_path: String,
     pub field_path: String,
     pub edge_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub confidence: Option<u16>,
 }
 
@@ -136,5 +136,155 @@ impl From<gather_step_analysis::ProjectionEvidence> for ProjectionEvidenceItem {
             edge_kind: item.edge_kind.to_string(),
             confidence: item.confidence,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        ProjectionDerivationItem, ProjectionEvidenceItem, ProjectionFieldItem,
+        ProjectionImpactData, ProjectionImpactResponse,
+    };
+
+    fn empty_data(target: &str) -> ProjectionImpactData {
+        ProjectionImpactData {
+            target: target.to_owned(),
+            resolved: false,
+            ambiguity: None,
+            candidates: Vec::new(),
+            source_fields: Vec::new(),
+            projected_fields: Vec::new(),
+            derivation_edges: Vec::new(),
+            readers: Vec::new(),
+            writers: Vec::new(),
+            filters: Vec::new(),
+            indexes: Vec::new(),
+            backfills: Vec::new(),
+            risk_hints: Vec::new(),
+            missing_evidence: Vec::new(),
+            confidence: "low".to_owned(),
+        }
+    }
+
+    fn field(repo: &str, field_path: &str, qualified_name: Option<&str>) -> ProjectionFieldItem {
+        ProjectionFieldItem {
+            repo: repo.to_owned(),
+            field_path: field_path.to_owned(),
+            qualified_name: qualified_name.map(str::to_owned),
+        }
+    }
+
+    fn evidence(
+        file_path: &str,
+        field_path: &str,
+        edge_kind: &str,
+        confidence: Option<u16>,
+    ) -> ProjectionEvidenceItem {
+        ProjectionEvidenceItem {
+            repo: "svc".to_owned(),
+            file_path: file_path.to_owned(),
+            field_path: field_path.to_owned(),
+            edge_kind: edge_kind.to_owned(),
+            confidence,
+        }
+    }
+
+    #[test]
+    fn empty_response_serializes_nulls_and_empty_arrays() {
+        let response = ProjectionImpactResponse {
+            data: empty_data("missingField"),
+        };
+
+        let value = serde_json::to_value(&response).expect("response should serialize");
+        assert_eq!(value["data"]["ambiguity"], json!(null));
+        for key in [
+            "candidates",
+            "source_fields",
+            "projected_fields",
+            "derivation_edges",
+            "readers",
+            "writers",
+            "filters",
+            "indexes",
+            "backfills",
+            "risk_hints",
+            "missing_evidence",
+        ] {
+            assert_eq!(
+                value["data"][key],
+                json!([]),
+                "field `{key}` should serialize as an empty array"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_response_serializes_candidate_null_qualified_name() {
+        let mut data = empty_data("status");
+        data.resolved = true;
+        data.ambiguity = Some("multiple_field_candidates".to_owned());
+        data.candidates = vec![
+            field("svc", "status", None),
+            field(
+                "svc",
+                "status",
+                Some("data-field::svc::src/account.ts::status"),
+            ),
+        ];
+        let response = ProjectionImpactResponse { data };
+
+        let value = serde_json::to_value(&response).expect("response should serialize");
+        assert_eq!(
+            value["data"]["ambiguity"],
+            json!("multiple_field_candidates")
+        );
+        assert_eq!(
+            value["data"]["candidates"][0]["qualified_name"],
+            json!(null)
+        );
+        assert_eq!(
+            value["data"]["candidates"][1]["qualified_name"],
+            json!("data-field::svc::src/account.ts::status")
+        );
+    }
+
+    #[test]
+    fn successful_response_serializes_optional_evidence_confidence() {
+        let source = field(
+            "svc",
+            "lineItems",
+            Some("data-field::svc::src/projection.ts::lineItems"),
+        );
+        let projected = field(
+            "svc",
+            "lineItemTotal",
+            Some("data-field::svc::src/projection.ts::lineItemTotal"),
+        );
+        let mut data = empty_data("lineItemTotal");
+        data.resolved = true;
+        data.confidence = "high".to_owned();
+        data.source_fields = vec![source.clone()];
+        data.projected_fields = vec![projected.clone()];
+        data.derivation_edges = vec![ProjectionDerivationItem { source, projected }];
+        data.indexes = vec![evidence(
+            "src/projection.ts",
+            "lineItemTotal",
+            "IndexesField",
+            Some(900),
+        )];
+        data.backfills = vec![evidence(
+            "src/projection.ts",
+            "lineItemTotal",
+            "BackfillsField",
+            None,
+        )];
+        let response = ProjectionImpactResponse { data };
+
+        let value = serde_json::to_value(&response).expect("response should serialize");
+        assert_eq!(value["data"]["ambiguity"], json!(null));
+        assert_eq!(value["data"]["indexes"][0]["confidence"], json!(900));
+        assert_eq!(value["data"]["backfills"][0]["confidence"], json!(null));
     }
 }
