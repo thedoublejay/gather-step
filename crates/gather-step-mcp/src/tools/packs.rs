@@ -1186,7 +1186,9 @@ fn assemble_context_pack_for_symbol(
             warnings,
         }),
     };
-    apply_projection_impact_summary(ctx, request, planning_repo_filter, &mut response);
+    if matches!(mode, PackMode::Planning | PackMode::ChangeImpact) {
+        apply_projection_impact_summary(ctx, request, planning_repo_filter, &mut response);
+    }
     let budget = apply_response_budget(
         options.budget_tool,
         request.budget_bytes,
