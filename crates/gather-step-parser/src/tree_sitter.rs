@@ -652,7 +652,7 @@ struct WorkspaceRepoIdentity {
 }
 
 impl WorkspaceRepoIdentity {
-    fn new(name: String, root: PathBuf) -> Option<Self> {
+    fn new(name: &str, root: PathBuf) -> Option<Self> {
         let name = name.trim();
         if name.is_empty() || !root.is_absolute() {
             return None;
@@ -3876,8 +3876,7 @@ fn load_configured_workspace_repo_identities(
             );
             continue;
         }
-        let Some(identity) = WorkspaceRepoIdentity::new(repo.name.clone(), canonical_repo_root)
-        else {
+        let Some(identity) = WorkspaceRepoIdentity::new(&repo.name, canonical_repo_root) else {
             tracing::warn!(
                 repo = %repo.name,
                 "configured repo entry has empty name or non-absolute root after canonicalization; ignoring"
@@ -6455,7 +6454,7 @@ export class Controller {
         let dir = TestDir::new("identity-whitespace-name");
         let root = canonical(dir.path());
 
-        assert!(WorkspaceRepoIdentity::new("   ".to_owned(), root).is_none());
+        assert!(WorkspaceRepoIdentity::new("   ", root).is_none());
     }
 
     #[test]

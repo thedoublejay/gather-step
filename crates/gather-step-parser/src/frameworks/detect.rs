@@ -402,9 +402,8 @@ fn dependency_array_contains(dependencies: &[toml::Value], packages: &[&str]) ->
 
 fn requirements_contains_dependency(repo_root: &Path, packages: &[&str]) -> bool {
     let requirements_path = repo_root.join("requirements.txt");
-    let metadata = match fs::symlink_metadata(&requirements_path) {
-        Ok(metadata) => metadata,
-        Err(_) => return false,
+    let Ok(metadata) = fs::symlink_metadata(&requirements_path) else {
+        return false;
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return false;
