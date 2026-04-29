@@ -58,6 +58,33 @@ fn summarize_import(binding: &ImportBinding) -> ImportSummary {
 }
 
 #[test]
+fn python_src_layout_absolute_imports_resolve_current_package() {
+    let root = fixture_root().join("src_layout");
+    let file = FileEntry {
+        path: PathBuf::from("src/transform_service/pipeline.py"),
+        language: Language::Python,
+        size_bytes: 0,
+        content_hash: [0; 32],
+        source_bytes: None,
+    };
+    let parsed = parse_file("python-src-layout", &root, &file).expect("fixture should parse");
+    let binding = parsed
+        .import_bindings
+        .iter()
+        .find(|binding| {
+            binding.source == "transform_service.rules" && binding.local_name == "normalize"
+        })
+        .expect("absolute current-package import should be captured");
+    let resolved = binding
+        .resolved_path
+        .as_ref()
+        .and_then(|path| path.strip_prefix(&root).ok())
+        .map(|path| path.to_string_lossy().replace('\\', "/"));
+
+    assert_eq!(resolved.as_deref(), Some("src/transform_service/rules.py"));
+}
+
+#[test]
 fn python_import_extraction_is_ast_backed_and_deterministic() {
     let first = parse_python_fixture("package/app/imports.py");
     let second = parse_python_fixture("package/app/imports.py");

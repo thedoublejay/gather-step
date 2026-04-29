@@ -168,3 +168,87 @@ fn python_planning_workspace_fixture_indexes_from_config() {
             .any(|edge| { edge.kind == EdgeKind::UsesTypeFrom && edge.target == shared_file.id })
     );
 }
+
+#[test]
+fn python_external_import_edges_use_configured_repo_names() {
+    let workspace_root = tempfile::tempdir().expect("workspace tempdir should create");
+    let storage_root = tempfile::tempdir().expect("storage tempdir should create");
+
+    write_fixture(
+        workspace_root.path(),
+        "gather-step.config.yaml",
+        r"
+repos:
+  - name: app_service
+    path: workspace/app_repo
+  - name: configured_shared_models
+    path: workspace/shared_models_repo
+indexing:
+  workspace_concurrency: 1
+",
+    );
+    write_fixture(
+        workspace_root.path(),
+        "workspace/app_repo/pyproject.toml",
+        r#"[project]
+name = "app-service"
+"#,
+    );
+    write_fixture(
+        workspace_root.path(),
+        "workspace/app_repo/src/app_service/app.py",
+        r"
+from shared_models.records import ParsedDocument
+
+
+def ingest(raw):
+    return ParsedDocument(raw)
+",
+    );
+    write_fixture(
+        workspace_root.path(),
+        "workspace/shared_models_repo/pyproject.toml",
+        r#"[project]
+name = "shared-models"
+"#,
+    );
+    write_fixture(
+        workspace_root.path(),
+        "workspace/shared_models_repo/src/shared_models/records.py",
+        r"
+class ParsedDocument:
+    def __init__(self, raw):
+        self.raw = raw
+",
+    );
+
+    let config =
+        GatherStepConfig::from_yaml_file(workspace_root.path().join("gather-step.config.yaml"))
+            .expect("fixture config should parse");
+    let indexer =
+        RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+    for repo in &config.repos {
+        indexer
+            .index_repo(&repo.name, workspace_root.path().join(&repo.path), None)
+            .unwrap_or_else(|error| panic!("{} should index: {error}", repo.name));
+    }
+
+    let graph = indexer.storage().graph();
+    let app_nodes = graph
+        .nodes_by_file("app_service", "src/app_service/app.py")
+        .expect("app nodes should load");
+    let shared_nodes = graph
+        .nodes_by_file("configured_shared_models", "src/shared_models/records.py")
+        .expect("shared nodes should load by configured repo name");
+    let app_file = find_file_node(&app_nodes, "src/app_service/app.py");
+    let shared_file = find_file_node(&shared_nodes, "src/shared_models/records.py");
+    let app_outgoing = graph
+        .get_outgoing(app_file.id)
+        .expect("app outgoing edges should load");
+
+    assert!(
+        app_outgoing
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::Imports && edge.target == shared_file.id })
+    );
+}

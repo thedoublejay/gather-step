@@ -10,8 +10,8 @@ use std::{
 use camino::Utf8PathBuf;
 
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, Visibility, node_id,
-    ref_node_id, shared_package_root, shared_symbol_qn_unversioned, virtual_node,
+    EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind, SourceSpan, Visibility,
+    node_id, ref_node_id, shared_package_root, shared_symbol_qn_unversioned, virtual_node,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -625,6 +625,13 @@ fn parse_tree_with_timeout(
 /// long-running `watch` / `serve` daemons.
 const PACKAGE_IMPORT_CACHE_CAPACITY: usize = 1024;
 const IMPORT_PATH_EXISTS_CACHE_CAPACITY: usize = 4_096;
+const WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY: usize = 64;
+
+#[derive(Clone, Debug)]
+struct WorkspaceRepoIdentity {
+    name: String,
+    root: PathBuf,
+}
 
 thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
@@ -655,6 +662,11 @@ thread_local! {
         RefCell::new(lru::LruCache::new(
             NonZeroUsize::new(PACKAGE_IMPORT_CACHE_CAPACITY)
                 .expect("PACKAGE_IMPORT_CACHE_CAPACITY is non-zero"),
+        ));
+    static WORKSPACE_REPO_IDENTITY_CACHE: RefCell<lru::LruCache<PathBuf, Option<Vec<WorkspaceRepoIdentity>>>> =
+        RefCell::new(lru::LruCache::new(
+            NonZeroUsize::new(WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY)
+                .expect("WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY is non-zero"),
         ));
 }
 
@@ -2619,6 +2631,10 @@ fn resolve_import_path(
         // loaded from tsconfig cover `@/`.
         ImportBase::Relative(PathBuf::from("src").join(alias))
     } else if language == Language::Python
+        && let Some(absolute) = resolve_python_current_package_import(repo_root, source)
+    {
+        return Some(absolute);
+    } else if language == Language::Python
         && let Some(absolute) = resolve_python_sibling_package_import(repo_root, source)
     {
         return Some(absolute);
@@ -2818,10 +2834,7 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
             {
                 continue;
             }
-            if !package_dir.join("pyproject.toml").is_file()
-                && !package_dir.join("setup.py").is_file()
-                && !package_dir.join("setup.cfg").is_file()
-            {
+            if !has_python_project_marker(&package_dir) {
                 continue;
             }
             if let Some(resolved) =
@@ -2833,6 +2846,21 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
     }
 
     None
+}
+
+fn resolve_python_current_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+    let (package_name, tail) = python_package_root_and_tail(source)?;
+    let package_dir = fs::canonicalize(repo_root).ok()?;
+    if !has_python_project_marker(&package_dir) {
+        return None;
+    }
+    resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
+}
+
+fn has_python_project_marker(package_dir: &Path) -> bool {
+    package_dir.join("pyproject.toml").is_file()
+        || package_dir.join("setup.py").is_file()
+        || package_dir.join("setup.cfg").is_file()
 }
 
 fn python_package_root_and_tail(source: &str) -> Option<(&str, Option<PathBuf>)> {
@@ -3447,6 +3475,10 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
         return None;
     }
 
+    if let Some(identity) = configured_external_repo_file_identity(repo_root, &canonical_resolved) {
+        return Some(identity);
+    }
+
     for ancestor in canonical_resolved.ancestors().skip(1) {
         if ancestor == canonical_repo_root {
             return None;
@@ -3486,6 +3518,77 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
         return Some((repo, relative));
     }
 
+    None
+}
+
+fn configured_external_repo_file_identity(
+    repo_root: &Path,
+    canonical_resolved: &Path,
+) -> Option<(String, PathBuf)> {
+    let canonical_repo_root = fs::canonicalize(repo_root).ok()?;
+    let repos = configured_workspace_repo_identities(&canonical_repo_root)?;
+    for repo in repos {
+        if repo.root == canonical_repo_root || !canonical_resolved.starts_with(&repo.root) {
+            continue;
+        }
+        let relative = canonical_resolved
+            .strip_prefix(&repo.root)
+            .ok()?
+            .to_path_buf();
+        return Some((repo.name, relative));
+    }
+    None
+}
+
+fn configured_workspace_repo_identities(repo_root: &Path) -> Option<Vec<WorkspaceRepoIdentity>> {
+    let key = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    if let Some(hit) =
+        WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| cache.get(&key).cloned())
+    {
+        return hit;
+    }
+
+    let identities = load_configured_workspace_repo_identities(repo_root);
+    WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| {
+        cache.put(key, identities.clone());
+    });
+    identities
+}
+
+fn load_configured_workspace_repo_identities(
+    repo_root: &Path,
+) -> Option<Vec<WorkspaceRepoIdentity>> {
+    let config_root = find_gather_step_config_root(repo_root, 12)?;
+    let canonical_config_root = fs::canonicalize(&config_root).ok()?;
+    let config =
+        GatherStepConfig::from_yaml_file(config_root.join("gather-step.config.yaml")).ok()?;
+    let mut repos = Vec::with_capacity(config.repos.len());
+    for repo in config.repos {
+        let Ok(canonical_repo_root) = fs::canonicalize(config_root.join(&repo.path)) else {
+            continue;
+        };
+        if !canonical_repo_root.starts_with(&canonical_config_root) {
+            continue;
+        }
+        repos.push(WorkspaceRepoIdentity {
+            name: repo.name,
+            root: canonical_repo_root,
+        });
+    }
+    if repos.is_empty() { None } else { Some(repos) }
+}
+
+fn find_gather_step_config_root(start_dir: &Path, max_depth: usize) -> Option<PathBuf> {
+    let mut current = start_dir;
+    for _ in 0..=max_depth {
+        if current.join("gather-step.config.yaml").is_file() {
+            return Some(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
     None
 }
 
