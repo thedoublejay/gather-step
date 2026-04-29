@@ -525,10 +525,21 @@ impl<'a> SymbolIndex<'a> {
             source_bytes: None,
         };
         let parsed =
-            parse_file_with_context("", self.repo_root, &file, &[], &self.path_aliases).ok();
-        self.parsed_file_cache.insert(cache_key, parsed.clone());
-        let _ = source_file;
-        parsed
+            match parse_file_with_context("", self.repo_root, &file, &[], &self.path_aliases) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    tracing::warn!(
+                        source_file = %source_file.display(),
+                        resolved_path = %resolved_path.display(),
+                        error = %error,
+                        "failed to parse re-export target; result will not be cached"
+                    );
+                    return None;
+                }
+            };
+        self.parsed_file_cache
+            .insert(cache_key, Some(parsed.clone()));
+        Some(parsed)
     }
 
     fn resolve_call(
@@ -931,8 +942,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, fuzzy_similarity,
-        resolve_calls, resolve_calls_with_unresolved,
+        CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, SymbolIndex,
+        fuzzy_similarity, resolve_calls, resolve_calls_with_unresolved,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1211,6 +1222,39 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].edge.target, target.id);
         assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
+    }
+
+    #[test]
+    fn parsed_file_cache_does_not_store_transient_parse_failures() {
+        let temp = TempDir::new("parsed-file-cache-transient");
+        let root = temp.path().to_path_buf();
+        let owner = function_node("app.py", "build_model");
+        let input = ResolutionInput {
+            file_node: owner.id,
+            file_path: root.join("app.py"),
+            import_bindings: Vec::new(),
+            call_sites: Vec::new(),
+        };
+        let index = SymbolIndex::new(&root, std::slice::from_ref(&owner), &[&input]);
+        let resolved_path = root.join("shared/models.py");
+
+        assert!(
+            index
+                .load_parsed_file(&root.join("app.py"), &resolved_path)
+                .is_none()
+        );
+
+        temp.write("shared/models.py", "class StubbedModel:\n    pass\n");
+        let parsed = index
+            .load_parsed_file(&root.join("app.py"), &resolved_path)
+            .expect("second parse should retry after initial failure");
+
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.node.name == "StubbedModel")
+        );
     }
 
     #[test]

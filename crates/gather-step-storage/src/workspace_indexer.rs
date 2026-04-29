@@ -114,6 +114,7 @@ fn framework_label(framework: Framework) -> String {
         Framework::Redux => "redux",
         Framework::Zustand => "zustand",
         Framework::LaunchDarkly => "launchdarkly",
+        Framework::FastApi => "fastapi",
         Framework::FrontendHooks => "frontend_hooks",
     }
     .to_owned()

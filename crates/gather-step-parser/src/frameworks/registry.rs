@@ -75,6 +75,8 @@ pub enum PackId {
     /// `LaunchDarkly` feature-flag extraction (shares augmentation with
     /// [`PackId::Azure`]).
     LaunchDarkly,
+    /// Detection-only `FastAPI` Python API pack.
+    Fastapi,
     /// Shared-library / shared-lib contract detection.  This pack is always
     /// active for TypeScript/JavaScript files; it has no detection predicate.
     SharedLib,
@@ -105,6 +107,7 @@ pub(crate) enum AugGroup {
     FrontendRouter,
     Storybook,
     Azure,
+    Fastapi,
     SharedLib,
     GatewayProxy,
     FrontendHooks,
@@ -129,6 +132,7 @@ impl PackId {
             }
             Self::Storybook => AugGroup::Storybook,
             Self::Azure | Self::LaunchDarkly => AugGroup::Azure,
+            Self::Fastapi => AugGroup::Fastapi,
             Self::SharedLib => AugGroup::SharedLib,
             Self::GatewayProxy => AugGroup::GatewayProxy,
             Self::FrontendHooks => AugGroup::FrontendHooks,
@@ -231,6 +235,10 @@ impl PackRegistry {
                 PackEntry {
                     id: PackId::LaunchDarkly,
                     detect: Some(detect::is_launchdarkly),
+                },
+                PackEntry {
+                    id: PackId::Fastapi,
+                    detect: Some(detect::is_fastapi),
                 },
                 // SharedLib has no detection predicate — it is always active.
                 PackEntry {
@@ -365,6 +373,7 @@ impl PackRegistry {
                     edges: aug.edges,
                 }
             }
+            AugGroup::Fastapi => AugmentationOutput::default(),
             AugGroup::SharedLib => {
                 let aug = azure::augment_shared_lib(parsed);
                 AugmentationOutput {
@@ -565,6 +574,18 @@ mod tests {
         assert!(active.contains(&PackId::Prisma));
         assert!(active.contains(&PackId::Drizzle));
         assert!(active.contains(&PackId::SharedLib));
+    }
+
+    #[test]
+    fn builtin_registry_detects_fastapi_without_augmenting_python_files() {
+        let dir = TempDir::new("detect-fastapi");
+        dir.write(
+            "pyproject.toml",
+            "[project]\ndependencies = [\"fastapi>=0.115\"]\n",
+        );
+        let registry = PackRegistry::builtin();
+        let active = registry.detect(&dir.path);
+        assert!(active.contains(&PackId::Fastapi));
     }
 
     #[test]

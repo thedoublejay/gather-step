@@ -472,16 +472,7 @@ fn parse_file_core(
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
         Language::Python => {
-            visit_python(
-                tree.root_node(),
-                &mut state,
-                None,
-                None,
-                None,
-                false,
-                &[],
-                0,
-            );
+            visit_python(tree.root_node(), &mut state, None, None, None, &[], 0);
         }
         Language::Rust | Language::Go | Language::Java => {}
     }
@@ -651,24 +642,24 @@ const PYTHON_SIBLING_SEARCH_ANCESTORS: usize = 6;
 const GATHER_STEP_CONFIG_MAX_ASCEND: usize = 12;
 
 /// Identity of a configured repo within a workspace.  Constructed only via
-/// [`WorkspaceRepoIdentity::new`] from a canonical, non-empty
-/// (`name`, `root`) pair so callers cannot accidentally fall back to
-/// `root.file_name()` as a name (the bug fixed in 5a5563a).  Fields are kept
-/// private; use the accessors.
+/// [`WorkspaceRepoIdentity::new`] from a non-empty name and absolute root so
+/// callers cannot accidentally fall back to `root.file_name()` as a name (the
+/// bug fixed in 5a5563a).  Fields are kept private; use the accessors.
 #[derive(Clone, Debug)]
 struct WorkspaceRepoIdentity {
     name: String,
-    canonical_root: PathBuf,
+    root: PathBuf,
 }
 
 impl WorkspaceRepoIdentity {
-    fn new(name: String, canonical_root: PathBuf) -> Option<Self> {
-        if name.is_empty() || !canonical_root.is_absolute() {
+    fn new(name: String, root: PathBuf) -> Option<Self> {
+        let name = name.trim();
+        if name.is_empty() || !root.is_absolute() {
             return None;
         }
         Some(Self {
-            name,
-            canonical_root,
+            name: name.to_owned(),
+            root,
         })
     }
 
@@ -677,7 +668,7 @@ impl WorkspaceRepoIdentity {
     }
 
     fn root(&self) -> &Path {
-        &self.canonical_root
+        &self.root
     }
 }
 
@@ -1840,14 +1831,13 @@ fn visit_ts_js_with_pending(
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned, clippy::only_used_in_recursion)]
+#[expect(clippy::semicolon_if_nothing_returned)]
 fn visit_python(
     node: Node<'_>,
     state: &mut ParseState<'_>,
     parent_class: Option<&NodeData>,
     owner: Option<gather_step_core::NodeId>,
     owner_qname: Option<&str>,
-    force_exported: bool,
     class_decorators: &[DecoratorCapture],
     depth: usize,
 ) {
@@ -1863,7 +1853,6 @@ fn visit_python(
                     parent_class,
                     owner,
                     owner_qname,
-                    force_exported,
                     class_decorators,
                     depth + 1,
                 )
@@ -1881,7 +1870,6 @@ fn visit_python(
                             parent_class,
                             owner,
                             owner_qname,
-                            force_exported,
                             &decorators,
                             depth + 1,
                         );
@@ -1900,7 +1888,6 @@ fn visit_python(
                             parent_class,
                             owner,
                             owner_qname,
-                            force_exported,
                             &merged,
                             depth + 1,
                         );
@@ -1913,12 +1900,16 @@ fn visit_python(
         "class_definition" => {
             let name = child_text(node, "name", state.source)
                 .unwrap_or_else(|| "AnonymousClass".to_owned());
+            let qualified_name = match owner_qname {
+                Some(parent) => format!("{parent}.{name}"),
+                None => name.clone(),
+            };
             let implemented_interfaces = collect_implemented_interfaces(node, state.source);
             let base_classes = collect_python_base_classes(node, state.source);
             let class_node = state.push_symbol(
                 NodeKind::Class,
                 name.clone(),
-                Some(name.clone()),
+                Some(qualified_name.clone()),
                 Some(span_from(node)),
                 None,
                 Some(Visibility::Public),
@@ -1935,8 +1926,7 @@ fn visit_python(
                     state,
                     Some(&class_node),
                     Some(class_node.id),
-                    Some(name.as_str()),
-                    force_exported,
+                    Some(qualified_name.as_str()),
                     class_decorators,
                     depth + 1,
                 )
@@ -1968,7 +1958,6 @@ fn visit_python(
                     parent_class,
                     Some(function_node.id),
                     Some(qualified_name.as_str()),
-                    force_exported,
                     class_decorators,
                     depth + 1,
                 )
@@ -1999,7 +1988,6 @@ fn visit_python(
                     parent_class,
                     owner,
                     owner_qname,
-                    force_exported,
                     class_decorators,
                     depth + 1,
                 )
@@ -2012,7 +2000,6 @@ fn visit_python(
                 parent_class,
                 owner,
                 owner_qname,
-                force_exported,
                 class_decorators,
                 depth + 1,
             )
@@ -2779,17 +2766,33 @@ fn import_path_exists_inside_allowed_roots(repo_root: &Path, candidate: &Path) -
     }
 
     let mut allowed_roots = Vec::new();
-    if let Ok(canonical_repo_root) = fs::canonicalize(repo_root) {
-        allowed_roots.push(canonical_repo_root);
-    }
-    if let Some(workspace_root) = find_workspace_root(repo_root, 12)
-        && let Ok(canonical_workspace_root) = fs::canonicalize(workspace_root)
-    {
-        allowed_roots.push(canonical_workspace_root);
+    let canonical_repo_root = match fs::canonicalize(repo_root) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                repo_root = %repo_root.display(),
+                error = %error,
+                "failed to canonicalize repo root while checking import path; result will not be cached"
+            );
+            return false;
+        }
+    };
+    allowed_roots.push(canonical_repo_root);
+    if let Some(workspace_root) = find_workspace_root(repo_root, 12) {
+        match fs::canonicalize(&workspace_root) {
+            Ok(canonical_workspace_root) => allowed_roots.push(canonical_workspace_root),
+            Err(error) => {
+                tracing::warn!(
+                    workspace_root = %workspace_root.display(),
+                    error = %error,
+                    "failed to canonicalize workspace root while checking import path; result will not be cached"
+                );
+                return canonicalize_existing_file_under_any(candidate, &allowed_roots).is_some();
+            }
+        }
     }
 
-    let exists = !allowed_roots.is_empty()
-        && canonicalize_existing_file_under_any(candidate, &allowed_roots).is_some();
+    let exists = canonicalize_existing_file_under_any(candidate, &allowed_roots).is_some();
     IMPORT_PATH_EXISTS_CACHE.with_borrow_mut(|cache| {
         cache.put(key, exists);
     });
@@ -2817,14 +2820,47 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
         .strip_prefix(package_name)
         .unwrap_or("")
         .trim_start_matches('/');
-    let canonical_repo_root = fs::canonicalize(repo_root).ok();
+    let canonical_repo_root = match fs::canonicalize(repo_root) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(
+                repo_root = %repo_root.display(),
+                error = %error,
+                "failed to canonicalize repo root while resolving sibling package import"
+            );
+            None
+        }
+    };
 
     for root in repo_root.ancestors().skip(1).take(6) {
-        let Ok(entries) = fs::read_dir(root) else {
-            continue;
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    dir = %root.display(),
+                    error = %error,
+                    "failed to enumerate ancestor while resolving sibling package import; skipping"
+                );
+                continue;
+            }
         };
-        for entry in entries.flatten() {
-            let package_dir = entry.path();
+        let mut package_dirs = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => package_dirs.push(entry.path()),
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %root.display(),
+                        error = %error,
+                        "skipping unreadable entry while resolving sibling package import"
+                    );
+                }
+            }
+        }
+        package_dirs.sort();
+
+        let mut first_match: Option<(PathBuf, PathBuf)> = None;
+        for package_dir in package_dirs {
             let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, root) else {
                 continue;
             };
@@ -2840,11 +2876,27 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             else {
                 continue;
             };
-            let Ok(raw) = fs::read_to_string(&manifest_path) else {
-                continue;
+            let raw = match fs::read_to_string(&manifest_path) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::warn!(
+                        manifest_path = %manifest_path.display(),
+                        error = %error,
+                        "failed to read package.json while resolving sibling package import; skipping"
+                    );
+                    continue;
+                }
             };
-            let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
-                continue;
+            let manifest = match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::warn!(
+                        manifest_path = %manifest_path.display(),
+                        error = %error,
+                        "failed to parse package.json while resolving sibling package import; skipping"
+                    );
+                    continue;
+                }
             };
             let manifest_name = manifest
                 .get("name")
@@ -2853,11 +2905,28 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             if manifest_name != package_name {
                 continue;
             }
-            return if tail.is_empty() {
+            let resolved = if tail.is_empty() {
                 resolve_workspace_package_entry(root, &package_dir, &manifest)
             } else {
                 resolve_workspace_package_subpath(root, &package_dir, &manifest, tail)
             };
+            let Some(resolved) = resolved else {
+                continue;
+            };
+            if let Some((first_package_dir, first_resolved)) = first_match.as_ref() {
+                tracing::warn!(
+                    package = package_name,
+                    first_package_dir = %first_package_dir.display(),
+                    duplicate_package_dir = %package_dir.display(),
+                    resolved = %first_resolved.display(),
+                    "multiple sibling packages matched import; using first match"
+                );
+                continue;
+            }
+            first_match = Some((package_dir, resolved));
+        }
+        if let Some((_, resolved)) = first_match {
+            return Some(resolved);
         }
     }
     None
@@ -2877,7 +2946,17 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
 /// [`resolve_python_current_package_import`] for in-repo resolution.
 fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
     let (package_name, tail) = python_package_root_and_tail(source)?;
-    let canonical_repo_root = fs::canonicalize(repo_root).ok();
+    let canonical_repo_root = match fs::canonicalize(repo_root) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(
+                repo_root = %repo_root.display(),
+                error = %error,
+                "failed to canonicalize repo root while resolving Python sibling import"
+            );
+            None
+        }
+    };
 
     for root in repo_root
         .ancestors()
@@ -2895,19 +2974,23 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
                 continue;
             }
         };
+        let mut package_dirs = Vec::new();
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
+            match entry {
+                Ok(entry) => package_dirs.push(entry.path()),
                 Err(error) => {
                     tracing::warn!(
                         dir = %root.display(),
                         error = %error,
                         "skipping unreadable entry while resolving Python sibling import"
                     );
-                    continue;
                 }
-            };
-            let package_dir = entry.path();
+            }
+        }
+        package_dirs.sort();
+
+        let mut first_match: Option<(PathBuf, PathBuf)> = None;
+        for package_dir in package_dirs {
             let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, root) else {
                 continue;
             };
@@ -2923,8 +3006,21 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
             if let Some(resolved) =
                 resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
             {
-                return Some(resolved);
+                if let Some((first_package_dir, first_resolved)) = first_match.as_ref() {
+                    tracing::warn!(
+                        package = package_name,
+                        first_package_dir = %first_package_dir.display(),
+                        duplicate_package_dir = %package_dir.display(),
+                        resolved = %first_resolved.display(),
+                        "multiple sibling Python packages matched import; using first match"
+                    );
+                    continue;
+                }
+                first_match = Some((package_dir, resolved));
             }
+        }
+        if let Some((_, resolved)) = first_match {
+            return Some(resolved);
         }
     }
 
@@ -3719,9 +3815,11 @@ fn configured_workspace_repo_identities(repo_root: &Path) -> Option<Vec<Workspac
     }
 
     let identities = load_configured_workspace_repo_identities(repo_root);
-    WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| {
-        cache.put(key, identities.clone());
-    });
+    if identities.is_some() {
+        WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| {
+            cache.put(key, identities.clone());
+        });
+    }
     identities
 }
 
@@ -3754,6 +3852,7 @@ fn load_configured_workspace_repo_identities(
     };
     let total = config.repos.len();
     let mut repos = Vec::with_capacity(total);
+    let mut seen_names = FxHashSet::default();
     for repo in config.repos {
         let absolute = config_root.join(&repo.path);
         let canonical_repo_root = match fs::canonicalize(&absolute) {
@@ -3785,6 +3884,14 @@ fn load_configured_workspace_repo_identities(
             );
             continue;
         };
+        if !seen_names.insert(identity.name().to_owned()) {
+            tracing::warn!(
+                repo = %identity.name(),
+                config_path = %config_path.display(),
+                "duplicate configured repo name; ignoring later entry"
+            );
+            continue;
+        }
         repos.push(identity);
     }
     if repos.is_empty() {
@@ -4027,6 +4134,7 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Redux => &[PackId::Redux],
         Framework::Zustand => &[PackId::Zustand],
         Framework::LaunchDarkly => &[PackId::LaunchDarkly],
+        Framework::FastApi => &[PackId::Fastapi],
         Framework::FrontendHooks => &[PackId::FrontendHooks],
     }
 }
@@ -4335,10 +4443,13 @@ mod tests {
     use std::{
         env,
         fmt::Write as _,
-        fs,
+        fs, io,
         path::{Path, PathBuf},
         process,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use gather_step_core::{EdgeKind, NodeKind, node_id};
@@ -4346,8 +4457,10 @@ mod tests {
     use crate::{Language, tsconfig::PathAliases};
 
     use super::{
-        WorkspaceRepoIdentity, load_configured_workspace_repo_identities, parse_file,
-        parse_file_with_context, resolve_import_path,
+        WorkspaceRepoIdentity, configured_workspace_repo_identities,
+        import_path_exists_inside_allowed_roots, load_configured_workspace_repo_identities,
+        parse_file, parse_file_with_context, resolve_import_path,
+        resolve_python_sibling_package_import, resolve_sibling_package_import,
     };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -4380,6 +4493,51 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[derive(Clone)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log capture lock should not be poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    fn capture_warnings(run: impl FnOnce()) -> String {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedLogs(Arc::clone(&logs));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, run);
+
+        let bytes = logs
+            .lock()
+            .expect("log capture lock should not be poisoned")
+            .clone();
+        String::from_utf8(bytes).expect("captured logs should be utf-8")
     }
 
     #[test]
@@ -5207,6 +5365,43 @@ def run():
     }
 
     #[test]
+    fn nested_python_classes_keep_parent_qualified_names() {
+        let temp_dir = TestDir::new("python-nested-class-qname");
+        fs::write(
+            temp_dir.path().join("module.py"),
+            r#"
+class Outer:
+    class Inner:
+        def method(self):
+            return "ok"
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "module.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        assert!(parsed.symbols.iter().any(|symbol| {
+            symbol.node.name == "Inner"
+                && symbol.node.qualified_name.as_deref() == Some("Outer.Inner")
+        }));
+        assert!(parsed.symbols.iter().any(|symbol| {
+            symbol.node.name == "method"
+                && symbol.node.qualified_name.as_deref() == Some("Outer.Inner.method")
+        }));
+    }
+
+    #[test]
     fn relative_imports_cannot_escape_repo_root() {
         let temp_dir = TestDir::new("relative-escape");
         fs::create_dir_all(temp_dir.path().join("src")).expect("src dir should exist");
@@ -5220,6 +5415,25 @@ def run():
         );
 
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn import_path_existence_miss_from_uncanonical_root_is_not_cached() {
+        let temp_dir = TestDir::new("import-path-cache-canonicalize");
+        let repo_root = temp_dir.path().join("repo");
+        let candidate = repo_root.join("src/index.ts");
+
+        assert!(!import_path_exists_inside_allowed_roots(
+            &repo_root, &candidate
+        ));
+
+        fs::create_dir_all(candidate.parent().expect("candidate has parent"))
+            .expect("repo source dir should write");
+        fs::write(&candidate, "export const value = 1;\n").expect("candidate should write");
+
+        assert!(import_path_exists_inside_allowed_roots(
+            &repo_root, &candidate
+        ));
     }
 
     #[test]
@@ -5258,6 +5472,43 @@ def run():
         assert_eq!(
             resolved,
             canonical(shared_root.join("src/shared_models/records.py"))
+        );
+    }
+
+    #[test]
+    fn duplicate_python_sibling_packages_warn_and_resolve_deterministically() {
+        let temp_dir = TestDir::new("python-sibling-duplicates");
+        let app_root = temp_dir.path().join("api_service");
+        let first_root = temp_dir.path().join("a_shared_models");
+        let second_root = temp_dir.path().join("b_shared_models");
+        fs::create_dir_all(&app_root).expect("app repo should exist");
+        for root in [&first_root, &second_root] {
+            fs::create_dir_all(root.join("src/shared_models"))
+                .expect("shared package should exist");
+            fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"shared-models\"\n",
+            )
+            .expect("pyproject should write");
+            fs::write(
+                root.join("src/shared_models/records.py"),
+                "class RawDocument: ...\n",
+            )
+            .expect("records module should write");
+        }
+
+        let mut resolved = None;
+        let logs = capture_warnings(|| {
+            resolved = resolve_python_sibling_package_import(&app_root, "shared_models.records");
+        });
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(canonical(first_root.join("src/shared_models/records.py")).as_path())
+        );
+        assert!(
+            logs.contains("multiple sibling Python packages matched import"),
+            "expected duplicate warning, got {logs}"
         );
     }
 
@@ -5436,6 +5687,28 @@ def run():
         assert_eq!(
             parsed.import_bindings[0].resolved_path.as_deref(),
             Some(canonical(temp_dir.path().join("packages/contracts/src/index.ts")).as_path())
+        );
+    }
+
+    #[test]
+    fn malformed_sibling_package_manifest_emits_warning() {
+        let temp_dir = TestDir::new("workspace-package-malformed-manifest");
+        let api_root = temp_dir.path().join("apps/api");
+        fs::create_dir_all(api_root.join("src")).expect("api dir should exist");
+        fs::create_dir_all(temp_dir.path().join("contracts")).expect("contracts dir should exist");
+        fs::write(
+            temp_dir.path().join("contracts/package.json"),
+            "{ this is not valid json",
+        )
+        .expect("malformed manifest should write");
+
+        let logs = capture_warnings(|| {
+            assert!(resolve_sibling_package_import(&api_root, "contracts").is_none());
+        });
+
+        assert!(
+            logs.contains("failed to parse package.json while resolving sibling package import"),
+            "expected malformed package.json warning, got {logs}"
         );
     }
 
@@ -6175,6 +6448,38 @@ export class Controller {
             .find(|repo| repo.name() == "configured_alpha")
             .expect("configured_alpha entry");
         assert_eq!(alpha.root(), canonical(&repo_a));
+    }
+
+    #[test]
+    fn workspace_repo_identity_rejects_whitespace_only_names() {
+        let dir = TestDir::new("identity-whitespace-name");
+        let root = canonical(dir.path());
+
+        assert!(WorkspaceRepoIdentity::new("   ".to_owned(), root).is_none());
+    }
+
+    #[test]
+    fn missing_workspace_config_result_is_not_cached() {
+        let dir = TestDir::new("identities-none-cache");
+        let workspace = dir.path();
+        let repo_a = workspace.join("services/alpha");
+        let repo_b = workspace.join("services/beta");
+        fs::create_dir_all(&repo_a).expect("repo a created");
+        fs::create_dir_all(&repo_b).expect("repo b created");
+
+        assert!(configured_workspace_repo_identities(&repo_a).is_none());
+
+        fs::write(
+            workspace.join("gather-step.config.yaml"),
+            "repos:\n  - name: configured_alpha\n    path: services/alpha\n  - name: configured_beta\n    path: services/beta\n",
+        )
+        .expect("config written");
+
+        let identities = configured_workspace_repo_identities(&repo_a)
+            .expect("newly added config should be visible");
+        let names: Vec<&str> = identities.iter().map(WorkspaceRepoIdentity::name).collect();
+        assert!(names.contains(&"configured_alpha"));
+        assert!(names.contains(&"configured_beta"));
     }
 
     /// Locks the diagnostic fallback path: a malformed `gather-step.config.yaml`

@@ -17,7 +17,7 @@ First-class languages produce a complete graph: file nodes, module nodes, class 
 | --- | --- | --- | --- |
 | TypeScript | swc | tsconfig path aliases, `package.json` workspaces, `exports` conditions | Yes |
 | JavaScript | swc | `package.json` workspaces, `exports` conditions | Yes |
-| Python | tree-sitter | Absolute current-package imports for `src/<pkg>` and flat `<pkg>` layouts; sibling-package imports across configured repos; `pyproject.toml [project].name` for standalone repo identity | Yes |
+| Python | tree-sitter | Absolute current-package imports for `src/<pkg>` and flat `<pkg>` layouts; sibling-package imports across configured repos; `pyproject.toml [project].name` for standalone repo identity; detection-only FastAPI pack | Yes |
 
 Python is first-class as of v2.1.0. TypeScript and JavaScript have been first-class since v1.0.0.
 
@@ -39,7 +39,7 @@ For a Tier 1 language, you can expect:
 
 - **Stable node IDs.** Node identity is a function of `(repo, file_path, kind, qualified_name)`. Re-indexing the same source produces the same IDs, and the same on-disk file produces the same IDs across configured workspace repos.
 - **Cross-repo edges.** When a file in repo A imports a symbol from repo B, the import binding resolves to a file node owned by repo B's configured `name`, not repo A. This is what powers cross-repo impact analysis and planning.
-- **Qualified names that survive nesting.** A nested function `def normalize` inside `class TitleHandler`'s `handle` method is named `TitleHandler.handle.normalize`. Same-named helpers in sibling functions remain distinct.
+- **Qualified names that survive nesting.** A nested function `def normalize` inside `class TitleHandler`'s `handle` method is named `TitleHandler.handle.normalize`; a method inside `Outer.Inner` is named `Outer.Inner.method`. Same-named helpers in sibling functions remain distinct.
 - **Resolved imports.** Each import binding carries a resolved file path when the target is reachable, plus the resolver that produced the answer (`import_map`, `path_alias`, `workspace_package`, `python_sibling`, etc.).
 
 For a Tier 2 language, none of the above apply yet. Files are present; symbols are not.

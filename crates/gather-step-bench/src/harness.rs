@@ -21,6 +21,7 @@ pub struct StorageMetrics {
     /// Combined size of `SQLite` sidecar files (`metadata.sqlite-wal` and
     /// `metadata.sqlite-shm`).  Named "sidecar" rather than "wal" because the
     /// shared-memory file is not a write-ahead log.
+    #[serde(default, alias = "metadata_wal_bytes")]
     pub metadata_sidecar_bytes: u64,
     pub search_bytes: u64,
     pub total_bytes: u64,
@@ -351,5 +352,48 @@ pub struct StorageDirGuard(std::path::PathBuf);
 impl Drop for StorageDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gather_step_core::WorkspaceIndexError;
+
+    use super::{HarnessError, StorageMetrics};
+
+    #[test]
+    fn storage_metrics_accepts_legacy_metadata_wal_bytes_alias() {
+        let metrics = serde_json::from_str::<StorageMetrics>(
+            r#"{
+                "graph_bytes": 10,
+                "metadata_bytes": 20,
+                "metadata_wal_bytes": 30,
+                "search_bytes": 40,
+                "total_bytes": 100
+            }"#,
+        )
+        .expect("legacy metrics JSON should deserialize");
+
+        assert_eq!(metrics.metadata_sidecar_bytes, 30);
+    }
+
+    #[test]
+    fn workspace_harness_error_downcasts_through_anyhow() {
+        let error = HarnessError::Workspace(Box::new(WorkspaceIndexError::Build(
+            "thread pool unavailable".to_owned(),
+        )));
+        let error: anyhow::Error = error.into();
+        let downcasted = error
+            .downcast::<HarnessError>()
+            .expect("anyhow downcast should preserve HarnessError");
+
+        assert!(matches!(
+            downcasted,
+            HarnessError::Workspace(inner)
+                if matches!(
+                    inner.as_ref(),
+                    WorkspaceIndexError::Build(message) if message == "thread pool unavailable"
+                )
+        ));
     }
 }

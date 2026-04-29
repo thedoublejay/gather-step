@@ -1,5 +1,5 @@
 import os, pkg.submodule as submodule
-from shared.models import User, Account as BillingAccount
+from shared.models import User, Account as BillingAccount  # type: ignore[import]
 from .services import (
     Processor,
     Runner as TaskRunner,

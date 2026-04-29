@@ -471,6 +471,7 @@ fn run_command(
     ));
 
     let mut checks: Vec<String> = Vec::new();
+    let mut rss_failure = None;
 
     // Check memory threshold.
     if let Some(rss_growth) = metrics.memory_rss_growth_bytes {
@@ -479,10 +480,12 @@ fn run_command(
             rss_growth, thresholds.memory.rss_absolute_max_bytes
         ));
         if rss_growth > thresholds.memory.rss_absolute_max_bytes {
-            print_status(&format!(
+            let message = format!(
                 "FAIL: RSS growth {} exceeds absolute max {}",
                 rss_growth, thresholds.memory.rss_absolute_max_bytes
-            ));
+            );
+            print_status(&message);
+            rss_failure = Some(message);
         }
     }
 
@@ -505,6 +508,9 @@ fn run_command(
     };
 
     write_result(output_dir, "index_pass", &date, &result)?;
+    if let Some(message) = rss_failure {
+        anyhow::bail!(message);
+    }
     Ok(())
 }
 
@@ -540,16 +546,19 @@ fn workspace_run_command(
     ));
 
     let mut checks: Vec<String> = Vec::new();
+    let mut rss_failure = None;
     if let Some(rss_growth) = metrics.memory_rss_growth_bytes {
         checks.push(format!(
             "memory.rss_absolute_max_bytes: {} <= {}",
             rss_growth, thresholds.memory.rss_absolute_max_bytes
         ));
         if rss_growth > thresholds.memory.rss_absolute_max_bytes {
-            print_status(&format!(
+            let message = format!(
                 "FAIL: RSS growth {} exceeds absolute max {}",
                 rss_growth, thresholds.memory.rss_absolute_max_bytes
-            ));
+            );
+            print_status(&message);
+            rss_failure = Some(message);
         }
     }
 
@@ -576,6 +585,9 @@ fn workspace_run_command(
     };
 
     write_result(output_dir, "workspace_index_pass", &date, &result)?;
+    if let Some(message) = rss_failure {
+        anyhow::bail!(message);
+    }
     Ok(())
 }
 
