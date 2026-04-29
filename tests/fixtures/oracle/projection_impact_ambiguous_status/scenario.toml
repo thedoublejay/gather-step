@@ -1,0 +1,25 @@
+name = "projection_impact_ambiguous_status"
+mode = "projection_impact"
+repo = "backend_standard"
+
+[target]
+kind = "field"
+qn = "status"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+required_ambiguity_codes = []
+expected_projection_resolved = true
+expected_projection_ambiguity = "multiple_field_candidates"
+expected_projection_risks = [
+  "needs_disambiguation",
+]
+expected_projection_fields = []
+expected_source_fields = []
+expected_backfill_files = []
+expected_index_files = []
+forbidden_focus_only_files = []
+max_response_bytes = 12000

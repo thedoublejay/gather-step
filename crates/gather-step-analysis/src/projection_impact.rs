@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::{GraphStore, GraphStoreError};
@@ -68,6 +68,10 @@ const FIELD_EDGE_KINDS: [EdgeKind; 6] = [
     EdgeKind::IndexesField,
     EdgeKind::BackfillsField,
 ];
+const MAX_DERIVATION_DEPTH: usize = 4;
+
+type FieldKey = (String, String);
+type LogicalDerivation = (FieldKey, FieldKey);
 
 fn default_max_results() -> usize {
     20
@@ -86,41 +90,57 @@ pub fn projection_impact<S: GraphStore>(
         .collect::<Vec<_>>();
     let selected_ids = selected.iter().map(|node| node.id).collect::<BTreeSet<_>>();
 
-    let mut source_ids = BTreeSet::new();
-    let mut projected_ids = BTreeSet::new();
-    let mut derivations = BTreeSet::new();
-
+    let mut chains_by_signature = BTreeMap::<BTreeSet<LogicalDerivation>, DerivationChain>::new();
     for candidate in &selected {
-        let incoming = store.get_incoming(candidate.id)?;
-        for edge in incoming
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::DerivesFieldFrom)
-        {
-            source_ids.insert(edge.source);
-            projected_ids.insert(edge.target);
-            derivations.insert((edge.source, edge.target));
-        }
-
-        let outgoing = store.get_outgoing(candidate.id)?;
-        for edge in outgoing
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::DerivesFieldFrom)
-        {
-            source_ids.insert(edge.source);
-            projected_ids.insert(edge.target);
-            derivations.insert((edge.source, edge.target));
-        }
-
-        if !incoming
-            .iter()
-            .chain(outgoing.iter())
-            .any(|edge| edge.kind == EdgeKind::DerivesFieldFrom)
-        {
-            source_ids.insert(candidate.id);
+        let chain = collect_derivation_chain(store, candidate.id, max_results)?;
+        if !chain.derivations.is_empty() {
+            let signature = logical_derivation_signature(store, &chain.derivations)?;
+            chains_by_signature
+                .entry(signature)
+                .and_modify(|existing| existing.merge(&chain))
+                .or_insert(chain);
         }
     }
 
-    let mut relevant_ids = selected_ids;
+    let ambiguous =
+        chains_by_signature.len() > 1 || (chains_by_signature.is_empty() && selected.len() > 1);
+    if ambiguous {
+        let mut report = ProjectionImpactReport {
+            target: request.target,
+            resolved: !selected.is_empty(),
+            ambiguity: Some("multiple_field_candidates".to_owned()),
+            candidates: nodes_to_fields(&selected),
+            source_fields: Vec::new(),
+            projected_fields: Vec::new(),
+            derivation_edges: Vec::new(),
+            readers: Vec::new(),
+            writers: Vec::new(),
+            filters: Vec::new(),
+            indexes: Vec::new(),
+            backfills: Vec::new(),
+            risk_hints: Vec::new(),
+            missing_evidence: Vec::new(),
+            confidence: "low".to_owned(),
+        };
+        populate_risks_and_confidence(&mut report);
+        return Ok(report);
+    }
+
+    let mut source_ids = BTreeSet::new();
+    let mut projected_ids = BTreeSet::new();
+    let mut derivations = BTreeSet::new();
+    let mut relevant_ids = selected_ids.clone();
+    if let Some(chain) = chains_by_signature.values().next() {
+        derivations.extend(chain.derivations.iter().copied());
+        relevant_ids.extend(chain.node_ids.iter().copied());
+        for (source, projected) in &chain.derivations {
+            source_ids.insert(*source);
+            projected_ids.insert(*projected);
+        }
+    }
+
+    let projected_keys = field_keys_for_ids(store, &projected_ids)?;
+    relevant_ids.extend(equivalent_field_ids(store, &projected_keys)?);
     relevant_ids.extend(source_ids.iter().copied());
     relevant_ids.extend(projected_ids.iter().copied());
 
@@ -141,7 +161,7 @@ pub fn projection_impact<S: GraphStore>(
     let mut report = ProjectionImpactReport {
         target: request.target,
         resolved: !selected.is_empty(),
-        ambiguity: (selected.len() > 1).then(|| "multiple_field_candidates".to_owned()),
+        ambiguity: None,
         candidates: nodes_to_fields(&selected),
         source_fields: ids_to_fields(store, &source_ids)?,
         projected_fields: ids_to_fields(store, &projected_ids)?,
@@ -158,6 +178,112 @@ pub fn projection_impact<S: GraphStore>(
 
     populate_risks_and_confidence(&mut report);
     Ok(report)
+}
+
+#[derive(Clone, Debug, Default)]
+struct DerivationChain {
+    node_ids: BTreeSet<NodeId>,
+    derivations: BTreeSet<(NodeId, NodeId)>,
+}
+
+impl DerivationChain {
+    fn merge(&mut self, other: &Self) {
+        self.node_ids.extend(other.node_ids.iter().copied());
+        self.derivations.extend(other.derivations.iter().copied());
+    }
+}
+
+fn collect_derivation_chain<S: GraphStore>(
+    store: &S,
+    seed: NodeId,
+    max_results: usize,
+) -> Result<DerivationChain, ProjectionImpactError> {
+    let mut chain = DerivationChain::default();
+    let mut visited = BTreeSet::new();
+    let mut frontier = VecDeque::from([(seed, 0usize)]);
+
+    while let Some((field_id, depth)) = frontier.pop_front() {
+        if !visited.insert(field_id) {
+            continue;
+        }
+        chain.node_ids.insert(field_id);
+        if depth >= MAX_DERIVATION_DEPTH {
+            continue;
+        }
+
+        let incoming = store.get_incoming(field_id)?;
+        let outgoing = store.get_outgoing(field_id)?;
+        for edge in incoming
+            .iter()
+            .chain(outgoing.iter())
+            .filter(|edge| edge.kind == EdgeKind::DerivesFieldFrom)
+        {
+            chain.derivations.insert((edge.source, edge.target));
+            chain.node_ids.insert(edge.source);
+            chain.node_ids.insert(edge.target);
+            if chain.derivations.len() >= max_results {
+                return Ok(chain);
+            }
+            if edge.source != field_id {
+                frontier.push_back((edge.source, depth + 1));
+            }
+            if edge.target != field_id {
+                frontier.push_back((edge.target, depth + 1));
+            }
+        }
+    }
+
+    Ok(chain)
+}
+
+fn logical_derivation_signature<S: GraphStore>(
+    store: &S,
+    derivations: &BTreeSet<(NodeId, NodeId)>,
+) -> Result<BTreeSet<LogicalDerivation>, ProjectionImpactError> {
+    let mut signature = BTreeSet::new();
+    for (source_id, target_id) in derivations {
+        let Some(source) = store.get_node(*source_id)? else {
+            continue;
+        };
+        let Some(target) = store.get_node(*target_id)? else {
+            continue;
+        };
+        signature.insert((field_key(&source), field_key(&target)));
+    }
+    Ok(signature)
+}
+
+fn field_keys_for_ids<S: GraphStore>(
+    store: &S,
+    ids: &BTreeSet<NodeId>,
+) -> Result<BTreeSet<FieldKey>, ProjectionImpactError> {
+    let mut keys = BTreeSet::new();
+    for id in ids {
+        if let Some(node) = store.get_node(*id)? {
+            keys.insert(field_key(&node));
+        }
+    }
+    Ok(keys)
+}
+
+fn equivalent_field_ids<S: GraphStore>(
+    store: &S,
+    keys: &BTreeSet<FieldKey>,
+) -> Result<BTreeSet<NodeId>, ProjectionImpactError> {
+    let mut ids = BTreeSet::new();
+    if keys.is_empty() {
+        return Ok(ids);
+    }
+    for node in store.nodes_by_type(NodeKind::DataField)? {
+        if keys.contains(&field_key(&node)) {
+            ids.insert(node.id);
+        }
+    }
+    Ok(ids)
+}
+
+fn field_key(node: &NodeData) -> FieldKey {
+    (node.repo.clone(), node.name.clone())
 }
 
 fn resolve_field_candidates<S: GraphStore>(
@@ -403,6 +529,16 @@ mod tests {
         )
     }
 
+    fn field_in_file(repo: &str, file_path: &str, name: &str) -> NodeData {
+        virtual_node(
+            NodeKind::DataField,
+            repo,
+            file_path,
+            name,
+            format!("data-field::{repo}::{file_path}::{name}"),
+        )
+    }
+
     fn edge(source: NodeId, target: NodeId, owner_file: NodeId, kind: EdgeKind) -> EdgeData {
         EdgeData {
             source,
@@ -527,6 +663,185 @@ mod tests {
 
         assert_eq!(report.source_fields[0].field_path, "subtasks");
         assert_eq!(report.projected_fields[0].field_path, "subtaskIds");
+    }
+
+    #[test]
+    fn follows_bounded_multi_hop_projection_chain() {
+        let temp = TempDb::new("projection-impact", "multi-hop");
+        let store = temp.open();
+        let file = file_node("svc", "src/projection.ts");
+        let raw_total = field_in_file("svc", "src/projection.ts", "rawTotal");
+        let normalized_total = field_in_file("svc", "src/projection.ts", "normalizedTotal");
+        let invoice_total = field_in_file("svc", "src/projection.ts", "invoiceTotal");
+        store
+            .bulk_insert(
+                &[
+                    file.clone(),
+                    raw_total.clone(),
+                    normalized_total.clone(),
+                    invoice_total.clone(),
+                ],
+                &[
+                    edge(
+                        raw_total.id,
+                        normalized_total.id,
+                        file.id,
+                        EdgeKind::DerivesFieldFrom,
+                    ),
+                    edge(
+                        normalized_total.id,
+                        invoice_total.id,
+                        file.id,
+                        EdgeKind::DerivesFieldFrom,
+                    ),
+                ],
+            )
+            .expect("multi-hop graph should write");
+
+        let report = projection_impact(
+            &store,
+            ProjectionImpactRequest {
+                target: "invoiceTotal".to_owned(),
+                repo: Some("svc".to_owned()),
+                max_results: 20,
+            },
+        )
+        .expect("projection impact should load");
+        let source_fields = report
+            .source_fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<BTreeSet<_>>();
+        let projected_fields = report
+            .projected_fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(report.derivation_edges.len(), 2);
+        assert!(source_fields.contains("rawTotal"));
+        assert!(source_fields.contains("normalizedTotal"));
+        assert!(projected_fields.contains("normalizedTotal"));
+        assert!(projected_fields.contains("invoiceTotal"));
+    }
+
+    #[test]
+    fn isolated_index_copy_does_not_become_source_field() {
+        let temp = TempDb::new("projection-impact", "isolated-copy");
+        let store = temp.open();
+        let projection_file = file_node("svc", "src/projection.ts");
+        let index_file = file_node("svc", "src/search-index.ts");
+        let line_items = field_in_file("svc", "src/projection.ts", "lineItems");
+        let line_item_total = field_in_file("svc", "src/projection.ts", "lineItemTotal");
+        let indexed_line_item_total = field_in_file("svc", "src/search-index.ts", "lineItemTotal");
+        store
+            .bulk_insert(
+                &[
+                    projection_file.clone(),
+                    index_file.clone(),
+                    line_items.clone(),
+                    line_item_total.clone(),
+                    indexed_line_item_total.clone(),
+                ],
+                &[
+                    edge(
+                        line_items.id,
+                        line_item_total.id,
+                        projection_file.id,
+                        EdgeKind::DerivesFieldFrom,
+                    ),
+                    edge(
+                        index_file.id,
+                        indexed_line_item_total.id,
+                        index_file.id,
+                        EdgeKind::IndexesField,
+                    ),
+                ],
+            )
+            .expect("projection graph should write");
+
+        let report = projection_impact(
+            &store,
+            ProjectionImpactRequest {
+                target: "lineItemTotal".to_owned(),
+                repo: Some("svc".to_owned()),
+                max_results: 20,
+            },
+        )
+        .expect("projection impact should load");
+
+        assert_eq!(report.ambiguity, None);
+        assert_eq!(report.source_fields.len(), 1);
+        assert_eq!(report.source_fields[0].field_path, "lineItems");
+        assert!(
+            report
+                .source_fields
+                .iter()
+                .all(|field| field.field_path != "lineItemTotal")
+        );
+        assert_eq!(report.indexes.len(), 1);
+        assert_eq!(report.indexes[0].file_path, "src/search-index.ts");
+    }
+
+    #[test]
+    fn ambiguous_same_name_chains_do_not_merge_evidence() {
+        let temp = TempDb::new("projection-impact", "ambiguous");
+        let store = temp.open();
+        let account_file = file_node("svc", "src/account.ts");
+        let billing_file = file_node("svc", "src/billing.ts");
+        let account_status = field_in_file("svc", "src/account.ts", "status");
+        let account_projection = field_in_file("svc", "src/account.ts", "accountStatus");
+        let billing_status = field_in_file("svc", "src/billing.ts", "status");
+        let billing_projection = field_in_file("svc", "src/billing.ts", "billingStatus");
+        store
+            .bulk_insert(
+                &[
+                    account_file.clone(),
+                    billing_file.clone(),
+                    account_status.clone(),
+                    account_projection.clone(),
+                    billing_status.clone(),
+                    billing_projection.clone(),
+                ],
+                &[
+                    edge(
+                        account_status.id,
+                        account_projection.id,
+                        account_file.id,
+                        EdgeKind::DerivesFieldFrom,
+                    ),
+                    edge(
+                        billing_status.id,
+                        billing_projection.id,
+                        billing_file.id,
+                        EdgeKind::DerivesFieldFrom,
+                    ),
+                ],
+            )
+            .expect("ambiguous graph should write");
+
+        let report = projection_impact(
+            &store,
+            ProjectionImpactRequest {
+                target: "status".to_owned(),
+                repo: Some("svc".to_owned()),
+                max_results: 20,
+            },
+        )
+        .expect("projection impact should load");
+
+        assert_eq!(
+            report.ambiguity.as_deref(),
+            Some("multiple_field_candidates")
+        );
+        assert!(
+            report
+                .risk_hints
+                .contains(&"needs_disambiguation".to_owned())
+        );
+        assert!(report.derivation_edges.is_empty());
+        assert!(report.source_fields.is_empty());
+        assert!(report.projected_fields.is_empty());
     }
 
     #[test]

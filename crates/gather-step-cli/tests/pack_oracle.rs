@@ -135,6 +135,12 @@ struct OracleExpectations {
     #[serde(default)]
     expected_projection_risks: Vec<String>,
     #[serde(default)]
+    forbidden_projection_risks: Vec<String>,
+    #[serde(default)]
+    expected_projection_resolved: Option<bool>,
+    #[serde(default)]
+    expected_projection_ambiguity: Option<String>,
+    #[serde(default)]
     expected_backfill_files: Vec<String>,
     #[serde(default)]
     expected_index_files: Vec<String>,
@@ -808,12 +814,21 @@ fn assert_projection_impact_scenario(json: &serde_json::Value, scenario: &Oracle
         output_size,
         scenario.oracle.max_response_bytes
     );
+    let expected_resolved = scenario.oracle.expected_projection_resolved.unwrap_or(true);
     assert_eq!(
         json.get("resolved").and_then(serde_json::Value::as_bool),
-        Some(true),
-        "scenario `{}` projection target should resolve",
+        Some(expected_resolved),
+        "scenario `{}` projection target resolved mismatch",
         scenario.name
     );
+    if let Some(expected) = &scenario.oracle.expected_projection_ambiguity {
+        assert_eq!(
+            json.get("ambiguity").and_then(serde_json::Value::as_str),
+            Some(expected.as_str()),
+            "scenario `{}` projection ambiguity mismatch",
+            scenario.name
+        );
+    }
 
     let projection_fields = projection_field_names(json, "projected_fields");
     for expected in &scenario.oracle.expected_projection_fields {
@@ -838,6 +853,13 @@ fn assert_projection_impact_scenario(json: &serde_json::Value, scenario: &Oracle
         assert!(
             risk_hints.contains(expected),
             "scenario `{}` missing projection risk `{expected}`; observed={risk_hints:?}",
+            scenario.name
+        );
+    }
+    for forbidden in &scenario.oracle.forbidden_projection_risks {
+        assert!(
+            !risk_hints.contains(forbidden),
+            "scenario `{}` unexpectedly included projection risk `{forbidden}`; observed={risk_hints:?}",
             scenario.name
         );
     }

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use gather_step_core::{EdgeKind, NodeKind};
 use gather_step_parser::{
-    FileEntry, Language, ParsedFile, frameworks::Framework, parse_file, parse_file_with_context,
-    parse_file_with_frameworks, parse_file_with_packs,
+    FileEntry, Language, ParsedFile, classify_language, frameworks::Framework, parse_file,
+    parse_file_with_context, parse_file_with_frameworks, parse_file_with_packs,
 };
 use insta::assert_debug_snapshot;
 
@@ -66,11 +66,8 @@ fn fixture_root() -> PathBuf {
 fn parse_fixture(relative_path: &str, frameworks: &[Framework]) -> ParsedFile {
     let root = fixture_root();
     let path = Path::new(relative_path);
-    let language = match path.extension().and_then(std::ffi::OsStr::to_str) {
-        Some("ts" | "tsx" | "mts" | "cts") => Language::TypeScript,
-        Some("js" | "jsx" | "mjs" | "cjs" | "json" | "yaml" | "yml") => Language::JavaScript,
-        other => panic!("unsupported fixture extension: {other:?}"),
-    };
+    let language = classify_language(path)
+        .unwrap_or_else(|| panic!("unsupported fixture path: {}", path.display()));
     let file = FileEntry {
         path: path.into(),
         language,
@@ -332,10 +329,12 @@ fn projection_fixtures_accept_non_regask_domain_names() {
             "loyaltyPointTotal",
             "households",
             "householdIds",
+            "rewardBalance",
         ],
     );
     assert!(has_derivation(&parsed, "pointEvents", "loyaltyPointTotal"));
     assert!(has_derivation(&parsed, "households", "householdIds"));
+    assert!(has_derivation(&parsed, "pointEvents", "rewardBalance"));
 }
 
 #[test]

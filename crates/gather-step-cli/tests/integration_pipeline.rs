@@ -642,6 +642,37 @@ export async function backfill(TaskModel: any) {
             .iter()
             .any(|item| item.file_path.contains("backfill_subtask_ids"))
     );
+
+    let planning_pack = context_pack_tool(
+        &mcp_context(temp.path()),
+        ContextPackRequest {
+            budget_bytes: None,
+            depth: None,
+            limit: Some(6),
+            repo: Some("backend_standard".to_owned()),
+            mode: "planning".to_owned(),
+            target: "projectTask".to_owned(),
+        },
+    )
+    .expect("planning pack should surface nearby projection evidence");
+    assert!(
+        planning_pack
+            .data
+            .next_steps
+            .iter()
+            .any(|step| step.contains("Review projection impact")),
+        "planning pack for a handler target should include projection guidance; next_steps={:?}",
+        planning_pack.data.next_steps
+    );
+    assert!(
+        planning_pack
+            .data
+            .unresolved_gaps
+            .iter()
+            .any(|gap| gap.starts_with("projection_impact:")),
+        "planning pack should include projection risk hints; gaps={:?}",
+        planning_pack.data.unresolved_gaps
+    );
 }
 
 #[test]

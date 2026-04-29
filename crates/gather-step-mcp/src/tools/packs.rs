@@ -1220,19 +1220,22 @@ fn apply_projection_impact_summary(
     repo_filter: Option<&str>,
     response: &mut ContextPackResponse,
 ) {
-    let Ok(report) = projection_impact(
-        ctx.graph(),
-        ProjectionImpactRequest {
-            target: request.target.clone(),
-            repo: repo_filter.map(str::to_owned),
-            max_results: 10,
-        },
-    ) else {
+    let targets = projection_impact_targets(ctx, request, repo_filter, response);
+    let Some(report) = targets.into_iter().find_map(|target| {
+        let report = projection_impact(
+            ctx.graph(),
+            ProjectionImpactRequest {
+                target,
+                repo: repo_filter.map(str::to_owned),
+                max_results: 10,
+            },
+        )
+        .ok()?;
+        (report.resolved && report.ambiguity.is_none() && !report.derivation_edges.is_empty())
+            .then_some(report)
+    }) else {
         return;
     };
-    if !report.resolved || report.derivation_edges.is_empty() {
-        return;
-    }
 
     let projected = report
         .projected_fields
@@ -1260,6 +1263,57 @@ fn apply_projection_impact_summary(
         meta.warnings
             .push("projection impact evidence is available for this target".to_owned());
     }
+}
+
+fn projection_impact_targets(
+    ctx: &McpContext,
+    request: &ContextPackRequest,
+    repo_filter: Option<&str>,
+    response: &ContextPackResponse,
+) -> Vec<String> {
+    let mut targets = vec![request.target.clone()];
+    let files = response
+        .data
+        .items
+        .iter()
+        .take(10)
+        .filter(|item| repo_filter.is_none_or(|repo| item.repo == repo))
+        .map(|item| (item.repo.as_str(), item.file_path.as_str()))
+        .collect::<BTreeSet<_>>();
+    if files.is_empty() {
+        return targets;
+    }
+    let Ok(fields) = ctx.graph().nodes_by_type(NodeKind::DataField) else {
+        return targets;
+    };
+    for field in fields {
+        if !files.contains(&(field.repo.as_str(), field.file_path.as_str())) {
+            continue;
+        }
+        if field_has_derivation(ctx.graph(), field.id) {
+            push_unique_projection_target(&mut targets, field.name);
+        }
+        if targets.len() >= 10 {
+            break;
+        }
+    }
+    targets
+}
+
+fn push_unique_projection_target(targets: &mut Vec<String>, target: String) {
+    if !targets.iter().any(|existing| existing == &target) {
+        targets.push(target);
+    }
+}
+
+fn field_has_derivation<S: GraphStore>(graph: &S, field_id: NodeId) -> bool {
+    graph
+        .get_incoming(field_id)
+        .ok()
+        .into_iter()
+        .flatten()
+        .chain(graph.get_outgoing(field_id).ok().into_iter().flatten())
+        .any(|edge| edge.kind == EdgeKind::DerivesFieldFrom)
 }
 
 fn pack_is_structurally_weak(response: &ContextPackResponse) -> bool {

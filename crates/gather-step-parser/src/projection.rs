@@ -275,7 +275,7 @@ fn object_line_fields(line: &str, known_fields: &BTreeSet<String>) -> BTreeSet<S
 fn is_derivation(target: &str, value: &str, sources: &BTreeSet<String>) -> bool {
     !sources.is_empty()
         && !sources.contains(target)
-        && is_projected_field_name(target)
+        && is_projection_target_field(target)
         && (value.contains("?.")
             || value.contains(".map")
             || value.contains(".length")
@@ -284,12 +284,38 @@ fn is_derivation(target: &str, value: &str, sources: &BTreeSet<String>) -> bool 
             || value.contains("filter("))
 }
 
+fn is_projection_target_field(field: &str) -> bool {
+    !is_method_or_noise(field) && !is_container_or_operator_key(field)
+}
+
 fn is_projected_field_name(field: &str) -> bool {
     field.ends_with("Ids")
         || field.ends_with("Id")
         || field.ends_with("Count")
         || field.ends_with("Total")
         || field.ends_with("Status")
+}
+
+fn is_container_or_operator_key(field: &str) -> bool {
+    matches!(
+        field,
+        "where"
+            | "data"
+            | "select"
+            | "include"
+            | "orderBy"
+            | "fields"
+            | "mapping"
+            | "properties"
+            | "$set"
+            | "$unset"
+            | "$inc"
+            | "$push"
+            | "$pull"
+            | "$addToSet"
+            | "$project"
+            | "$match"
+    )
 }
 
 fn is_write_context(value: &str) -> bool {

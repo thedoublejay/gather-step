@@ -1,0 +1,8 @@
+{
+  "resolved": true,
+  "ambiguity": "multiple_field_candidates",
+  "source_fields": [],
+  "projected_fields": [],
+  "derivation_edges": [],
+  "risk_hints": ["needs_disambiguation"]
+}
