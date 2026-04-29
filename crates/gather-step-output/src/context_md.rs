@@ -122,7 +122,7 @@ pub fn render_workspace_summary_claude(registry: &WorkspaceRegistry, version: &s
 }
 
 fn workspace_summary_reference_block() -> &'static str {
-    r#"## About Gather Step
+    r"## About Gather Step
 
 Gather Step is a local-first code graph tool that indexes your workspace and exposes a semantic graph over symbols, routes, events, and cross-repo edges. When Gather Step is registered as an MCP server, these capabilities are available via MCP tool calls.
 
@@ -168,7 +168,7 @@ Use Gather Step tools before reasoning about cross-repo impact, tracing a reques
 | `get_conventions` | Summarize detected workspace conventions |
 | `get_overview` | Get a high-level workspace overview |
 
-"#
+"
 }
 
 pub fn render_workspace_summary_agents(registry: &WorkspaceRegistry, version: &str) -> String {
