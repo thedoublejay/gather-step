@@ -1,12 +1,25 @@
 #![forbid(unsafe_code)]
 
-use std::{path::Path, time::Instant};
+use std::{fs, path::Path, time::Instant};
 
-use gather_step_storage::{GraphStoreError, IndexingOptions, RepoIndexer, RepoIndexerError};
+use gather_step_core::{ConfigError, GatherStepConfig, RegistryError, RegistryStore};
+use gather_step_storage::{
+    GraphStoreError, IndexingOptions, RepoIndexer, RepoIndexerError, index_workspace_with_storage,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::metrics::capture_rss;
+
+/// Byte-size breakdown of the on-disk storage written by an index pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StorageMetrics {
+    pub graph_bytes: u64,
+    pub metadata_bytes: u64,
+    pub metadata_wal_bytes: u64,
+    pub search_bytes: u64,
+    pub total_bytes: u64,
+}
 
 /// Metrics collected from a single indexing pass over a fixture directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +33,18 @@ pub struct IndexMetrics {
     /// RSS growth in bytes during the index pass (after minus before), when
     /// measurement is available.
     pub memory_rss_growth_bytes: Option<u64>,
+    /// On-disk storage size written during the pass.
+    #[serde(default)]
+    pub storage: StorageMetrics,
+    /// Number of repos indexed for workspace runs.
+    #[serde(default)]
+    pub indexed_repos: Option<usize>,
+    /// Number of source files indexed for workspace runs.
+    #[serde(default)]
+    pub indexed_files: Option<u64>,
+    /// Number of cross-repo edges counted after workspace finalization.
+    #[serde(default)]
+    pub cross_repo_edges: Option<u64>,
 }
 
 /// Errors that can arise during a benchmark index pass.
@@ -31,6 +56,12 @@ pub enum HarnessError {
     Graph(#[from] GraphStoreError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("config error: {0}")]
+    Config(#[from] ConfigError),
+    #[error("registry error: {0}")]
+    Registry(#[from] RegistryError),
+    #[error("workspace index error: {0}")]
+    Workspace(String),
 }
 
 /// Run a full indexing pass over `fixture_path` and collect metrics.
@@ -61,6 +92,8 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
     let graph = indexer.storage().graph();
     let graph_nodes = graph.count_nodes()?;
     let graph_edges = graph.count_edges()?;
+    indexer.storage().metadata().finalize();
+    let storage = collect_storage_metrics(&storage_dir)?;
 
     let memory_rss_growth_bytes = match (rss_before, rss_after) {
         (Some(before), Some(after)) => Some(after.saturating_sub(before)),
@@ -72,6 +105,60 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
         graph_nodes,
         graph_edges,
         memory_rss_growth_bytes,
+        storage,
+        indexed_repos: None,
+        indexed_files: None,
+        cross_repo_edges: None,
+    })
+}
+
+/// Run a full indexing pass over every repo declared in a fixture workspace.
+///
+/// `fixture_path` must contain a `gather-step.config.yaml` file. The workspace
+/// is indexed into a temporary storage directory and the resulting graph and
+/// storage metrics are returned.
+pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, HarnessError> {
+    let storage_dir = tempdir_for_pass(fixture_path)?;
+    let _guard = StorageDirGuard(storage_dir.clone());
+    let config = GatherStepConfig::from_yaml_file(fixture_path.join("gather-step.config.yaml"))?;
+    let mut registry = RegistryStore::open(storage_dir.join("registry.json"))?;
+
+    let rss_before = capture_rss();
+
+    let t0 = Instant::now();
+    let stats = index_workspace_with_storage(
+        &config,
+        fixture_path,
+        &mut registry,
+        &storage_dir,
+        IndexingOptions::default(),
+    )
+    .map_err(|error| HarnessError::Workspace(error.to_string()))?;
+    let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let rss_after = capture_rss();
+
+    let indexer = RepoIndexer::open(&storage_dir, IndexingOptions::default())?;
+    let graph = indexer.storage().graph();
+    let graph_nodes = graph.count_nodes()?;
+    let graph_edges = graph.count_edges()?;
+    indexer.storage().metadata().finalize();
+    let storage = collect_storage_metrics(&storage_dir)?;
+
+    let memory_rss_growth_bytes = match (rss_before, rss_after) {
+        (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+        _ => None,
+    };
+
+    Ok(IndexMetrics {
+        parse_ms: elapsed_ms,
+        graph_nodes,
+        graph_edges,
+        memory_rss_growth_bytes,
+        storage,
+        indexed_repos: Some(stats.indexed_repos),
+        indexed_files: Some(stats.total_files),
+        cross_repo_edges: Some(stats.cross_repo_edges),
     })
 }
 
@@ -180,8 +267,54 @@ fn tempdir_for_pass(fixture_path: &Path) -> Result<std::path::PathBuf, HarnessEr
         "gather-step-bench-{name}-{}-{id}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+fn collect_storage_metrics(storage_dir: &Path) -> Result<StorageMetrics, HarnessError> {
+    let graph_bytes = file_size(storage_dir.join("graph.redb"))?;
+    let metadata_bytes = file_size(storage_dir.join("metadata.sqlite"))?;
+    let metadata_wal_bytes = file_size(storage_dir.join("metadata.sqlite-wal"))?
+        + file_size(storage_dir.join("metadata.sqlite-shm"))?;
+    let search_bytes = path_size(storage_dir.join("search"))?;
+    let total_bytes = path_size(storage_dir)?;
+
+    Ok(StorageMetrics {
+        graph_bytes,
+        metadata_bytes,
+        metadata_wal_bytes,
+        search_bytes,
+        total_bytes,
+    })
+}
+
+fn file_size(path: impl AsRef<Path>) -> Result<u64, HarnessError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn path_size(path: impl AsRef<Path>) -> Result<u64, HarnessError> {
+    let path = path.as_ref();
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        total = total.saturating_add(path_size(entry?.path())?);
+    }
+    Ok(total)
 }
 
 /// RAII guard that removes the storage directory on drop.

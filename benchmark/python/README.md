@@ -24,6 +24,19 @@ cargo run -p gather-step-bench -- planning-oracle \
   --output-dir /tmp/gather-step-python-oracle
 ```
 
+Neutral speed/storage check:
+
+```sh
+cargo run -p gather-step-bench -- workspace-run \
+  tests/fixtures/python_planning_workspace \
+  --thresholds benchmark/python/thresholds.yaml \
+  --output-dir /tmp/gather-step-python-index
+```
+
+The `workspace-run` artifact includes wall-clock index time, graph node/edge
+counts, cross-repo edge count, RSS growth when available, and storage byte
+breakdowns for graph, metadata, and search files.
+
 The neutral scenario may use a `[python_oracle]` table for Python-specific
 repo, bridge, rank, warning, resolution, completeness, and unresolved-gap
 assertions. Private corpus manifests should use the same alias-only vocabulary
