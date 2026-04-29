@@ -29,6 +29,8 @@ pub enum Framework {
     Redux,
     Zustand,
     LaunchDarkly,
+    /// Detection-only Python web API pack.
+    FastApi,
     /// Always-active pack for detecting cross-package frontend hook boundary
     /// edges.  Does not require a per-repo detection predicate.
     FrontendHooks,
@@ -38,10 +40,10 @@ pub enum Framework {
 /// packs should run for files in this repo.
 ///
 /// Detection is intentionally conservative — it only looks at well-known
-/// manifest files (currently just `package.json`) and never parses source
-/// files. A missing or malformed manifest returns an empty set rather than
-/// erroring, because framework detection is a performance optimisation, not
-/// a hard correctness requirement.
+/// manifest files (`package.json`, `pyproject.toml`, and `requirements.txt`)
+/// and never parses source files. A missing or malformed manifest returns an
+/// empty set rather than erroring, because framework detection is a
+/// performance optimisation, not a hard correctness requirement.
 #[must_use]
 pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     let mut frameworks = FxHashSet::default();
@@ -134,6 +136,9 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
         ],
     ) {
         frameworks.insert(Framework::LaunchDarkly);
+    }
+    if has_any_python_dependency(repo_root, &["fastapi"]) {
+        frameworks.insert(Framework::FastApi);
     }
     // FrontendHooks detection is always active for any repo: cross-package hook
     // imports can appear in any TypeScript/JavaScript codebase regardless of
@@ -280,6 +285,12 @@ pub fn is_launchdarkly(repo_root: &Path) -> bool {
     )
 }
 
+/// Returns `true` when `FastAPI` is present in Python dependency metadata.
+#[must_use]
+pub fn is_fastapi(repo_root: &Path) -> bool {
+    has_any_python_dependency(repo_root, &["fastapi"])
+}
+
 /// Returns `true` when the repo has a `src/serviceConfigs` directory, which
 /// indicates a proxy-gateway repo with config-driven route definitions.
 #[must_use]
@@ -329,6 +340,99 @@ fn read_manifest_json(repo_root: &Path) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(&raw).ok()
 }
 
+fn has_any_python_dependency(repo_root: &Path, packages: &[&str]) -> bool {
+    let pyproject_match = read_pyproject(repo_root)
+        .as_ref()
+        .is_some_and(|manifest| has_dependency_in_pyproject(manifest, packages));
+    pyproject_match || requirements_contains_dependency(repo_root, packages)
+}
+
+fn read_pyproject(repo_root: &Path) -> Option<toml::Value> {
+    let pyproject_path = repo_root.join("pyproject.toml");
+    let metadata = fs::symlink_metadata(&pyproject_path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let raw = fs::read_to_string(pyproject_path).ok()?;
+    toml::from_str::<toml::Value>(&raw).ok()
+}
+
+fn has_dependency_in_pyproject(manifest: &toml::Value, packages: &[&str]) -> bool {
+    let project = manifest.get("project");
+    let project_dependencies = project
+        .and_then(|project| project.get("dependencies"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|dependencies| dependency_array_contains(dependencies, packages));
+    if project_dependencies {
+        return true;
+    }
+
+    let optional_dependencies = project
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|groups| {
+            groups.values().any(|dependencies| {
+                dependencies
+                    .as_array()
+                    .is_some_and(|dependencies| dependency_array_contains(dependencies, packages))
+            })
+        });
+    if optional_dependencies {
+        return true;
+    }
+
+    manifest
+        .get("tool")
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(|poetry| poetry.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|dependencies| {
+            dependencies
+                .keys()
+                .any(|dependency| package_name_matches(dependency, packages))
+        })
+}
+
+fn dependency_array_contains(dependencies: &[toml::Value], packages: &[&str]) -> bool {
+    dependencies
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .any(|dependency| package_name_matches(dependency_name(dependency), packages))
+}
+
+fn requirements_contains_dependency(repo_root: &Path, packages: &[&str]) -> bool {
+    let requirements_path = repo_root.join("requirements.txt");
+    let Ok(metadata) = fs::symlink_metadata(&requirements_path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    let Ok(raw) = fs::read_to_string(requirements_path) else {
+        return false;
+    };
+    raw.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty()
+            && !line.starts_with('#')
+            && package_name_matches(dependency_name(line), packages)
+    })
+}
+
+fn dependency_name(spec: &str) -> &str {
+    spec.trim()
+        .split(['[', '<', '>', '=', '!', '~', ';', ' ', '\t'])
+        .next()
+        .unwrap_or("")
+        .trim()
+}
+
+fn package_name_matches(name: &str, packages: &[&str]) -> bool {
+    packages
+        .iter()
+        .any(|package| name.eq_ignore_ascii_case(package))
+}
+
 fn manifest_script_contains(repo_root: &Path, needles: &[&str]) -> bool {
     let Some(manifest) = read_manifest_json(repo_root) else {
         return false;
@@ -371,8 +475,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        Framework, detect_frameworks, is_drizzle, is_mongoose, is_nestjs, is_nextjs, is_prisma,
-        is_react, is_tailwind,
+        Framework, detect_frameworks, is_drizzle, is_fastapi, is_mongoose, is_nestjs, is_nextjs,
+        is_prisma, is_react, is_tailwind,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -622,6 +726,29 @@ mod tests {
         assert!(detected.contains(&Framework::Tailwind));
         assert!(detected.contains(&Framework::Prisma));
         assert!(detected.contains(&Framework::Drizzle));
+    }
+
+    #[test]
+    fn fastapi_is_detected_from_python_dependency_metadata() {
+        let pyproject_dir = TempDir::new("fastapi-pyproject");
+        pyproject_dir.write(
+            "pyproject.toml",
+            r#"
+[project]
+dependencies = [
+  "fastapi>=0.115",
+]
+"#,
+        );
+        assert!(is_fastapi(&pyproject_dir.path));
+
+        let requirements_dir = TempDir::new("fastapi-requirements");
+        requirements_dir.write("requirements.txt", "fastapi==0.115.0\nuvicorn\n");
+        assert!(is_fastapi(&requirements_dir.path));
+
+        let detected = detect_frameworks(&pyproject_dir.path);
+        assert!(detected.contains(&Framework::FastApi));
+        assert!(detected.contains(&Framework::FrontendHooks));
     }
 
     #[test]

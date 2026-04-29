@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gather_step_bench::{
     compare::{BenchmarkResult, Environment, compare_result_dirs},
-    harness::{index_fixture, run_index_pass},
+    harness::{index_fixture, run_index_pass, run_workspace_index_pass},
     link_quality::{
         load_link_quality_task, render_link_quality_report, run_link_quality_benchmark,
     },
@@ -80,6 +80,17 @@ enum Command {
         /// Repository name to assign to the indexed fixture.
         #[arg(long, default_value = "bench-fixture")]
         repo: String,
+        /// Path to the thresholds YAML file.
+        #[arg(long, default_value = "benchmark/thresholds.yaml")]
+        thresholds: PathBuf,
+        /// Directory where JSON results are written.
+        #[arg(long, default_value = "benchmark/results")]
+        output_dir: PathBuf,
+    },
+    /// Index a configured fixture workspace and write benchmark results.
+    WorkspaceRun {
+        /// Path to the fixture workspace containing gather-step.config.yaml.
+        fixture_path: PathBuf,
         /// Path to the thresholds YAML file.
         #[arg(long, default_value = "benchmark/thresholds.yaml")]
         thresholds: PathBuf,
@@ -230,6 +241,11 @@ fn main() -> anyhow::Result<()> {
             thresholds,
             output_dir,
         } => run_command(&fixture_path, &repo, &thresholds, &output_dir),
+        Command::WorkspaceRun {
+            fixture_path,
+            thresholds,
+            output_dir,
+        } => workspace_run_command(&fixture_path, &thresholds, &output_dir),
         Command::Compare { from, to } => {
             let summary = compare_result_dirs(&from, &to)?;
             for line in &summary.lines {
@@ -450,11 +466,12 @@ fn run_command(
     print_status(&format!("Indexing fixture: {}", fixture_path.display()));
     let metrics = run_index_pass(fixture_path, repo)?;
     print_status(&format!(
-        "Done: parse_ms={} nodes={} edges={}",
-        metrics.parse_ms, metrics.graph_nodes, metrics.graph_edges
+        "Done: parse_ms={} nodes={} edges={} storage={}B",
+        metrics.parse_ms, metrics.graph_nodes, metrics.graph_edges, metrics.storage.total_bytes
     ));
 
     let mut checks: Vec<String> = Vec::new();
+    let mut rss_failure = None;
 
     // Check memory threshold.
     if let Some(rss_growth) = metrics.memory_rss_growth_bytes {
@@ -463,10 +480,12 @@ fn run_command(
             rss_growth, thresholds.memory.rss_absolute_max_bytes
         ));
         if rss_growth > thresholds.memory.rss_absolute_max_bytes {
-            print_status(&format!(
+            let message = format!(
                 "FAIL: RSS growth {} exceeds absolute max {}",
                 rss_growth, thresholds.memory.rss_absolute_max_bytes
-            ));
+            );
+            print_status(&message);
+            rss_failure = Some(message);
         }
     }
 
@@ -483,11 +502,92 @@ fn run_command(
             "graph_nodes": metrics.graph_nodes,
             "graph_edges": metrics.graph_edges,
             "memory_rss_growth_bytes": metrics.memory_rss_growth_bytes,
+            "storage": metrics.storage,
         }),
         thresholds_applied: checks,
     };
 
     write_result(output_dir, "index_pass", &date, &result)?;
+    if let Some(message) = rss_failure {
+        anyhow::bail!(message);
+    }
+    Ok(())
+}
+
+fn workspace_run_command(
+    fixture_path: &Path,
+    thresholds_path: &Path,
+    output_dir: &Path,
+) -> anyhow::Result<()> {
+    let thresholds = if thresholds_path.exists() {
+        Thresholds::load(thresholds_path)?
+    } else {
+        print_status(&format!(
+            "warning: thresholds file not found at {}; using defaults",
+            thresholds_path.display()
+        ));
+        Thresholds::default_thresholds()
+    };
+
+    print_status(&format!(
+        "Indexing fixture workspace: {}",
+        fixture_path.display()
+    ));
+    let metrics = run_workspace_index_pass(fixture_path)?;
+    print_status(&format!(
+        "Done: parse_ms={} repos={} files={} nodes={} edges={} cross_repo_edges={} storage={}B",
+        metrics.parse_ms,
+        metrics.indexed_repos.unwrap_or_default(),
+        metrics.indexed_files.unwrap_or_default(),
+        metrics.graph_nodes,
+        metrics.graph_edges,
+        metrics.cross_repo_edges.unwrap_or_default(),
+        metrics.storage.total_bytes
+    ));
+
+    let mut checks: Vec<String> = Vec::new();
+    let mut rss_failure = None;
+    if let Some(rss_growth) = metrics.memory_rss_growth_bytes {
+        checks.push(format!(
+            "memory.rss_absolute_max_bytes: {} <= {}",
+            rss_growth, thresholds.memory.rss_absolute_max_bytes
+        ));
+        if rss_growth > thresholds.memory.rss_absolute_max_bytes {
+            let message = format!(
+                "FAIL: RSS growth {} exceeds absolute max {}",
+                rss_growth, thresholds.memory.rss_absolute_max_bytes
+            );
+            print_status(&message);
+            rss_failure = Some(message);
+        }
+    }
+
+    let env = Environment::current();
+    let date = chrono::Utc::now().to_rfc3339();
+    let result = BenchmarkResult {
+        environment: Some(env),
+        date: date.clone(),
+        sample_sizes: [("workspace_index_pass".to_owned(), 1)]
+            .into_iter()
+            .collect(),
+        comparison_window: None,
+        metrics: serde_json::json!({
+            "parse_ms": metrics.parse_ms,
+            "graph_nodes": metrics.graph_nodes,
+            "graph_edges": metrics.graph_edges,
+            "memory_rss_growth_bytes": metrics.memory_rss_growth_bytes,
+            "storage": metrics.storage,
+            "indexed_repos": metrics.indexed_repos,
+            "indexed_files": metrics.indexed_files,
+            "cross_repo_edges": metrics.cross_repo_edges,
+        }),
+        thresholds_applied: checks,
+    };
+
+    write_result(output_dir, "workspace_index_pass", &date, &result)?;
+    if let Some(message) = rss_failure {
+        anyhow::bail!(message);
+    }
     Ok(())
 }
 

@@ -2,14 +2,16 @@ use std::{
     cell::RefCell,
     fs,
     num::NonZeroUsize,
+    ops::ControlFlow,
     path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use camino::Utf8PathBuf;
 
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, Visibility, node_id,
-    ref_node_id, shared_package_root, shared_symbol_qn_unversioned, virtual_node,
+    EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind, SourceSpan, Visibility,
+    node_id, ref_node_id, shared_package_root, shared_symbol_qn_unversioned, virtual_node,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -56,6 +58,7 @@ pub struct SymbolCapture {
     pub class_decorators: Vec<DecoratorCapture>,
     pub constructor_dependencies: Vec<String>,
     pub implemented_interfaces: Vec<String>,
+    pub base_classes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,9 +104,12 @@ pub enum ParseError {
     Language(#[from] tree_sitter::LanguageError),
     #[error("tree-sitter produced no parse tree for {path}")]
     MissingTree { path: PathBuf },
+    #[error("tree-sitter parsing timed out for {path} after {timeout_ms}ms")]
+    Timeout { path: PathBuf, timeout_ms: u64 },
 }
 
 const MAX_VISITOR_DEPTH: usize = 256;
+const TREE_SITTER_PARSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Process-wide built-in registry — reused across all `parse_file_core` calls.
 /// `PackRegistry::builtin()` allocates a 15-entry `Vec<PackEntry>`.
@@ -306,39 +312,13 @@ fn parse_file_core(
             let tree = PARSER.with_borrow_mut(|parser| -> Result<_, ParseError> {
                 let language = parser_language(file);
                 parser.set_language(&language)?;
-                let timeout = std::time::Duration::from_secs(5);
-                let mut timed_out = false;
-                let mut progress_cb = |_: &tree_sitter::ParseState| -> std::ops::ControlFlow<()> {
-                    if fallback_start.elapsed() >= timeout {
-                        timed_out = true;
-                        std::ops::ControlFlow::Break(())
-                    } else {
-                        std::ops::ControlFlow::Continue(())
-                    }
-                };
-                let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress_cb);
-                let len = source.len();
-                let bytes = source.as_bytes();
-                parser
-                    .parse_with_options(
-                        &mut |i, _| {
-                            if i < len { &bytes[i..] } else { &[] }
-                        },
-                        None,
-                        Some(options),
-                    )
-                    .ok_or_else(|| {
-                        if timed_out {
-                            tracing::warn!(
-                                path = %absolute_path.display(),
-                                timeout_s = timeout.as_secs(),
-                                "tree-sitter TS/JS fallback timed out"
-                            );
-                        }
-                        ParseError::MissingTree {
-                            path: absolute_path.clone(),
-                        }
-                    })
+                parse_tree_with_timeout(
+                    parser,
+                    &source,
+                    fallback_start,
+                    &absolute_path,
+                    "tree-sitter TS/JS fallback",
+                )
             })?;
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
@@ -417,28 +397,13 @@ fn parse_file_core(
     let tree = PARSER.with_borrow_mut(|parser| -> Result<_, ParseError> {
         let language = parser_language(file);
         parser.set_language(&language)?;
-        let timeout = std::time::Duration::from_secs(5);
-        let mut progress_cb = |_: &tree_sitter::ParseState| -> std::ops::ControlFlow<()> {
-            if parse_start.elapsed() >= timeout {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        };
-        let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress_cb);
-        let len = source.len();
-        let bytes = source.as_bytes();
-        parser
-            .parse_with_options(
-                &mut |i, _| {
-                    if i < len { &bytes[i..] } else { &[] }
-                },
-                None,
-                Some(options),
-            )
-            .ok_or_else(|| ParseError::MissingTree {
-                path: absolute_path.clone(),
-            })
+        parse_tree_with_timeout(
+            parser,
+            &source,
+            parse_start,
+            &absolute_path,
+            "tree-sitter parser",
+        )
     })?;
 
     let file_path_utf8 = path_to_utf8(&file.path);
@@ -507,7 +472,7 @@ fn parse_file_core(
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
         Language::Python => {
-            visit_python(tree.root_node(), &mut state, None, None, false, &[], 0);
+            visit_python(tree.root_node(), &mut state, None, None, None, &[], 0);
         }
         Language::Rust | Language::Go | Language::Java => {}
     }
@@ -605,6 +570,54 @@ fn parse_file_core(
     Ok(parsed)
 }
 
+fn parse_tree_with_timeout(
+    parser: &mut Parser,
+    source: &str,
+    started_at: Instant,
+    path: &Path,
+    timeout_context: &'static str,
+) -> Result<tree_sitter::Tree, ParseError> {
+    let mut timed_out = false;
+    let mut progress_cb = |_: &tree_sitter::ParseState| -> ControlFlow<()> {
+        if started_at.elapsed() >= TREE_SITTER_PARSE_TIMEOUT {
+            timed_out = true;
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::ParseOptions::new().progress_callback(&mut progress_cb);
+    let len = source.len();
+    let bytes = source.as_bytes();
+    let tree = parser.parse_with_options(
+        &mut |i, _| {
+            if i < len { &bytes[i..] } else { &[] }
+        },
+        None,
+        Some(options),
+    );
+    tree.ok_or_else(|| {
+        if timed_out {
+            let timeout_ms =
+                u64::try_from(TREE_SITTER_PARSE_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
+            tracing::warn!(
+                path = %path.display(),
+                timeout_ms,
+                timeout_context,
+                "tree-sitter parse timed out"
+            );
+            ParseError::Timeout {
+                path: path.to_path_buf(),
+                timeout_ms,
+            }
+        } else {
+            ParseError::MissingTree {
+                path: path.to_path_buf(),
+            }
+        }
+    })
+}
+
 /// Maximum number of package-import resolution entries retained per rayon
 /// worker thread.  Each entry maps `(repo_root, import_source)` → resolved
 /// path.  Most repositories have fewer than 100 distinct package imports, so
@@ -612,6 +625,52 @@ fn parse_file_core(
 /// long-running `watch` / `serve` daemons.
 const PACKAGE_IMPORT_CACHE_CAPACITY: usize = 1024;
 const IMPORT_PATH_EXISTS_CACHE_CAPACITY: usize = 4_096;
+const WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY: usize = 64;
+
+/// Maximum number of ancestor directories of a repo root to scan for sibling
+/// Python projects.  Six levels covers `monorepo/services/<repo>` (1),
+/// `monorepo/<repo>` (2), `monorepo/<group>/<repo>` (2), and a comfortable
+/// margin for nested layouts without making `read_dir` quadratic on
+/// pathological depths.  Increase only if a real layout requires it.
+const PYTHON_SIBLING_SEARCH_ANCESTORS: usize = 6;
+
+/// Maximum number of directory levels to climb from a parsed file looking for
+/// a `gather-step.config.yaml`.  Twelve covers all configured layouts seen in
+/// the project's fixtures and real users (deepest known is around eight).  A
+/// hard cap prevents pathological filesystem walks when the file is outside
+/// any configured workspace.
+const GATHER_STEP_CONFIG_MAX_ASCEND: usize = 12;
+
+/// Identity of a configured repo within a workspace.  Constructed only via
+/// [`WorkspaceRepoIdentity::new`] from a non-empty name and absolute root so
+/// callers cannot accidentally fall back to `root.file_name()` as a name (the
+/// bug fixed in 5a5563a).  Fields are kept private; use the accessors.
+#[derive(Clone, Debug)]
+struct WorkspaceRepoIdentity {
+    name: String,
+    root: PathBuf,
+}
+
+impl WorkspaceRepoIdentity {
+    fn new(name: &str, root: PathBuf) -> Option<Self> {
+        let name = name.trim();
+        if name.is_empty() || !root.is_absolute() {
+            return None;
+        }
+        Some(Self {
+            name: name.to_owned(),
+            root,
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
 
 thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
@@ -642,6 +701,11 @@ thread_local! {
         RefCell::new(lru::LruCache::new(
             NonZeroUsize::new(PACKAGE_IMPORT_CACHE_CAPACITY)
                 .expect("PACKAGE_IMPORT_CACHE_CAPACITY is non-zero"),
+        ));
+    static WORKSPACE_REPO_IDENTITY_CACHE: RefCell<lru::LruCache<PathBuf, Option<Vec<WorkspaceRepoIdentity>>>> =
+        RefCell::new(lru::LruCache::new(
+            NonZeroUsize::new(WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY)
+                .expect("WORKSPACE_REPO_IDENTITY_CACHE_CAPACITY is non-zero"),
         ));
 }
 
@@ -1008,6 +1072,7 @@ impl<'a> ParseState<'a> {
             class_decorators,
             constructor_dependencies,
             implemented_interfaces: Vec::new(),
+            base_classes: Vec::new(),
         });
         node
     }
@@ -1023,6 +1088,20 @@ impl<'a> ParseState<'a> {
             .find(|symbol| symbol.node.id == node_id)
         {
             symbol.implemented_interfaces = implemented_interfaces;
+        }
+    }
+
+    pub(crate) fn set_symbol_base_classes(
+        &mut self,
+        node_id: gather_step_core::NodeId,
+        base_classes: Vec<String>,
+    ) {
+        if let Some(symbol) = self
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.node.id == node_id)
+        {
+            symbol.base_classes = base_classes;
         }
     }
 
@@ -1068,85 +1147,93 @@ impl<'a> ParseState<'a> {
 
     fn push_imports(&mut self, statement: Node<'_>) {
         let raw = node_text(statement, self.source);
-        let (source, bindings) = if self.file.language == Language::Python {
-            let Some((source, bindings)) = parse_python_import_bindings(raw) else {
-                return;
-            };
-            (source, bindings)
+        let import_groups = if self.file.language == Language::Python {
+            let groups = parse_python_import_groups(statement, self.source);
+            if groups.is_empty() {
+                parse_python_import_groups_from_raw(raw)
+            } else {
+                groups
+            }
         } else {
             let Some(source) = parse_import_source(raw) else {
                 return;
             };
             let bindings = parse_ts_import_bindings(raw, &source);
-            (source, bindings)
+            vec![(source, bindings)]
         };
-        let resolved_path = resolve_import_path(
-            self.repo_root,
-            &self.file.path,
-            &source,
-            self.file.language,
-            self.path_aliases,
-        );
-        let mut is_new_module = false;
-        let module_id = *self.module_cache.entry(source.clone()).or_insert_with(|| {
-            is_new_module = true;
-            ref_node_id(NodeKind::Module, &format!("module-import::{source}"))
-        });
-        if is_new_module {
-            self.nodes.push(NodeData {
-                id: module_id,
-                kind: NodeKind::Module,
-                repo: self.repo.to_owned(),
-                file_path: self.file_path().to_owned(),
-                name: source.clone(),
-                qualified_name: Some(format!("module-import::{source}")),
-                external_id: Some(format!("module-import::{source}")),
-                signature: None,
-                visibility: Some(Visibility::Public),
-                span: Some(span_from(statement)),
-                is_virtual: true,
-            });
-        }
-        self.edges.push(EdgeData {
-            source: self.file_node.id,
-            target: module_id,
-            kind: EdgeKind::Imports,
-            metadata: EdgeMetadata::default(),
-            owner_file: self.file_node.id,
-            is_cross_file: true,
-        });
 
-        for binding in bindings {
-            // Import identity: file-path-scoped local name, stable across
-            // reordering of other imports in the same file.
-            let import_qn = format!("{}::{}", self.file_path(), binding.local_name);
-            let import_node = NodeData {
-                id: node_id(self.repo, self.file_path(), NodeKind::Import, &import_qn),
-                kind: NodeKind::Import,
-                repo: self.repo.to_owned(),
-                file_path: self.file_path().to_owned(),
-                name: binding.local_name.clone(),
-                qualified_name: Some(import_qn),
-                external_id: None,
-                signature: Some(format!("from {source}")),
-                visibility: None,
-                span: Some(span_from(statement)),
-                is_virtual: false,
-            };
-            self.nodes.push(import_node.clone());
+        for (source, bindings) in import_groups {
+            if source.is_empty() || bindings.is_empty() {
+                continue;
+            }
+            let resolved_path = resolve_import_path(
+                self.repo_root,
+                &self.file.path,
+                &source,
+                self.file.language,
+                self.path_aliases,
+            );
+            let mut is_new_module = false;
+            let module_id = *self.module_cache.entry(source.clone()).or_insert_with(|| {
+                is_new_module = true;
+                ref_node_id(NodeKind::Module, &format!("module-import::{source}"))
+            });
+            if is_new_module {
+                self.nodes.push(NodeData {
+                    id: module_id,
+                    kind: NodeKind::Module,
+                    repo: self.repo.to_owned(),
+                    file_path: self.file_path().to_owned(),
+                    name: source.clone(),
+                    qualified_name: Some(format!("module-import::{source}")),
+                    external_id: Some(format!("module-import::{source}")),
+                    signature: None,
+                    visibility: Some(Visibility::Public),
+                    span: Some(span_from(statement)),
+                    is_virtual: true,
+                });
+            }
             self.edges.push(EdgeData {
                 source: self.file_node.id,
-                target: import_node.id,
-                kind: EdgeKind::Defines,
+                target: module_id,
+                kind: EdgeKind::Imports,
                 metadata: EdgeMetadata::default(),
                 owner_file: self.file_node.id,
-                is_cross_file: false,
+                is_cross_file: true,
             });
-            self.import_bindings.push(ImportBinding {
-                resolved_path: resolved_path.clone(),
-                source: source.clone(),
-                ..binding
-            });
+
+            for binding in bindings {
+                // Import identity: file-path-scoped local name, stable across
+                // reordering of other imports in the same file.
+                let import_qn = format!("{}::{}", self.file_path(), binding.local_name);
+                let import_node = NodeData {
+                    id: node_id(self.repo, self.file_path(), NodeKind::Import, &import_qn),
+                    kind: NodeKind::Import,
+                    repo: self.repo.to_owned(),
+                    file_path: self.file_path().to_owned(),
+                    name: binding.local_name.clone(),
+                    qualified_name: Some(import_qn),
+                    external_id: None,
+                    signature: Some(format!("from {source}")),
+                    visibility: None,
+                    span: Some(span_from(statement)),
+                    is_virtual: false,
+                };
+                self.nodes.push(import_node.clone());
+                self.edges.push(EdgeData {
+                    source: self.file_node.id,
+                    target: import_node.id,
+                    kind: EdgeKind::Defines,
+                    metadata: EdgeMetadata::default(),
+                    owner_file: self.file_node.id,
+                    is_cross_file: false,
+                });
+                self.import_bindings.push(ImportBinding {
+                    resolved_path: resolved_path.clone(),
+                    source: source.clone(),
+                    ..binding
+                });
+            }
         }
     }
 
@@ -1744,13 +1831,13 @@ fn visit_ts_js_with_pending(
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned, clippy::only_used_in_recursion)]
+#[expect(clippy::semicolon_if_nothing_returned)]
 fn visit_python(
     node: Node<'_>,
     state: &mut ParseState<'_>,
     parent_class: Option<&NodeData>,
     owner: Option<gather_step_core::NodeId>,
-    force_exported: bool,
+    owner_qname: Option<&str>,
     class_decorators: &[DecoratorCapture],
     depth: usize,
 ) {
@@ -1765,7 +1852,7 @@ fn visit_python(
                     state,
                     parent_class,
                     owner,
-                    force_exported,
+                    owner_qname,
                     class_decorators,
                     depth + 1,
                 )
@@ -1782,7 +1869,7 @@ fn visit_python(
                             state,
                             parent_class,
                             owner,
-                            force_exported,
+                            owner_qname,
                             &decorators,
                             depth + 1,
                         );
@@ -1800,7 +1887,7 @@ fn visit_python(
                             state,
                             parent_class,
                             owner,
-                            force_exported,
+                            owner_qname,
                             &merged,
                             depth + 1,
                         );
@@ -1813,11 +1900,16 @@ fn visit_python(
         "class_definition" => {
             let name = child_text(node, "name", state.source)
                 .unwrap_or_else(|| "AnonymousClass".to_owned());
+            let qualified_name = match owner_qname {
+                Some(parent) => format!("{parent}.{name}"),
+                None => name.clone(),
+            };
             let implemented_interfaces = collect_implemented_interfaces(node, state.source);
+            let base_classes = collect_python_base_classes(node, state.source);
             let class_node = state.push_symbol(
                 NodeKind::Class,
                 name.clone(),
-                Some(name.clone()),
+                Some(qualified_name.clone()),
                 Some(span_from(node)),
                 None,
                 Some(Visibility::Public),
@@ -1827,13 +1919,14 @@ fn visit_python(
                 collect_constructor_dependencies(node, state.source),
             );
             state.set_symbol_implemented_interfaces(class_node.id, implemented_interfaces);
+            state.set_symbol_base_classes(class_node.id, base_classes);
             recurse_children(node, |child| {
                 visit_python(
                     child,
                     state,
                     Some(&class_node),
                     Some(class_node.id),
-                    force_exported,
+                    Some(qualified_name.as_str()),
                     class_decorators,
                     depth + 1,
                 )
@@ -1842,13 +1935,14 @@ fn visit_python(
         "function_definition" => {
             let name =
                 child_text(node, "name", state.source).unwrap_or_else(|| "anonymous".to_owned());
-            let qualified_name = parent_class
-                .map(|class_node| format!("{}.{}", class_node.name, name))
-                .or_else(|| Some(name.clone()));
+            let qualified_name = match owner_qname {
+                Some(parent) => format!("{parent}.{name}"),
+                None => name.clone(),
+            };
             let function_node = state.push_symbol(
                 NodeKind::Function,
                 name,
-                qualified_name,
+                Some(qualified_name.clone()),
                 Some(span_from(node)),
                 function_signature(node, state.source),
                 Some(Visibility::Public),
@@ -1863,7 +1957,7 @@ fn visit_python(
                     state,
                     parent_class,
                     Some(function_node.id),
-                    force_exported,
+                    Some(qualified_name.as_str()),
                     class_decorators,
                     depth + 1,
                 )
@@ -1893,7 +1987,7 @@ fn visit_python(
                     state,
                     parent_class,
                     owner,
-                    force_exported,
+                    owner_qname,
                     class_decorators,
                     depth + 1,
                 )
@@ -1905,7 +1999,7 @@ fn visit_python(
                 state,
                 parent_class,
                 owner,
-                force_exported,
+                owner_qname,
                 class_decorators,
                 depth + 1,
             )
@@ -2008,14 +2102,16 @@ fn collect_constructor_dependencies(node: Node<'_>, source: &str) -> Vec<String>
                     && child_text(child, "name", source).as_deref() == Some("constructor"));
             let is_python_init = child.kind() == "function_definition"
                 && child_text(child, "name", source).as_deref() == Some("__init__");
-            if is_constructor || is_python_init {
+            if is_python_init {
+                dependencies.extend(collect_python_constructor_dependencies(child, source));
+            } else if is_constructor {
                 let text = node_text(child, source);
                 if let Some(open) = text.find('(')
                     && let Some(close) = text[open + 1..].find(')')
                 {
-                    for parameter in text[open + 1..open + 1 + close].split(',') {
+                    for parameter in split_top_level_commas(&text[open + 1..open + 1 + close]) {
                         let parameter = parameter.trim();
-                        if parameter.is_empty() || parameter == "self" {
+                        if parameter.is_empty() || matches!(parameter, "self" | "this") {
                             continue;
                         }
                         let name = parameter
@@ -2045,6 +2141,39 @@ fn collect_constructor_dependencies(node: Node<'_>, source: &str) -> Vec<String>
     dependencies
 }
 
+fn collect_python_constructor_dependencies(function_node: Node<'_>, source: &str) -> Vec<String> {
+    let Some(parameters) = find_child_by_kind(function_node, "parameters") else {
+        return Vec::new();
+    };
+
+    let mut dependencies = Vec::new();
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        if parameter.kind() == "identifier" {
+            let name = node_text(parameter, source).trim();
+            if !matches!(name, "" | "self" | "cls") {
+                dependencies.push(name.to_owned());
+            }
+            continue;
+        }
+        if parameter.kind() == "keyword_separator" {
+            continue;
+        }
+        let Some(type_node) = parameter
+            .child_by_field_name("type")
+            .or_else(|| find_child_by_kind(parameter, "type"))
+        else {
+            continue;
+        };
+        let type_name = clean_python_type_annotation(node_text(type_node, source));
+        if !type_name.is_empty() {
+            dependencies.push(type_name);
+        }
+    }
+
+    dependencies
+}
+
 fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
     let Ok(text) = node.utf8_text(source.as_bytes()) else {
         return Vec::new();
@@ -2070,6 +2199,45 @@ fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
             (!head.is_empty()).then(|| head.to_owned())
         })
         .collect()
+}
+
+fn collect_python_base_classes(node: Node<'_>, source: &str) -> Vec<String> {
+    let Some(argument_list) = find_child_by_kind(node, "argument_list") else {
+        return Vec::new();
+    };
+
+    let mut bases = Vec::new();
+    let mut cursor = argument_list.walk();
+    for argument in argument_list.named_children(&mut cursor) {
+        if argument.kind() == "keyword_argument" {
+            continue;
+        }
+        let base = clean_python_type_annotation(node_text(argument, source));
+        if !base.is_empty() {
+            bases.push(base);
+        }
+    }
+
+    bases
+}
+
+fn clean_python_type_annotation(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_end_matches(',')
+        .trim()
+        .to_owned()
+}
+
+fn type_reference_head(reference: &str) -> &str {
+    reference
+        .trim()
+        .split(['<', '[', '(', ' ', '\n', '\r', '\t'])
+        .next()
+        .unwrap_or(reference)
+        .trim_end_matches(',')
+        .trim()
 }
 
 fn split_top_level_commas(input: &str) -> Vec<&str> {
@@ -2217,63 +2385,237 @@ fn parse_named_imports(raw: &str, source: &str, is_type_only: bool) -> Vec<Impor
         .collect()
 }
 
-fn parse_python_import_bindings(raw: &str) -> Option<(String, Vec<ImportBinding>)> {
+fn parse_python_import_groups(
+    statement: Node<'_>,
+    source_text: &str,
+) -> Vec<(String, Vec<ImportBinding>)> {
+    match statement.kind() {
+        "import_statement" => parse_python_import_statement(statement, source_text),
+        "import_from_statement" => parse_python_from_import_statement(statement, source_text),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_python_import_statement(
+    statement: Node<'_>,
+    source_text: &str,
+) -> Vec<(String, Vec<ImportBinding>)> {
+    let mut groups = Vec::new();
+    let mut cursor = statement.walk();
+    for child in statement.named_children(&mut cursor) {
+        let Some((imported_name, local_name)) = python_import_item_name(child, source_text) else {
+            continue;
+        };
+        groups.push((
+            imported_name.clone(),
+            vec![python_import_binding(local_name, None, imported_name, true)],
+        ));
+    }
+    groups
+}
+
+fn parse_python_from_import_statement(
+    statement: Node<'_>,
+    source_text: &str,
+) -> Vec<(String, Vec<ImportBinding>)> {
+    let Some(module_node) = statement.child_by_field_name("module_name") else {
+        return Vec::new();
+    };
+    let source = normalize_python_module_text(node_text(module_node, source_text));
+    if source.is_empty() {
+        return Vec::new();
+    }
+
+    let mut bindings = Vec::new();
+    let module_range = module_node.byte_range();
+    let mut cursor = statement.walk();
+    for child in statement.named_children(&mut cursor) {
+        if child.byte_range() == module_range {
+            continue;
+        }
+        let Some((imported_name, local_name)) = python_import_item_name(child, source_text) else {
+            continue;
+        };
+        bindings.push(python_import_binding(
+            local_name,
+            Some(imported_name),
+            source.clone(),
+            false,
+        ));
+    }
+
+    let raw = node_text(statement, source_text);
+    if raw
+        .split_once(" import ")
+        .is_some_and(|(_, tail)| tail.trim_start().starts_with('*'))
+    {
+        bindings.push(python_import_binding(
+            "*".to_owned(),
+            Some("*".to_owned()),
+            source.clone(),
+            false,
+        ));
+    }
+
+    if python_module_source_is_dots_only(&source) {
+        return bindings
+            .into_iter()
+            .filter_map(|binding| {
+                let imported_name = binding.imported_name.as_deref()?;
+                if imported_name == "*" {
+                    return Some((source.clone(), vec![binding]));
+                }
+                let binding_source = format!("{source}{imported_name}");
+                Some((
+                    binding_source.clone(),
+                    vec![ImportBinding {
+                        source: binding_source,
+                        ..binding
+                    }],
+                ))
+            })
+            .collect();
+    }
+
+    if bindings.is_empty() {
+        Vec::new()
+    } else {
+        vec![(source, bindings)]
+    }
+}
+
+fn python_module_source_is_dots_only(source: &str) -> bool {
+    !source.is_empty() && source.chars().all(|ch| ch == '.')
+}
+
+fn python_import_item_name(item: Node<'_>, source_text: &str) -> Option<(String, String)> {
+    match item.kind() {
+        "aliased_import" => {
+            let imported_name = child_text(item, "name", source_text)
+                .map(|value| normalize_python_module_text(&value))?;
+            let local_name = child_text(item, "alias", source_text)?;
+            Some((imported_name, local_name))
+        }
+        "dotted_name" => {
+            let imported_name = normalize_python_module_text(node_text(item, source_text));
+            if imported_name.is_empty() {
+                None
+            } else {
+                let local_name = python_import_local_name(&imported_name);
+                Some((imported_name, local_name))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_python_module_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+}
+
+fn python_import_local_name(imported_name: &str) -> String {
+    imported_name
+        .rsplit('.')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(imported_name)
+        .to_owned()
+}
+
+fn python_import_binding(
+    local_name: String,
+    imported_name: Option<String>,
+    source: String,
+    is_namespace: bool,
+) -> ImportBinding {
+    ImportBinding {
+        local_name,
+        imported_name,
+        source,
+        resolved_path: None,
+        is_default: false,
+        is_namespace,
+        is_type_only: false,
+    }
+}
+
+fn parse_python_import_groups_from_raw(raw: &str) -> Vec<(String, Vec<ImportBinding>)> {
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix("from ") {
-        let (source, imported) = rest.split_once(" import ")?;
-        let source = source.trim().to_owned();
+        let Some((source, imported)) = rest.split_once(" import ") else {
+            return Vec::new();
+        };
+        let source = normalize_python_module_text(source);
         let bindings = imported
             .split(',')
             .filter_map(|piece| {
-                let piece = piece.trim();
+                let piece = piece
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .trim();
                 if piece.is_empty() {
                     return None;
                 }
                 let (imported_name, local_name) =
                     if let Some((left, right)) = piece.split_once(" as ") {
-                        (left.trim().to_owned(), right.trim().to_owned())
+                        (
+                            normalize_python_module_text(left),
+                            normalize_python_module_text(right),
+                        )
                     } else {
-                        (piece.to_owned(), piece.to_owned())
+                        let imported_name = normalize_python_module_text(piece);
+                        let local_name = python_import_local_name(&imported_name);
+                        (imported_name, local_name)
                     };
-                Some(ImportBinding {
+                Some(python_import_binding(
                     local_name,
-                    imported_name: Some(imported_name),
-                    source: source.clone(),
-                    resolved_path: None,
-                    is_default: false,
-                    is_namespace: false,
-                    is_type_only: false,
-                })
+                    Some(imported_name),
+                    source.clone(),
+                    false,
+                ))
             })
             .collect::<Vec<_>>();
-        return Some((source, bindings));
+        return if bindings.is_empty() {
+            Vec::new()
+        } else {
+            vec![(source, bindings)]
+        };
     }
 
-    let rest = trimmed.strip_prefix("import ")?;
-    let source = rest
-        .split(',')
-        .next()?
-        .split_whitespace()
-        .next()?
-        .trim()
-        .to_owned();
-    let local_name = if let Some((_, alias)) = source.rsplit_once('.') {
-        alias.to_owned()
-    } else {
-        source.clone()
+    let Some(rest) = trimmed.strip_prefix("import ") else {
+        return Vec::new();
     };
-    Some((
-        source.clone(),
-        vec![ImportBinding {
-            local_name,
-            imported_name: None,
-            source,
-            resolved_path: None,
-            is_default: false,
-            is_namespace: true,
-            is_type_only: false,
-        }],
-    ))
+    rest.split(',')
+        .filter_map(|piece| {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                return None;
+            }
+            let (source, local_name) = if let Some((left, right)) = piece.split_once(" as ") {
+                (
+                    normalize_python_module_text(left),
+                    normalize_python_module_text(right),
+                )
+            } else {
+                let source = normalize_python_module_text(
+                    piece.split_whitespace().next().unwrap_or_default(),
+                );
+                let local_name = python_import_local_name(&source);
+                (source, local_name)
+            };
+            if source.is_empty() || local_name.is_empty() {
+                None
+            } else {
+                Some((
+                    source.clone(),
+                    vec![python_import_binding(local_name, None, source, true)],
+                ))
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn resolve_import_path_pub(
@@ -2305,6 +2647,8 @@ fn resolve_import_path(
                 .unwrap_or_else(|| Path::new(""))
                 .join(source),
         )
+    } else if language == Language::Python && source.starts_with('.') {
+        ImportBase::Relative(python_relative_import_path(current_file, source)?)
     } else if let Some(rewritten) = aliases.rewrite(source) {
         // tsconfig.json / workspace alias — prefer when present since it's the
         // repo's declared intent. Most rewrites are repo-relative, but
@@ -2321,8 +2665,18 @@ fn resolve_import_path(
         // `src/*` convention by default. Drops away entirely once aliases
         // loaded from tsconfig cover `@/`.
         ImportBase::Relative(PathBuf::from("src").join(alias))
+    } else if language == Language::Python
+        && let Some(absolute) = resolve_python_current_package_import(repo_root, source)
+    {
+        return Some(absolute);
+    } else if language == Language::Python
+        && let Some(absolute) = resolve_python_sibling_package_import(repo_root, source)
+    {
+        return Some(absolute);
     } else if let Some(absolute) = resolve_workspace_or_sibling_package_cached(repo_root, source) {
         return Some(absolute);
+    } else if language == Language::Python {
+        ImportBase::Relative(PathBuf::from(source.replace('.', "/")))
     } else {
         return None;
     };
@@ -2333,7 +2687,9 @@ fn resolve_import_path(
     let candidates = match language {
         Language::Python => vec![
             base_path.with_extension("py"),
+            base_path.with_extension("pyi"),
             base_path.join("__init__.py"),
+            base_path.join("__init__.pyi"),
         ],
         _ => vec![
             base_path.clone(),
@@ -2361,6 +2717,30 @@ fn resolve_import_path(
         .find(|candidate| import_path_exists_inside_allowed_roots(repo_root, candidate))
 }
 
+fn python_relative_import_path(current_file: &Path, source: &str) -> Option<PathBuf> {
+    let leading_dots = source.chars().take_while(|ch| *ch == '.').count();
+    if leading_dots == 0 {
+        return None;
+    }
+
+    let mut base = current_file
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    for _ in 1..leading_dots {
+        if !base.pop() {
+            return None;
+        }
+    }
+
+    let remainder = source.trim_start_matches('.');
+    if remainder.is_empty() {
+        Some(base)
+    } else {
+        Some(base.join(remainder.replace('.', "/")))
+    }
+}
+
 fn normalize_repo_relative_path(path: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -2386,17 +2766,33 @@ fn import_path_exists_inside_allowed_roots(repo_root: &Path, candidate: &Path) -
     }
 
     let mut allowed_roots = Vec::new();
-    if let Ok(canonical_repo_root) = fs::canonicalize(repo_root) {
-        allowed_roots.push(canonical_repo_root);
-    }
-    if let Some(workspace_root) = find_workspace_root(repo_root, 12)
-        && let Ok(canonical_workspace_root) = fs::canonicalize(workspace_root)
-    {
-        allowed_roots.push(canonical_workspace_root);
+    let canonical_repo_root = match fs::canonicalize(repo_root) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                repo_root = %repo_root.display(),
+                error = %error,
+                "failed to canonicalize repo root while checking import path; result will not be cached"
+            );
+            return false;
+        }
+    };
+    allowed_roots.push(canonical_repo_root);
+    if let Some(workspace_root) = find_workspace_root(repo_root, 12) {
+        match fs::canonicalize(&workspace_root) {
+            Ok(canonical_workspace_root) => allowed_roots.push(canonical_workspace_root),
+            Err(error) => {
+                tracing::warn!(
+                    workspace_root = %workspace_root.display(),
+                    error = %error,
+                    "failed to canonicalize workspace root while checking import path; result will not be cached"
+                );
+                return canonicalize_existing_file_under_any(candidate, &allowed_roots).is_some();
+            }
+        }
     }
 
-    let exists = !allowed_roots.is_empty()
-        && canonicalize_existing_file_under_any(candidate, &allowed_roots).is_some();
+    let exists = canonicalize_existing_file_under_any(candidate, &allowed_roots).is_some();
     IMPORT_PATH_EXISTS_CACHE.with_borrow_mut(|cache| {
         cache.put(key, exists);
     });
@@ -2424,14 +2820,47 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
         .strip_prefix(package_name)
         .unwrap_or("")
         .trim_start_matches('/');
-    let canonical_repo_root = fs::canonicalize(repo_root).ok();
+    let canonical_repo_root = match fs::canonicalize(repo_root) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(
+                repo_root = %repo_root.display(),
+                error = %error,
+                "failed to canonicalize repo root while resolving sibling package import"
+            );
+            None
+        }
+    };
 
     for root in repo_root.ancestors().skip(1).take(6) {
-        let Ok(entries) = fs::read_dir(root) else {
-            continue;
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    dir = %root.display(),
+                    error = %error,
+                    "failed to enumerate ancestor while resolving sibling package import; skipping"
+                );
+                continue;
+            }
         };
-        for entry in entries.flatten() {
-            let package_dir = entry.path();
+        let mut package_dirs = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => package_dirs.push(entry.path()),
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %root.display(),
+                        error = %error,
+                        "skipping unreadable entry while resolving sibling package import"
+                    );
+                }
+            }
+        }
+        package_dirs.sort();
+
+        let mut first_match: Option<(PathBuf, PathBuf)> = None;
+        for package_dir in package_dirs {
             let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, root) else {
                 continue;
             };
@@ -2447,11 +2876,27 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             else {
                 continue;
             };
-            let Ok(raw) = fs::read_to_string(&manifest_path) else {
-                continue;
+            let raw = match fs::read_to_string(&manifest_path) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::warn!(
+                        manifest_path = %manifest_path.display(),
+                        error = %error,
+                        "failed to read package.json while resolving sibling package import; skipping"
+                    );
+                    continue;
+                }
             };
-            let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
-                continue;
+            let manifest = match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::warn!(
+                        manifest_path = %manifest_path.display(),
+                        error = %error,
+                        "failed to parse package.json while resolving sibling package import; skipping"
+                    );
+                    continue;
+                }
             };
             let manifest_name = manifest
                 .get("name")
@@ -2460,14 +2905,196 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             if manifest_name != package_name {
                 continue;
             }
-            return if tail.is_empty() {
+            let resolved = if tail.is_empty() {
                 resolve_workspace_package_entry(root, &package_dir, &manifest)
             } else {
                 resolve_workspace_package_subpath(root, &package_dir, &manifest, tail)
             };
+            let Some(resolved) = resolved else {
+                continue;
+            };
+            if let Some((first_package_dir, first_resolved)) = first_match.as_ref() {
+                tracing::warn!(
+                    package = package_name,
+                    first_package_dir = %first_package_dir.display(),
+                    duplicate_package_dir = %package_dir.display(),
+                    resolved = %first_resolved.display(),
+                    "multiple sibling packages matched import; using first match"
+                );
+                continue;
+            }
+            first_match = Some((package_dir, resolved));
+        }
+        if let Some((_, resolved)) = first_match {
+            return Some(resolved);
         }
     }
     None
+}
+
+/// Resolve a top-level Python import like `package_a.module_b` against
+/// repositories that live next to (or near) `repo_root` in a multi-repo
+/// monorepo layout.
+///
+/// Walks up to [`PYTHON_SIBLING_SEARCH_ANCESTORS`] ancestors of `repo_root`
+/// and inspects each ancestor's children for directories that look like
+/// Python projects (have a `pyproject.toml`/`setup.py`/`setup.cfg`).  The
+/// first match whose package layout (`src/<pkg>/...` or `<pkg>/...`) resolves
+/// the import wins.
+///
+/// The current repo itself is filtered out — see
+/// [`resolve_python_current_package_import`] for in-repo resolution.
+fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+    let (package_name, tail) = python_package_root_and_tail(source)?;
+    let canonical_repo_root = match fs::canonicalize(repo_root) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            tracing::warn!(
+                repo_root = %repo_root.display(),
+                error = %error,
+                "failed to canonicalize repo root while resolving Python sibling import"
+            );
+            None
+        }
+    };
+
+    for root in repo_root
+        .ancestors()
+        .skip(1)
+        .take(PYTHON_SIBLING_SEARCH_ANCESTORS)
+    {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    dir = %root.display(),
+                    error = %error,
+                    "failed to enumerate ancestor while resolving Python sibling import; skipping"
+                );
+                continue;
+            }
+        };
+        let mut package_dirs = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => package_dirs.push(entry.path()),
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %root.display(),
+                        error = %error,
+                        "skipping unreadable entry while resolving Python sibling import"
+                    );
+                }
+            }
+        }
+        package_dirs.sort();
+
+        let mut first_match: Option<(PathBuf, PathBuf)> = None;
+        for package_dir in package_dirs {
+            let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, root) else {
+                continue;
+            };
+            if canonical_repo_root
+                .as_ref()
+                .is_some_and(|repo_root| &package_dir == repo_root)
+            {
+                continue;
+            }
+            if !has_python_project_marker(&package_dir) {
+                continue;
+            }
+            if let Some(resolved) =
+                resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
+            {
+                if let Some((first_package_dir, first_resolved)) = first_match.as_ref() {
+                    tracing::warn!(
+                        package = package_name,
+                        first_package_dir = %first_package_dir.display(),
+                        duplicate_package_dir = %package_dir.display(),
+                        resolved = %first_resolved.display(),
+                        "multiple sibling Python packages matched import; using first match"
+                    );
+                    continue;
+                }
+                first_match = Some((package_dir, resolved));
+            }
+        }
+        if let Some((_, resolved)) = first_match {
+            return Some(resolved);
+        }
+    }
+
+    None
+}
+
+/// Resolve an absolute Python import (`my_pkg.submodule`) against the current
+/// repo's package layout, supporting both `src/<pkg>/...` and flat
+/// `<pkg>/...` conventions.  Used after relative-import handling and before
+/// sibling-repo lookup.
+fn resolve_python_current_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+    let (package_name, tail) = python_package_root_and_tail(source)?;
+    let package_dir = fs::canonicalize(repo_root).ok()?;
+    if !has_python_project_marker(&package_dir) {
+        return None;
+    }
+    resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
+}
+
+fn has_python_project_marker(package_dir: &Path) -> bool {
+    package_dir.join("pyproject.toml").is_file()
+        || package_dir.join("setup.py").is_file()
+        || package_dir.join("setup.cfg").is_file()
+}
+
+fn python_package_root_and_tail(source: &str) -> Option<(&str, Option<PathBuf>)> {
+    if source.is_empty()
+        || source.starts_with('.')
+        || source.starts_with('/')
+        || source.contains('/')
+        || source.split('.').any(str::is_empty)
+    {
+        return None;
+    }
+    let mut parts = source.split('.');
+    let package_name = parts.next()?;
+    let tail = parts.collect::<PathBuf>();
+    let tail = if tail.as_os_str().is_empty() {
+        None
+    } else {
+        Some(tail)
+    };
+    Some((package_name, tail))
+}
+
+fn resolve_python_package_subpath(
+    package_dir: &Path,
+    package_name: &str,
+    tail: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut bases = Vec::with_capacity(2);
+    let mut src_base = package_dir.join("src").join(package_name);
+    if let Some(tail) = tail {
+        src_base = src_base.join(tail);
+    }
+    bases.push(src_base);
+
+    let mut flat_base = package_dir.join(package_name);
+    if let Some(tail) = tail {
+        flat_base = flat_base.join(tail);
+    }
+    bases.push(flat_base);
+
+    bases
+        .into_iter()
+        .flat_map(|base| {
+            [
+                base.with_extension("py"),
+                base.with_extension("pyi"),
+                base.join("__init__.py"),
+                base.join("__init__.pyi"),
+            ]
+        })
+        .find_map(|candidate| canonicalize_existing_file_under(&candidate, package_dir))
 }
 
 fn find_workspace_package(
@@ -2784,11 +3411,21 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
         .collect::<FxHashSet<_>>();
 
     for binding in &parsed.import_bindings {
+        if let Some((node, edge)) = external_import_file_edge(parsed, repo_root, binding) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
+                added_nodes.push(node);
+            }
+            let key = (edge.source, edge.target, edge.kind, edge.owner_file);
+            if seen_edge_keys.insert(key) {
+                added_edges.push(edge);
+            }
+        }
+
         if !binding.is_type_only && !is_contract_like_import_binding(repo_root, binding) {
             continue;
         }
         if let Some((node, edge)) = semantic_import_edge(parsed, repo_root, binding) {
-            if seen_node_ids.insert(node.id) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
                 added_nodes.push(node);
             }
             let key = (edge.source, edge.target, edge.kind, edge.owner_file);
@@ -2812,42 +3449,13 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
                 continue;
             };
 
-            // Prefer a shared-contract virtual node when the import comes from
-            // a known shared-contract package (e.g. `@workspace/contracts`).
-            // Fall back to a file node derived from the resolved path for any
-            // other resolvable import (e.g. `./contracts`).
-            let node = if let Some(shared_node) =
-                shared_contract_node_from_binding(parsed, binding, imported_symbol_name)
-            {
-                shared_node
-            } else if let Some(resolved) = binding.resolved_path.as_ref()
-                && let Ok(relative) = resolved.strip_prefix(repo_root)
-            {
-                let relative_utf8 = path_to_utf8(relative);
-                let relative_str = relative_utf8.as_str();
-                NodeData {
-                    id: node_id(
-                        &parsed.file_node.repo,
-                        relative_str,
-                        NodeKind::File,
-                        relative_str,
-                    ),
-                    kind: NodeKind::File,
-                    repo: parsed.file_node.repo.clone(),
-                    file_path: relative_str.to_owned(),
-                    name: relative_str.to_owned(),
-                    qualified_name: Some(format!("{}::{relative_str}", parsed.file_node.repo)),
-                    external_id: None,
-                    signature: None,
-                    visibility: None,
-                    span: None,
-                    is_virtual: false,
-                }
-            } else {
+            let Some(node) =
+                semantic_type_node_from_binding(parsed, repo_root, binding, imported_symbol_name)
+            else {
                 continue;
             };
 
-            if seen_node_ids.insert(node.id) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
                 added_nodes.push(node.clone());
             }
             let edge = EdgeData {
@@ -2877,10 +3485,58 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
                 }
             }
         }
+
+        for base_class in &symbol.base_classes {
+            let base_head = type_reference_head(base_class);
+            if base_head.is_empty() {
+                continue;
+            }
+
+            let node = if let Some(node) = same_file_class_node(parsed, symbol.node.id, base_head) {
+                node
+            } else if let Some((binding, imported_symbol_name)) =
+                parsed.import_bindings.iter().find_map(|binding| {
+                    interface_symbol_from_binding(binding, base_head)
+                        .map(|symbol_name| (binding, symbol_name))
+                })
+            {
+                let Some(node) = semantic_type_node_from_binding(
+                    parsed,
+                    repo_root,
+                    binding,
+                    imported_symbol_name,
+                ) else {
+                    continue;
+                };
+                node
+            } else {
+                continue;
+            };
+
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
+                added_nodes.push(node.clone());
+            }
+            let edge = EdgeData {
+                source: symbol.node.id,
+                target: node.id,
+                kind: EdgeKind::Extends,
+                metadata: EdgeMetadata::default(),
+                owner_file: parsed.file_node.id,
+                is_cross_file: node.file_path != symbol.node.file_path,
+            };
+            let key = (edge.source, edge.target, edge.kind, edge.owner_file);
+            if seen_edge_keys.insert(key) {
+                added_edges.push(edge);
+            }
+        }
     }
 
     append_unique_nodes(&mut parsed.nodes, added_nodes);
     parsed.edges.extend(added_edges);
+}
+
+fn should_add_semantic_node(parsed: &ParsedFile, node: &NodeData) -> bool {
+    node.repo == parsed.file_node.repo || node.is_virtual
 }
 
 fn semantic_import_edge(
@@ -2890,6 +3546,21 @@ fn semantic_import_edge(
 ) -> Option<(NodeData, EdgeData)> {
     let source_file_utf8 = path_to_utf8(&parsed.file.path);
     let source_file_path = source_file_utf8.as_str();
+
+    if is_python_shared_contract_source(&binding.source)
+        && let Some(resolved) = binding.resolved_path.as_ref()
+        && let Some(target_file) = external_file_node_from_resolved_path(repo_root, resolved)
+    {
+        let edge = EdgeData {
+            source: parsed.file_node.id,
+            target: target_file.id,
+            kind: EdgeKind::UsesTypeFrom,
+            metadata: EdgeMetadata::default(),
+            owner_file: parsed.file_node.id,
+            is_cross_file: true,
+        };
+        return Some((target_file, edge));
+    }
 
     if let Some(shared_node) = shared_contract_node_from_binding(
         parsed,
@@ -2943,6 +3614,362 @@ fn semantic_import_edge(
     Some((target_file, edge))
 }
 
+fn external_import_file_edge(
+    parsed: &ParsedFile,
+    repo_root: &Path,
+    binding: &ImportBinding,
+) -> Option<(NodeData, EdgeData)> {
+    let target_file =
+        external_file_node_from_resolved_path(repo_root, binding.resolved_path.as_ref()?)?;
+    let edge = EdgeData {
+        source: parsed.file_node.id,
+        target: target_file.id,
+        kind: EdgeKind::Imports,
+        metadata: EdgeMetadata::default(),
+        owner_file: parsed.file_node.id,
+        is_cross_file: true,
+    };
+    Some((target_file, edge))
+}
+
+fn external_file_node_from_resolved_path(repo_root: &Path, resolved: &Path) -> Option<NodeData> {
+    let (repo, relative) = external_repo_file_identity(repo_root, resolved)?;
+    let relative_utf8 = path_to_utf8(&relative);
+    let relative_str = relative_utf8.as_str();
+    Some(NodeData {
+        id: node_id(&repo, relative_str, NodeKind::File, relative_str),
+        kind: NodeKind::File,
+        repo: repo.clone(),
+        file_path: relative_str.to_owned(),
+        name: relative_str.to_owned(),
+        qualified_name: Some(format!("{repo}::{relative_str}")),
+        external_id: None,
+        signature: None,
+        visibility: None,
+        span: None,
+        is_virtual: false,
+    })
+}
+
+/// Resolve the (repo name, repo-relative path) of an externally-owned file.
+///
+/// Tier 1: configured `gather-step.config.yaml` lookup (the 5a5563a fix).
+/// Tier 2: walk ancestors looking for a project marker
+/// (`pyproject.toml`, `setup.py`, `setup.cfg`, `package.json`).  When the
+/// marker is `pyproject.toml`, prefer the declared `[project].name`; otherwise
+/// fall back to the directory basename.
+/// Tier 3: scan siblings of the *current* repo's parent for a directory that
+/// contains the resolved file.  Same name-resolution policy as tier 2.
+fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(String, PathBuf)> {
+    let canonical_resolved = fs::canonicalize(resolved).ok()?;
+    let canonical_repo_root = fs::canonicalize(repo_root).ok()?;
+    if canonical_resolved.starts_with(&canonical_repo_root) {
+        return None;
+    }
+
+    if let Some(identity) = configured_external_repo_file_identity(repo_root, &canonical_resolved) {
+        return Some(identity);
+    }
+
+    for ancestor in canonical_resolved.ancestors().skip(1) {
+        if ancestor == canonical_repo_root {
+            return None;
+        }
+        if ancestor.join("pyproject.toml").is_file()
+            || ancestor.join("setup.py").is_file()
+            || ancestor.join("setup.cfg").is_file()
+            || ancestor.join("package.json").is_file()
+        {
+            let repo = repo_name_from_manifest_dir(ancestor)?;
+            let relative = canonical_resolved
+                .strip_prefix(ancestor)
+                .ok()?
+                .to_path_buf();
+            return Some((repo, relative));
+        }
+    }
+
+    let workspace_root = canonical_repo_root.parent()?;
+    let entries = match fs::read_dir(workspace_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                workspace_root = %workspace_root.display(),
+                error = %error,
+                "failed to enumerate workspace root while resolving external repo identity; cross-repo edge will be unresolved"
+            );
+            return None;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    workspace_root = %workspace_root.display(),
+                    error = %error,
+                    "skipping unreadable entry while resolving external repo identity"
+                );
+                continue;
+            }
+        };
+        let package_dir = entry.path();
+        let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, workspace_root)
+        else {
+            continue;
+        };
+        if package_dir == canonical_repo_root || !canonical_resolved.starts_with(&package_dir) {
+            continue;
+        }
+        let repo = repo_name_from_manifest_dir(&package_dir)?;
+        let relative = canonical_resolved
+            .strip_prefix(&package_dir)
+            .ok()?
+            .to_path_buf();
+        return Some((repo, relative));
+    }
+
+    None
+}
+
+/// Best-effort repo name for a directory that contains a recognized project
+/// manifest.  Prefers `pyproject.toml`'s `[project].name` so a Python repo
+/// whose package name differs from its directory basename produces stable
+/// cross-repo node IDs.  Falls back to the directory basename for non-Python
+/// manifests or when the TOML cannot be parsed.
+fn repo_name_from_manifest_dir(dir: &Path) -> Option<String> {
+    if let Some(name) = python_project_name_from_pyproject(&dir.join("pyproject.toml")) {
+        return Some(name);
+    }
+    Some(dir.file_name()?.to_string_lossy().into_owned())
+}
+
+fn python_project_name_from_pyproject(pyproject_path: &Path) -> Option<String> {
+    if !pyproject_path.is_file() {
+        return None;
+    }
+    let text = match fs::read_to_string(pyproject_path) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                pyproject = %pyproject_path.display(),
+                error = %error,
+                "failed to read pyproject.toml while deriving repo name; falling back to directory basename"
+            );
+            return None;
+        }
+    };
+    let value = match text.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                pyproject = %pyproject_path.display(),
+                error = %error,
+                "failed to parse pyproject.toml while deriving repo name; falling back to directory basename"
+            );
+            return None;
+        }
+    };
+    let name = value
+        .get("project")
+        .and_then(|project| project.get("name"))
+        .and_then(toml::Value::as_str)?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+fn configured_external_repo_file_identity(
+    repo_root: &Path,
+    canonical_resolved: &Path,
+) -> Option<(String, PathBuf)> {
+    let canonical_repo_root = fs::canonicalize(repo_root).ok()?;
+    let repos = configured_workspace_repo_identities(&canonical_repo_root)?;
+    for repo in repos {
+        if repo.root() == canonical_repo_root || !canonical_resolved.starts_with(repo.root()) {
+            continue;
+        }
+        let relative = canonical_resolved
+            .strip_prefix(repo.root())
+            .ok()?
+            .to_path_buf();
+        return Some((repo.name().to_owned(), relative));
+    }
+    None
+}
+
+fn configured_workspace_repo_identities(repo_root: &Path) -> Option<Vec<WorkspaceRepoIdentity>> {
+    // Only cache under a canonical key.  A non-canonical fallback key would
+    // miss on every subsequent call (the file-system view of `repo_root` is
+    // canonicalized by inner helpers), forcing the identity loader to re-run
+    // for every import in the file.
+    let Ok(key) = fs::canonicalize(repo_root) else {
+        return load_configured_workspace_repo_identities(repo_root);
+    };
+    if let Some(hit) =
+        WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| cache.get(&key).cloned())
+    {
+        return hit;
+    }
+
+    let identities = load_configured_workspace_repo_identities(repo_root);
+    if identities.is_some() {
+        WORKSPACE_REPO_IDENTITY_CACHE.with_borrow_mut(|cache| {
+            cache.put(key, identities.clone());
+        });
+    }
+    identities
+}
+
+fn load_configured_workspace_repo_identities(
+    repo_root: &Path,
+) -> Option<Vec<WorkspaceRepoIdentity>> {
+    let config_root = find_gather_step_config_root(repo_root, GATHER_STEP_CONFIG_MAX_ASCEND)?;
+    let canonical_config_root = match fs::canonicalize(&config_root) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                config_root = %config_root.display(),
+                error = %error,
+                "failed to canonicalize gather-step config root; falling back to directory-basename heuristic"
+            );
+            return None;
+        }
+    };
+    let config_path = config_root.join("gather-step.config.yaml");
+    let config = match GatherStepConfig::from_yaml_file(&config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                config_path = %config_path.display(),
+                error = %error,
+                "failed to parse gather-step.config.yaml; falling back to directory-basename heuristic"
+            );
+            return None;
+        }
+    };
+    let total = config.repos.len();
+    let mut repos = Vec::with_capacity(total);
+    let mut seen_names = FxHashSet::default();
+    for repo in config.repos {
+        let absolute = config_root.join(&repo.path);
+        let canonical_repo_root = match fs::canonicalize(&absolute) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    repo = %repo.name,
+                    repo_path = %absolute.display(),
+                    error = %error,
+                    "failed to canonicalize configured repo path; cross-repo edges from this repo will fall back to directory-basename heuristic"
+                );
+                continue;
+            }
+        };
+        if !canonical_repo_root.starts_with(&canonical_config_root) {
+            tracing::warn!(
+                repo = %repo.name,
+                repo_root = %canonical_repo_root.display(),
+                config_root = %canonical_config_root.display(),
+                "configured repo root escapes the gather-step config root; ignoring"
+            );
+            continue;
+        }
+        let Some(identity) = WorkspaceRepoIdentity::new(&repo.name, canonical_repo_root) else {
+            tracing::warn!(
+                repo = %repo.name,
+                "configured repo entry has empty name or non-absolute root after canonicalization; ignoring"
+            );
+            continue;
+        };
+        if !seen_names.insert(identity.name().to_owned()) {
+            tracing::warn!(
+                repo = %identity.name(),
+                config_path = %config_path.display(),
+                "duplicate configured repo name; ignoring later entry"
+            );
+            continue;
+        }
+        repos.push(identity);
+    }
+    if repos.is_empty() {
+        if total > 0 {
+            tracing::warn!(
+                config_path = %config_path.display(),
+                "gather-step.config.yaml present but no repo entries resolved; falling back to directory-basename heuristic"
+            );
+        }
+        None
+    } else {
+        Some(repos)
+    }
+}
+
+fn find_gather_step_config_root(start_dir: &Path, max_depth: usize) -> Option<PathBuf> {
+    let mut current = start_dir;
+    for _ in 0..=max_depth {
+        if current.join("gather-step.config.yaml").is_file() {
+            return Some(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    None
+}
+
+fn semantic_type_node_from_binding(
+    parsed: &ParsedFile,
+    repo_root: &Path,
+    binding: &ImportBinding,
+    symbol_name: &str,
+) -> Option<NodeData> {
+    if let Some(shared_node) = shared_contract_node_from_binding(parsed, binding, symbol_name) {
+        return Some(shared_node);
+    }
+
+    let resolved = binding.resolved_path.as_ref()?;
+    let relative = resolved.strip_prefix(repo_root).ok()?;
+    let relative_utf8 = path_to_utf8(relative);
+    let relative_str = relative_utf8.as_str();
+    Some(NodeData {
+        id: node_id(
+            &parsed.file_node.repo,
+            relative_str,
+            NodeKind::File,
+            relative_str,
+        ),
+        kind: NodeKind::File,
+        repo: parsed.file_node.repo.clone(),
+        file_path: relative_str.to_owned(),
+        name: relative_str.to_owned(),
+        qualified_name: Some(format!("{}::{relative_str}", parsed.file_node.repo)),
+        external_id: None,
+        signature: None,
+        visibility: None,
+        span: None,
+        is_virtual: false,
+    })
+}
+
+fn same_file_class_node(
+    parsed: &ParsedFile,
+    source_id: gather_step_core::NodeId,
+    base_name: &str,
+) -> Option<NodeData> {
+    parsed
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.node.kind == NodeKind::Class
+                && symbol.node.id != source_id
+                && symbol.node.name == base_name
+        })
+        .map(|symbol| symbol.node.clone())
+}
+
 fn shared_contract_node_from_binding(
     parsed: &ParsedFile,
     binding: &ImportBinding,
@@ -2982,6 +4009,7 @@ fn interface_symbol_from_binding<'a>(
     binding: &'a ImportBinding,
     interface_name: &'a str,
 ) -> Option<&'a str> {
+    let interface_name = type_reference_head(interface_name);
     if binding.is_namespace {
         interface_name
             .strip_prefix(binding.local_name.as_str())
@@ -3010,11 +4038,19 @@ fn is_contract_like_import_binding(repo_root: &Path, binding: &ImportBinding) ->
     {
         return true;
     }
+    if is_python_shared_contract_source(&binding.source) {
+        return true;
+    }
 
     let Some(resolved) = binding.resolved_path.as_ref() else {
         return false;
     };
     !resolved.starts_with(repo_root) && resolved_path_looks_contract_like(binding)
+}
+
+fn is_python_shared_contract_source(source: &str) -> bool {
+    python_package_root_and_tail(source)
+        .is_some_and(|(package, _)| is_shared_contract_package(package))
 }
 
 fn resolved_path_looks_contract_like(binding: &ImportBinding) -> bool {
@@ -3097,6 +4133,7 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Redux => &[PackId::Redux],
         Framework::Zustand => &[PackId::Zustand],
         Framework::LaunchDarkly => &[PackId::LaunchDarkly],
+        Framework::FastApi => &[PackId::Fastapi],
         Framework::FrontendHooks => &[PackId::FrontendHooks],
     }
 }
@@ -3405,17 +4442,25 @@ mod tests {
     use std::{
         env,
         fmt::Write as _,
-        fs,
+        fs, io,
         path::{Path, PathBuf},
         process,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
-    use gather_step_core::{EdgeKind, NodeKind};
+    use gather_step_core::{EdgeKind, NodeKind, node_id};
 
     use crate::{Language, tsconfig::PathAliases};
 
-    use super::{parse_file, parse_file_with_context, resolve_import_path};
+    use super::{
+        WorkspaceRepoIdentity, configured_workspace_repo_identities,
+        import_path_exists_inside_allowed_roots, load_configured_workspace_repo_identities,
+        parse_file, parse_file_with_context, resolve_import_path,
+        resolve_python_sibling_package_import, resolve_sibling_package_import,
+    };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -3447,6 +4492,51 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[derive(Clone)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log capture lock should not be poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    fn capture_warnings(run: impl FnOnce()) -> String {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = CapturedLogs(Arc::clone(&logs));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, run);
+
+        let bytes = logs
+            .lock()
+            .expect("log capture lock should not be poisoned")
+            .clone();
+        String::from_utf8(bytes).expect("captured logs should be utf-8")
     }
 
     #[test]
@@ -4274,6 +5364,43 @@ def run():
     }
 
     #[test]
+    fn nested_python_classes_keep_parent_qualified_names() {
+        let temp_dir = TestDir::new("python-nested-class-qname");
+        fs::write(
+            temp_dir.path().join("module.py"),
+            r#"
+class Outer:
+    class Inner:
+        def method(self):
+            return "ok"
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "module.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        assert!(parsed.symbols.iter().any(|symbol| {
+            symbol.node.name == "Inner"
+                && symbol.node.qualified_name.as_deref() == Some("Outer.Inner")
+        }));
+        assert!(parsed.symbols.iter().any(|symbol| {
+            symbol.node.name == "method"
+                && symbol.node.qualified_name.as_deref() == Some("Outer.Inner.method")
+        }));
+    }
+
+    #[test]
     fn relative_imports_cannot_escape_repo_root() {
         let temp_dir = TestDir::new("relative-escape");
         fs::create_dir_all(temp_dir.path().join("src")).expect("src dir should exist");
@@ -4287,6 +5414,165 @@ def run():
         );
 
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn import_path_existence_miss_from_uncanonical_root_is_not_cached() {
+        let temp_dir = TestDir::new("import-path-cache-canonicalize");
+        let repo_root = temp_dir.path().join("repo");
+        let candidate = repo_root.join("src/index.ts");
+
+        assert!(!import_path_exists_inside_allowed_roots(
+            &repo_root, &candidate
+        ));
+
+        fs::create_dir_all(candidate.parent().expect("candidate has parent"))
+            .expect("repo source dir should write");
+        fs::write(&candidate, "export const value = 1;\n").expect("candidate should write");
+
+        assert!(import_path_exists_inside_allowed_roots(
+            &repo_root, &candidate
+        ));
+    }
+
+    #[test]
+    fn python_sibling_package_imports_resolve_through_pyproject_layout() {
+        let temp_dir = TestDir::new("python-sibling-package");
+        let app_root = temp_dir.path().join("api_service");
+        let shared_root = temp_dir.path().join("shared_models_repo");
+        fs::create_dir_all(app_root.join("src/api_service")).expect("app package should exist");
+        fs::create_dir_all(shared_root.join("src/shared_models"))
+            .expect("shared package should exist");
+        fs::write(
+            app_root.join("pyproject.toml"),
+            "[project]\nname = \"api-service\"\n",
+        )
+        .expect("app pyproject should write");
+        fs::write(
+            shared_root.join("pyproject.toml"),
+            "[project]\nname = \"shared-models\"\n",
+        )
+        .expect("shared pyproject should write");
+        fs::write(
+            shared_root.join("src/shared_models/records.py"),
+            "class RawDocument: ...\n",
+        )
+        .expect("records module should write");
+
+        let resolved = resolve_import_path(
+            &app_root,
+            Path::new("src/api_service/app.py"),
+            "shared_models.records",
+            Language::Python,
+            &PathAliases::empty(),
+        )
+        .expect("sibling Python package should resolve");
+
+        assert_eq!(
+            resolved,
+            canonical(shared_root.join("src/shared_models/records.py"))
+        );
+    }
+
+    #[test]
+    fn duplicate_python_sibling_packages_warn_and_resolve_deterministically() {
+        let temp_dir = TestDir::new("python-sibling-duplicates");
+        let app_root = temp_dir.path().join("api_service");
+        let first_root = temp_dir.path().join("a_shared_models");
+        let second_root = temp_dir.path().join("b_shared_models");
+        fs::create_dir_all(&app_root).expect("app repo should exist");
+        for root in [&first_root, &second_root] {
+            fs::create_dir_all(root.join("src/shared_models"))
+                .expect("shared package should exist");
+            fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"shared-models\"\n",
+            )
+            .expect("pyproject should write");
+            fs::write(
+                root.join("src/shared_models/records.py"),
+                "class RawDocument: ...\n",
+            )
+            .expect("records module should write");
+        }
+
+        let mut resolved = None;
+        let logs = capture_warnings(|| {
+            resolved = resolve_python_sibling_package_import(&app_root, "shared_models.records");
+        });
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(canonical(first_root.join("src/shared_models/records.py")).as_path())
+        );
+        assert!(
+            logs.contains("multiple sibling Python packages matched import"),
+            "expected duplicate warning, got {logs}"
+        );
+    }
+
+    #[test]
+    fn python_neutral_fixture_sibling_imports_resolve_between_repos() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/python_planning_workspace/workspace")
+            .canonicalize()
+            .expect("neutral Python workspace should exist");
+        let transform_root = workspace_root.join("py_transform_service");
+        let shared_root = workspace_root.join("py_shared_models");
+
+        let resolved = resolve_import_path(
+            &transform_root,
+            Path::new("src/transform_service/pipeline.py"),
+            "shared_models.records",
+            Language::Python,
+            &PathAliases::empty(),
+        )
+        .expect("neutral fixture sibling Python package should resolve");
+
+        assert_eq!(
+            resolved,
+            canonical(shared_root.join("src/shared_models/records.py"))
+        );
+    }
+
+    #[test]
+    fn python_neutral_fixture_parse_emits_cross_repo_import_edges() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/python_planning_workspace/workspace")
+            .canonicalize()
+            .expect("neutral Python workspace should exist");
+        let transform_root = workspace_root.join("py_transform_service");
+        let shared_root = workspace_root.join("py_shared_models");
+        let file = crate::traverse::FileEntry {
+            path: PathBuf::from("src/transform_service/pipeline.py"),
+            language: Language::Python,
+            size_bytes: 0,
+            content_hash: [0; 32],
+            source_bytes: None,
+        };
+
+        let parsed = parse_file("py_transform_service", &transform_root, &file)
+            .expect("neutral Python fixture should parse");
+        let shared_path = canonical(shared_root.join("src/shared_models/records.py"));
+
+        assert!(parsed.import_bindings.iter().any(|binding| {
+            binding.source == "shared_models.records"
+                && binding.resolved_path.as_deref() == Some(shared_path.as_path())
+        }));
+        let shared_file_id = node_id(
+            "py_shared_models",
+            "src/shared_models/records.py",
+            NodeKind::File,
+            "src/shared_models/records.py",
+        );
+        assert!(
+            parsed
+                .edges
+                .iter()
+                .any(|edge| { edge.kind == EdgeKind::Imports && edge.target == shared_file_id })
+        );
     }
 
     #[cfg(unix)]
@@ -4400,6 +5686,28 @@ def run():
         assert_eq!(
             parsed.import_bindings[0].resolved_path.as_deref(),
             Some(canonical(temp_dir.path().join("packages/contracts/src/index.ts")).as_path())
+        );
+    }
+
+    #[test]
+    fn malformed_sibling_package_manifest_emits_warning() {
+        let temp_dir = TestDir::new("workspace-package-malformed-manifest");
+        let api_root = temp_dir.path().join("apps/api");
+        fs::create_dir_all(api_root.join("src")).expect("api dir should exist");
+        fs::create_dir_all(temp_dir.path().join("contracts")).expect("contracts dir should exist");
+        fs::write(
+            temp_dir.path().join("contracts/package.json"),
+            "{ this is not valid json",
+        )
+        .expect("malformed manifest should write");
+
+        let logs = capture_warnings(|| {
+            assert!(resolve_sibling_package_import(&api_root, "contracts").is_none());
+        });
+
+        assert!(
+            logs.contains("failed to parse package.json while resolving sibling package import"),
+            "expected malformed package.json warning, got {logs}"
         );
     }
 
@@ -5107,5 +6415,91 @@ export class Controller {
         );
         // Content is still correct after cloning.
         assert!(cloned.contains("const x"));
+    }
+
+    /// Locks the contract that `load_configured_workspace_repo_identities`
+    /// returns the configured names for repos under the workspace, so the
+    /// 5a5563a fix (cross-repo nodes use the configured `name` field rather
+    /// than the directory basename) cannot regress silently.
+    #[test]
+    fn load_configured_workspace_repo_identities_returns_configured_names() {
+        let dir = TestDir::new("identities-valid");
+        let workspace = dir.path();
+        let repo_a = workspace.join("services/alpha");
+        let repo_b = workspace.join("services/beta");
+        fs::create_dir_all(&repo_a).expect("repo a created");
+        fs::create_dir_all(&repo_b).expect("repo b created");
+        fs::write(
+            workspace.join("gather-step.config.yaml"),
+            "repos:\n  - name: configured_alpha\n    path: services/alpha\n  - name: configured_beta\n    path: services/beta\n",
+        )
+        .expect("config written");
+
+        let identities = load_configured_workspace_repo_identities(&repo_a)
+            .expect("identities should resolve from configured workspace");
+        let names: Vec<&str> = identities.iter().map(WorkspaceRepoIdentity::name).collect();
+        assert!(
+            names.contains(&"configured_alpha") && names.contains(&"configured_beta"),
+            "expected configured names, got {names:?}"
+        );
+        let alpha = identities
+            .iter()
+            .find(|repo| repo.name() == "configured_alpha")
+            .expect("configured_alpha entry");
+        assert_eq!(alpha.root(), canonical(&repo_a));
+    }
+
+    #[test]
+    fn workspace_repo_identity_rejects_whitespace_only_names() {
+        let dir = TestDir::new("identity-whitespace-name");
+        let root = canonical(dir.path());
+
+        assert!(WorkspaceRepoIdentity::new("   ", root).is_none());
+    }
+
+    #[test]
+    fn missing_workspace_config_result_is_not_cached() {
+        let dir = TestDir::new("identities-none-cache");
+        let workspace = dir.path();
+        let repo_a = workspace.join("services/alpha");
+        let repo_b = workspace.join("services/beta");
+        fs::create_dir_all(&repo_a).expect("repo a created");
+        fs::create_dir_all(&repo_b).expect("repo b created");
+
+        assert!(configured_workspace_repo_identities(&repo_a).is_none());
+
+        fs::write(
+            workspace.join("gather-step.config.yaml"),
+            "repos:\n  - name: configured_alpha\n    path: services/alpha\n  - name: configured_beta\n    path: services/beta\n",
+        )
+        .expect("config written");
+
+        let identities = configured_workspace_repo_identities(&repo_a)
+            .expect("newly added config should be visible");
+        let names: Vec<&str> = identities.iter().map(WorkspaceRepoIdentity::name).collect();
+        assert!(names.contains(&"configured_alpha"));
+        assert!(names.contains(&"configured_beta"));
+    }
+
+    /// Locks the diagnostic fallback path: a malformed `gather-step.config.yaml`
+    /// must return `None` so callers fall back to the directory-basename
+    /// heuristic instead of crashing or partially loading.
+    #[test]
+    fn load_configured_workspace_repo_identities_falls_back_on_malformed_yaml() {
+        let dir = TestDir::new("identities-malformed");
+        let workspace = dir.path();
+        let repo_a = workspace.join("services/alpha");
+        fs::create_dir_all(&repo_a).expect("repo a created");
+        fs::write(
+            workspace.join("gather-step.config.yaml"),
+            "repos:\n  - name: configured_alpha\n    path:\n      this is not valid yaml: [unclosed",
+        )
+        .expect("malformed config written");
+
+        let identities = load_configured_workspace_repo_identities(&repo_a);
+        assert!(
+            identities.is_none(),
+            "malformed config should fall back to None, got {identities:?}"
+        );
     }
 }

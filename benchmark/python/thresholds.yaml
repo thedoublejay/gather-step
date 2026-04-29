@@ -1,0 +1,36 @@
+parsing_correctness:
+  pass_rate_min: 1.0
+
+graph_quality:
+  nodes_recall_min: 0.95
+  nodes_precision_min: 0.85
+  edges_recall_min: 0.95
+  edges_precision_min: 0.85
+
+link_quality:
+  missed_repos_max: 1
+  missed_files_max: 3
+  false_positives_max: 5
+  cross_boundary_precision_min: 0.85
+
+planning_oracle:
+  coverage_min: 1.0
+  top1_accuracy_min: 1.0
+  top3_accuracy_min: 1.0
+  mrr_min: 1.0
+  expected_file_recall_min: 1.0
+  expected_repo_recall_min: 1.0
+  forbidden_hit_rate_max: 0.0
+  empty_result_rate_max: 0.0
+  unresolved_gap_rate_max: 1.0
+  event_resolution_success_rate_min: 1.0
+  stability_kendall_tau_min: 0.999
+
+latency:
+  p50_ms_max: 50
+  p95_ms_max: 300
+  p99_ms_max: 1000
+
+memory:
+  rss_growth_max_fraction: 0.10
+  rss_absolute_max_bytes: 1073741824

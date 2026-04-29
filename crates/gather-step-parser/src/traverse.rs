@@ -56,7 +56,7 @@ impl FromStr for Language {
             .any(|candidate| value.eq_ignore_ascii_case(candidate))
         {
             Ok(Self::JavaScript)
-        } else if ["py", "python"]
+        } else if ["py", "pyi", "python"]
             .iter()
             .any(|candidate| value.eq_ignore_ascii_case(candidate))
         {
@@ -677,7 +677,10 @@ pub fn classify_language(path: impl AsRef<Path>) -> Option<Language> {
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
     {
         Some(Language::JavaScript)
-    } else if extension.eq_ignore_ascii_case("py") {
+    } else if ["py", "pyi"]
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    {
         Some(Language::Python)
     } else if extension.eq_ignore_ascii_case("rs") {
         Some(Language::Rust)
@@ -1001,6 +1004,7 @@ mod tests {
         fs::write(temp_dir.path().join("c.cts"), "export const cts = 1;\n").expect("cts");
         fs::write(temp_dir.path().join("d.js"), "export const js = 1;\n").expect("js");
         fs::write(temp_dir.path().join("e.py"), "x = 1\n").expect("py");
+        fs::write(temp_dir.path().join("f.pyi"), "x: int\n").expect("pyi");
 
         let summary =
             collect_repo_files(temp_dir.path(), &TraverseConfig::default()).expect("walk passes");
@@ -1018,6 +1022,7 @@ mod tests {
                 (PathBuf::from("c.cts"), Language::TypeScript),
                 (PathBuf::from("d.js"), Language::JavaScript),
                 (PathBuf::from("e.py"), Language::Python),
+                (PathBuf::from("f.pyi"), Language::Python),
             ]
         );
     }
@@ -1194,6 +1199,7 @@ mod tests {
         );
         assert_eq!(classify_language("src/main.js"), Some(Language::JavaScript));
         assert_eq!(classify_language("src/main.py"), Some(Language::Python));
+        assert_eq!(classify_language("src/main.pyi"), Some(Language::Python));
         assert_eq!(classify_language("src/main.rs"), Some(Language::Rust));
         assert_eq!(classify_language("src/main.go"), Some(Language::Go));
         assert_eq!(classify_language("src/Main.java"), Some(Language::Java));

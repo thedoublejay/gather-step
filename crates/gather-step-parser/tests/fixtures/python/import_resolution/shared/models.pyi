@@ -1,0 +1,2 @@
+class StubbedModel:
+    id: str

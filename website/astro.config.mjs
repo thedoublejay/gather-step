@@ -137,6 +137,7 @@ export default defineConfig({
             { slug: 'concepts/event-topology' },
             { slug: 'concepts/context-packs' },
             { slug: 'concepts/deterministic-indexing' },
+            { slug: 'concepts/language-support' },
             { slug: 'concepts/architecture' },
           ],
         },

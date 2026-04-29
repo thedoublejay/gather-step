@@ -69,6 +69,8 @@ pub struct OracleScenario {
     pub repo: Option<String>,
     pub target: OracleTarget,
     pub oracle: OracleExpectations,
+    #[serde(default)]
+    pub python_oracle: Option<PythonOracleExpectations>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +140,25 @@ pub struct OracleExpectations {
     /// portion after the first `:` is treated as the expected primary file.
     #[serde(default)]
     pub require_top1_canonical: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PythonOracleExpectations {
+    #[serde(default)]
+    pub expected_repos: Vec<String>,
+    #[serde(default)]
+    pub expected_bridges: Vec<String>,
+    #[serde(default)]
+    pub required_top_rank: Option<usize>,
+    #[serde(default)]
+    pub max_unresolved_gaps: Option<usize>,
+    #[serde(default)]
+    pub expected_resolution: Option<String>,
+    #[serde(default)]
+    pub expected_completeness: Option<String>,
+    #[serde(default)]
+    pub required_warning_substrings: Vec<String>,
 }
 
 fn is_shared_contract_impact_scenario(scenario: &OracleScenario) -> bool {
@@ -299,9 +320,20 @@ pub fn load_oracle_scenarios(root: &Path) -> anyhow::Result<Vec<OracleScenario>>
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            if path.is_dir() {
+                Some(path.join("scenario.toml"))
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "toml")
+            {
+                Some(path)
+            } else {
+                None
+            }
+        })
         .map(|path| {
-            let raw = fs::read_to_string(path.join("scenario.toml"))?;
+            let raw = fs::read_to_string(path)?;
             let scenario = toml::from_str::<OracleScenario>(&raw)?;
             Ok(scenario)
         })
@@ -1419,6 +1451,15 @@ fn build_scenario_report(
             "confidence model version mismatch; expected `{expected}`"
         ));
     }
+    if let Some(python_oracle) = &scenario.python_oracle {
+        add_python_oracle_findings(
+            &mut findings,
+            python_oracle,
+            response,
+            first_expected_rank,
+            warnings,
+        );
+    }
     PlanningOracleScenarioReport {
         name: scenario.name.clone(),
         passed: findings.is_empty(),
@@ -1462,6 +1503,169 @@ fn build_scenario_report(
             )
         },
     }
+}
+
+fn add_python_oracle_findings(
+    findings: &mut Vec<String>,
+    oracle: &PythonOracleExpectations,
+    response: &ContextPackResponse,
+    first_expected_rank: Option<usize>,
+    warnings: &[String],
+) {
+    let observed_repos = python_oracle_observed_repos(response);
+    for expected_repo in &oracle.expected_repos {
+        if !observed_repos.contains(expected_repo) {
+            findings.push(format!("missing Python repo `{expected_repo}`"));
+        }
+    }
+
+    let observed_bridges = python_oracle_observed_bridges(response);
+    for expected_bridge in &oracle.expected_bridges {
+        if !observed_bridges.contains(expected_bridge) {
+            findings.push(format!("missing Python bridge `{expected_bridge}`"));
+        }
+    }
+
+    if let Some(required_top_rank) = oracle.required_top_rank {
+        if required_top_rank == 0 {
+            findings.push("Python required top rank must be at least 1".to_owned());
+        } else if first_expected_rank.is_none_or(|rank| rank + 1 > required_top_rank) {
+            findings.push(format!(
+                "Python top rank exceeded {required_top_rank}; observed {}",
+                first_expected_rank
+                    .map_or_else(|| "none".to_owned(), |rank| (rank + 1).to_string())
+            ));
+        }
+    }
+
+    if let Some(max_unresolved_gaps) = oracle.max_unresolved_gaps {
+        let unresolved_gap_count = response.data.unresolved_gaps.len();
+        if unresolved_gap_count > max_unresolved_gaps {
+            findings.push(format!(
+                "Python unresolved gaps {unresolved_gap_count} exceeded max {max_unresolved_gaps}"
+            ));
+        }
+    }
+
+    if let Some(expected) = &oracle.expected_resolution
+        && response
+            .meta
+            .as_ref()
+            .is_none_or(|meta| meta.resolution != *expected)
+    {
+        findings.push(format!("Python resolution mismatch; expected `{expected}`"));
+    }
+
+    if let Some(expected) = &oracle.expected_completeness
+        && response
+            .meta
+            .as_ref()
+            .is_none_or(|meta| meta.completeness != *expected)
+    {
+        findings.push(format!(
+            "Python completeness mismatch; expected `{expected}`"
+        ));
+    }
+
+    for required_warning in &oracle.required_warning_substrings {
+        if !warnings
+            .iter()
+            .any(|warning| warning.contains(required_warning))
+        {
+            findings.push(format!(
+                "missing Python warning containing `{required_warning}`"
+            ));
+        }
+    }
+}
+
+fn python_oracle_observed_repos(response: &ContextPackResponse) -> BTreeSet<String> {
+    let mut repos = response
+        .data
+        .items
+        .iter()
+        .map(|item| item.repo.clone())
+        .collect::<BTreeSet<_>>();
+    repos.extend(
+        response
+            .data
+            .semantic_bridges
+            .iter()
+            .map(|bridge| bridge.repo.clone()),
+    );
+    repos.extend(response.data.change_impact.direct_repos.iter().cloned());
+    repos.extend(
+        response
+            .data
+            .change_impact
+            .cross_repo_callers
+            .iter()
+            .map(|caller| caller.repo.clone()),
+    );
+    repos.extend(
+        response
+            .data
+            .change_impact
+            .confirmed_downstream_repos
+            .iter()
+            .cloned(),
+    );
+    repos.extend(
+        response
+            .data
+            .change_impact
+            .probable_downstream_repos
+            .iter()
+            .cloned(),
+    );
+    repos.extend(response.data.change_impact.downstream_repos.iter().cloned());
+    for proof in &response.data.planning_proofs {
+        if let Some(repo) = proof.get("source_repo").and_then(serde_json::Value::as_str) {
+            repos.insert(repo.to_owned());
+        }
+        if let Some(repo) = proof.get("target_repo").and_then(serde_json::Value::as_str) {
+            repos.insert(repo.to_owned());
+        }
+    }
+    repos
+}
+
+fn python_oracle_observed_bridges(response: &ContextPackResponse) -> BTreeSet<String> {
+    let mut bridges = BTreeSet::new();
+    for bridge in &response.data.semantic_bridges {
+        bridges.insert(format!("{}:{}", bridge.repo, bridge.name));
+        bridges.insert(format!("{}:{}", bridge.repo, bridge.symbol_id));
+    }
+    for caller in &response.data.change_impact.cross_repo_callers {
+        bridges.insert(format!("{}:{}", caller.repo, caller.symbol_name));
+        bridges.insert(format!("{}:{}", caller.repo, caller.symbol_id));
+        bridges.insert(format!("{}:{}", caller.repo, caller.file_path));
+    }
+    for item in &response.data.items {
+        bridges.insert(format!("{}:{}", item.repo, item.symbol_name));
+        bridges.insert(format!("{}:{}", item.repo, item.symbol_id));
+        bridges.insert(format!("{}:{}", item.repo, item.file_path));
+    }
+    for proof in &response.data.planning_proofs {
+        let source_repo = proof.get("source_repo").and_then(serde_json::Value::as_str);
+        let target_repo = proof.get("target_repo").and_then(serde_json::Value::as_str);
+        let source_file = proof.get("source_file").and_then(serde_json::Value::as_str);
+        let target_file = proof.get("target_file").and_then(serde_json::Value::as_str);
+        let kind = proof.get("kind").and_then(serde_json::Value::as_str);
+        if let (Some(repo), Some(file)) = (source_repo, source_file) {
+            bridges.insert(format!("{repo}:{file}"));
+        }
+        if let (Some(repo), Some(file)) = (target_repo, target_file) {
+            bridges.insert(format!("{repo}:{file}"));
+        }
+        if let (Some(source), Some(target)) = (source_repo, target_repo) {
+            bridges.insert(format!("{source}:{target}"));
+            if let Some(kind) = kind {
+                bridges.insert(format!("{source}:{kind}:{target}"));
+            }
+        }
+    }
+    bridges
 }
 
 impl WorkspaceFileIndex {
@@ -1828,17 +2032,25 @@ fn percentile(samples: &[u64], percentile: f64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, fs};
 
+    use gather_step_mcp::{
+        budget::{BudgetedTool, ResponseBudget, response_schema_version},
+        tools::packs::{
+            ChangeImpactSummary, ContextPackData, ContextPackMeta, ContextPackResponse,
+            CrossRepoCaller, PackBridge, PackItem,
+        },
+    };
     use serde_json::json;
 
     use super::{
         WorkspaceFileIndex, advisory_only_repo_fraction, build_scenario_report,
-        compute_split_metrics, kendall_tau, parse_proofs, percentile,
+        compute_split_metrics, kendall_tau, load_oracle_scenarios, parse_proofs, percentile,
         unexplained_confirmed_repo_fraction,
     };
-    use crate::planning_oracle::{OracleExpectations, OracleRun, OracleScenario, OracleTarget};
-    use gather_step_mcp::tools::packs::ContextPackResponse;
+    use crate::planning_oracle::{
+        OracleExpectations, OracleRun, OracleScenario, OracleTarget, PythonOracleExpectations,
+    };
 
     // ── percentile / kendall_tau ─────────────────────────────────────────────
 
@@ -2087,6 +2299,7 @@ mod tests {
                 expected_canonical_anchor,
                 require_top1_canonical: None,
             },
+            python_oracle: None,
         }
     }
 
@@ -2097,6 +2310,91 @@ mod tests {
             impact_response: None,
             latency_ms: 5,
             response: Some(response),
+        }
+    }
+
+    fn python_oracle_response() -> ContextPackResponse {
+        ContextPackResponse {
+            data: ContextPackData {
+                mode: "planning".to_owned(),
+                target: "transform_batch".to_owned(),
+                found: true,
+                items: vec![
+                    PackItem {
+                        category: "primary".to_owned(),
+                        file_path: "src/transform_service/pipeline.py".to_owned(),
+                        line_start: Some(12),
+                        reason: "top match".to_owned(),
+                        repo: "py_transform_service".to_owned(),
+                        score: 950,
+                        symbol_id: "py-transform-symbol".to_owned(),
+                        symbol_kind: "function".to_owned(),
+                        symbol_name: "transform_batch".to_owned(),
+                        evidence_chain: None,
+                    },
+                    PackItem {
+                        category: "structural_neighbor".to_owned(),
+                        file_path: "src/shared_models/records.py".to_owned(),
+                        line_start: Some(5),
+                        reason: "type dependency".to_owned(),
+                        repo: "py_shared_models".to_owned(),
+                        score: 870,
+                        symbol_id: "py-shared-symbol".to_owned(),
+                        symbol_kind: "class".to_owned(),
+                        symbol_name: "ParsedDocument".to_owned(),
+                        evidence_chain: None,
+                    },
+                ],
+                semantic_bridges: vec![PackBridge {
+                    kind: "sharedsymbol".to_owned(),
+                    name: "shared_models.records.ParsedDocument".to_owned(),
+                    repo: "py_transform_service".to_owned(),
+                    symbol_id: "py-shared-symbol".to_owned(),
+                }],
+                next_steps: Vec::new(),
+                unresolved_gaps: vec!["optional dynamic import not resolved".to_owned()],
+                change_impact: ChangeImpactSummary {
+                    direct_repos: vec!["py_transform_service".to_owned()],
+                    cross_repo_callers: vec![CrossRepoCaller {
+                        file_path: "src/api_service/routes.py".to_owned(),
+                        line_start: Some(24),
+                        repo: "py_api_service".to_owned(),
+                        symbol_id: "py-api-caller".to_owned(),
+                        symbol_kind: "function".to_owned(),
+                        symbol_name: "transform_service.pipeline.transform_batch".to_owned(),
+                    }],
+                    confirmed_downstream_repos: vec!["py_shared_models".to_owned()],
+                    probable_downstream_repos: Vec::new(),
+                    downstream_repos: vec!["py_shared_models".to_owned()],
+                    unresolved_possible: Vec::new(),
+                    truncated_repos: None,
+                },
+                transport_links: None,
+                planning_rescue: None,
+                planning_proofs: vec![json!({
+                    "kind": "ImportBridge",
+                    "strength": 55,
+                    "source_repo": "py_transform_service",
+                    "target_repo": "py_shared_models",
+                    "source_file": "src/transform_service/pipeline.py",
+                    "target_file": "src/shared_models/records.py",
+                })],
+            },
+            meta: Some(ContextPackMeta {
+                response_schema_version: response_schema_version(),
+                generation: 0,
+                ambiguity: None,
+                budget: ResponseBudget::not_truncated(BudgetedTool::ContextPack, 22_000, 1_000),
+                candidate_count: 2,
+                completeness: "primary_and_structural_neighbors".to_owned(),
+                resolution: "search_ranked_resolved".to_owned(),
+                resolution_details: None,
+                confidence_model_version: Some("v1.0".to_owned()),
+                resolution_confidence: None,
+                resolved_symbol_id: Some("py-transform-symbol".to_owned()),
+                winner_margin: None,
+                warnings: vec!["namespace widened through import bridge".to_owned()],
+            }),
         }
     }
 
@@ -2328,6 +2626,134 @@ mod tests {
                 finding.contains("advisory repo `source_repo` appeared in structural pack items")
             }),
             "expected forbidden advisory primary finding; got {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn load_oracle_scenarios_accepts_direct_toml_files() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp.path().join("direct.toml"),
+            r#"
+name = "direct_python"
+mode = "planning"
+
+[target]
+kind = "symbol"
+qn = "Target"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 1
+min_confidence = 0
+max_response_bytes = 1000
+"#,
+        )
+        .expect("direct scenario should be written");
+        let nested = temp.path().join("nested_python");
+        fs::create_dir(&nested).expect("nested scenario dir should be created");
+        fs::write(
+            nested.join("scenario.toml"),
+            r#"
+name = "nested_python"
+mode = "planning"
+
+[target]
+kind = "symbol"
+qn = "Target"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 1
+min_confidence = 0
+max_response_bytes = 1000
+"#,
+        )
+        .expect("nested scenario should be written");
+
+        let scenarios = load_oracle_scenarios(temp.path()).expect("scenarios should load");
+
+        let names = scenarios
+            .iter()
+            .map(|scenario| scenario.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["direct_python", "nested_python"]);
+    }
+
+    #[test]
+    fn build_scenario_report_enforces_python_oracle_expectations() {
+        let mut scenario = minimal_scenario(
+            "planning",
+            "symbol",
+            vec!["src/transform_service/pipeline.py".to_owned()],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        );
+        scenario.python_oracle = Some(PythonOracleExpectations {
+            expected_repos: vec![
+                "py_api_service".to_owned(),
+                "py_transform_service".to_owned(),
+                "py_shared_models".to_owned(),
+            ],
+            expected_bridges: vec![
+                "py_api_service:transform_service.pipeline.transform_batch".to_owned(),
+                "py_transform_service:shared_models.records.ParsedDocument".to_owned(),
+            ],
+            required_top_rank: Some(1),
+            max_unresolved_gaps: Some(1),
+            expected_resolution: Some("search_ranked_resolved".to_owned()),
+            expected_completeness: Some("primary_and_structural_neighbors".to_owned()),
+            required_warning_substrings: vec!["namespace widened".to_owned()],
+        });
+        let response = python_oracle_response();
+        let workspace_index = WorkspaceFileIndex {
+            unique_file_to_repo: BTreeMap::new(),
+        };
+
+        let report = build_scenario_report(&workspace_index, &scenario, &run_with(response), None);
+
+        assert!(
+            report.passed,
+            "expected Python oracle scenario to pass; got {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn build_scenario_report_flags_missing_python_oracle_bridge() {
+        let mut scenario = minimal_scenario(
+            "planning",
+            "symbol",
+            vec!["src/transform_service/pipeline.py".to_owned()],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        );
+        scenario.python_oracle = Some(PythonOracleExpectations {
+            expected_bridges: vec!["py_api_service:missing.bridge".to_owned()],
+            ..PythonOracleExpectations::default()
+        });
+        let response = python_oracle_response();
+        let workspace_index = WorkspaceFileIndex {
+            unique_file_to_repo: BTreeMap::new(),
+        };
+
+        let report = build_scenario_report(&workspace_index, &scenario, &run_with(response), None);
+
+        assert!(!report.passed);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding
+                    .contains("missing Python bridge `py_api_service:missing.bridge`")),
+            "expected missing Python bridge finding; got {:?}",
             report.findings
         );
     }

@@ -150,7 +150,7 @@ pub fn resolve_calls_with_unresolved<'a>(
 
             for call_site in &file.call_sites {
                 if let Some((target, strategy, confidence)) =
-                    index.resolve_call(call_site, &import_map)
+                    index.resolve_call(call_site, &import_map, &file.import_bindings)
                 {
                     file_resolved.push(ResolvedCall {
                         edge: EdgeData {
@@ -525,18 +525,40 @@ impl<'a> SymbolIndex<'a> {
             source_bytes: None,
         };
         let parsed =
-            parse_file_with_context("", self.repo_root, &file, &[], &self.path_aliases).ok();
-        self.parsed_file_cache.insert(cache_key, parsed.clone());
-        let _ = source_file;
-        parsed
+            match parse_file_with_context("", self.repo_root, &file, &[], &self.path_aliases) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    tracing::warn!(
+                        source_file = %source_file.display(),
+                        resolved_path = %resolved_path.display(),
+                        error = %error,
+                        "failed to parse re-export target; result will not be cached"
+                    );
+                    return None;
+                }
+            };
+        self.parsed_file_cache
+            .insert(cache_key, Some(parsed.clone()));
+        Some(parsed)
     }
 
     fn resolve_call(
         &self,
         call_site: &CallSite,
         import_map: &FxHashMap<String, Vec<&'a NodeData>>,
+        import_bindings: &[ImportBinding],
     ) -> Option<(&'a NodeData, ResolutionStrategy, f32)> {
-        if let Some(imported) = import_map.get(&call_site.callee_name)
+        let qualified_hint_uses_import_head =
+            qualified_hint_import_head_matches(call_site, import_bindings);
+
+        if let Some((target, confidence)) =
+            self.resolve_qualified_import_call(call_site, import_bindings)
+        {
+            return Some((target, ResolutionStrategy::ImportMap, confidence));
+        }
+
+        if !qualified_hint_uses_import_head
+            && let Some(imported) = import_map.get(&call_site.callee_name)
             && let Some(target) = imported.first().copied()
         {
             return Some((
@@ -597,6 +619,76 @@ impl<'a> SymbolIndex<'a> {
                 penalize(
                     ResolutionStrategy::Fallback.base_confidence(),
                     by_name.len(),
+                ),
+            )
+        })
+    }
+
+    fn resolve_qualified_import_call(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> Option<(&'a NodeData, f32)> {
+        let qualified_hint = call_site.callee_qualified_hint.as_deref()?;
+        let (head, tail) = split_qualified_import_hint(qualified_hint)?;
+        let mut matches = Vec::new();
+
+        for binding in import_bindings
+            .iter()
+            .filter(|binding| binding.local_name == head)
+        {
+            let Some(resolved_path) = binding.resolved_path.as_ref() else {
+                continue;
+            };
+
+            let mut seen = FxHashSet::default();
+            matches.extend(self.resolve_export_targets(
+                &call_site.source_path,
+                resolved_path,
+                tail,
+                false,
+                &mut seen,
+            ));
+
+            let terminal = tail.rsplit('.').next().unwrap_or(tail);
+            if terminal != tail {
+                let mut seen = FxHashSet::default();
+                matches.extend(self.resolve_export_targets(
+                    &call_site.source_path,
+                    resolved_path,
+                    terminal,
+                    false,
+                    &mut seen,
+                ));
+            }
+
+            if call_site.callee_name != terminal {
+                let mut seen = FxHashSet::default();
+                matches.extend(self.resolve_export_targets(
+                    &call_site.source_path,
+                    resolved_path,
+                    &call_site.callee_name,
+                    false,
+                    &mut seen,
+                ));
+            }
+        }
+
+        let mut seen = FxHashSet::default();
+        matches.retain(|node| seen.insert(node.id));
+        matches.sort_by(|left, right| {
+            left.file_path
+                .cmp(&right.file_path)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.qualified_name.cmp(&right.qualified_name))
+        });
+
+        matches.first().copied().map(|target| {
+            (
+                target,
+                penalize(
+                    ResolutionStrategy::ImportMap.base_confidence(),
+                    matches.len(),
                 ),
             )
         })
@@ -749,9 +841,32 @@ fn language_for_path(path: &Path) -> Option<Language> {
     match extension {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
-        "py" => Some(Language::Python),
+        "py" | "pyi" => Some(Language::Python),
         _ => None,
     }
+}
+
+fn split_qualified_import_hint(qualified_hint: &str) -> Option<(&str, &str)> {
+    let (head, tail) = qualified_hint.split_once('.')?;
+    if head.is_empty() || tail.is_empty() || matches!(head, "self" | "this") {
+        return None;
+    }
+    Some((head, tail))
+}
+
+fn qualified_hint_import_head_matches(
+    call_site: &CallSite,
+    import_bindings: &[ImportBinding],
+) -> bool {
+    let Some(qualified_hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let Some((head, _)) = split_qualified_import_hint(qualified_hint) else {
+        return false;
+    };
+    import_bindings
+        .iter()
+        .any(|binding| binding.local_name == head)
 }
 
 #[expect(clippy::cast_precision_loss)]
@@ -827,8 +942,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, fuzzy_similarity,
-        resolve_calls, resolve_calls_with_unresolved,
+        CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, SymbolIndex,
+        fuzzy_similarity, resolve_calls, resolve_calls_with_unresolved,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -888,6 +1003,27 @@ mod tests {
         }
     }
 
+    fn class_node(file_path: &str, name: &str) -> NodeData {
+        NodeData {
+            id: node_id("sample-service", file_path, NodeKind::Class, name),
+            kind: NodeKind::Class,
+            repo: "sample-service".to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(format!("{file_path}::{name}")),
+            external_id: None,
+            signature: Some(format!("class {name}")),
+            visibility: Some(Visibility::Public),
+            span: Some(SourceSpan {
+                line_start: 1,
+                line_len: 0,
+                column_start: 0,
+                column_len: 1,
+            }),
+            is_virtual: false,
+        }
+    }
+
     #[test]
     fn import_map_resolution_uses_highest_confidence() {
         let root = PathBuf::from("/repo");
@@ -923,6 +1059,202 @@ mod tests {
         assert_eq!(resolved[0].edge.target, target.id);
         assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
         assert_eq!(resolved[0].confidence, 0.95);
+    }
+
+    #[test]
+    fn qualified_from_import_alias_resolves_inside_imported_python_module() {
+        let root = PathBuf::from("/repo");
+        let target = class_node("package/app/services.py", "Runner");
+        let owner = function_node("package/app/imports.py", "run_pipeline");
+        let resolved = resolve_calls(
+            &root,
+            &[target.clone(), owner.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("package/app/imports.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "svc".to_owned(),
+                    imported_name: Some("services".to_owned()),
+                    source: ".services".to_owned(),
+                    resolved_path: Some(root.join("package/app/services.py")),
+                    is_default: false,
+                    is_namespace: false,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("package/app/imports.py"),
+                    callee_name: "Runner".to_owned(),
+                    callee_qualified_hint: Some("svc.Runner".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].edge.target, target.id);
+        assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
+        assert!(resolved[0].edge.is_cross_file);
+    }
+
+    #[test]
+    fn qualified_import_head_wins_over_competing_leaf_import() {
+        let root = PathBuf::from("/repo");
+        let target = class_node("package/app/services.py", "Runner");
+        let distractor = class_node("other.py", "Runner");
+        let owner = function_node("package/app/imports.py", "run_pipeline");
+        let resolved = resolve_calls(
+            &root,
+            &[target.clone(), distractor.clone(), owner.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("package/app/imports.py"),
+                import_bindings: vec![
+                    ImportBinding {
+                        local_name: "Runner".to_owned(),
+                        imported_name: Some("Runner".to_owned()),
+                        source: "other".to_owned(),
+                        resolved_path: Some(root.join("other.py")),
+                        is_default: false,
+                        is_namespace: false,
+                        is_type_only: false,
+                    },
+                    ImportBinding {
+                        local_name: "svc".to_owned(),
+                        imported_name: Some("services".to_owned()),
+                        source: ".services".to_owned(),
+                        resolved_path: Some(root.join("package/app/services.py")),
+                        is_default: false,
+                        is_namespace: false,
+                        is_type_only: false,
+                    },
+                ],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("package/app/imports.py"),
+                    callee_name: "Runner".to_owned(),
+                    callee_qualified_hint: Some("svc.Runner".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].edge.target, target.id);
+        assert_ne!(resolved[0].edge.target, distractor.id);
+        assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
+    }
+
+    #[test]
+    fn qualified_namespace_import_resolves_inside_imported_python_module() {
+        let root = PathBuf::from("/repo");
+        let target = function_node("pkg/submodule.py", "fallback");
+        let owner = function_node("package/app/imports.py", "run_pipeline");
+        let resolved = resolve_calls(
+            &root,
+            &[target.clone(), owner.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("package/app/imports.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "submodule".to_owned(),
+                    imported_name: None,
+                    source: "pkg.submodule".to_owned(),
+                    resolved_path: Some(root.join("pkg/submodule.py")),
+                    is_default: false,
+                    is_namespace: true,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("package/app/imports.py"),
+                    callee_name: "fallback".to_owned(),
+                    callee_qualified_hint: Some("submodule.fallback".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].edge.target, target.id);
+        assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
+        assert!(resolved[0].edge.is_cross_file);
+    }
+
+    #[test]
+    fn python_stub_reexports_can_be_loaded_for_import_resolution() {
+        let temp = TempDir::new("python-stub-reexport");
+        temp.write("shared/models.pyi", "from .types import StubbedModel\n");
+        temp.write("shared/types.py", "class StubbedModel:\n    pass\n");
+
+        let root = temp.path().to_path_buf();
+        let target = class_node("shared/types.py", "StubbedModel");
+        let owner = function_node("app.py", "build_model");
+        let resolved = resolve_calls(
+            &root,
+            &[target.clone(), owner.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("app.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "StubbedModel".to_owned(),
+                    imported_name: Some("StubbedModel".to_owned()),
+                    source: "shared.models".to_owned(),
+                    resolved_path: Some(root.join("shared/models.pyi")),
+                    is_default: false,
+                    is_namespace: false,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("app.py"),
+                    callee_name: "StubbedModel".to_owned(),
+                    callee_qualified_hint: None,
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].edge.target, target.id);
+        assert_eq!(resolved[0].strategy, ResolutionStrategy::ImportMap);
+    }
+
+    #[test]
+    fn parsed_file_cache_does_not_store_transient_parse_failures() {
+        let temp = TempDir::new("parsed-file-cache-transient");
+        let root = temp.path().to_path_buf();
+        let owner = function_node("app.py", "build_model");
+        let input = ResolutionInput {
+            file_node: owner.id,
+            file_path: root.join("app.py"),
+            import_bindings: Vec::new(),
+            call_sites: Vec::new(),
+        };
+        let index = SymbolIndex::new(&root, std::slice::from_ref(&owner), &[&input]);
+        let resolved_path = root.join("shared/models.py");
+
+        assert!(
+            index
+                .load_parsed_file(&root.join("app.py"), &resolved_path)
+                .is_none()
+        );
+
+        temp.write("shared/models.py", "class StubbedModel:\n    pass\n");
+        let parsed = index
+            .load_parsed_file(&root.join("app.py"), &resolved_path)
+            .expect("second parse should retry after initial failure");
+
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .any(|symbol| symbol.node.name == "StubbedModel")
+        );
     }
 
     #[test]

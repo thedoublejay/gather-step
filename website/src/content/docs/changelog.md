@@ -7,7 +7,7 @@ This changelog lists significant user-visible changes. It is maintained manually
 
 ## v2.1.0 (Draft)
 
-This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph for the PR #3 release branch.
+This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph, and promotes Python to first-class parsing parity with TypeScript and JavaScript.
 
 ### Highlights
 
@@ -17,13 +17,32 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Updated the website workflow to Node 24 and refreshed GitHub Actions used by CI and website builds.
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.1.0`.
 - Refreshed Cargo dependencies with `cargo update`, including moving `gix` from the yanked `0.82.0` line to `0.83.0`.
+- Promoted Python to first-class parsing alongside TypeScript and JavaScript (see [Language Support](/concepts/language-support/)).
+
+### Python Parsing
+
+- Resolved Python `src/<package>/...` and flat `<package>/...` layouts so absolute current-package imports produce stable cross-file edges.
+- Linked Python sibling packages across configured workspace repos using the `name` field from `gather-step.config.yaml`, falling back to `pyproject.toml [project].name` and finally the directory basename for standalone repos.
+- Added detection-only FastAPI framework pack activation from Python dependency metadata.
+- Qualified nested Python functions and methods, including methods inside nested classes, with full owner qualified names such as `Outer.Inner.method`, removing node-ID collisions for same-named helpers.
+- Preserved Python class relationships (base classes, implemented interfaces, constructor dependencies) and decorator metadata across nested scopes.
+- Added explicit diagnostics (`tracing::warn!`) when `gather-step.config.yaml` cannot be canonicalized or parsed, when configured repo paths fail to canonicalize, or when `read_dir` errors are encountered during sibling-package resolution. Prior behavior silently fell back to the directory-basename heuristic.
+
+### Benchmarking And Tooling
+
+- Added `gather-step-bench workspace-run` to measure wall-clock index time, graph node/edge counts, cross-repo edge count, RSS growth, and storage byte breakdowns (graph, metadata, search, sidecar) for a configured workspace.
+- Added a neutral Python planning workspace fixture under `tests/fixtures/python_planning_workspace/` so the planning oracle and storage benchmark have a committed Python target.
+- Documented the [private corpus benchmarking convention](/concepts/language-support/#private-corpus-convention) for measuring against repositories that cannot be checked in.
+- Renamed `StorageMetrics::metadata_wal_bytes` to `metadata_sidecar_bytes` since the field actually sums the SQLite WAL and SHM files. Deserialization remains backward-compatible with the old bench JSON field name.
+- Promoted `HarnessError::Workspace` from a stringified message to a typed `Box<WorkspaceIndexError<RepoIndexerError>>` so `anyhow::downcast` and structured logging can recover the source chain.
 
 ### Verification Coverage
 
 - Website build and Cloudflare Pages checks.
 - Rust CI summary: format, clippy, cargo-deny, cargo-shear, macOS tests, MVCC stress, and MSRV check.
+- Added regression tests for configured-repo identity resolution and malformed `gather-step.config.yaml` fallback.
 
-## v2.0.0 (Draft)
+## v2.0.0 (2026-04-28)
 
 CLI onboarding, local MCP setup, release automation, and documentation refresh.
 

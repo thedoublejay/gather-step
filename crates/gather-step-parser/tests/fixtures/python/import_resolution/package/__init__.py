@@ -1,0 +1,1 @@
+"""Neutral Python package fixture."""

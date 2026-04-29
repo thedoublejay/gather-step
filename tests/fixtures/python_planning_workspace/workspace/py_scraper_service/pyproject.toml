@@ -1,0 +1,7 @@
+[project]
+name = "py-scraper-service"
+version = "0.1.0"
+dependencies = [
+  "numpy",
+  "py-shared-models",
+]
