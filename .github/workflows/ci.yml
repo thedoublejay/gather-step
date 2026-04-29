@@ -101,7 +101,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Spell check
-        uses: crate-ci/typos@v1.45.1
+        uses: crate-ci/typos@v1.45.2
 
   deny:
     name: Cargo Deny
@@ -110,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.75.25
         with:
           tool: cargo-deny
       - run: cargo deny check
@@ -126,7 +126,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
         with:
           toolchain: 1.94.1
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.75.25
         with:
           tool: cargo-shear
       - run: cargo shear
@@ -145,7 +145,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.75.25
         with:
           tool: cargo-nextest
       - run: cargo nextest run --all-features
@@ -162,7 +162,7 @@ jobs:
         with:
           toolchain: 1.94.1
       - uses: Swatinem/rust-cache@v2.9.1
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.75.25
         with:
           tool: cargo-nextest
       - name: Run MVCC consistency 100x
