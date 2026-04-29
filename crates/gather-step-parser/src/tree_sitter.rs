@@ -2609,6 +2609,10 @@ fn resolve_import_path(
         // `src/*` convention by default. Drops away entirely once aliases
         // loaded from tsconfig cover `@/`.
         ImportBase::Relative(PathBuf::from("src").join(alias))
+    } else if language == Language::Python
+        && let Some(absolute) = resolve_python_sibling_package_import(repo_root, source)
+    {
+        return Some(absolute);
     } else if let Some(absolute) = resolve_workspace_or_sibling_package_cached(repo_root, source) {
         return Some(absolute);
     } else if language == Language::Python {
@@ -2784,6 +2788,93 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
         }
     }
     None
+}
+
+fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+    let (package_name, tail) = python_package_root_and_tail(source)?;
+    let canonical_repo_root = fs::canonicalize(repo_root).ok();
+
+    for root in repo_root.ancestors().skip(1).take(6) {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let package_dir = entry.path();
+            let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, root) else {
+                continue;
+            };
+            if canonical_repo_root
+                .as_ref()
+                .is_some_and(|repo_root| &package_dir == repo_root)
+            {
+                continue;
+            }
+            if !package_dir.join("pyproject.toml").is_file()
+                && !package_dir.join("setup.py").is_file()
+                && !package_dir.join("setup.cfg").is_file()
+            {
+                continue;
+            }
+            if let Some(resolved) =
+                resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
+            {
+                return Some(resolved);
+            }
+        }
+    }
+
+    None
+}
+
+fn python_package_root_and_tail(source: &str) -> Option<(&str, Option<PathBuf>)> {
+    if source.is_empty()
+        || source.starts_with('.')
+        || source.starts_with('/')
+        || source.contains('/')
+        || source.split('.').any(str::is_empty)
+    {
+        return None;
+    }
+    let mut parts = source.split('.');
+    let package_name = parts.next()?;
+    let tail = parts.collect::<PathBuf>();
+    let tail = if tail.as_os_str().is_empty() {
+        None
+    } else {
+        Some(tail)
+    };
+    Some((package_name, tail))
+}
+
+fn resolve_python_package_subpath(
+    package_dir: &Path,
+    package_name: &str,
+    tail: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut bases = Vec::with_capacity(2);
+    let mut src_base = package_dir.join("src").join(package_name);
+    if let Some(tail) = tail {
+        src_base = src_base.join(tail);
+    }
+    bases.push(src_base);
+
+    let mut flat_base = package_dir.join(package_name);
+    if let Some(tail) = tail {
+        flat_base = flat_base.join(tail);
+    }
+    bases.push(flat_base);
+
+    bases
+        .into_iter()
+        .flat_map(|base| {
+            [
+                base.with_extension("py"),
+                base.with_extension("pyi"),
+                base.join("__init__.py"),
+                base.join("__init__.pyi"),
+            ]
+        })
+        .find_map(|candidate| canonicalize_existing_file_under(&candidate, package_dir))
 }
 
 fn find_workspace_package(
@@ -3100,11 +3191,21 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
         .collect::<FxHashSet<_>>();
 
     for binding in &parsed.import_bindings {
+        if let Some((node, edge)) = external_import_file_edge(parsed, repo_root, binding) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
+                added_nodes.push(node);
+            }
+            let key = (edge.source, edge.target, edge.kind, edge.owner_file);
+            if seen_edge_keys.insert(key) {
+                added_edges.push(edge);
+            }
+        }
+
         if !binding.is_type_only && !is_contract_like_import_binding(repo_root, binding) {
             continue;
         }
         if let Some((node, edge)) = semantic_import_edge(parsed, repo_root, binding) {
-            if seen_node_ids.insert(node.id) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
                 added_nodes.push(node);
             }
             let key = (edge.source, edge.target, edge.kind, edge.owner_file);
@@ -3134,7 +3235,7 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
                 continue;
             };
 
-            if seen_node_ids.insert(node.id) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
                 added_nodes.push(node.clone());
             }
             let edge = EdgeData {
@@ -3192,7 +3293,7 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
                 continue;
             };
 
-            if seen_node_ids.insert(node.id) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
                 added_nodes.push(node.clone());
             }
             let edge = EdgeData {
@@ -3214,6 +3315,10 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
     parsed.edges.extend(added_edges);
 }
 
+fn should_add_semantic_node(parsed: &ParsedFile, node: &NodeData) -> bool {
+    node.repo == parsed.file_node.repo || node.is_virtual
+}
+
 fn semantic_import_edge(
     parsed: &ParsedFile,
     repo_root: &Path,
@@ -3221,6 +3326,21 @@ fn semantic_import_edge(
 ) -> Option<(NodeData, EdgeData)> {
     let source_file_utf8 = path_to_utf8(&parsed.file.path);
     let source_file_path = source_file_utf8.as_str();
+
+    if is_python_shared_contract_source(&binding.source)
+        && let Some(resolved) = binding.resolved_path.as_ref()
+        && let Some(target_file) = external_file_node_from_resolved_path(repo_root, resolved)
+    {
+        let edge = EdgeData {
+            source: parsed.file_node.id,
+            target: target_file.id,
+            kind: EdgeKind::UsesTypeFrom,
+            metadata: EdgeMetadata::default(),
+            owner_file: parsed.file_node.id,
+            is_cross_file: true,
+        };
+        return Some((target_file, edge));
+    }
 
     if let Some(shared_node) = shared_contract_node_from_binding(
         parsed,
@@ -3272,6 +3392,92 @@ fn semantic_import_edge(
         is_cross_file: relative_str != source_file_path,
     };
     Some((target_file, edge))
+}
+
+fn external_import_file_edge(
+    parsed: &ParsedFile,
+    repo_root: &Path,
+    binding: &ImportBinding,
+) -> Option<(NodeData, EdgeData)> {
+    let target_file =
+        external_file_node_from_resolved_path(repo_root, binding.resolved_path.as_ref()?)?;
+    let edge = EdgeData {
+        source: parsed.file_node.id,
+        target: target_file.id,
+        kind: EdgeKind::Imports,
+        metadata: EdgeMetadata::default(),
+        owner_file: parsed.file_node.id,
+        is_cross_file: true,
+    };
+    Some((target_file, edge))
+}
+
+fn external_file_node_from_resolved_path(repo_root: &Path, resolved: &Path) -> Option<NodeData> {
+    let (repo, relative) = external_repo_file_identity(repo_root, resolved)?;
+    let relative_utf8 = path_to_utf8(&relative);
+    let relative_str = relative_utf8.as_str();
+    Some(NodeData {
+        id: node_id(&repo, relative_str, NodeKind::File, relative_str),
+        kind: NodeKind::File,
+        repo: repo.clone(),
+        file_path: relative_str.to_owned(),
+        name: relative_str.to_owned(),
+        qualified_name: Some(format!("{repo}::{relative_str}")),
+        external_id: None,
+        signature: None,
+        visibility: None,
+        span: None,
+        is_virtual: false,
+    })
+}
+
+fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(String, PathBuf)> {
+    let canonical_resolved = fs::canonicalize(resolved).ok()?;
+    let canonical_repo_root = fs::canonicalize(repo_root).ok()?;
+    if canonical_resolved.starts_with(&canonical_repo_root) {
+        return None;
+    }
+
+    for ancestor in canonical_resolved.ancestors().skip(1) {
+        if ancestor == canonical_repo_root {
+            return None;
+        }
+        if ancestor.join("pyproject.toml").is_file()
+            || ancestor.join("setup.py").is_file()
+            || ancestor.join("setup.cfg").is_file()
+            || ancestor.join("package.json").is_file()
+        {
+            let repo = ancestor.file_name()?.to_string_lossy().to_string();
+            let relative = canonical_resolved
+                .strip_prefix(ancestor)
+                .ok()?
+                .to_path_buf();
+            return Some((repo, relative));
+        }
+    }
+
+    let workspace_root = canonical_repo_root.parent()?;
+    let Ok(entries) = fs::read_dir(workspace_root) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let package_dir = entry.path();
+        let Some(package_dir) = canonicalize_existing_dir_under(&package_dir, workspace_root)
+        else {
+            continue;
+        };
+        if package_dir == canonical_repo_root || !canonical_resolved.starts_with(&package_dir) {
+            continue;
+        }
+        let repo = package_dir.file_name()?.to_string_lossy().to_string();
+        let relative = canonical_resolved
+            .strip_prefix(&package_dir)
+            .ok()?
+            .to_path_buf();
+        return Some((repo, relative));
+    }
+
+    None
 }
 
 fn semantic_type_node_from_binding(
@@ -3392,11 +3598,19 @@ fn is_contract_like_import_binding(repo_root: &Path, binding: &ImportBinding) ->
     {
         return true;
     }
+    if is_python_shared_contract_source(&binding.source) {
+        return true;
+    }
 
     let Some(resolved) = binding.resolved_path.as_ref() else {
         return false;
     };
     !resolved.starts_with(repo_root) && resolved_path_looks_contract_like(binding)
+}
+
+fn is_python_shared_contract_source(source: &str) -> bool {
+    python_package_root_and_tail(source)
+        .is_some_and(|(package, _)| is_shared_contract_package(package))
 }
 
 fn resolved_path_looks_contract_like(binding: &ImportBinding) -> bool {
@@ -3793,7 +4007,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use gather_step_core::{EdgeKind, NodeKind};
+    use gather_step_core::{EdgeKind, NodeKind, node_id};
 
     use crate::{Language, tsconfig::PathAliases};
 
@@ -4669,6 +4883,109 @@ def run():
         );
 
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn python_sibling_package_imports_resolve_through_pyproject_layout() {
+        let temp_dir = TestDir::new("python-sibling-package");
+        let app_root = temp_dir.path().join("api_service");
+        let shared_root = temp_dir.path().join("shared_models_repo");
+        fs::create_dir_all(app_root.join("src/api_service")).expect("app package should exist");
+        fs::create_dir_all(shared_root.join("src/shared_models"))
+            .expect("shared package should exist");
+        fs::write(
+            app_root.join("pyproject.toml"),
+            "[project]\nname = \"api-service\"\n",
+        )
+        .expect("app pyproject should write");
+        fs::write(
+            shared_root.join("pyproject.toml"),
+            "[project]\nname = \"shared-models\"\n",
+        )
+        .expect("shared pyproject should write");
+        fs::write(
+            shared_root.join("src/shared_models/records.py"),
+            "class RawDocument: ...\n",
+        )
+        .expect("records module should write");
+
+        let resolved = resolve_import_path(
+            &app_root,
+            Path::new("src/api_service/app.py"),
+            "shared_models.records",
+            Language::Python,
+            &PathAliases::empty(),
+        )
+        .expect("sibling Python package should resolve");
+
+        assert_eq!(
+            resolved,
+            canonical(shared_root.join("src/shared_models/records.py"))
+        );
+    }
+
+    #[test]
+    fn python_neutral_fixture_sibling_imports_resolve_between_repos() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/python_planning_workspace/workspace")
+            .canonicalize()
+            .expect("neutral Python workspace should exist");
+        let transform_root = workspace_root.join("py_transform_service");
+        let shared_root = workspace_root.join("py_shared_models");
+
+        let resolved = resolve_import_path(
+            &transform_root,
+            Path::new("src/transform_service/pipeline.py"),
+            "shared_models.records",
+            Language::Python,
+            &PathAliases::empty(),
+        )
+        .expect("neutral fixture sibling Python package should resolve");
+
+        assert_eq!(
+            resolved,
+            canonical(shared_root.join("src/shared_models/records.py"))
+        );
+    }
+
+    #[test]
+    fn python_neutral_fixture_parse_emits_cross_repo_import_edges() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tests/fixtures/python_planning_workspace/workspace")
+            .canonicalize()
+            .expect("neutral Python workspace should exist");
+        let transform_root = workspace_root.join("py_transform_service");
+        let shared_root = workspace_root.join("py_shared_models");
+        let file = crate::traverse::FileEntry {
+            path: PathBuf::from("src/transform_service/pipeline.py"),
+            language: Language::Python,
+            size_bytes: 0,
+            content_hash: [0; 32],
+            source_bytes: None,
+        };
+
+        let parsed = parse_file("py_transform_service", &transform_root, &file)
+            .expect("neutral Python fixture should parse");
+        let shared_path = canonical(shared_root.join("src/shared_models/records.py"));
+
+        assert!(parsed.import_bindings.iter().any(|binding| {
+            binding.source == "shared_models.records"
+                && binding.resolved_path.as_deref() == Some(shared_path.as_path())
+        }));
+        let shared_file_id = node_id(
+            "py_shared_models",
+            "src/shared_models/records.py",
+            NodeKind::File,
+            "src/shared_models/records.py",
+        );
+        assert!(
+            parsed
+                .edges
+                .iter()
+                .any(|edge| { edge.kind == EdgeKind::Imports && edge.target == shared_file_id })
+        );
     }
 
     #[cfg(unix)]

@@ -19,6 +19,14 @@ fn find_node(nodes: &[NodeData], kind: NodeKind, name: &str) -> NodeData {
         .unwrap_or_else(|| panic!("{kind:?} node {name} should exist"))
 }
 
+fn find_file_node(nodes: &[NodeData], file_path: &str) -> NodeData {
+    nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::File && node.file_path == file_path)
+        .cloned()
+        .unwrap_or_else(|| panic!("file node {file_path} should exist"))
+}
+
 #[test]
 fn indexes_python_imported_module_calls_into_storage_graph() {
     let repo_root = tempfile::tempdir().expect("repo tempdir should create");
@@ -127,4 +135,36 @@ fn python_planning_workspace_fixture_indexes_from_config() {
     find_node(&transform_nodes, NodeKind::Function, "transform_batch");
     find_node(&shared_nodes, NodeKind::Class, "ParsedDocument");
     find_node(&api_nodes, NodeKind::Function, "ingest_documents");
+
+    let api_file = find_file_node(&api_nodes, "src/api_service/app.py");
+    let transform_file = find_file_node(&transform_nodes, "src/transform_service/pipeline.py");
+    let shared_file = find_file_node(&shared_nodes, "src/shared_models/records.py");
+
+    let api_outgoing = graph
+        .get_outgoing(api_file.id)
+        .expect("api file outgoing edges should load");
+    assert!(
+        api_outgoing
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::Imports && edge.target == transform_file.id })
+    );
+    assert!(
+        api_outgoing
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::Imports && edge.target == shared_file.id })
+    );
+
+    let transform_outgoing = graph
+        .get_outgoing(transform_file.id)
+        .expect("transform file outgoing edges should load");
+    assert!(
+        transform_outgoing
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::Imports && edge.target == shared_file.id })
+    );
+    assert!(
+        transform_outgoing
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::UsesTypeFrom && edge.target == shared_file.id })
+    );
 }
