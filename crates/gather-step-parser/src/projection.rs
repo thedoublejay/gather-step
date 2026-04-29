@@ -23,6 +23,7 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
 
     let mut known_fields = BTreeSet::new();
     let mut facts = ProjectionFacts::default();
+    let has_backfill_context = has_backfill_context(source, &parsed.file_node.file_path);
 
     if has_schema_field_context(source) {
         for field in property_declarations(source) {
@@ -64,7 +65,9 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
         if is_index_line(line) {
             facts.indexes.extend(write_fields.iter().cloned());
         }
-        if is_backfill_line(line, &parsed.file_node.file_path) {
+        if is_backfill_line(line, &parsed.file_node.file_path)
+            || (has_backfill_context && is_write_line(line))
+        {
             if write_fields.is_empty() {
                 facts.backfills.extend(fields);
             } else {
@@ -138,16 +141,20 @@ fn has_schema_field_context(source: &str) -> bool {
 }
 
 fn should_scan_projection_fields(source: &str, file_path: &str) -> bool {
-    has_schema_field_context(source)
-        || is_backfill_path(file_path)
-        || has_projection_context_token(source)
-        || has_projected_object_key(source)
+    !is_false_positive_projection_path(file_path)
+        && (has_schema_field_context(source)
+            || is_backfill_path(file_path)
+            || has_projection_context_token(source)
+            || has_projected_object_key(source))
 }
 
 fn has_projection_context_token(source: &str) -> bool {
     source.contains("$project")
+        || source.contains("$addFields")
+        || source.contains("$lookup")
         || source.contains("$set")
         || source.contains("$unset")
+        || source.contains("$inc")
         || source.contains("$push")
         || source.contains("$pull")
         || source.contains("$addToSet")
@@ -272,6 +279,7 @@ fn is_derivation(target: &str, value: &str, sources: &BTreeSet<String>) -> bool 
         && (value.contains("?.")
             || value.contains(".map")
             || value.contains(".length")
+            || value.contains('.')
             || value.contains("reduce(")
             || value.contains("filter("))
 }
@@ -287,6 +295,8 @@ fn is_projected_field_name(field: &str) -> bool {
 fn is_write_context(value: &str) -> bool {
     value.contains("$set")
         || value.contains("$unset")
+        || value.contains("$inc")
+        || value.contains("$addFields")
         || value.contains("$push")
         || value.contains("$pull")
         || value.contains("$addToSet")
@@ -304,6 +314,8 @@ fn is_filter_line(line: &str) -> bool {
 fn is_write_line(line: &str) -> bool {
     contains_ascii_case(line, "$set")
         || contains_ascii_case(line, "$unset")
+        || contains_ascii_case(line, "$inc")
+        || contains_ascii_case(line, "$addfields")
         || contains_ascii_case(line, "$push")
         || contains_ascii_case(line, "$pull")
         || contains_ascii_case(line, "$addtoset")
@@ -330,6 +342,35 @@ fn is_backfill_line(line: &str, file_path: &str) -> bool {
 
 fn is_backfill_path(file_path: &str) -> bool {
     contains_ascii_case(file_path, "migration") || contains_ascii_case(file_path, "backfill")
+}
+
+fn has_backfill_context(source: &str, file_path: &str) -> bool {
+    is_backfill_path(file_path)
+        || contains_ascii_case(source, "migration")
+        || contains_ascii_case(source, "backfill")
+}
+
+fn is_false_positive_projection_path(file_path: &str) -> bool {
+    let normalized = file_path.replace('\\', "/");
+    normalized.starts_with("__mocks__/")
+        || normalized.starts_with("mocks/")
+        || normalized.starts_with("ui/")
+        || normalized.starts_with("components/")
+        || normalized.starts_with("i18n/")
+        || normalized.starts_with("locales/")
+        || normalized.starts_with("translations/")
+        || contains_ascii_case(&normalized, "/__mocks__/")
+        || contains_ascii_case(&normalized, "/mocks/")
+        || contains_ascii_case(&normalized, ".mock.")
+        || contains_ascii_case(&normalized, ".test.")
+        || contains_ascii_case(&normalized, ".spec.")
+        || contains_ascii_case(&normalized, ".stories.")
+        || contains_ascii_case(&normalized, "/components/")
+        || contains_ascii_case(&normalized, "/ui/")
+        || contains_ascii_case(&normalized, "/i18n/")
+        || contains_ascii_case(&normalized, "/locales/")
+        || contains_ascii_case(&normalized, "/translations/")
+        || contains_ascii_case(&normalized, "translation")
 }
 
 fn is_field_context_line(line: &str) -> bool {

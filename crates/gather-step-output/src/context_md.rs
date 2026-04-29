@@ -149,6 +149,7 @@ Use Gather Step tools before reasoning about cross-repo impact, tracing a reques
 | `get_shared_type_usage` | Find all usages of a shared contract type |
 | `payload_schema` | Inspect inferred payload schema evidence |
 | `contract_drift` | Find contract drift signals |
+| `projection_impact` | Trace source, projected field, filter, index, and backfill evidence |
 | `breaking_change_candidates` | Surface likely breaking-change risks |
 | `brief` | Get a compact orientation response |
 | `context` | Get bounded context for a target |

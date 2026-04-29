@@ -10,21 +10,16 @@ type BillingAccountDocument = {
 export function buildBillingProjection(account: BillingAccountDocument) {
   return {
     billingStatus: account.status,
-    invoiceItemTotal: account.invoiceItems.reduce((total, item) => total + item.amount, 0),
+    invoiceItemTotal: account.invoiceItems,
   };
 }
 
-export async function ensureBillingProjectionIndex(collection: any) {
-  await collection.createIndex({ invoiceItemTotal: 1 });
+export const billingProjectionIndexMapping = { invoiceItemTotal: 1 };
+
+export const billingProjectionFilterByTotal = { invoiceItemTotal: { $gte: 0 } };
+
+export function backfillInvoiceItemTotal() {
+  return { $set: { invoiceItemTotal: 0 } }; // backfill
 }
 
-export async function backfillInvoiceItemTotal(collection: any) {
-  await collection.updateMany({ invoiceItemTotal: { $exists: false } }, { $set: { invoiceItemTotal: 0 } }); // backfill
-}
-
-export async function readBillingProjection(collection: any) {
-  return collection
-    .find({ invoiceItemTotal: { $gte: 0 } })
-    .project({ invoiceItemTotal: 1, billingStatus: 1 })
-    .toArray();
-}
+export const billingProjectionReadModel = { invoiceItemTotal: 1, billingStatus: 1 };

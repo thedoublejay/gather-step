@@ -1,0 +1,1 @@
+searchIndexMapping: { invoiceItemTotal: invoice.total, orderIds: order.ids }

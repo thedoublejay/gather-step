@@ -10,13 +10,10 @@ type LegacyAccountDocument = {
 export function buildLegacyAccountProjection(account: LegacyAccountDocument) {
   return {
     accountStatus: account.status,
-    legacySeatIds: account.seats.map((seat) => seat.id),
+    legacySeatIds: account.seats,
   };
 }
 
-export async function readLegacyAccountProjection(collection: any) {
-  return collection
-    .find({ legacySeatIds: { $exists: true } })
-    .project({ legacySeatIds: 1, accountStatus: 1 })
-    .toArray();
-}
+export const legacyAccountProjectionFilterBySeat = { legacySeatIds: { $exists: true } };
+
+export const legacyAccountProjectionReadModel = { legacySeatIds: 1, accountStatus: 1 };
