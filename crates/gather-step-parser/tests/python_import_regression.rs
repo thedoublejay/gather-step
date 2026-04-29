@@ -172,3 +172,63 @@ fn python_class_bases_and_constructor_dependencies_are_preserved() {
             && edge.is_cross_file
     }));
 }
+
+#[test]
+fn python_nested_scopes_decorators_and_modern_syntax_keep_stable_ownership() {
+    let parsed = parse_python_fixture("package/app/fidelity.py");
+    let normalize_symbols = parsed
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.node.name == "normalize")
+        .collect::<Vec<_>>();
+    let normalize_qualified_names = normalize_symbols
+        .iter()
+        .filter_map(|symbol| symbol.node.qualified_name.as_deref())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(normalize_symbols.len(), 3);
+    assert!(normalize_qualified_names.contains("TitleHandler.handle.normalize"));
+    assert!(normalize_qualified_names.contains("build_title.normalize"));
+    assert!(normalize_qualified_names.contains("summarize_title.normalize"));
+    assert_eq!(
+        normalize_symbols
+            .iter()
+            .map(|symbol| symbol.node.id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+
+    let handle = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.node.qualified_name.as_deref() == Some("TitleHandler.handle"))
+        .expect("handle method should exist");
+    let route = handle
+        .decorators
+        .iter()
+        .find(|decorator| decorator.name == "route")
+        .expect("route decorator should be captured");
+    assert!(route.raw.contains(r#""/documents/{source_id}""#));
+    assert!(route.raw.contains("methods="));
+    assert!(route.raw.contains("POST"));
+    assert!(route.raw.contains("PATCH"));
+
+    let handle_normalize = normalize_symbols
+        .iter()
+        .find(|symbol| {
+            symbol.node.qualified_name.as_deref() == Some("TitleHandler.handle.normalize")
+        })
+        .expect("nested handle normalize should exist");
+    assert!(parsed.call_sites.iter().any(|call| {
+        call.owner_id == handle_normalize.node.id
+            && call.callee_name == "strip"
+            && call.callee_qualified_hint.as_deref() == Some("value.strip")
+    }));
+    assert!(
+        !parsed
+            .call_sites
+            .iter()
+            .any(|call| call.owner_id == handle.node.id && call.callee_name == "strip")
+    );
+}

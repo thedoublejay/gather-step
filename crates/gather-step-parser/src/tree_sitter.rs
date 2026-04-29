@@ -786,6 +786,13 @@ impl<'a> ParseState<'a> {
         self.cached_file_path.as_str()
     }
 
+    fn qualified_name_for_node(&self, node_id: gather_step_core::NodeId) -> Option<String> {
+        self.nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .and_then(|node| node.qualified_name.clone())
+    }
+
     /// Test-only constructor that builds a minimal `ParseState` suitable for
     /// driving `parse_ts_js_with_swc` in isolation.  The returned state has
     /// empty `nodes` / `edges` / `symbols` and dummy file/module nodes.
@@ -1880,8 +1887,10 @@ fn visit_python(
         "function_definition" => {
             let name =
                 child_text(node, "name", state.source).unwrap_or_else(|| "anonymous".to_owned());
-            let qualified_name = parent_class
-                .map(|class_node| format!("{}.{}", class_node.name, name))
+            let qualified_name = owner
+                .and_then(|owner_id| state.qualified_name_for_node(owner_id))
+                .map(|owner_name| format!("{owner_name}.{name}"))
+                .or_else(|| parent_class.map(|class_node| format!("{}.{}", class_node.name, name)))
                 .or_else(|| Some(name.clone()));
             let function_node = state.push_symbol(
                 NodeKind::Function,
