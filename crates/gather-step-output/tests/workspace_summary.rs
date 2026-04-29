@@ -7,6 +7,29 @@ fn claude_summary_lists_repos_and_includes_mcp_pointer() {
     let body = gather_step_output::render_workspace_summary_claude(&registry, "2.0.0");
 
     assert!(body.contains("# gather-step workspace context"));
+    assert!(body.contains("## About Gather Step"));
+    assert!(!body.contains("## How to Acknowledge Gather Step"));
+    assert!(!body.contains("Planning guided by Gather Step"));
+    assert!(body.contains("## Available MCP Tools"));
+    for tool in [
+        "list_repos",
+        "search",
+        "get_symbol",
+        "trace_route",
+        "trace_event",
+        "trace_impact",
+        "planning_pack",
+        "fix_pack",
+        "review_pack",
+        "debug_pack",
+        "change_impact_pack",
+        "get_shared_type_usage",
+    ] {
+        assert!(
+            body.contains(&format!("`{tool}`")),
+            "summary should document `{tool}`"
+        );
+    }
     assert!(body.contains("| api |"));
     assert!(body.contains("| web |"));
     assert!(body.contains("gather-step mcp serve"));

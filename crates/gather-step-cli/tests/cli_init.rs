@@ -65,3 +65,34 @@ fn init_force_non_interactive_writes_config_without_optional_steps() {
     assert!(config.contains("path: ."));
     assert!(!tmp.path().join(".gather-step/registry.json").exists());
 }
+
+#[test]
+fn init_generate_ai_files_without_index_writes_summaries_and_skips_rules() {
+    let tmp = tempdir().expect("temp dir");
+    fs::create_dir_all(tmp.path().join(".git")).expect("git dir");
+
+    let output = Command::new(bin())
+        .args([
+            "--workspace",
+            tmp.path().to_str().expect("utf-8 temp path"),
+            "init",
+            "--force",
+            "--no-index",
+            "--generate-ai-files",
+            "--no-watch",
+        ])
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("warning: skipped .claude/rules/ generation"));
+    assert!(tmp.path().join("CLAUDE.gather.md").exists());
+    assert!(tmp.path().join("AGENTS.gather.md").exists());
+    assert!(!tmp.path().join(".claude/rules").exists());
+}

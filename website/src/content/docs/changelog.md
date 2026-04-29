@@ -5,6 +5,24 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## v2.1.0 (Draft)
+
+This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph for the PR #3 release branch.
+
+### Highlights
+
+- Made `gather-step init` the primary setup path in docs and landing copy, with a workspace directory diagram and explicit prompt defaults.
+- Updated init output casing to "Gather Step" and made the local MCP default visible in the interactive prompt.
+- Kept generated Claude workspace context factual by removing acknowledgement/sign-off instructions while preserving the MCP tool reference table.
+- Updated the website workflow to Node 24 and refreshed GitHub Actions used by CI and website builds.
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.1.0`.
+- Refreshed Cargo dependencies with `cargo update`, including moving `gix` from the yanked `0.82.0` line to `0.83.0`.
+
+### Verification Coverage
+
+- Website build and Cloudflare Pages checks.
+- Rust CI summary: format, clippy, cargo-deny, cargo-shear, macOS tests, MVCC stress, and MSRV check.
+
 ## v2.0.0 (Draft)
 
 CLI onboarding, local MCP setup, release automation, and documentation refresh.
@@ -14,9 +32,9 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 ### Highlights
 
 - Added a richer no-args startup path: interactive unconfigured workspaces enter setup, configured workspaces show status, and non-interactive shells print help without hanging.
-- Completed the `init` wizard for repository discovery, config writing, optional indexing, AI summary generation, MCP registration, and watch handoff.
+- Completed the `init` wizard for repository discovery, config writing, optional indexing, AI context generation, MCP registration, and watch handoff.
 - Added `setup-mcp` for idempotent workspace-local or global Claude settings updates.
-- Added AI-facing workspace summary generation through `CLAUDE.gather.md` and `AGENTS.gather.md`.
+- Added AI-facing context generation through graph-backed `.claude/rules/` plus `CLAUDE.gather.md` and `AGENTS.gather.md` summaries.
 - Improved operator feedback for startup, `status`, `index`, `reindex`, `watch`, `clean`, and `serve`.
 - Bumped the workspace and crate versions to `2.0.0`.
 - Added release workflow automation to open Homebrew tap update pull requests.
@@ -49,6 +67,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - `setup-mcp --scope local` writes `.claude/settings.json` under the workspace.
 - `setup-mcp --scope global` writes `~/.claude/settings.json`.
 - MCP settings are updated idempotently without removing unrelated server entries.
+- Added `generate claude-md` / `--target rules` for graph-backed Claude Code project rules under `.claude/rules/`.
 - Added `generate claude-md --target summary` for `CLAUDE.gather.md`.
 - Added `generate agents-md` for Codex-style `AGENTS.gather.md` workflows.
 - Reused the same workspace summary renderer in the init wizard and explicit generate commands.

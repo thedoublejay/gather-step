@@ -64,7 +64,7 @@ The workspace is split into eight purpose-specific crates. Each has a narrow res
 | `gather-step-analysis` | Graph queries and derived analysis: event topology, contract drift, dead code detection, convention detection, cross-repo tracing, repo overview, semantic health. Query-oriented, always downstream of storage. |
 | `gather-step-output` | Generated assistant context files and rule markdown, with byte budgeting for context-window practicality. |
 | `gather-step-mcp` | Local stdio MCP server configuration, request limits, and tool implementations over the indexed graph. |
-| `gather-step-cli` | The end-user command surface: `init`, `index`, `clean`, `search`, `trace`, `events`, `impact`, `status`, `doctor`, `pack`, `conventions`, `generate`, `watch`, `serve`. |
+| `gather-step-cli` | The end-user command surface: `init`, `index`, `clean`, `search`, `trace`, `events`, `impact`, `status`, `doctor`, `pack`, `conventions`, `generate`, `watch`, `tui`, `serve`. |
 | `gather-step-git` | Git history parsing, ownership signals, co-change analytics, and hotspot primitives used by the analysis layer. |
 
 The separation is intentional. Parsing is deterministic and file-oriented. Storage is persistence-oriented. Analysis is query-oriented. The delivery layers are thin facades over the same indexed facts.

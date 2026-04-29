@@ -199,7 +199,7 @@ mod tests {
     use super::{
         confirm_destructive_clean_io, reset_index_state, validate_generated_path_override,
     };
-    use crate::app::AppContext;
+    use crate::app::{AppContext, ColorModeArg};
 
     static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -239,7 +239,9 @@ mod tests {
             no_interactive: true,
             stdin_is_tty: false,
             stdout_is_tty: false,
+            stderr_is_tty: false,
             ci_env_set: true,
+            color_mode: ColorModeArg::Auto,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         }

@@ -15,6 +15,7 @@ pub mod serve;
 pub mod setup_mcp;
 pub mod status;
 pub mod trace;
+pub mod tui;
 pub mod watch;
 
 use anyhow::Result;
@@ -23,7 +24,7 @@ use clap::{
     builder::styling::{AnsiColor, Effects, Styles},
 };
 
-use crate::app::AppContext;
+use crate::app::{AppContext, ColorModeArg};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,6 +46,14 @@ pub struct Cli {
     pub verbose: u8,
     #[arg(long, global = true, help = "Emit newline-delimited JSON output")]
     pub json: bool,
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ColorModeArg::Auto,
+        help = "Control ANSI color output"
+    )]
+    pub color: ColorModeArg,
     #[arg(long, global = true, help = "Disable the startup banner")]
     pub no_banner: bool,
     #[arg(
@@ -68,6 +77,7 @@ pub enum Command {
     Trace(trace::TraceArgs),
     Serve(serve::ServeArgs),
     Watch(watch::WatchArgs),
+    Tui(tui::TuiArgs),
     SetupMcp(setup_mcp::SetupMcpArgs),
     Status(status::StatusArgs),
     Doctor(doctor::DoctorArgs),
@@ -100,6 +110,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Reindex(args)) => reindex::run(&app, args).await,
         Some(Command::Serve(args)) => serve::run(&app, args).await,
         Some(Command::Watch(args)) => watch::run(&app, args).await,
+        Some(Command::Tui(args)) => tui::run(&app, args),
         Some(Command::Search(args)) => search::run(&app, args),
         Some(Command::Trace(args)) => trace::run(&app, args),
         Some(Command::SetupMcp(args)) => setup_mcp::run(&app, args),
@@ -136,7 +147,7 @@ mod tests {
     use super::{Cli, Command};
     use crate::commands::{
         clean::CleanArgs, compact::CompactArgs, index::IndexArgs, reindex::ReindexArgs,
-        serve::ServeArgs, setup_mcp::McpScope, trace::TraceCommand, watch::WatchArgs,
+        serve::ServeArgs, setup_mcp::McpScope, trace::TraceCommand, tui::TuiArgs, watch::WatchArgs,
     };
 
     #[test]
@@ -343,6 +354,16 @@ mod tests {
                 error_backoff_ms: 9000,
             }
         );
+    }
+
+    #[test]
+    fn parses_tui_args() {
+        let cli = Cli::parse_from(["gather-step", "tui"]);
+
+        let Some(Command::Tui(args)) = cli.command else {
+            unreachable!("expected tui command");
+        };
+        assert_eq!(args, TuiArgs {});
     }
 
     #[test]

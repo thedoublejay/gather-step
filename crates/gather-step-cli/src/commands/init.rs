@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use console::style;
 use gather_step_core::{GatherStepConfig, IndexingConfig, RepoConfig};
 use serde::Serialize;
 
@@ -38,7 +39,10 @@ pub struct InitArgs {
     pub watch: bool,
     #[arg(long = "no-watch", conflicts_with = "watch")]
     pub no_watch: bool,
-    #[arg(long, help = "Generate CLAUDE.gather.md and AGENTS.gather.md")]
+    #[arg(
+        long,
+        help = "Generate .claude/rules/, CLAUDE.gather.md, and AGENTS.gather.md"
+    )]
     pub generate_ai_files: bool,
     #[arg(long = "no-generate-ai-files", conflicts_with = "generate_ai_files")]
     pub no_generate_ai_files: bool,
@@ -74,7 +78,7 @@ pub async fn run(app: &AppContext, args: InitArgs) -> Result<()> {
 
     if config_path.exists() && !args.force {
         bail!(
-            "config already exists at {} (pass --force to overwrite)",
+            "config already exists at {}\nhint: pass --force to overwrite",
             config_path.display()
         );
     }
@@ -88,6 +92,7 @@ pub async fn run(app: &AppContext, args: InitArgs) -> Result<()> {
 
 async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
     write_default_config(app, &args)?;
+    let output = app.output();
 
     if args.index && !args.no_index {
         index::run(app, index::IndexArgs::default()).await?;
@@ -99,6 +104,10 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
         setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
     }
     if args.watch && !args.no_watch {
+        output.line(format!(
+            "\n  {} Gather Step is ready.",
+            style("✓ Setup complete.").green().bold()
+        ));
         watch::run(app, watch::WatchArgs::default()).await?;
     }
 
@@ -109,14 +118,21 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     let repos = discover_git_repos(&app.workspace_path)?;
 
     let output = app.output();
-    output.line("gather-step workspace setup");
     output.line(format!(
-        "Found {} git repo(s) in {}",
-        repos.len(),
-        app.workspace_path.display()
+        "\n  {}",
+        style("Gather Step workspace setup").bold()
+    ));
+    output.line(format!(
+        "  Found {} git repo(s) in {}",
+        style(repos.len()).cyan().bold(),
+        style(app.workspace_path.display()).dim()
     ));
     for repo in &repos {
-        output.line(format!("  {} -> {}", repo.name, repo.relative_path));
+        output.line(format!(
+            "    {} {}",
+            style(&repo.name).cyan(),
+            style(format!("→ {}", repo.relative_path)).dim()
+        ));
     }
 
     let do_index = if args.index {
@@ -126,26 +142,26 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     } else {
         prompt_yes_no("Index these repos now?", true)?
     };
-    let do_watch = if args.watch {
-        true
-    } else if args.no_watch {
-        false
-    } else {
-        prompt_yes_no("Watch for changes and re-index automatically?", false)?
-    };
     let do_ai = if args.generate_ai_files {
         true
     } else if args.no_generate_ai_files {
         false
     } else {
         prompt_yes_no(
-            "Generate AI tool context files (CLAUDE.gather.md, AGENTS.gather.md)?",
+            "Generate AI context files (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md)?",
             true,
         )?
     };
     let scope = match args.setup_mcp {
         Some(scope) => Some(scope),
         None => prompt_mcp_scope()?,
+    };
+    let do_watch = if args.watch {
+        true
+    } else if args.no_watch {
+        false
+    } else {
+        prompt_yes_no("Watch for changes and re-index automatically?", false)?
     };
 
     write_default_config_with_repos(app, &args, repos)?;
@@ -159,11 +175,14 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     if let Some(scope) = scope {
         setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
     }
+    output.line(format!(
+        "\n  {} gather-step is ready.",
+        style("✓ Setup complete.").green().bold()
+    ));
     if do_watch {
         watch::run(app, watch::WatchArgs::default()).await?;
     }
 
-    output.line("Setup complete; gather-step is ready.");
     Ok(())
 }
 
@@ -185,7 +204,7 @@ fn write_default_config_with_repos(
 
     if repos.is_empty() {
         bail!(
-            "no git repositories were found under {}",
+            "No git repositories found under {}",
             app.workspace_path.display()
         );
     }
@@ -253,7 +272,7 @@ fn prompt_mcp_scope() -> Result<Option<setup_mcp::McpScope>> {
     let mut stdout = io::stdout().lock();
     write!(
         stdout,
-        "Register gather-step as an MCP server? [local/global/skip] "
+        "Register as an MCP server? [local/global/skip] (default: local) "
     )?;
     stdout.flush()?;
 

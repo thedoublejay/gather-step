@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use console::style;
 use gather_step_core::{
     GatherStepConfig, NodeKind, RegistryStore, RepoIndexMetadata, WorkspaceRepoResult,
     WorkspaceStats,
@@ -187,7 +188,10 @@ fn reset_and_reopen_indexer(
             storage_root.display()
         )
     })?;
-    output.line("Auto-recovered generated index state; rebuilding from source repos.");
+    output.line(format!(
+        "  {} Auto-recovered generated index state; rebuilding from source repos.",
+        style("→").cyan()
+    ));
     RepoIndexer::open(storage_root, IndexingOptions::default())
         .with_context(|| format!("opening storage at {}", storage_root.display()))
 }
@@ -324,10 +328,14 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bar = (!output.is_json()).then(|| {
         let bar = multi.add(ProgressBar::new(config.repos.len() as u64));
         bar.set_style(
-            ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar}] {pos}/{len} {msg}")
-                .expect("workspace progress template is valid")
-                .progress_chars("=> "),
+            ProgressStyle::with_template(
+                " {spinner:.cyan.bold} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}  {msg}",
+            )
+            .expect("workspace progress template is valid")
+            .progress_chars("█░░")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
         );
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
         bar
     });
 
@@ -582,11 +590,11 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let finalization_bar = (!output.is_json()).then(|| {
         let bar = multi.add(ProgressBar::new_spinner());
         bar.set_style(
-            ProgressStyle::with_template("  {spinner} {msg}")
+            ProgressStyle::with_template("  {spinner:.cyan.bold} {msg}")
                 .expect("finalization spinner template is valid")
-                .tick_strings(&["-", "\\", "|", "/"]),
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
         );
-        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
         bar
     });
 
@@ -757,18 +765,20 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
 
     output.emit(&payload)?;
     output.line(format!(
-        "Indexed {} repo(s) into {}",
-        payload.stats.indexed_repos, payload.storage_root
+        "\n  {} {} repo(s)  {}",
+        style("✓ Indexed").green().bold(),
+        style(payload.stats.indexed_repos).cyan(),
+        style(&payload.storage_root).dim()
     ));
     output.line(format!(
-        "Files: {}  Symbols: {}  Edges: {}  Cross-repo: {}",
-        payload.stats.total_files,
-        payload.stats.total_symbols,
-        payload.stats.total_edges,
-        payload.stats.cross_repo_edges
+        "    {} files  {} symbols  {} edges  {} cross-repo",
+        style(payload.stats.total_files).dim(),
+        style(payload.stats.total_symbols).dim(),
+        style(payload.stats.total_edges).dim(),
+        style(payload.stats.cross_repo_edges).dim()
     ));
     for warning in &payload.warnings {
-        output.line(format!("Warning: {warning}"));
+        output.line(format!("  {} {warning}", style("warning:").yellow().bold()));
     }
 
     // When `--artifact-path` is set, persist the IndexOutput payload so release

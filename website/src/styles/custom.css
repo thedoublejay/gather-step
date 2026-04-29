@@ -82,6 +82,12 @@ h4 {
   --sl-sidebar-width: 20rem;
 }
 
+[data-has-sidebar] .content-panel,
+[data-has-sidebar] .sidebar-pane,
+[data-has-sidebar] .right-sidebar-panel {
+  min-width: 0;
+}
+
 .sidebar-pane {
   background-image:
     linear-gradient(rgba(148, 202, 235, 0.04) 1px, transparent 1px),
@@ -89,7 +95,6 @@ h4 {
   background-size: 20px 20px;
 }
 
-.content-panel,
 .right-sidebar-panel,
 .sidebar-pane,
 .sl-markdown-content :is(table, pre, blockquote) {
@@ -105,6 +110,7 @@ h4 {
 }
 
 .content-panel .sl-container {
+  min-width: 0;
   padding-top: 1rem;
 }
 
@@ -406,8 +412,11 @@ h4 {
 
 .sidebar-pane,
 .right-sidebar-panel,
-.content-panel,
 .sl-markdown-content :is(table, pre) {
+  border-radius: 1rem;
+}
+
+.content-panel > .sl-container {
   border-radius: 1rem;
 }
 

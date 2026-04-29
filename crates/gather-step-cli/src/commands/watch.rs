@@ -7,11 +7,13 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use console::style;
 use gather_step_core::GatherStepConfig;
 use gather_step_storage::{
     IndexingOptions, StorageDaemonMetadataGuard, WatchCause, WatchEvent, WatcherConfig,
     WorkspaceStores, WorkspaceWatcher, search_store::SearchWorkload,
 };
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -87,6 +89,19 @@ fn emit_watch_line(line: &str) -> Result<()> {
     Ok(())
 }
 
+fn emit_watch_human_line(pb: Option<&ProgressBar>, line: String) -> Result<()> {
+    if let Some(pb) = pb {
+        pb.println(line);
+        Ok(())
+    } else {
+        emit_watch_line(&line)
+    }
+}
+
+fn log_value(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"<invalid>\"".to_owned())
+}
+
 pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     let output = app.output();
     let daemon_metadata;
@@ -133,6 +148,34 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     let mut events = watcher.subscribe();
     let run_cancel = cancel.clone();
     let event_output = output.clone();
+    let progress_visible = app.progress_is_visible();
+
+    // Persistent spinner that sits at the bottom while events scroll above it.
+    // Only created when MultiProgress is visible; cloned into the event task.
+    let watcher_bar = if progress_visible {
+        let pb = app.multi_progress.add(ProgressBar::new_spinner());
+        pb.set_style(
+            ProgressStyle::with_template(" {spinner:.cyan.bold} {wide_msg}")
+                .expect("watcher spinner template is valid")
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        pb.set_message("watching for changes");
+        pb.enable_steady_tick(Duration::from_millis(80));
+        Some(pb)
+    } else {
+        None
+    };
+    let event_bar = watcher_bar.clone();
+
+    if progress_visible {
+        emit_watch_line(&format!(
+            "\n  {} Watching for changes. Press Ctrl+C to stop.\n",
+            style("*").cyan()
+        ))?;
+    } else if !output.is_json() {
+        emit_watch_line("watch:start status=watching")?;
+    }
+
     let event_task = tokio::spawn(async move {
         loop {
             let event = match events.recv().await {
@@ -164,10 +207,21 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                             duration_ms: None,
                             error: None,
                         })
+                    } else if progress_visible {
+                        let line = format!(
+                            "  {} {}  {} {}",
+                            style("[indexing]").cyan().bold(),
+                            style(&repo).bold(),
+                            style(format!("({cause})")).dim(),
+                            style(format!("{} file(s)", files.len())).dim(),
+                        );
+                        emit_watch_human_line(event_bar.as_ref(), line)
                     } else {
                         emit_watch_line(&format!(
-                            "watch:indexing_start repo={repo} cause={cause} files={}",
-                            files.join(",")
+                            "watch:indexing_start repo={} cause={} files={}",
+                            log_value(&repo),
+                            cause,
+                            files.len()
                         ))
                     }
                 }
@@ -189,9 +243,18 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                             duration_ms: None,
                             error: None,
                         })
+                    } else if progress_visible {
+                        let line = format!(
+                            "  {} {}  {}",
+                            style("[overflow]").yellow().bold(),
+                            style(&repo).bold(),
+                            style(format!("{dropped_events} events dropped")).yellow(),
+                        );
+                        emit_watch_human_line(event_bar.as_ref(), line)
                     } else {
                         emit_watch_line(&format!(
-                            "watch:overflow repo={repo} dropped_events={dropped_events}"
+                            "watch:overflow repo={} dropped_events={dropped_events}",
+                            log_value(&repo),
                         ))
                     }
                 }
@@ -214,9 +277,25 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                             duration_ms: Some(u64::try_from(stats.duration_ms).unwrap_or(u64::MAX)),
                             error: None,
                         })
+                    } else if progress_visible {
+                        let line = format!(
+                            "  {} {}  {}",
+                            style("[rebuilt]").green().bold(),
+                            style(&repo).bold(),
+                            style(format!(
+                                "+{} ~{} -{}  {}ms",
+                                changed.added.len(),
+                                changed.modified.len(),
+                                changed.deleted.len(),
+                                stats.duration_ms,
+                            ))
+                            .dim(),
+                        );
+                        emit_watch_human_line(event_bar.as_ref(), line)
                     } else {
                         emit_watch_line(&format!(
-                            "watch:indexing_complete repo={repo} modified={} added={} deleted={} files_parsed={} duration_ms={}",
+                            "watch:indexing_complete repo={} modified={} added={} deleted={} files_parsed={} duration_ms={}",
+                            log_value(&repo),
                             changed.modified.len(),
                             changed.added.len(),
                             changed.deleted.len(),
@@ -240,8 +319,20 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                             duration_ms: None,
                             error: Some(error),
                         })
+                    } else if progress_visible {
+                        let line = format!(
+                            "  {} {}  {}",
+                            style("[error]").red().bold(),
+                            style(&repo).bold(),
+                            style(&error).red(),
+                        );
+                        emit_watch_human_line(event_bar.as_ref(), line)
                     } else {
-                        emit_watch_line(&format!("watch:error repo={repo} error={error}"))
+                        emit_watch_line(&format!(
+                            "watch:error repo={} error={}",
+                            log_value(&repo),
+                            log_value(&error)
+                        ))
                     }
                 }
             };
@@ -281,6 +372,14 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
             backoff_suppressions: status.backoff_suppressions,
             cross_repo_reconciliations: status.cross_repo_reconciliations,
         })?;
+    } else if progress_visible {
+        if let Some(ref pb) = watcher_bar {
+            pb.finish_and_clear();
+        }
+        emit_watch_line(&format!(
+            "\n  Watch session ended: {} events, {} indexing runs, {} errors",
+            status.events_seen, status.indexing_runs, status.errors,
+        ))?;
     } else {
         emit_watch_line(&format!(
             "watch:status events_seen={} dropped_events={} indexing_runs={} overflows={} rescans_requested={} errors={} backoff_suppressions={} cross_repo_reconciliations={}",

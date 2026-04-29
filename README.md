@@ -128,7 +128,7 @@ Or build from source:
 cargo build -p gather-step --release
 ```
 
-Create a config, build the index, generate AI-facing summaries, and register Claude MCP settings:
+Create a config, build the index, generate AI-facing context files, and register Claude MCP settings:
 
 ```bash
 gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
@@ -165,6 +165,7 @@ gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace impact CreateOrderInput
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
 gather-step --workspace /path/to/workspace conventions
+gather-step --workspace /path/to/workspace generate claude-md
 gather-step --workspace /path/to/workspace generate claude-md --target summary
 gather-step --workspace /path/to/workspace generate agents-md
 gather-step --workspace /path/to/workspace generate codeowners

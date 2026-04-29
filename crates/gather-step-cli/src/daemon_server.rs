@@ -719,7 +719,7 @@ mod tests {
 
     use super::{DaemonServer, daemon_pid_path, daemon_socket_path};
     use crate::{
-        app::AppContext,
+        app::{AppContext, ColorModeArg},
         daemon_client::DaemonClient,
         daemon_protocol::{DaemonRequest, DaemonResponse},
     };
@@ -758,7 +758,9 @@ mod tests {
             no_interactive: true,
             stdin_is_tty: false,
             stdout_is_tty: false,
+            stderr_is_tty: false,
             ci_env_set: true,
+            color_mode: ColorModeArg::Auto,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         }

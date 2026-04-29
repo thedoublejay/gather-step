@@ -1,6 +1,6 @@
 ---
-title: "gather-step CLI reference"
-description: "Complete command and flag reference for the gather-step CLI. Covers commands, global flags, output modes, and exit codes."
+title: "Gather Step CLI Reference"
+description: "Complete command and flag reference for the Gather Step CLI. Covers commands, global flags, output modes, and exit codes."
 ---
 
 The `gather-step` binary is the primary interface for managing workspace indexes and running the local MCP server. Every command reads its defaults from `gather-step.config.yaml` and the workspace-local state directory at `.gather-step/`.
@@ -15,6 +15,7 @@ These flags apply to every command. Pass them before the subcommand name.
 | `--repo <NAME>` | string | — | Restrict the command to one configured repo name. The name must match a repo listed in the config. |
 | `-v, --verbose` | count | 0 (warn level) | Increase log verbosity. Pass once for `info`, twice for `debug`, three or more times for `trace`. Overridden by the `GATHER_STEP_LOG` environment variable. |
 | `--json` | bool flag | false | Emit newline-delimited JSON to stdout instead of human-readable text. Tracing logs are still written to stderr in JSON format when this flag is set. |
+| `--color <auto\|always\|never>` | enum | `auto` | Control ANSI color for command output after CLI parsing. `auto` respects TTY detection, `NO_COLOR`, `FORCE_COLOR`, and `TERM=dumb`; `--json` disables color in stdout payloads. Clap-rendered help and parse errors are emitted before command setup and follow Clap's own terminal color behavior. |
 | `--no-banner` | bool flag | false | Suppress the startup banner printed to stderr. The banner is also suppressed when `--json` is active or when stderr is not a TTY. |
 | `--no-interactive` | bool flag | false | Disable interactive prompts and use command defaults. Use this for scripts and CI. |
 
@@ -39,6 +40,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`generate agents-md`](#generate-agents-md) — Generate a workspace summary for Codex-style `AGENTS.md` workflows.
 - [`generate codeowners`](#generate-codeowners) — Generate a CODEOWNERS file from indexed ownership analytics.
 - [`watch`](#watch) — Watch for file changes and trigger incremental indexing.
+- [`tui`](#tui) — Open the opt-in full-screen workspace dashboard.
 - [`setup-mcp`](#setup-mcp) — Register workspace-pinned Claude MCP settings.
 - [`serve`](#serve) — Start the stdio MCP server.
 
@@ -60,15 +62,20 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 | `--force` | bool flag | false | Overwrite an existing config file. Without this flag, the command exits with an error if the config already exists. |
 | `--index` / `--no-index` | bool flag | prompt/default | Index discovered repos after writing the config, or skip indexing. |
 | `--watch` / `--no-watch` | bool flag | prompt/default | Start watch mode after setup, or return immediately. |
-| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `CLAUDE.gather.md` and `AGENTS.gather.md` after indexing. |
+| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.claude/rules/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
 | `--setup-mcp <SCOPE>` | enum | prompt/default | Register the MCP server in `local` or `global` Claude settings. |
 
 **Example**
 
 ```bash
-gather-step --workspace /path/to/workspace init
-gather-step --workspace /path/to/workspace init --index --generate-ai-files --setup-mcp local
+cd /path/to/workspace
+gather-step init
+
+# non-interactive equivalent
+gather-step init --index --generate-ai-files --setup-mcp local --no-watch
 ```
+
+Interactive `init` asks whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
 
 **Output shape (`--json`)** — emits one line:
 
@@ -480,7 +487,7 @@ gather-step --workspace /path/to/workspace --repo backend_standard conventions -
 
 ### `generate claude-md`
 
-Generates CLAUDE.md rule files for one or all repos in the workspace. With `--target=rules`, files are graph-backed repo rule files. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
+Generates Claude Code rule files for the workspace. With `--target=rules`, the command writes multiple graph-backed rule files under `.claude/rules/`. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
 
 ```bash
 gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] \
@@ -489,15 +496,16 @@ gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] 
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--output <PATH>` | path | Workspace default locations | Explicit output file or directory. When multiple files are generated and this is an existing file, the command errors. Pass a trailing slash to force directory treatment. |
-| `--repo <NAME>` | string | — | Generate repo-scoped output for this repo only. Overrides the global `--repo` flag. |
-| `--target <rules|summary>` | enum | `rules` | Choose graph-backed repo rule files or the registry-only `CLAUDE.gather.md` summary. `--repo` is only valid with `rules`. |
+| `--output <PATH>` | path | Workspace default locations | Explicit output file or directory. `rules` generates multiple files, so pass a directory path such as `./claude-rules/`; file-like paths such as `CLAUDE.md` are rejected. |
+| `--repo <NAME>` | string | — | Limit graph-backed rule content to one repo. This still writes the shared rule files plus the repo-specific rule file. Overrides the global `--repo` flag. |
+| `--target <rules|summary>` | enum | `rules` | Choose graph-backed rule files or the registry-only `CLAUDE.gather.md` summary. `--repo` is only valid with `rules`. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace generate claude-md
-gather-step --workspace /path/to/workspace generate claude-md --repo backend_standard --output ./CLAUDE.md
+gather-step --workspace /path/to/workspace generate claude-md --repo backend_standard --output ./claude-rules/
+gather-step --workspace /path/to/workspace generate claude-md --target summary --output ./CLAUDE.gather.md
 ```
 
 **Output shape (`--json`)** — emits one line with `event: "generate_claude_md_completed"` and `files` array of `{path, bytes}`.
@@ -583,7 +591,23 @@ gather-step --workspace /path/to/workspace watch
 gather-step --workspace /path/to/workspace watch --debounce-ms 500 --poll-interval-ms 100
 ```
 
+Visible terminals show a spinner and labeled status lines. Non-TTY and CI runs keep stable stderr lines such as `watch:start`, `watch:indexing_complete`, and `watch:status`. `--json` emits NDJSON events on stdout and hides progress.
+
 **When to use** — during active development, so AI assistant tools always query a fresh index.
+
+---
+
+### `tui`
+
+Opens the opt-in full-screen workspace dashboard. The dashboard shows the current registry snapshot, copyable next commands, selected repo details, and a compact event log. It does not run the file watcher or mutate index state; use `watch`, `index`, or `reindex` for backend work. It never starts automatically from scripted commands.
+
+```bash
+gather-step [GLOBAL FLAGS] tui
+```
+
+Primary keys: `q` quit, `?` help, `/` filter, `Tab` next pane, `Enter` detail, `c` clear, `1`/`2`/`3` switch Symbols/Routes/Events. In filter mode, printable keys edit the filter; `Esc` or `Enter` exits filter mode.
+
+The TUI requires stdin, stdout, and stderr to be TTYs. In scripts or CI, use `status`, `watch`, or `--json` instead.
 
 ---
 
@@ -628,7 +652,7 @@ gather-step [GLOBAL FLAGS] serve [--graph <PATH>] [--registry <PATH>] \
 | `--graph <PATH>` | path | `<workspace>/.gather-step/storage/graph.redb` | Path to the graph store file. |
 | `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Path to the workspace registry. |
 | `--config <PATH>` | path | `<workspace>/gather-step.config.yaml` | Path to workspace config, used by `--watch`. |
-| `--max-limit <N>` | usize | server default | Per-call result limit cap applied to all MCP tools. |
+| `--max-limit <N>` | usize | 1000 | Per-call result limit cap applied to all MCP tools. |
 | `--server-name <NAME>` | string | `"gather-step"` | Server name reported to MCP clients in the `server_info` handshake. |
 | `--watch` | bool flag | false | Run the filesystem watcher in the same process so the MCP server stays fresh during development. |
 | `--poll-interval-ms <N>` | u64 | 250 | Watch-loop cadence in milliseconds. |

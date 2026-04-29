@@ -332,7 +332,7 @@ mod tests {
     use indicatif::MultiProgress;
 
     use super::{ServeArgs, build_mcp_config, escape_field};
-    use crate::app::AppContext;
+    use crate::app::{AppContext, ColorModeArg};
 
     #[test]
     fn escape_field_is_identity_for_clean_strings() {
@@ -372,7 +372,9 @@ mod tests {
             no_interactive: true,
             stdin_is_tty: false,
             stdout_is_tty: false,
+            stderr_is_tty: false,
             ci_env_set: true,
+            color_mode: ColorModeArg::Auto,
             show_banner: false,
             multi_progress: MultiProgress::new(),
         }

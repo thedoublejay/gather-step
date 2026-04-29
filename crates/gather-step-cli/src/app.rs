@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use console::style;
+use console::{set_colors_enabled, set_colors_enabled_stderr, style};
 use indicatif::{MultiProgress, ProgressDrawTarget};
 use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
@@ -27,9 +27,19 @@ pub struct AppContext {
     pub no_interactive: bool,
     pub stdin_is_tty: bool,
     pub stdout_is_tty: bool,
+    pub stderr_is_tty: bool,
     pub ci_env_set: bool,
+    pub color_mode: ColorModeArg,
     pub show_banner: bool,
     pub multi_progress: MultiProgress,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ColorModeArg {
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -108,7 +118,9 @@ impl AppContext {
             no_interactive: cli.no_interactive,
             stdin_is_tty: std::io::stdin().is_terminal(),
             stdout_is_tty: std::io::stdout().is_terminal(),
+            stderr_is_tty: std::io::stderr().is_terminal(),
             ci_env_set: std::env::var("CI").is_ok_and(|value| !value.is_empty()),
+            color_mode: cli.color,
             show_banner: !cli.no_banner,
             multi_progress,
         })
@@ -125,6 +137,25 @@ impl AppContext {
             && self.stdout_is_tty
             && !self.json_output
             && !self.ci_env_set
+            && !self.no_interactive
+    }
+
+    #[must_use]
+    pub fn progress_is_visible(&self) -> bool {
+        self.stderr_is_tty && !self.ci_env_set && !self.json_output
+    }
+
+    #[must_use]
+    pub fn color_enabled(&self) -> bool {
+        color_enabled_for(self.color_mode, self.stdout_is_tty, self.json_output)
+    }
+
+    #[must_use]
+    pub fn tui_is_available(&self) -> bool {
+        self.stdin_is_tty
+            && self.stdout_is_tty
+            && self.stderr_is_tty
+            && !self.json_output
             && !self.no_interactive
     }
 
@@ -156,6 +187,7 @@ impl AppContext {
 /// bars render.
 pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
     let env_filter = build_env_filter(cli.verbose)?;
+    configure_console_colors(cli);
 
     if cli.json {
         tracing_subscriber::fmt()
@@ -183,9 +215,35 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
         .with_env_filter(env_filter)
         .with_writer(writer)
         .with_target(false)
-        .with_ansi(draw_visible)
+        .with_ansi(color_enabled_for(cli.color, stderr_is_tty, cli.json))
         .init();
     Ok(multi_progress)
+}
+
+fn configure_console_colors(cli: &Cli) {
+    let stdout_is_tty = io::stdout().is_terminal();
+    let stderr_is_tty = io::stderr().is_terminal();
+    set_colors_enabled(color_enabled_for(cli.color, stdout_is_tty, cli.json));
+    set_colors_enabled_stderr(color_enabled_for(cli.color, stderr_is_tty, cli.json));
+}
+
+fn color_enabled_for(mode: ColorModeArg, stream_is_tty: bool, json_output: bool) -> bool {
+    if json_output {
+        return false;
+    }
+    match mode {
+        ColorModeArg::Always => true,
+        ColorModeArg::Never => false,
+        ColorModeArg::Auto => {
+            if env::var_os("NO_COLOR").is_some() {
+                return false;
+            }
+            if env::var_os("FORCE_COLOR").is_some() {
+                return true;
+            }
+            stream_is_tty && env::var("TERM").map_or(true, |term| term != "dumb")
+        }
+    }
 }
 
 fn build_env_filter(verbose: u8) -> Result<EnvFilter> {
@@ -273,6 +331,7 @@ pub fn maybe_print_banner(app: &AppContext) {
         return;
     }
 
+    eprintln!();
     eprintln!("{}", style(BANNER).dim());
     eprintln!(
         "{}",
@@ -304,7 +363,7 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_env_filter;
+    use super::{ColorModeArg, build_env_filter, color_enabled_for};
 
     #[test]
     fn default_filter_suppresses_tantivy_segment_manager_warnings() {
@@ -312,5 +371,12 @@ mod tests {
             .expect("env filter should build")
             .to_string();
         assert!(rendered.contains("tantivy::indexer::segment_manager=error"));
+    }
+
+    #[test]
+    fn explicit_color_modes_override_tty_detection() {
+        assert!(color_enabled_for(ColorModeArg::Always, false, false));
+        assert!(!color_enabled_for(ColorModeArg::Never, true, false));
+        assert!(!color_enabled_for(ColorModeArg::Always, true, true));
     }
 }
