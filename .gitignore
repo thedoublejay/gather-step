@@ -3,6 +3,9 @@
 *.rs.bk
 rust_out
 
+# Git worktrees
+/.worktrees/
+
 # JavaScript / Astro / Starlight
 node_modules/
 dist/
