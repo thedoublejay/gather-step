@@ -360,6 +360,25 @@ fn typed_direct_field_access_extracts_reader_and_writer_edges() {
 }
 
 #[test]
+fn typed_direct_field_access_follows_local_aliases_and_destructuring() {
+    let parsed = parse_ts_source_in_tempdir(
+        "interface Alert { workflow?: { taskIds: string[] } }\n\
+         export function planAlert(alert: Alert) {\n\
+           const workflow = alert.workflow;\n\
+           const { workflow: destructuredWorkflow } = alert;\n\
+           workflow.taskIds.push('migration');\n\
+           return destructuredWorkflow?.taskIds.includes('migration');\n\
+         }\n",
+        "typed_direct_access_aliases.ts",
+    );
+
+    assert_fields(&parsed, &["Alert.workflow", "Alert.workflow.taskIds"]);
+    assert!(field_edge_kinds(&parsed, "Alert.workflow").contains("ReadsField"));
+    assert!(field_edge_kinds(&parsed, "Alert.workflow.taskIds").contains("ReadsField"));
+    assert!(field_edge_kinds(&parsed, "Alert.workflow.taskIds").contains("WritesField"));
+}
+
+#[test]
 fn typed_direct_field_access_skips_dynamic_and_deep_optional_paths() {
     let parsed = parse_ts_source_in_tempdir(
         "interface Alert { workflow?: { taskIds: string[] } }\n\

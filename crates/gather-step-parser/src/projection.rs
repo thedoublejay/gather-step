@@ -219,7 +219,8 @@ fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFie
         return Vec::new();
     }
 
-    let bindings = typed_field_bindings(source);
+    let mut bindings = typed_field_bindings(source);
+    extend_field_alias_bindings(source, &mut bindings);
     if bindings.is_empty() {
         return Vec::new();
     }
@@ -228,8 +229,8 @@ fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFie
     for (line_index, line) in source.lines().enumerate() {
         let line_number = u32::try_from(line_index + 1).unwrap_or(u32::MAX);
         let owner = owner_for_line(parsed, line_number);
-        for (binding, type_name) in &bindings {
-            for access in field_accesses_on_line(line, binding, type_name) {
+        for (binding, field_binding) in &bindings {
+            for access in field_accesses_on_line(line, binding, field_binding) {
                 for edge in access_edges(owner, &access.field_path, access.mode) {
                     edges.insert(edge);
                 }
@@ -242,7 +243,30 @@ fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFie
 
 const MAX_DIRECT_FIELD_SOURCE_LEN: usize = 1024 * 1024;
 
-fn typed_field_bindings(source: &str) -> BTreeMap<String, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FieldBinding {
+    root: String,
+}
+
+impl FieldBinding {
+    fn typed(type_name: String) -> Self {
+        Self { root: type_name }
+    }
+
+    fn alias(field_path: String) -> Self {
+        Self { root: field_path }
+    }
+
+    fn field_path(&self, props: &[String]) -> String {
+        if props.is_empty() {
+            self.root.clone()
+        } else {
+            format!("{}.{}", self.root, props.join("."))
+        }
+    }
+}
+
+fn typed_field_bindings(source: &str) -> BTreeMap<String, FieldBinding> {
     let mut bindings = BTreeMap::new();
     for regex in [typed_variable_re(), typed_parameter_re()] {
         for capture in regex.captures_iter(source) {
@@ -255,10 +279,125 @@ fn typed_field_bindings(source: &str) -> BTreeMap<String, String> {
             else {
                 continue;
             };
-            bindings.insert(name.to_owned(), type_name);
+            bindings.insert(name.to_owned(), FieldBinding::typed(type_name));
         }
     }
     bindings
+}
+
+fn extend_field_alias_bindings(source: &str, bindings: &mut BTreeMap<String, FieldBinding>) {
+    const MAX_ALIAS_PASSES: usize = 4;
+
+    for _ in 0..MAX_ALIAS_PASSES {
+        let mut discovered = Vec::new();
+        for line in source.lines() {
+            discovered.extend(field_alias_assignments_on_line(line, bindings));
+            discovered.extend(destructured_field_aliases_on_line(line, bindings));
+        }
+        discovered.retain(|(name, _)| !bindings.contains_key(name));
+        if discovered.is_empty() {
+            break;
+        }
+        for (name, binding) in discovered {
+            bindings.insert(name, binding);
+        }
+    }
+}
+
+fn field_alias_assignments_on_line(
+    line: &str,
+    bindings: &BTreeMap<String, FieldBinding>,
+) -> Vec<(String, FieldBinding)> {
+    field_alias_assignment_re()
+        .captures_iter(line)
+        .filter_map(|capture| {
+            let alias = capture.get(1)?.as_str();
+            let expression = capture.get(2)?.as_str();
+            let field_path = field_path_from_expression(expression, bindings)?;
+            Some((alias.to_owned(), FieldBinding::alias(field_path)))
+        })
+        .collect()
+}
+
+fn destructured_field_aliases_on_line(
+    line: &str,
+    bindings: &BTreeMap<String, FieldBinding>,
+) -> Vec<(String, FieldBinding)> {
+    destructured_alias_re()
+        .captures_iter(line)
+        .flat_map(|capture| {
+            let Some(fields) = capture.get(1).map(|item| item.as_str()) else {
+                return Vec::new();
+            };
+            let Some(source) = capture.get(2).map(|item| item.as_str()) else {
+                return Vec::new();
+            };
+            let Some(source_binding) = bindings.get(source) else {
+                return Vec::new();
+            };
+            fields
+                .split(',')
+                .filter_map(|field| destructured_alias_binding(field, source_binding))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn destructured_alias_binding(
+    raw_field: &str,
+    source_binding: &FieldBinding,
+) -> Option<(String, FieldBinding)> {
+    let field = raw_field.trim();
+    if field.is_empty() || field.starts_with("...") {
+        return None;
+    }
+
+    let (field_name, alias_name) = field
+        .split_once(':')
+        .map_or((field, field), |(left, right)| (left.trim(), right.trim()));
+    let field_name = normalize_identifier(field_name)?;
+    let alias_name = normalize_identifier(alias_name.split('=').next().unwrap_or(alias_name))?;
+    let field_path = source_binding.field_path(&[field_name]);
+    Some((alias_name, FieldBinding::alias(field_path)))
+}
+
+fn field_path_from_expression(
+    expression: &str,
+    bindings: &BTreeMap<String, FieldBinding>,
+) -> Option<String> {
+    let expression = expression.trim();
+    for (binding, field_binding) in bindings {
+        let Some(start) = expression.find(binding) else {
+            continue;
+        };
+        let end = start + binding.len();
+        if !expression[..start].trim().is_empty()
+            || !is_identifier_boundary(expression.as_bytes(), start, end)
+            || is_inside_simple_string(expression, start)
+            || is_after_line_comment(expression, start)
+        {
+            continue;
+        }
+        let parsed = parse_member_chain(expression, end)?;
+        if parsed.props.is_empty() {
+            continue;
+        }
+        return Some(field_binding.field_path(&parsed.props));
+    }
+    None
+}
+
+fn normalize_identifier(raw: &str) -> Option<String> {
+    let value = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    if value.is_empty() || !value.bytes().all(is_field_name_byte) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn normalize_direct_type_name(raw: &str) -> Option<String> {
@@ -328,7 +467,11 @@ struct FieldAccess {
     mode: FieldAccessMode,
 }
 
-fn field_accesses_on_line(line: &str, binding: &str, type_name: &str) -> Vec<FieldAccess> {
+fn field_accesses_on_line(
+    line: &str,
+    binding: &str,
+    field_binding: &FieldBinding,
+) -> Vec<FieldAccess> {
     let mut accesses = Vec::new();
     let mut search_from = 0;
     while let Some(relative_start) = line[search_from..].find(binding) {
@@ -351,7 +494,7 @@ fn field_accesses_on_line(line: &str, binding: &str, type_name: &str) -> Vec<Fie
         }
 
         let mode = access_mode(line, start, parsed.cursor, parsed.mutating_method);
-        let field_path = format!("{}.{}", type_name, parsed.props.join("."));
+        let field_path = field_binding.field_path(&parsed.props);
         accesses.push(FieldAccess { field_path, mode });
     }
     accesses
@@ -1036,6 +1179,22 @@ fn typed_parameter_re() -> &'static Regex {
     RE.get_or_init(|| {
         Regex::new(r"[(,]\s*([A-Za-z_$][A-Za-z0-9_$]*)\??\s*:\s*([^=,)\n]+)")
             .expect("typed parameter regex should compile")
+    })
+}
+
+fn field_alias_assignment_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*([^;\n]+)")
+            .expect("field alias assignment regex should compile")
+    })
+}
+
+fn destructured_alias_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\b")
+            .expect("destructured alias regex should compile")
     })
 }
 
