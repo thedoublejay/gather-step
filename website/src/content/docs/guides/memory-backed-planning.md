@@ -21,14 +21,16 @@ When the two are paired, planning quality improves measurably:
 - The agent writes a plan that cites both, separating *fact* from *inference*.
 
 This guide describes the pattern. It does not require any specific memory
-tool; the examples use a generic Markdown-first memory repository.
+tool, but it uses [Braingent Manifesto](https://github.com/thedoublejay/braingent-manifesto)
+as the concrete example because it is open source, Markdown-first, and
+designed exactly for this loop.
 
 ## The Loop
 
 ```text
                 ┌──────────────────────────┐
                 │  Engineering memory      │
-                │  Markdown records        │
+                │  (e.g. Braingent)        │
                 │  prior decisions, tickets│
                 │  reviews, learnings      │
                 └─────────────┬────────────┘
@@ -71,11 +73,11 @@ The agent searches the memory store for context relevant to the task:
 The output is a focused context pack of memory citations, not a wholesale
 dump. Each cited fact links back to the file that holds it.
 
-> **Markdown memory example.** Records are stored as Markdown with
+> **Braingent example.** Braingent stores records as Markdown with
 > frontmatter. An agent searches first by structured fields
-> (`ticket`, `repo`, `topic`, `status`) using the memory repository's helper,
-> then falls back to free-text `rg` over record bodies. It cites the specific
-> record paths in the plan.
+> (`ticket`, `repo`, `topic`, `status`) using the project's `find.sh`
+> helper, then falls back to free-text `rg` over record bodies. It cites the
+> specific record paths in the plan.
 
 ### 2. Ground the plan in Gather Step
 
@@ -114,11 +116,10 @@ was decided, what changed, what was learned, and what to avoid next time.
 This is the only step that grows the memory; without it, the loop
 unidirectionally drains context the next agent could have reused.
 
-> **Markdown memory example.** The memory repository's capture policy
-> specifies when a record is worth writing (PR opened, decision made, learning
-> surfaced) and provides a minimal task-record template. A capture is a small
-> Markdown file with frontmatter that the next session can find by structured
-> query.
+> **Braingent example.** Braingent's capture policy specifies when a record
+> is worth writing (PR opened, decision made, learning surfaced) and provides
+> a minimal task-record template. A capture is a small Markdown file with
+> frontmatter that the next session can find by structured query.
 
 ## Why Both, Not Either
 
@@ -144,8 +145,9 @@ contract is small:
 - the memory tool exposes a way for an agent to query and cite specific
   records without loading everything.
 
-A complete memory repository usually includes capture policy, retrieval
-helpers, and validation scripts so the workflow stays repeatable.
+[Braingent Manifesto](https://github.com/thedoublejay/braingent-manifesto)
+is one open-source reference for what such a system looks like end-to-end,
+including capture policy, retrieval helpers, and validation scripts.
 
 ## Non-Goals
 

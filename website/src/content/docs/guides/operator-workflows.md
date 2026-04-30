@@ -315,18 +315,19 @@ planning-pack quality, event tracing, change-impact parity, and PR-oracle
 scores. Operators pass explicit planning, event, and impact targets so the
 gate cannot accidentally reuse one target shape for all checks.
 
-The committed release-gate baseline came from the 2026-04-27 gate:
+The v2.1 release-ready benchmark keeps the 2026-04-27 26-repo release-gate
+baseline for scale and adds the fresh 2026-04-30 release-build
+projection-impact run. Local benchmark artifacts are not checked into the docs.
 
 | Metric | Value |
 |---|---:|
-| Result | PASS |
-| Indexed repos | 26 |
-| Total files | 13,604 |
-| Total symbols | 171,124 |
-| Total edges | 405,384 |
-| Cross-repo edges | 88,365 |
-| Index wall time | 118.2s |
-| PR-oracle median F1 / recall | 1.000 / 1.000 |
+| v2.1 fresh release result | PASS |
+| Link-quality tasks | 3 / 3 passing |
+| Planning oracle | 25 / 25 passing |
+| Python planning | 1 / 1 passing |
+| Projection targets | 4 / 4 release-scored High |
+| Prior 26-repo baseline | 13,604 files, 171,124 symbols, 405,384 edges, 88,365 cross-repo |
+| Prior 26-repo index wall time | 118.2s |
 
 ## JSON-First Output
 

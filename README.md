@@ -44,7 +44,7 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 - Local-first CLI and stdio MCP server
 - Multi-repo indexing into `WORKSPACE/.gather-step/`
 - Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
-- Route, event, shared-symbol, and payload-contract graph surfaces
+- Route, event, shared-symbol, payload-contract, and projection-impact graph surfaces
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
 - Workspace health commands such as `status`, `doctor`, and `watch`
 - Derived outputs for assistant summaries, rules, and ownership files
@@ -57,6 +57,7 @@ Use Gather Step when the expensive part of the task is gathering context rather 
 - tracing a route from caller to handler
 - mapping event producers and consumers across repos
 - checking which repos or files are affected by a change
+- checking projection, backfill, index, and filter evidence before field changes
 - finding shared type usage and contract drift
 - preparing bounded context for an AI assistant
 - inspecting ownership, conventions, and dead-code candidates
