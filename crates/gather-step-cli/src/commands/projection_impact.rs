@@ -125,6 +125,21 @@ fn render_text_lines(report: &ProjectionImpactReport) -> Vec<String> {
                     .join("; ")
             ));
         }
+        if !report.readers.is_empty() {
+            lines.push(format!("readers: {}", format_evidence(&report.readers)));
+        }
+        if !report.writers.is_empty() {
+            lines.push(format!("writers: {}", format_evidence(&report.writers)));
+        }
+        if !report.filters.is_empty() {
+            lines.push(format!("filters: {}", format_evidence(&report.filters)));
+        }
+        if !report.indexes.is_empty() {
+            lines.push(format!("indexes: {}", format_evidence(&report.indexes)));
+        }
+        if !report.backfills.is_empty() {
+            lines.push(format!("backfills: {}", format_evidence(&report.backfills)));
+        }
         if !report.missing_evidence.is_empty() {
             lines.push(format!(
                 "missing evidence: {}",
@@ -162,6 +177,14 @@ fn format_fields(fields: &[ProjectionField]) -> String {
 
 fn format_field(field: &ProjectionField) -> String {
     format!("{}:{}", field.repo, field.field_path)
+}
+
+fn format_evidence(evidence: &[gather_step_analysis::ProjectionEvidence]) -> String {
+    evidence
+        .iter()
+        .map(|item| format!("{}:{} ({})", item.repo, item.file_path, item.field_path))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {

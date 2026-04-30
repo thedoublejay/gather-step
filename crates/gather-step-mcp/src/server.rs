@@ -601,7 +601,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "projection_impact",
-        description = "Return source/projected field chains, runtime surfaces, and planning risk hints for a data field.",
+        description = "Return source/projected field chains, direct readers/writers, runtime surfaces, and planning risk hints for a data field.",
         annotations(read_only_hint = true)
     )]
     pub async fn projection_impact_tool(

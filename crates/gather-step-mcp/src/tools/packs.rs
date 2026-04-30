@@ -11,7 +11,7 @@ use gather_step_analysis::proofs::{
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
 use gather_step_analysis::{
-    ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact,
+    ProjectionEvidenceVerbosity, ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
 };
 use gather_step_core::{
     EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeId, NodeKind, PlanningProof, node_id,
@@ -1265,27 +1265,49 @@ fn apply_projection_impact_summary(
             },
         )
         .ok()?;
-        (report.resolved && report.ambiguity.is_none() && !report.derivation_edges.is_empty())
+        (report.resolved && report.ambiguity.is_none() && report_has_field_summary(&report))
             .then_some(report)
     }) else {
         return;
     };
 
-    let projected = report
-        .projected_fields
-        .iter()
-        .map(|field| field.field_path.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sources = report
-        .source_fields
-        .iter()
-        .map(|field| field.field_path.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    response.data.next_steps.push(format!(
-        "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
-    ));
+    if report.derivation_edges.is_empty() {
+        let readers = report
+            .readers
+            .iter()
+            .map(|item| item.field_path.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let writers = report
+            .writers
+            .iter()
+            .map(|item| item.field_path.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        response.data.next_steps.push(format!(
+            "Review field impact: readers [{readers}], writers [{writers}]. Use projection_impact for full evidence."
+        ));
+    } else {
+        let projected = report
+            .projected_fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sources = report
+            .source_fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        response.data.next_steps.push(format!(
+            "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
+        ));
+    }
 
     for hint in report.risk_hints {
         let gap = format!("projection_impact:{hint}");
@@ -1297,6 +1319,15 @@ fn apply_projection_impact_summary(
         meta.warnings
             .push("projection impact evidence is available for this target".to_owned());
     }
+}
+
+fn report_has_field_summary(report: &ProjectionImpactReport) -> bool {
+    !report.derivation_edges.is_empty()
+        || !report.readers.is_empty()
+        || !report.writers.is_empty()
+        || !report.filters.is_empty()
+        || !report.indexes.is_empty()
+        || !report.backfills.is_empty()
 }
 
 fn projection_impact_targets(

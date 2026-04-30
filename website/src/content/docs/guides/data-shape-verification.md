@@ -7,9 +7,43 @@ Source types and schemas do not prove the current shape of production data. A
 Mongo migration can be type-correct and still miss records because the filter
 assumes an old field distribution.
 
-Gather Step v2.2 adds a focused planning-pack reminder for supported Mongoose
-migrations. When the pack target is a detected migration, the response includes
-a `migration_siblings` band with:
+Gather Step v2.2 adds two best-effort source-code signals:
+
+- direct field access edges for typed TypeScript receivers, and
+- a focused planning-pack reminder for supported Mongoose migrations.
+
+## Field Access Signal
+
+When a TypeScript file reads or writes a direct dotted field path on a typed
+receiver, Gather Step records `ReadsField` and `WritesField` edges against a
+`DataField` node such as `Alert.workflow` or `Alert.workflow.taskIds`.
+
+```ts
+interface Alert {
+  workflow?: { taskIds: string[] };
+}
+
+export function planAlert(alert: Alert, id: string) {
+  if (alert.workflow) {
+    alert.workflow.taskIds.push(id);
+  }
+}
+```
+
+The field-aware surface is available through `projection_impact`, and dotted
+CLI impact queries such as `gather-step impact Alert.workflow` use the same
+field slice when an indexed data field exists. Planning and change-impact packs
+also add a field-impact reminder when the target has direct field evidence.
+
+This is deliberately scoped. Aliased reads, destructured rebinds, dynamic
+property keys, `any` / `unknown` receivers, generic container types, UI `Props`
+types, and optional chaining beyond depth 1 are not tracked in v2.2. Silence
+means "not detected", not "safe".
+
+## Migration Sibling Signal
+
+When the pack target is a detected migration, the response includes a
+`migration_siblings` band with:
 
 - the collection name,
 - sibling migration files on the same collection,

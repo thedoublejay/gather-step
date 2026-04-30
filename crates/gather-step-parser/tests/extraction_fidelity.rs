@@ -225,6 +225,22 @@ fn field_edge_kinds(parsed: &ParsedFile, field: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn field_edge_sources(parsed: &ParsedFile, field: &str, kind: EdgeKind) -> BTreeSet<String> {
+    parsed
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == kind)
+        .filter_map(|edge| {
+            parsed
+                .nodes
+                .iter()
+                .find(|node| node.id == edge.target && node.kind == NodeKind::DataField)
+                .filter(|node| node.name == field)
+                .map(|_| display_node(parsed, edge.source))
+        })
+        .collect()
+}
+
 fn has_derivation(parsed: &ParsedFile, source: &str, target: &str) -> bool {
     parsed.edges.iter().any(|edge| {
         if edge.kind != EdgeKind::DerivesFieldFrom {
@@ -311,6 +327,53 @@ fn projection_optional_chaining_fixture_extracts_derivations() {
     assert!(has_derivation(&parsed, "lineItems", "lineItemTotal"));
     assert!(has_derivation(&parsed, "orders", "orderIds"));
     assert!(has_derivation(&parsed, "status", "accountStatus"));
+}
+
+#[test]
+fn typed_direct_field_access_extracts_reader_and_writer_edges() {
+    let parsed = parse_ts_source_in_tempdir(
+        "interface Alert { workflow?: { taskIds: string[] }; severity?: string; }\n\
+         export function planAlert(alert: Alert) {\n\
+           if (alert.workflow) {\n\
+             alert.workflow.taskIds.push('migration');\n\
+           }\n\
+           alert.severity = 'high';\n\
+           return alert.workflow?.taskIds.includes('migration');\n\
+         }\n",
+        "typed_direct_access.ts",
+    );
+
+    assert_fields(
+        &parsed,
+        &["Alert.workflow", "Alert.workflow.taskIds", "Alert.severity"],
+    );
+    assert!(field_edge_kinds(&parsed, "Alert.workflow").contains("ReadsField"));
+    assert!(field_edge_kinds(&parsed, "Alert.workflow.taskIds").contains("ReadsField"));
+    assert!(field_edge_kinds(&parsed, "Alert.workflow.taskIds").contains("WritesField"));
+    assert!(field_edge_kinds(&parsed, "Alert.severity").contains("WritesField"));
+    assert!(
+        field_edge_sources(&parsed, "Alert.workflow.taskIds", EdgeKind::WritesField)
+            .iter()
+            .any(|source| source.ends_with("planAlert")),
+        "direct field write should be owned by the enclosing function"
+    );
+}
+
+#[test]
+fn typed_direct_field_access_skips_dynamic_and_deep_optional_paths() {
+    let parsed = parse_ts_source_in_tempdir(
+        "interface Alert { workflow?: { taskIds: string[] } }\n\
+         export function skipDynamic(alert: Alert, key: string) {\n\
+           alert[key];\n\
+           alert.workflow?.taskIds?.push(key);\n\
+         }\n",
+        "typed_direct_access_skip.ts",
+    );
+
+    assert!(
+        !data_field_names(&parsed).contains("Alert.workflow.taskIds"),
+        "computed access and optional chaining beyond depth 1 should not emit nested field paths"
+    );
 }
 
 #[test]
