@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn edge_kind_invalid_u8_rejects() {
-        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 87, 100, 255] {
+        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 88, 89, 100, 255] {
             assert!(EdgeKind::try_from(value).is_err(), "{value} should reject");
         }
     }

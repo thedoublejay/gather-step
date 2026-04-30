@@ -16,22 +16,22 @@ Gather Step v2.2 adds two best-effort source-code signals:
 
 When a TypeScript file reads or writes a direct dotted field path on a typed
 receiver, Gather Step records `ReadsField` and `WritesField` edges against a
-`DataField` node such as `Alert.workflow` or `Alert.workflow.taskIds`.
+`DataField` node such as `WorkItem.workflow` or `WorkItem.workflow.stepIds`.
 
 ```ts
-interface Alert {
-  workflow?: { taskIds: string[] };
+interface WorkItem {
+  workflow?: { stepIds: string[] };
 }
 
-export function planAlert(alert: Alert, id: string) {
-  if (alert.workflow) {
-    alert.workflow.taskIds.push(id);
+export function planWorkItem(item: WorkItem, id: string) {
+  if (item.workflow) {
+    item.workflow.stepIds.push(id);
   }
 }
 ```
 
 The field-aware surface is available through `projection_impact`, and dotted
-CLI impact queries such as `gather-step impact Alert.workflow` use the same
+CLI impact queries such as `gather-step impact WorkItem.workflow` use the same
 field slice when an indexed data field exists. Planning and change-impact packs
 also add a field-impact reminder when the target has direct field evidence.
 
@@ -74,11 +74,11 @@ the `migration_siblings` band means "not detected", not "safe".
 
 ## Planning Pack Signal
 
-For a detected migration on `alerts`, the planning pack includes a hint in this
+For a detected migration on `work_items`, the planning pack includes a hint in this
 form:
 
 ```text
-Run db.alerts.aggregate([{ $group: { _id: { $type: '$<field>' }, count: { $sum: 1 } } }]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift.
+Run db.work_items.aggregate([{ $group: { _id: { $type: '$<field>' }, count: { $sum: 1 } } }]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift.
 ```
 
 Use the sibling filters as prompts, not proof. If an older migration filtered
