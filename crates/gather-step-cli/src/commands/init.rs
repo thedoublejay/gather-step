@@ -176,7 +176,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
     }
     output.line(format!(
-        "\n  {} gather-step is ready.",
+        "\n  {} Gather Step is ready.",
         style("✓ Setup complete.").green().bold()
     ));
     if do_watch {

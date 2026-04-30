@@ -86,6 +86,10 @@ enum TuiAction {
     ToggleHelp,
     StartFilter,
     ExitOverlay,
+    /// Cancel the current overlay and discard any in-progress filter text.
+    /// Distinct from `ExitOverlay`, which preserves the filter (Enter
+    /// commits; Esc cancels — standard convention).
+    CancelOverlay,
     FilterChar(char),
     FilterBackspace,
     Clear,
@@ -189,6 +193,14 @@ impl TuiState {
             }
             TuiAction::ExitOverlay => {
                 self.help_open = false;
+                self.input_mode = InputMode::Normal;
+            }
+            TuiAction::CancelOverlay => {
+                self.help_open = false;
+                if matches!(self.input_mode, InputMode::Filter) {
+                    self.filter.clear();
+                    self.selected_repo = 0;
+                }
                 self.input_mode = InputMode::Normal;
             }
             TuiAction::FilterChar(ch) => {
@@ -341,7 +353,10 @@ fn action_from_key(key: KeyEvent, input_mode: InputMode) -> Option<TuiAction> {
 
 fn action_from_filter_key(key: KeyEvent) -> Option<TuiAction> {
     match key.code {
-        KeyCode::Esc | KeyCode::Enter => Some(TuiAction::ExitOverlay),
+        // Convention: Enter commits the filter (preserves the typed text);
+        // Esc cancels (clears the typed text).
+        KeyCode::Enter => Some(TuiAction::ExitOverlay),
+        KeyCode::Esc => Some(TuiAction::CancelOverlay),
         KeyCode::Backspace => Some(TuiAction::FilterBackspace),
         KeyCode::Char(ch)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -554,7 +569,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &TuiState) {
         InputMode::Filter => "filter",
     };
     let footer = Paragraph::new(format!(
-        "q quit  ? help  / filter  tab pane  enter detail  c clear  mode: {mode}"
+        "q quit  ? help  / filter  tab pane  j/k move  1/2/3 view  enter detail  c clear  esc cancel  mode: {mode}"
     ));
     frame.render_widget(footer, area);
 }
@@ -570,7 +585,8 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from("1 / 2 / 3        symbols, routes, events"),
         Line::from("Enter            open detail"),
         Line::from("c                clear filter or event log"),
-        Line::from("Esc / Enter      leave filter mode"),
+        Line::from("Enter            commit filter (keeps text, exits filter mode)"),
+        Line::from("Esc              cancel filter (clears text, exits filter mode)"),
     ])
     .block(Block::default().title("Help").borders(Borders::ALL));
     frame.render_widget(Clear, area);
@@ -704,11 +720,34 @@ mod tests {
             Some(TuiAction::ExitOverlay)
         );
 
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            action_from_key(key, InputMode::Filter),
+            Some(TuiAction::CancelOverlay)
+        );
+
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(
             action_from_key(key, InputMode::Filter),
             Some(TuiAction::Quit)
         );
+    }
+
+    #[test]
+    fn enter_commits_filter_text_esc_cancels() {
+        let mut state = state();
+        state.apply(TuiAction::StartFilter);
+        state.apply(TuiAction::FilterChar('a'));
+        state.apply(TuiAction::FilterChar('p'));
+        state.apply(TuiAction::ExitOverlay);
+        assert_eq!(state.filter, "ap", "Enter should commit the filter text");
+        assert!(matches!(state.input_mode, InputMode::Normal));
+
+        state.apply(TuiAction::StartFilter);
+        state.apply(TuiAction::FilterChar('x'));
+        state.apply(TuiAction::CancelOverlay);
+        assert_eq!(state.filter, "", "Esc should clear the filter text");
+        assert!(matches!(state.input_mode, InputMode::Normal));
     }
 
     #[test]

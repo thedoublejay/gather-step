@@ -11,7 +11,11 @@ use crate::command_render::RenderedCommand;
 
 #[derive(Debug, Args)]
 pub struct ProjectionImpactArgs {
-    #[arg(long, help = "Field or projected field name to inspect")]
+    #[arg(
+        long,
+        help = "Field or projected field name to inspect. Accepts a bare field name (`stepIds`), \
+                a typed dotted path (`WorkItem.workflow.stepIds`), or a qualified node id."
+    )]
     pub target: String,
     #[arg(
         long,
@@ -147,7 +151,7 @@ fn render_text_lines(report: &ProjectionImpactReport) -> Vec<String> {
             ));
         }
         if !report.risk_hints.is_empty() {
-            lines.push(format!("next checks: {}", report.risk_hints.join(", ")));
+            lines.push(format!("risk hints: {}", report.risk_hints.join(", ")));
         }
     } else {
         lines.push(format!(
@@ -161,7 +165,7 @@ fn render_text_lines(report: &ProjectionImpactReport) -> Vec<String> {
             ));
         }
         if !report.risk_hints.is_empty() {
-            lines.push(format!("next checks: {}", report.risk_hints.join(", ")));
+            lines.push(format!("risk hints: {}", report.risk_hints.join(", ")));
         }
     }
     lines

@@ -775,7 +775,7 @@ export async function backfill(TaskModel: any) {
         ],
     );
     assert!(empty_text.contains("missing evidence: data_field"));
-    assert!(empty_text.contains("next checks: field_candidate_not_found"));
+    assert!(empty_text.contains("risk hints: field_candidate_not_found"));
 
     let ambiguous_report = run_ok_json(
         temp.path(),
