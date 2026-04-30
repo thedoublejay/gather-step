@@ -1,7 +1,13 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use gather_step_core::{NodeId, NodeKind};
 
+use crate::path_guard::canonicalize_existing_file_under;
+use crate::traverse::classify_language;
 use crate::tree_sitter::{EnrichedCallSite, ParsedFile};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +35,7 @@ pub fn detect_migrations(parsed: &ParsedFile) -> Vec<MongooseMigration> {
     }
 
     let up_owner_id = migration_up_owner_id(parsed);
-    let model_collections = mongoose_model_collection_names(&parsed.source);
+    let model_collections = mongoose_model_collection_names(parsed);
     let mut collection_calls = parsed
         .call_sites
         .iter()
@@ -133,6 +139,7 @@ fn is_migration_write_method(name: &str) -> bool {
 }
 
 fn normalize_model_receiver(receiver: &str) -> Option<String> {
+    let receiver = receiver.rsplit("::").next().unwrap_or(receiver);
     let base = receiver.strip_suffix("Model").unwrap_or(receiver);
     let mut chars = base.chars();
     let first = chars.next()?;
@@ -141,7 +148,15 @@ fn normalize_model_receiver(receiver: &str) -> Option<String> {
     Some(normalized)
 }
 
-fn mongoose_model_collection_names(source: &str) -> BTreeMap<String, String> {
+fn mongoose_model_collection_names(parsed: &ParsedFile) -> BTreeMap<String, String> {
+    let mut result = mongoose_model_collection_names_in_source(&parsed.source);
+    for imported in imported_mongoose_model_files(parsed) {
+        result.extend(mongoose_model_collection_names_in_source(&imported.source));
+    }
+    result
+}
+
+fn mongoose_model_collection_names_in_source(source: &str) -> BTreeMap<String, String> {
     let mut result = BTreeMap::new();
     let mut cursor = 0;
     while let Some(relative_index) = source[cursor..].find("mongoose.model") {
@@ -168,6 +183,47 @@ fn mongoose_model_collection_names(source: &str) -> BTreeMap<String, String> {
         cursor = close + 1;
     }
     result
+}
+
+fn imported_mongoose_model_files(parsed: &ParsedFile) -> Vec<ParsedFile> {
+    parsed
+        .import_bindings
+        .iter()
+        .filter(|binding| binding.resolved_path.is_some() && !binding.is_namespace)
+        .filter_map(|binding| binding.resolved_path.as_ref())
+        .filter_map(|path| parse_imported_file(parsed, path))
+        .collect()
+}
+
+fn parse_imported_file(parsed: &ParsedFile, path: &Path) -> Option<ParsedFile> {
+    let repo_root = fs::canonicalize(repo_root_for(parsed)).ok()?;
+    let safe_path = canonicalize_existing_file_under(path, &repo_root)?;
+    let relative = safe_path.strip_prefix(&repo_root).ok()?;
+    let language = classify_language(relative)?;
+    let metadata = fs::symlink_metadata(&safe_path).ok()?;
+    if metadata.len() > crate::TraverseConfig::default().max_file_size_bytes() {
+        return None;
+    }
+    crate::tree_sitter::parse_file(
+        parsed.file_node.repo.as_str(),
+        &repo_root,
+        &crate::FileEntry {
+            path: relative.to_path_buf(),
+            language,
+            size_bytes: metadata.len(),
+            content_hash: [0; 32],
+            source_bytes: None,
+        },
+    )
+    .ok()
+}
+
+fn repo_root_for(parsed: &ParsedFile) -> PathBuf {
+    let mut root = parsed.source_path.clone();
+    for _ in parsed.file.path.components() {
+        root.pop();
+    }
+    root
 }
 
 fn is_migration_path(path: &std::path::Path) -> bool {
@@ -476,6 +532,111 @@ export async function down(): Promise<void> {
             migration.filter_literals,
             vec!["{ workflow: { $exists: false } }".to_owned()]
         );
+    }
+
+    #[test]
+    fn detects_imported_model_update_many_collection_and_filter_literal() {
+        let temp_dir = TestDir::new("imported-model-update-many");
+        fs::create_dir_all(temp_dir.path().join("models")).expect("models dir should write");
+        fs::write(
+            temp_dir.path().join("models/alert.model.ts"),
+            r#"
+import mongoose from 'mongoose';
+
+const alertSchema = new mongoose.Schema({});
+export const AlertModel = mongoose.model('Alert', alertSchema, 'alerts');
+"#,
+        )
+        .expect("model fixture should write");
+        fs::write(
+            temp_dir
+                .path()
+                .join("migrations/20260430-backfill-alert-workflow.ts"),
+            r#"
+import mongoose from 'mongoose';
+import { AlertModel } from '../models/alert.model.ts';
+
+export async function up(): Promise<void> {
+  await AlertModel.updateMany(
+    { workflow: { $exists: false } },
+    { $set: { migrated: true } },
+  );
+}
+
+export async function down(): Promise<void> {}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file_with_frameworks(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-backfill-alert-workflow.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::Mongoose],
+        )
+        .expect("fixture should parse");
+
+        assert!(
+            parsed.import_bindings.iter().any(
+                |binding| binding.local_name == "AlertModel" && binding.resolved_path.is_some()
+            ),
+            "expected AlertModel import to resolve: {:?}",
+            parsed.import_bindings
+        );
+        let migrations = detect_migrations(&parsed);
+        assert_eq!(migrations.len(), 1, "migrations: {migrations:?}");
+        let migration = detect_migration(&parsed).expect("migration should be detected");
+        assert_eq!(migration.collection_name, "alerts");
+        assert_eq!(
+            migration.filter_literals,
+            vec!["{ workflow: { $exists: false } }".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ignores_imported_model_when_import_is_unresolved() {
+        let temp_dir = TestDir::new("unresolved-imported-model");
+        fs::write(
+            temp_dir
+                .path()
+                .join("migrations/20260430-backfill-alert-workflow.ts"),
+            r#"
+import mongoose from 'mongoose';
+import { AlertModel } from '../models/missing.ts';
+
+export async function up(): Promise<void> {
+  await AlertModel.updateMany(
+    { workflow: { $exists: false } },
+    { $set: { migrated: true } },
+  );
+}
+
+export async function down(): Promise<void> {}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file_with_frameworks(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-backfill-alert-workflow.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::Mongoose],
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(detect_migration(&parsed), None);
     }
 
     #[test]
