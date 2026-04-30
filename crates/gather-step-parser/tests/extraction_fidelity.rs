@@ -294,6 +294,26 @@ fn projection_mongo_pipeline_extracts_update_lookup_and_mapping_edges() {
 }
 
 #[test]
+fn projection_optional_chaining_fixture_extracts_derivations() {
+    let parsed = parse_fixture("projection_optional_chaining.ts", &[]);
+
+    assert_fields(
+        &parsed,
+        &[
+            "lineItems",
+            "lineItemTotal",
+            "orders",
+            "orderIds",
+            "status",
+            "accountStatus",
+        ],
+    );
+    assert!(has_derivation(&parsed, "lineItems", "lineItemTotal"));
+    assert!(has_derivation(&parsed, "orders", "orderIds"));
+    assert!(has_derivation(&parsed, "status", "accountStatus"));
+}
+
+#[test]
 fn projection_mapping_fixtures_extract_json_and_yaml_index_fields() {
     let json = parse_fixture("projection_json_mapping.json", &[]);
     let yaml = parse_fixture("projection_yaml_mapping.yaml", &[]);
