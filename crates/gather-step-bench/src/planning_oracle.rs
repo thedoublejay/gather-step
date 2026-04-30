@@ -126,6 +126,24 @@ pub struct OracleExpectations {
     pub expected_structural_repos: Vec<String>,
     #[serde(default)]
     pub forbidden_advisory_in_primary: Vec<String>,
+    #[serde(default)]
+    pub expected_projection_resolved: Option<bool>,
+    #[serde(default)]
+    pub expected_projection_ambiguity: Option<String>,
+    #[serde(default)]
+    pub expected_projection_risks: Vec<String>,
+    #[serde(default)]
+    pub forbidden_projection_risks: Vec<String>,
+    #[serde(default)]
+    pub expected_projection_fields: Vec<String>,
+    #[serde(default)]
+    pub expected_source_fields: Vec<String>,
+    #[serde(default)]
+    pub expected_backfill_files: Vec<String>,
+    #[serde(default)]
+    pub expected_index_files: Vec<String>,
+    #[serde(default)]
+    pub forbidden_focus_only_files: Vec<String>,
     pub max_response_bytes: usize,
     /// When set, the scenario specifies which anchor (by file path) should rank
     /// first.  Used to compute `anchor_top1` across scenarios.
@@ -2295,6 +2313,15 @@ mod tests {
                 forbidden_primary_edge_kinds: vec![],
                 expected_structural_repos: vec![],
                 forbidden_advisory_in_primary: vec![],
+                expected_projection_resolved: None,
+                expected_projection_ambiguity: None,
+                expected_projection_risks: vec![],
+                forbidden_projection_risks: vec![],
+                expected_projection_fields: vec![],
+                expected_source_fields: vec![],
+                expected_backfill_files: vec![],
+                expected_index_files: vec![],
+                forbidden_focus_only_files: vec![],
                 max_response_bytes: 1_000_000,
                 expected_canonical_anchor,
                 require_top1_canonical: None,
@@ -2755,6 +2782,48 @@ max_response_bytes = 1000
                     .contains("missing Python bridge `py_api_service:missing.bridge`")),
             "expected missing Python bridge finding; got {:?}",
             report.findings
+        );
+    }
+
+    #[test]
+    fn oracle_expectations_accept_projection_impact_fields() {
+        let raw = r#"
+name = "projection_impact_contract"
+mode = "projection_impact"
+repo = "backend_standard"
+
+[target]
+kind = "field"
+qn = "legacySeatIds"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+expected_projection_resolved = true
+expected_projection_ambiguity = "multiple_field_candidates"
+expected_projection_risks = ["source_field_unreviewed"]
+forbidden_projection_risks = ["backfill_unproven"]
+expected_projection_fields = ["legacySeatIds"]
+expected_source_fields = ["seats"]
+expected_backfill_files = []
+expected_index_files = []
+forbidden_focus_only_files = ["src/projection_fixed.ts"]
+max_response_bytes = 12000
+"#;
+
+        let scenario =
+            toml::from_str::<OracleScenario>(raw).expect("projection oracle keys should parse");
+
+        assert_eq!(scenario.oracle.expected_projection_resolved, Some(true));
+        assert_eq!(
+            scenario.oracle.expected_projection_ambiguity.as_deref(),
+            Some("multiple_field_candidates")
+        );
+        assert_eq!(
+            scenario.oracle.expected_projection_risks,
+            vec!["source_field_unreviewed".to_owned()]
         );
     }
 

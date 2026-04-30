@@ -1,6 +1,9 @@
 use anyhow::{Result, bail};
-use clap::Args;
-use gather_step_analysis::{ProjectionImpactRequest, projection_impact};
+use clap::{Args, ValueEnum};
+use gather_step_analysis::{
+    ProjectionEvidenceVerbosity, ProjectionField, ProjectionImpactReport, ProjectionImpactRequest,
+    projection_impact,
+};
 use gather_step_storage::StorageCoordinator;
 
 use crate::app::AppContext;
@@ -16,6 +19,28 @@ pub struct ProjectionImpactArgs {
         help = "Maximum field candidates to inspect"
     )]
     pub limit: usize,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = EvidenceVerbosityArg::Full,
+        help = "Evidence detail level to return"
+    )]
+    pub evidence_verbosity: EvidenceVerbosityArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EvidenceVerbosityArg {
+    Summary,
+    Full,
+}
+
+impl From<EvidenceVerbosityArg> for ProjectionEvidenceVerbosity {
+    fn from(value: EvidenceVerbosityArg) -> Self {
+        match value {
+            EvidenceVerbosityArg::Summary => Self::Summary,
+            EvidenceVerbosityArg::Full => Self::Full,
+        }
+    }
 }
 
 pub fn run(app: &AppContext, args: ProjectionImpactArgs) -> Result<()> {
@@ -37,9 +62,15 @@ pub(crate) fn run_rendered(
             target: args.target,
             repo: app.repo_filter.clone(),
             max_results: args.limit,
+            evidence_verbosity: args.evidence_verbosity.into(),
         },
     )?;
 
+    let lines = render_text_lines(&report);
+    RenderedCommand::success_serialized(&report, lines)
+}
+
+fn render_text_lines(report: &ProjectionImpactReport) -> Vec<String> {
     let mut lines = Vec::new();
     if report.resolved {
         lines.push(format!(
@@ -48,40 +79,77 @@ pub(crate) fn run_rendered(
             report.candidates.len(),
             report.confidence
         ));
+        if let Some(ambiguity) = &report.ambiguity {
+            lines.push(format!("ambiguity: {ambiguity}"));
+        }
+        if report.ambiguity.is_some() && !report.candidates.is_empty() {
+            lines.push(format!(
+                "candidate fields: {}",
+                format_fields(&report.candidates)
+            ));
+        }
         if !report.source_fields.is_empty() {
             lines.push(format!(
                 "source fields: {}",
-                report
-                    .source_fields
-                    .iter()
-                    .map(|field| field.field_path.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                format_fields(&report.source_fields)
             ));
         }
         if !report.projected_fields.is_empty() {
             lines.push(format!(
                 "projected fields: {}",
+                format_fields(&report.projected_fields)
+            ));
+        }
+        if !report.derivation_edges.is_empty() {
+            lines.push(format!(
+                "projection chain: {}",
                 report
-                    .projected_fields
+                    .derivation_edges
                     .iter()
-                    .map(|field| field.field_path.as_str())
+                    .map(|edge| format!(
+                        "{} -> {}",
+                        format_field(&edge.source),
+                        format_field(&edge.projected)
+                    ))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join("; ")
+            ));
+        }
+        if !report.missing_evidence.is_empty() {
+            lines.push(format!(
+                "missing evidence: {}",
+                report.missing_evidence.join(", ")
             ));
         }
         if !report.risk_hints.is_empty() {
-            lines.push(format!("risk hints: {}", report.risk_hints.join(", ")));
+            lines.push(format!("next checks: {}", report.risk_hints.join(", ")));
         }
     } else {
         lines.push(format!(
             "projection impact for `{}`: no indexed data field found",
             report.target
         ));
+        if !report.missing_evidence.is_empty() {
+            lines.push(format!(
+                "missing evidence: {}",
+                report.missing_evidence.join(", ")
+            ));
+        }
         if !report.risk_hints.is_empty() {
-            lines.push(format!("risk hints: {}", report.risk_hints.join(", ")));
+            lines.push(format!("next checks: {}", report.risk_hints.join(", ")));
         }
     }
+    lines
+}
 
-    RenderedCommand::success_serialized(&report, lines)
+fn format_fields(fields: &[ProjectionField]) -> String {
+    fields
+        .iter()
+        .map(format_field)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_field(field: &ProjectionField) -> String {
+    format!("{}:{}", field.repo, field.field_path)
 }

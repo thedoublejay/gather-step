@@ -18,7 +18,9 @@ expected_projection_risks = [
   "backfill_unproven",
   "deployed_owner_unchecked",
   "filter_contract_impacted",
+  "frontend_only_focus",
   "index_or_search_mapping_unproven",
+  "source_field_unreviewed",
 ]
 expected_backfill_files = []
 expected_index_files = []

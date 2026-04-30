@@ -272,7 +272,14 @@ fn projection_mongo_pipeline_extracts_update_lookup_and_mapping_edges() {
 
     assert_fields(
         &parsed,
-        &["invoiceItems", "invoiceItemTotal", "orders", "orderIds"],
+        &[
+            "invoiceItems",
+            "invoiceItemTotal",
+            "orders",
+            "orderIds",
+            "archivedOrderIds",
+            "tagIds",
+        ],
     );
     assert!(has_derivation(&parsed, "invoiceItems", "invoiceItemTotal"));
     assert!(has_derivation(&parsed, "orders", "orderIds"));
@@ -280,6 +287,10 @@ fn projection_mongo_pipeline_extracts_update_lookup_and_mapping_edges() {
     assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("BackfillsField"));
     assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("FiltersOnField"));
     assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("IndexesField"));
+    assert!(field_edge_kinds(&parsed, "orderIds").contains("WritesField"));
+    assert!(field_edge_kinds(&parsed, "orderIds").contains("FiltersOnField"));
+    assert!(field_edge_kinds(&parsed, "archivedOrderIds").contains("WritesField"));
+    assert!(field_edge_kinds(&parsed, "tagIds").contains("WritesField"));
 }
 
 #[test]
@@ -308,6 +319,7 @@ fn projection_false_positive_fixtures_do_not_emit_data_fields() {
         "ui/projection_summary.tsx",
         "__mocks__/projection_mock.ts",
         "projection_contract.test.ts",
+        "projection_false_positive_count_locals.ts",
     ] {
         let parsed = parse_fixture(fixture, &[]);
         assert!(

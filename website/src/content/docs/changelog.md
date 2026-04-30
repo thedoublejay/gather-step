@@ -22,11 +22,11 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 
 ### Projection Impact
 
-- Added the `projection-impact --target <FIELD>` CLI command and `projection_impact` MCP tool for static field-level projection tracing.
+- Added the `projection-impact --target <FIELD>` CLI command and `projection_impact` MCP tool for static field-level projection tracing, including `evidence_verbosity` controls for summary versus full evidence.
 - Added `DataField` graph nodes plus `ReadsField`, `WritesField`, `DerivesFieldFrom`, `FiltersOnField`, `IndexesField`, and `BackfillsField` edges.
 - Planning and change-impact packs can now include short projection hints and `projection_impact:*` gap markers while the full evidence stays behind the dedicated projection tool.
 - Added oracle, CLI/MCP serialization, integration, and parser extraction-fidelity coverage for projection chains, Mongo-style mappings, JSON/YAML index mappings, and false-positive fixtures.
-- Deployment note: v2.1 projection impact changes the generated graph schema. Existing `.gather-step` storage should be rebuilt with `gather-step clean --storage` followed by `gather-step index` before relying on projection-impact output.
+- Deployment note: v2.1 projection impact changes the generated graph schema. Existing `.gather-step` storage should be rebuilt with `gather-step reindex` before relying on projection-impact output.
 - Projection impact intentionally does not infer deployed runtime ownership; verify deployment owners separately when duplicate or transitioning services exist.
 
 ### Python Parsing

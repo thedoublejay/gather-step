@@ -17,6 +17,16 @@ pub struct ProjectionImpactRequest {
     pub repo: Option<String>,
     #[serde(default = "default_max_results")]
     pub max_results: usize,
+    #[serde(default)]
+    pub evidence_verbosity: ProjectionEvidenceVerbosity,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionEvidenceVerbosity {
+    Summary,
+    #[default]
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +187,7 @@ pub fn projection_impact<S: GraphStore>(
     };
 
     populate_risks_and_confidence(&mut report);
+    apply_evidence_verbosity(&mut report, request.evidence_verbosity);
     Ok(report)
 }
 
@@ -448,6 +459,9 @@ fn populate_risks_and_confidence(report: &mut ProjectionImpactReport) {
     if report.ambiguity.is_some() {
         report.risk_hints.push("needs_disambiguation".to_owned());
     }
+    if !report.source_fields.is_empty() && !report.projected_fields.is_empty() {
+        report.risk_hints.push("source_field_unreviewed".to_owned());
+    }
     if report.derivation_edges.is_empty() {
         report
             .risk_hints
@@ -477,6 +491,13 @@ fn populate_risks_and_confidence(report: &mut ProjectionImpactReport) {
             .risk_hints
             .push("filter_contract_impacted".to_owned());
     }
+    if !report.projected_fields.is_empty()
+        && (!report.readers.is_empty() || !report.filters.is_empty())
+        && report.backfills.is_empty()
+        && report.indexes.is_empty()
+    {
+        report.risk_hints.push("frontend_only_focus".to_owned());
+    }
     if !report.derivation_edges.is_empty() {
         report
             .risk_hints
@@ -497,6 +518,23 @@ fn populate_risks_and_confidence(report: &mut ProjectionImpactReport) {
     } else {
         "low".to_owned()
     };
+}
+
+fn apply_evidence_verbosity(
+    report: &mut ProjectionImpactReport,
+    verbosity: ProjectionEvidenceVerbosity,
+) {
+    const SUMMARY_EVIDENCE_LIMIT: usize = 3;
+
+    if verbosity == ProjectionEvidenceVerbosity::Full {
+        return;
+    }
+
+    report.readers.truncate(SUMMARY_EVIDENCE_LIMIT);
+    report.writers.truncate(SUMMARY_EVIDENCE_LIMIT);
+    report.filters.truncate(SUMMARY_EVIDENCE_LIMIT);
+    report.indexes.truncate(SUMMARY_EVIDENCE_LIMIT);
+    report.backfills.truncate(SUMMARY_EVIDENCE_LIMIT);
 }
 
 fn contains_ascii_case(haystack: &str, needle: &str) -> bool {
@@ -594,18 +632,20 @@ mod tests {
         store
     }
 
+    fn request(target: &str) -> ProjectionImpactRequest {
+        ProjectionImpactRequest {
+            target: target.to_owned(),
+            repo: Some("svc".to_owned()),
+            max_results: 20,
+            evidence_verbosity: ProjectionEvidenceVerbosity::Full,
+        }
+    }
+
     #[test]
     fn reports_projection_chain_and_runtime_surfaces() {
         let store = store_with_projection();
-        let report = projection_impact(
-            &store,
-            ProjectionImpactRequest {
-                target: "subtaskIds".to_owned(),
-                repo: Some("svc".to_owned()),
-                max_results: 20,
-            },
-        )
-        .expect("projection impact should load");
+        let report = projection_impact(&store, request("subtaskIds"))
+            .expect("projection impact should load");
 
         assert!(report.resolved);
         assert_eq!(report.source_fields[0].field_path, "subtasks");
@@ -619,6 +659,11 @@ mod tests {
                 .risk_hints
                 .contains(&"filter_contract_impacted".to_owned())
         );
+        assert!(
+            report
+                .risk_hints
+                .contains(&"source_field_unreviewed".to_owned())
+        );
     }
 
     #[test]
@@ -630,15 +675,8 @@ mod tests {
             .bulk_insert(&[file], &[])
             .expect("empty graph should write");
 
-        let report = projection_impact(
-            &store,
-            ProjectionImpactRequest {
-                target: "subtaskIds".to_owned(),
-                repo: Some("svc".to_owned()),
-                max_results: 20,
-            },
-        )
-        .expect("projection impact should load");
+        let report = projection_impact(&store, request("subtaskIds"))
+            .expect("projection impact should load");
 
         assert!(!report.resolved);
         assert!(
@@ -649,17 +687,98 @@ mod tests {
     }
 
     #[test]
+    fn frontend_only_projection_reports_frontend_focus_risk() {
+        let temp = TempDb::new("projection-impact", "frontend-only");
+        let store = temp.open();
+        let projection_file = file_node("svc", "src/projection.ts");
+        let reader_file = file_node("svc", "web/render.tsx");
+        let source = field_in_file("svc", "src/projection.ts", "items");
+        let projected = field_in_file("svc", "src/projection.ts", "itemIds");
+        store
+            .bulk_insert(
+                &[
+                    projection_file.clone(),
+                    reader_file.clone(),
+                    source.clone(),
+                    projected.clone(),
+                ],
+                &[
+                    edge(
+                        source.id,
+                        projected.id,
+                        projection_file.id,
+                        EdgeKind::DerivesFieldFrom,
+                    ),
+                    edge(
+                        reader_file.id,
+                        projected.id,
+                        reader_file.id,
+                        EdgeKind::ReadsField,
+                    ),
+                ],
+            )
+            .expect("frontend-only graph should write");
+
+        let report =
+            projection_impact(&store, request("itemIds")).expect("projection impact should load");
+
+        assert!(
+            report
+                .risk_hints
+                .contains(&"frontend_only_focus".to_owned())
+        );
+        assert!(
+            report
+                .risk_hints
+                .contains(&"source_field_unreviewed".to_owned())
+        );
+    }
+
+    #[test]
+    fn summary_evidence_verbosity_truncates_large_evidence_lists() {
+        let temp = TempDb::new("projection-impact", "summary-verbosity");
+        let store = temp.open();
+        let projection_file = file_node("svc", "src/projection.ts");
+        let source = field_in_file("svc", "src/projection.ts", "items");
+        let projected = field_in_file("svc", "src/projection.ts", "itemIds");
+        let reader_files = (0..4)
+            .map(|index| file_node("svc", &format!("web/render-{index}.tsx")))
+            .collect::<Vec<_>>();
+        let mut nodes = vec![projection_file.clone(), source.clone(), projected.clone()];
+        nodes.extend(reader_files.iter().cloned());
+        let mut edges = vec![edge(
+            source.id,
+            projected.id,
+            projection_file.id,
+            EdgeKind::DerivesFieldFrom,
+        )];
+        edges.extend(
+            reader_files
+                .iter()
+                .map(|file| edge(file.id, projected.id, file.id, EdgeKind::ReadsField)),
+        );
+        store
+            .bulk_insert(&nodes, &edges)
+            .expect("projection graph should write");
+
+        let mut summary_request = request("itemIds");
+        summary_request.evidence_verbosity = ProjectionEvidenceVerbosity::Summary;
+        let report =
+            projection_impact(&store, summary_request).expect("projection impact should load");
+
+        assert_eq!(report.readers.len(), 3);
+        assert!(
+            report
+                .risk_hints
+                .contains(&"frontend_only_focus".to_owned())
+        );
+    }
+
+    #[test]
     fn target_can_be_source_field() {
         let store = store_with_projection();
-        let report = projection_impact(
-            &store,
-            ProjectionImpactRequest {
-                target: "subtasks".to_owned(),
-                repo: Some("svc".to_owned()),
-                max_results: 20,
-            },
-        )
-        .expect("projection impact should load");
+        let report =
+            projection_impact(&store, request("subtasks")).expect("projection impact should load");
 
         assert_eq!(report.source_fields[0].field_path, "subtasks");
         assert_eq!(report.projected_fields[0].field_path, "subtaskIds");
@@ -698,15 +817,8 @@ mod tests {
             )
             .expect("multi-hop graph should write");
 
-        let report = projection_impact(
-            &store,
-            ProjectionImpactRequest {
-                target: "invoiceTotal".to_owned(),
-                repo: Some("svc".to_owned()),
-                max_results: 20,
-            },
-        )
-        .expect("projection impact should load");
+        let report = projection_impact(&store, request("invoiceTotal"))
+            .expect("projection impact should load");
         let source_fields = report
             .source_fields
             .iter()
@@ -760,15 +872,8 @@ mod tests {
             )
             .expect("projection graph should write");
 
-        let report = projection_impact(
-            &store,
-            ProjectionImpactRequest {
-                target: "lineItemTotal".to_owned(),
-                repo: Some("svc".to_owned()),
-                max_results: 20,
-            },
-        )
-        .expect("projection impact should load");
+        let report = projection_impact(&store, request("lineItemTotal"))
+            .expect("projection impact should load");
 
         assert_eq!(report.ambiguity, None);
         assert_eq!(report.source_fields.len(), 1);
@@ -820,15 +925,8 @@ mod tests {
             )
             .expect("ambiguous graph should write");
 
-        let report = projection_impact(
-            &store,
-            ProjectionImpactRequest {
-                target: "status".to_owned(),
-                repo: Some("svc".to_owned()),
-                max_results: 20,
-            },
-        )
-        .expect("projection impact should load");
+        let report =
+            projection_impact(&store, request("status")).expect("projection impact should load");
 
         assert_eq!(
             report.ambiguity.as_deref(),

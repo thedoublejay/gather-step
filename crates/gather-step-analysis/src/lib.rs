@@ -55,8 +55,8 @@ pub use pack_assembly::{
     classify_query_shape,
 };
 pub use projection_impact::{
-    ProjectionDerivation, ProjectionEvidence, ProjectionField, ProjectionImpactError,
-    ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
+    ProjectionDerivation, ProjectionEvidence, ProjectionEvidenceVerbosity, ProjectionField,
+    ProjectionImpactError, ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
 };
 pub use proofs::{
     MAX_PROOFS_PER_REPO, ProofCaller, ProofEngineError, ProofEngineOptions, ProofEngineOutput,

@@ -3378,6 +3378,71 @@ mod tests {
     }
 
     #[test]
+    fn open_reports_schema_mismatch_when_schema_table_missing() {
+        let graph_path = temp_db_path("missing-graph-schema");
+        let db = redb::Database::create(&graph_path).expect("legacy graph db should create");
+        let write_txn = db
+            .begin_write()
+            .expect("legacy graph write txn should begin");
+        {
+            let _nodes = write_txn
+                .open_table(super::NODES)
+                .expect("legacy nodes table should create");
+        }
+        write_txn
+            .commit()
+            .expect("legacy graph write txn should commit");
+        drop(db);
+
+        let Err(err) = GraphStoreDb::open(&graph_path) else {
+            panic!("legacy db missing schema table should fail");
+        };
+
+        assert!(matches!(
+            err,
+            super::GraphStoreError::SchemaVersionMismatch {
+                stored: 0,
+                expected
+            } if expected == super::GRAPH_SCHEMA_VERSION
+        ));
+        fs::remove_file(graph_path).ok();
+    }
+
+    #[test]
+    fn open_reports_schema_mismatch_when_schema_version_is_old() {
+        let graph_path = temp_db_path("old-graph-schema");
+        let db = redb::Database::create(&graph_path).expect("legacy graph db should create");
+        let write_txn = db
+            .begin_write()
+            .expect("legacy graph write txn should begin");
+        {
+            let mut schema = write_txn
+                .open_table(super::GRAPH_SCHEMA)
+                .expect("schema table should create");
+            schema
+                .insert(super::GRAPH_SCHEMA_VERSION_KEY, 0)
+                .expect("old schema version should insert");
+        }
+        write_txn
+            .commit()
+            .expect("legacy graph write txn should commit");
+        drop(db);
+
+        let Err(err) = GraphStoreDb::open(&graph_path) else {
+            panic!("legacy db with old schema version should fail");
+        };
+
+        assert!(matches!(
+            err,
+            super::GraphStoreError::SchemaVersionMismatch {
+                stored: 0,
+                expected
+            } if expected == super::GRAPH_SCHEMA_VERSION
+        ));
+        fs::remove_file(graph_path).ok();
+    }
+
+    #[test]
     fn daemon_metadata_round_trips_from_graph_path() {
         let (workspace, _storage, graph_path) = temp_workspace_graph_path("metadata-read");
         let metadata = StorageDaemonMetadata::for_current_process(&workspace);

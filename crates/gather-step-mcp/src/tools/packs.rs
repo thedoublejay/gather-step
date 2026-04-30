@@ -10,7 +10,9 @@ use gather_step_analysis::proofs::{
 };
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
-use gather_step_analysis::{ProjectionImpactRequest, projection_impact};
+use gather_step_analysis::{
+    ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact,
+};
 use gather_step_core::{EdgeKind, NodeId, NodeKind, PlanningProof, node_id};
 use gather_step_output::evidence::render_evidence_chain;
 use gather_step_storage::GraphStore;
@@ -1228,6 +1230,7 @@ fn apply_projection_impact_summary(
                 target,
                 repo: repo_filter.map(str::to_owned),
                 max_results: 10,
+                evidence_verbosity: ProjectionEvidenceVerbosity::Summary,
             },
         )
         .ok()?;

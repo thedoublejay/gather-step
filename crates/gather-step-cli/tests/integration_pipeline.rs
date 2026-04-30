@@ -14,11 +14,13 @@ use gather_step_mcp::{
         crud_trace::{CrudTraceRequest, crud_trace_tool},
         events::{TraceEventRequest, TraceRouteRequest, trace_event_tool, trace_route_tool},
         packs::{ContextPackRequest, context_pack_tool},
-        projection_impact::{ProjectionImpactRequest, projection_impact_tool},
+        projection_impact::{
+            ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact_tool,
+        },
     },
 };
 use gather_step_storage::{IndexingOptions, RepoIndexer};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -142,6 +144,44 @@ fn run_ok_text(workspace: &Path, args: &[&str]) -> String {
     );
 
     String::from_utf8(output.stdout).expect("stdout should be valid utf8")
+}
+
+fn projection_field_paths(report: &Value, key: &str) -> Vec<Value> {
+    let mut fields = report[key]
+        .as_array()
+        .expect("projection field list should be an array")
+        .iter()
+        .map(|field| {
+            json!({
+                "repo": field["repo"],
+                "field_path": field["field_path"],
+            })
+        })
+        .collect::<Vec<_>>();
+    fields.sort_by_key(std::string::ToString::to_string);
+    fields
+}
+
+fn projection_derivation_paths(report: &Value) -> Vec<Value> {
+    let mut edges = report["derivation_edges"]
+        .as_array()
+        .expect("derivation edges should be an array")
+        .iter()
+        .map(|edge| {
+            json!({
+                "source": {
+                    "repo": edge["source"]["repo"],
+                    "field_path": edge["source"]["field_path"],
+                },
+                "projected": {
+                    "repo": edge["projected"]["repo"],
+                    "field_path": edge["projected"]["field_path"],
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by_key(std::string::ToString::to_string);
+    edges
 }
 
 fn workspace_paths(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -574,6 +614,26 @@ TaskSchema.index({ subtaskIds: 1 });
     .expect("projection fixture should write");
     fs::write(
         temp.path()
+            .join("workspace/backend_standard/src/account_status_projection.ts"),
+        r"
+export function projectAccount(account: { status: string }) {
+  return { accountStatus: account.status };
+}
+",
+    )
+    .expect("account status projection fixture should write");
+    fs::write(
+        temp.path()
+            .join("workspace/backend_standard/src/billing_status_projection.ts"),
+        r"
+export function projectBilling(invoice: { status: string }) {
+  return { billingStatus: invoice.status };
+}
+",
+    )
+    .expect("billing status projection fixture should write");
+    fs::write(
+        temp.path()
             .join("workspace/backend_standard/src/migrations/backfill_subtask_ids.ts"),
         r"
 export async function backfill(TaskModel: any) {
@@ -583,7 +643,8 @@ export async function backfill(TaskModel: any) {
     )
     .expect("backfill fixture should write");
 
-    run_ok_json(temp.path(), &["index"]);
+    let reindex = run_ok_json(temp.path(), &["reindex"]);
+    assert_eq!(reindex["event"], "index_completed");
 
     let cli_report = run_ok_json(
         temp.path(),
@@ -595,7 +656,34 @@ export async function backfill(TaskModel: any) {
             "subtaskIds",
         ],
     );
+    let mut actual_keys = cli_report
+        .as_object()
+        .expect("projection report should be an object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    actual_keys.sort_unstable();
+    let mut expected_keys = vec![
+        "ambiguity",
+        "backfills",
+        "candidates",
+        "confidence",
+        "derivation_edges",
+        "filters",
+        "indexes",
+        "missing_evidence",
+        "projected_fields",
+        "readers",
+        "resolved",
+        "risk_hints",
+        "source_fields",
+        "target",
+        "writers",
+    ];
+    expected_keys.sort_unstable();
+    assert_eq!(actual_keys, expected_keys);
     assert_eq!(cli_report["resolved"], true);
+    assert_eq!(cli_report["ambiguity"], json!(null));
     assert!(
         cli_report["source_fields"]
             .as_array()
@@ -617,6 +705,94 @@ export async function backfill(TaskModel: any) {
             .iter()
             .any(|hint| hint == "filter_contract_impacted")
     );
+    assert_eq!(cli_report["missing_evidence"], json!([]));
+    assert_eq!(
+        json!({
+            "target": cli_report["target"],
+            "resolved": cli_report["resolved"],
+            "ambiguity": cli_report["ambiguity"],
+            "source_fields": projection_field_paths(&cli_report, "source_fields"),
+            "projected_fields": projection_field_paths(&cli_report, "projected_fields"),
+            "derivation_edges": projection_derivation_paths(&cli_report),
+            "risk_hints": cli_report["risk_hints"],
+            "missing_evidence": cli_report["missing_evidence"],
+            "confidence": cli_report["confidence"],
+        }),
+        json!({
+            "target": "subtaskIds",
+            "resolved": true,
+            "ambiguity": null,
+            "source_fields": [
+                { "repo": "backend_standard", "field_path": "id" },
+                { "repo": "backend_standard", "field_path": "subtasks" }
+            ],
+            "projected_fields": [
+                { "repo": "backend_standard", "field_path": "subtaskIds" }
+            ],
+            "derivation_edges": [
+                {
+                    "source": { "repo": "backend_standard", "field_path": "id" },
+                    "projected": { "repo": "backend_standard", "field_path": "subtaskIds" }
+                },
+                {
+                    "source": { "repo": "backend_standard", "field_path": "subtasks" },
+                    "projected": { "repo": "backend_standard", "field_path": "subtaskIds" }
+                }
+            ],
+            "risk_hints": [
+                "deployed_owner_unchecked",
+                "filter_contract_impacted",
+                "source_field_unreviewed"
+            ],
+            "missing_evidence": [],
+            "confidence": "high"
+        })
+    );
+
+    let cli_text = run_ok_text(
+        temp.path(),
+        &[
+            "--repo",
+            "backend_standard",
+            "projection-impact",
+            "--target",
+            "subtaskIds",
+            "--evidence-verbosity",
+            "summary",
+        ],
+    );
+    assert!(cli_text.contains("projection chain:"));
+    assert!(cli_text.contains("backend_standard:subtasks -> backend_standard:subtaskIds"));
+
+    let empty_text = run_ok_text(
+        temp.path(),
+        &[
+            "--repo",
+            "backend_standard",
+            "projection-impact",
+            "--target",
+            "fieldThatDoesNotExist",
+        ],
+    );
+    assert!(empty_text.contains("missing evidence: data_field"));
+    assert!(empty_text.contains("next checks: field_candidate_not_found"));
+
+    let ambiguous_report = run_ok_json(
+        temp.path(),
+        &[
+            "--repo",
+            "backend_standard",
+            "projection-impact",
+            "--target",
+            "status",
+        ],
+    );
+    assert_eq!(ambiguous_report["resolved"], true);
+    assert_eq!(
+        ambiguous_report["ambiguity"],
+        json!("multiple_field_candidates")
+    );
+    assert_eq!(ambiguous_report["derivation_edges"], json!([]));
 
     let mcp_report = projection_impact_tool(
         &mcp_context(temp.path()),
@@ -624,6 +800,7 @@ export async function backfill(TaskModel: any) {
             target: "subtaskIds".to_owned(),
             repo: Some("backend_standard".to_owned()),
             limit: 20,
+            evidence_verbosity: ProjectionEvidenceVerbosity::Full,
         },
     )
     .expect("projection impact MCP tool should succeed");

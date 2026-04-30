@@ -439,21 +439,25 @@ gather-step --workspace /path/to/workspace impact OrderCreatedDto
 Traces static field-level projection relationships for a target field. The report includes source fields, projected fields, derivation edges, readers, writers, filters, indexes, backfills, missing evidence, and planning risk hints.
 
 ```bash
-gather-step [GLOBAL FLAGS] projection-impact --target <FIELD> [--limit <N>]
+gather-step [GLOBAL FLAGS] projection-impact --target <FIELD> [--limit <N>] \
+  [--evidence-verbosity <summary|full>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--target <FIELD>` | string | required | Field or projected field name to inspect. |
 | `--limit <N>` | usize | 20 | Maximum field candidates to inspect. |
+| `--evidence-verbosity <summary\|full>` | enum | `full` | Controls whether large evidence lists are capped (`summary`) or returned in full (`full`). |
 
 **Example**
 
 ```bash
-gather-step --workspace /path/to/workspace --repo backend projection-impact --target subtaskIds --json
+gather-step --workspace /path/to/workspace --repo backend projection-impact --target subtaskIds --evidence-verbosity full --json
 ```
 
-**Output shape (`--json`)** — emits one serialized projection-impact report with `target`, `resolved`, `candidates`, `source_fields`, `projected_fields`, `derivation_edges`, `readers`, `writers`, `filters`, `indexes`, `backfills`, `risk_hints`, `missing_evidence`, and `confidence`.
+**Output shape (`--json`)** — emits one serialized projection-impact report with `target`, `resolved`, `ambiguity`, `candidates`, `source_fields`, `projected_fields`, `derivation_edges`, `readers`, `writers`, `filters`, `indexes`, `backfills`, `risk_hints`, `missing_evidence`, and `confidence`. Text output includes the most likely projection chain, missing evidence, and next checks.
+
+JSON/YAML index mapping extraction is intentionally limited to filenames containing `mapping`, `index`, `search`, or `projection`, so ordinary manifests are not parsed as projection maps.
 
 **When to use** — before changing a persisted projection, denormalized field, query filter, search mapping, or backfill-sensitive derived value.
 

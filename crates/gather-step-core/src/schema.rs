@@ -397,6 +397,7 @@ impl fmt::Display for EdgeKind {
 /// | `EventProducerConsumer`  | ≥ 67 (80)     |
 /// | `GuardUsage`             | ≥ 67 (80)     |
 /// | `SharedContractConsumer` | ≥ 67 (75)     |
+/// | `ProjectionFieldEvidence` | ≥ 67 (72)    |
 /// | `RouteClientServer`      | ≥ 67 (70)     |
 /// | `ImportBridge`           | 33–67 (55)    |
 /// | `CoChangeAdvisory`       | < 33 (25)     |
@@ -415,6 +416,9 @@ pub enum ProofKind {
     /// A `UsesTypeFrom` edge consumes a shared type or contract from another
     /// repo's canonical package.
     SharedContractConsumer,
+    /// A field-level read/write/filter/index/backfill/derivation edge links a
+    /// projection data field to another repo.
+    ProjectionFieldEvidence,
     /// A `Calls` + `ConsumesApiFrom` pair represents an HTTP client/server
     /// boundary across repos.
     RouteClientServer,

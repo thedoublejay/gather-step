@@ -1,4 +1,7 @@
-use gather_step_analysis::{ProjectionImpactRequest as AnalysisRequest, projection_impact};
+use gather_step_analysis::{
+    ProjectionEvidenceVerbosity as AnalysisEvidenceVerbosity,
+    ProjectionImpactRequest as AnalysisRequest, projection_impact,
+};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -12,6 +15,25 @@ pub struct ProjectionImpactRequest {
     pub repo: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub evidence_verbosity: ProjectionEvidenceVerbosity,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionEvidenceVerbosity {
+    Summary,
+    #[default]
+    Full,
+}
+
+impl From<ProjectionEvidenceVerbosity> for AnalysisEvidenceVerbosity {
+    fn from(value: ProjectionEvidenceVerbosity) -> Self {
+        match value {
+            ProjectionEvidenceVerbosity::Summary => Self::Summary,
+            ProjectionEvidenceVerbosity::Full => Self::Full,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -82,6 +104,7 @@ pub fn projection_impact_tool(
             target: request.target,
             repo: request.repo,
             max_results: request.limit,
+            evidence_verbosity: request.evidence_verbosity.into(),
         },
     )?;
 
@@ -144,8 +167,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ProjectionDerivationItem, ProjectionEvidenceItem, ProjectionFieldItem,
-        ProjectionImpactData, ProjectionImpactResponse,
+        ProjectionDerivationItem, ProjectionEvidenceItem, ProjectionEvidenceVerbosity,
+        ProjectionFieldItem, ProjectionImpactData, ProjectionImpactRequest,
+        ProjectionImpactResponse,
     };
 
     fn empty_data(target: &str) -> ProjectionImpactData {
@@ -189,6 +213,27 @@ mod tests {
             edge_kind: edge_kind.to_owned(),
             confidence,
         }
+    }
+
+    #[test]
+    fn request_deserializes_evidence_verbosity_with_full_default() {
+        let default_request: ProjectionImpactRequest =
+            serde_json::from_value(json!({"target": "legacySeatIds"}))
+                .expect("request should deserialize with defaults");
+        assert_eq!(default_request.limit, 20);
+        assert_eq!(
+            default_request.evidence_verbosity,
+            ProjectionEvidenceVerbosity::Full
+        );
+
+        let summary_request: ProjectionImpactRequest = serde_json::from_value(
+            json!({"target": "legacySeatIds", "evidence_verbosity": "summary"}),
+        )
+        .expect("request should deserialize summary verbosity");
+        assert_eq!(
+            summary_request.evidence_verbosity,
+            ProjectionEvidenceVerbosity::Summary
+        );
     }
 
     #[test]

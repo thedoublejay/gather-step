@@ -36,6 +36,7 @@ pub fn proof_strength(kind: ProofKind) -> u8 {
         ProofKind::DirectCall => 85,
         ProofKind::EventProducerConsumer | ProofKind::GuardUsage => 80,
         ProofKind::SharedContractConsumer => 75,
+        ProofKind::ProjectionFieldEvidence => 72,
         ProofKind::RouteClientServer => 70,
         ProofKind::ImportBridge => 55,
         ProofKind::CoChangeAdvisory => 25,
@@ -59,6 +60,12 @@ fn edge_to_proof_kind(edge: EdgeKind) -> Option<ProofKind> {
         | EdgeKind::ImplementsContractFrom
         | EdgeKind::ContractOn
         | EdgeKind::UsesShared => Some(ProofKind::SharedContractConsumer),
+        EdgeKind::ReadsField
+        | EdgeKind::WritesField
+        | EdgeKind::DerivesFieldFrom
+        | EdgeKind::FiltersOnField
+        | EdgeKind::IndexesField
+        | EdgeKind::BackfillsField => Some(ProofKind::ProjectionFieldEvidence),
         EdgeKind::ConsumesApiFrom | EdgeKind::Serves => Some(ProofKind::RouteClientServer),
         EdgeKind::Imports | EdgeKind::ConsumesHookFrom => Some(ProofKind::ImportBridge),
         EdgeKind::CoChangesWith => Some(ProofKind::CoChangeAdvisory),
@@ -162,7 +169,7 @@ pub fn build_planning_proofs<S: GraphStore>(
                 continue;
             };
 
-            // Skip virtual bridge nodes entirely.  Virtual nodes (shared-symbol
+            // Skip virtual bridge nodes except DataField anchors.  Virtual nodes (shared-symbol
             // stubs, topic/route anchors, etc.) are not real repositories and
             // must not appear in proof target_repo fields.  Event- and route-
             // based cross-repo evidence is handled by the dedicated
@@ -170,7 +177,7 @@ pub fn build_planning_proofs<S: GraphStore>(
             // virtual-node topology correctly.  Traversing through virtual nodes
             // here would incorrectly promote cross-repo callers that reach the
             // anchor via a shared-symbol bridge into confirmed downstream repos.
-            if neighbor.is_virtual {
+            if neighbor.is_virtual && neighbor.kind != NodeKind::DataField {
                 continue;
             }
 
@@ -409,6 +416,7 @@ mod tests {
             ProofKind::EventProducerConsumer,
             ProofKind::GuardUsage,
             ProofKind::SharedContractConsumer,
+            ProofKind::ProjectionFieldEvidence,
             ProofKind::RouteClientServer,
         ] {
             let s = proof_strength(kind);
