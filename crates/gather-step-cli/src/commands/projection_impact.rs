@@ -52,16 +52,24 @@ pub(crate) fn run_rendered(
     app: &AppContext,
     args: ProjectionImpactArgs,
 ) -> Result<RenderedCommand> {
+    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+    execute(&storage, app.repo_filter.as_deref(), args)
+}
+
+pub fn execute(
+    storage: &StorageCoordinator,
+    repo_filter: Option<&str>,
+    args: ProjectionImpactArgs,
+) -> Result<RenderedCommand> {
     if args.target.trim().is_empty() {
         bail!("projection-impact --target must not be empty");
     }
 
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
     let report = projection_impact(
         storage.graph(),
         ProjectionImpactRequest {
             target: args.target,
-            repo: app.repo_filter.clone(),
+            repo: repo_filter.map(ToOwned::to_owned),
             max_results: args.limit,
             evidence_verbosity: args.evidence_verbosity.into(),
         },

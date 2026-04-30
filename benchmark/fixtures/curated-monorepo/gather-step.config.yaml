@@ -1,0 +1,9 @@
+repos:
+  - name: shared_contracts
+    path: apps/shared_contracts
+  - name: frontend_app
+    path: apps/frontend_app
+  - name: backend_api
+    path: apps/backend_api
+indexing:
+  workspace_concurrency: 1

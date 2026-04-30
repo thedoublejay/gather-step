@@ -219,22 +219,24 @@ mod tests {
 
     #[test]
     fn rejects_projection_impact_limit_outside_supported_range() {
-        let error = Cli::try_parse_from([
-            "gather-step",
-            "projection-impact",
-            "--target",
-            "subtaskIds",
-            "--limit",
-            "0",
-        ])
-        .expect_err("limit 0 should be rejected");
+        for limit in ["0", "101", "many"] {
+            let error = Cli::try_parse_from([
+                "gather-step",
+                "projection-impact",
+                "--target",
+                "subtaskIds",
+                "--limit",
+                limit,
+            ])
+            .expect_err("unsupported limit should be rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("limit must be an integer between 1 and 100"),
-            "unexpected error: {error}"
-        );
+            assert!(
+                error
+                    .to_string()
+                    .contains("limit must be an integer between 1 and 100"),
+                "unexpected error for {limit}: {error}"
+            );
+        }
     }
 
     #[test]

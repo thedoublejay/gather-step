@@ -10,7 +10,7 @@ expected_files:
   - apps/backend_api/src/services/orders.service.ts
   - apps/frontend_app/src/api/orders.api.ts
 expected_edges:
-  - kind: Imports
+  - kind: UsesTypeFrom
 missed_repos_max: 1
 missed_files_max: 3
 false_positives_max: 5

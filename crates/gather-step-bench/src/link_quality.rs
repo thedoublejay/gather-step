@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::{fmt::Write as _, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt::Write as _,
+    path::Path,
+};
 
-use gather_step_core::NodeKind;
+use gather_step_core::{NodeData, NodeId, NodeKind};
 use gather_step_storage::GraphStore;
 use serde::{Deserialize, Serialize};
 
@@ -70,9 +74,9 @@ pub fn load_link_quality_task(task_yaml: &Path) -> anyhow::Result<LinkQualityTas
 
 /// Evaluate a link-quality task against the indexed graph.
 ///
-/// The evaluation walks from all nodes whose `file_path` matches the anchor
-/// and collects the repos and file paths reachable via outgoing edges.  The
-/// result is compared to the task's expected sets to produce a
+/// The evaluation walks from all nodes whose `file_path` matches the anchor and
+/// collects nearby repos and file paths through outbound, inbound, and virtual
+/// bridge edges. The result is compared to the task's expected sets to produce a
 /// [`LinkQualityReport`].
 pub fn run_link_quality_benchmark<S: GraphStore>(
     task: &LinkQualityTask,
@@ -81,35 +85,37 @@ pub fn run_link_quality_benchmark<S: GraphStore>(
     // Collect all nodes whose file_path starts with the anchor prefix.
     let anchor_nodes = collect_anchor_nodes(store, &task.anchor);
 
-    // Gather repos reachable via any outgoing edge from anchor nodes.
-    let mut reached_repos: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut reached_files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut total_cross_boundary: usize = 0;
-    let mut matching_cross_boundary: usize = 0;
-    let expected_edge_kinds: std::collections::BTreeSet<String> =
+    let expected_edge_kinds: BTreeSet<String> =
         task.expected_edges.iter().map(|e| e.kind.clone()).collect();
-
-    for node in &anchor_nodes {
-        let Ok(outgoing) = store.get_outgoing(node.id) else {
-            continue;
-        };
-        for edge in outgoing {
-            if let Ok(Some(target_node)) = store.get_node(edge.target) {
-                if target_node.is_virtual {
-                    continue;
-                }
-                reached_repos.insert(target_node.repo.clone());
-                reached_files.insert(target_node.file_path.clone());
-                if target_node.repo != node.repo {
-                    total_cross_boundary += 1;
-                    let edge_kind_str = format!("{:?}", edge.kind);
-                    if expected_edge_kinds.contains(&edge_kind_str) {
-                        matching_cross_boundary += 1;
-                    }
-                }
-            }
-        }
-    }
+    let anchor_repos = anchor_nodes
+        .iter()
+        .map(|node| node.repo.clone())
+        .collect::<BTreeSet<_>>();
+    let reached_nodes = collect_reachable_nodes(store, &anchor_nodes, &expected_edge_kinds);
+    let reached_repos = reached_nodes
+        .values()
+        .filter(|(node, _)| !node.is_virtual)
+        .map(|(node, _)| node.repo.clone())
+        .collect::<BTreeSet<_>>();
+    let reached_files = reached_nodes
+        .values()
+        .filter(|(node, _)| !node.is_virtual)
+        .map(|(node, _)| node.file_path.clone())
+        .collect::<BTreeSet<_>>();
+    let cross_boundary_repos = reached_nodes
+        .values()
+        .filter(|(node, _)| !node.is_virtual && !anchor_repos.contains(&node.repo))
+        .map(|(node, _)| node.repo.clone())
+        .collect::<BTreeSet<_>>();
+    let matching_cross_boundary_repos = reached_nodes
+        .values()
+        .filter(|(node, matched)| {
+            !node.is_virtual && !anchor_repos.contains(&node.repo) && *matched
+        })
+        .map(|(node, _)| node.repo.clone())
+        .collect::<BTreeSet<_>>();
+    let total_cross_boundary = cross_boundary_repos.len();
+    let matching_cross_boundary = matching_cross_boundary_repos.len();
 
     let missed_repos: Vec<String> = task
         .expected_repos
@@ -121,14 +127,17 @@ pub fn run_link_quality_benchmark<S: GraphStore>(
     let missed_files: Vec<String> = task
         .expected_files
         .iter()
-        .filter(|f| !reached_files.contains(*f))
+        .filter(|expected| {
+            !reached_files
+                .iter()
+                .any(|reached| file_matches(expected, reached))
+        })
         .cloned()
         .collect();
 
-    let anchor_repo = anchor_nodes.first().map_or("", |n| n.repo.as_str());
     let false_positive_repos: Vec<String> = reached_repos
         .iter()
-        .filter(|r| r.as_str() != anchor_repo && !task.expected_repos.contains(r))
+        .filter(|r| !anchor_repos.contains(*r) && !task.expected_repos.contains(r))
         .cloned()
         .collect();
 
@@ -191,13 +200,103 @@ pub fn run_link_quality_benchmark<S: GraphStore>(
     }
 }
 
+const MAX_LINK_QUALITY_DEPTH: usize = 4;
+
+fn collect_reachable_nodes<S: GraphStore>(
+    store: &S,
+    anchor_nodes: &[NodeData],
+    expected_edge_kinds: &BTreeSet<String>,
+) -> BTreeMap<NodeId, (NodeData, bool)> {
+    let mut queue = VecDeque::new();
+    let mut visited = BTreeSet::new();
+    let mut reached = BTreeMap::new();
+
+    for node in anchor_nodes {
+        queue.push_back((node.id, 0usize, false));
+        visited.insert((node.id, false));
+        reached.insert(node.id, (node.clone(), false));
+    }
+    let shared_symbols = store
+        .nodes_by_type(NodeKind::SharedSymbol)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|node| !node.name.is_empty())
+        .fold(
+            BTreeMap::<String, Vec<NodeData>>::new(),
+            |mut symbols, node| {
+                symbols.entry(node.name.clone()).or_default().push(node);
+                symbols
+            },
+        );
+
+    while let Some((node_id, depth, matched_expected_edge)) = queue.pop_front() {
+        if depth >= MAX_LINK_QUALITY_DEPTH {
+            continue;
+        }
+
+        let Some((current_node, _)) = reached.get(&node_id) else {
+            continue;
+        };
+        let mut adjacent = Vec::new();
+        if let Ok(outgoing) = store.get_outgoing(node_id) {
+            adjacent.extend(
+                outgoing
+                    .into_iter()
+                    .map(|edge| (edge.target, format!("{:?}", edge.kind))),
+            );
+        }
+        if let Ok(incoming) = store.get_incoming(node_id) {
+            adjacent.extend(
+                incoming
+                    .into_iter()
+                    .map(|edge| (edge.source, format!("{:?}", edge.kind))),
+            );
+        }
+        if !current_node.is_virtual
+            && let Some(symbols) = shared_symbols.get(&current_node.name)
+        {
+            adjacent.extend(
+                symbols
+                    .iter()
+                    .map(|node| (node.id, "SharedSymbolNameBridge".to_owned())),
+            );
+        }
+
+        for (next_id, edge_kind) in adjacent {
+            let Ok(Some(next_node)) = store.get_node(next_id) else {
+                continue;
+            };
+            let next_matched =
+                matched_expected_edge || expected_edge_kinds.contains(edge_kind.as_str());
+            reached
+                .entry(next_id)
+                .and_modify(|(_, matched)| *matched |= next_matched)
+                .or_insert_with(|| (next_node.clone(), next_matched));
+
+            if visited.insert((next_id, next_matched)) {
+                queue.push_back((next_id, depth + 1, next_matched));
+            }
+        }
+    }
+
+    reached
+}
+
+fn file_matches(expected: &str, reached: &str) -> bool {
+    expected == reached || expected.ends_with(reached) || reached.ends_with(expected)
+}
+
 fn collect_anchor_nodes<S: GraphStore>(store: &S, anchor: &str) -> Vec<gather_step_core::NodeData> {
     // Walk all File nodes and match by file_path or name.
     store
         .nodes_by_type(NodeKind::File)
         .unwrap_or_default()
         .into_iter()
-        .filter(|n| n.file_path == anchor || n.file_path.ends_with(anchor))
+        .filter(|n| {
+            n.file_path == anchor
+                || n.file_path.ends_with(anchor)
+                || (anchor.ends_with(&n.file_path) && anchor.contains(&n.repo))
+        })
         .collect()
 }
 

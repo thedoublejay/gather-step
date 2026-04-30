@@ -1,0 +1,5 @@
+{
+  "name": "@shared/contracts",
+  "private": true,
+  "exports": "./src/dtos/order.dto.ts"
+}

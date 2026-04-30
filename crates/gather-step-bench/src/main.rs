@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gather_step_bench::{
     compare::{BenchmarkResult, Environment, compare_result_dirs},
-    harness::{index_fixture, run_index_pass, run_workspace_index_pass},
+    harness::{index_workspace_fixture, run_index_pass, run_workspace_index_pass},
     link_quality::{
         load_link_quality_task, render_link_quality_report, run_link_quality_benchmark,
     },
@@ -597,8 +597,8 @@ fn link_quality_command(
     _thresholds_path: &Path,
 ) -> anyhow::Result<()> {
     print_status(&format!("Indexing fixture: {}", fixture.display()));
-    let (indexer, _guard) = index_fixture(fixture, "curated-monorepo")?;
-    let graph = indexer.storage().graph();
+    let (storage, _guard) = index_workspace_fixture(fixture)?;
+    let graph = storage.graph();
     print_status("Fixture indexed.");
 
     let mut task_files: Vec<std::path::PathBuf> = std::fs::read_dir(tasks_dir)?
