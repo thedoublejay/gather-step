@@ -1331,6 +1331,13 @@ fn push_projection_impact_next_step(response: &mut ContextPackResponse, step: St
     const PACK_FOLLOW_UP_BUDGET: usize = 6;
     if response.data.next_steps.len() < PACK_FOLLOW_UP_BUDGET {
         response.data.next_steps.push(step);
+    } else if let Some(index) = response
+        .data
+        .next_steps
+        .iter()
+        .position(|existing| matches!(existing.as_str(), "brief" | "context" | "search"))
+    {
+        response.data.next_steps[index] = step;
     }
 }
 
