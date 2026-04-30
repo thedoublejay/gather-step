@@ -153,7 +153,7 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 ///
 /// Bump this when node/edge discriminants or graph-derived evidence semantics
 /// change in a way that requires rebuilding `.gather-step/storage/graph.redb`.
-pub const GRAPH_SCHEMA_VERSION: u32 = 1;
+pub const GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///

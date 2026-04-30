@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use gather_step_analysis::{
-    CandidateKey, EvidenceBand, QueryShape, anchor::rank_anchors, classify_query_shape,
-    resolve_event_targets, resolve_route_target, shared_contract::shared_contract_candidate_ids,
-    shared_contract_impact, trace_across_repos,
+    CandidateKey, EvidenceBand, ProjectionEvidence, ProjectionEvidenceVerbosity, ProjectionField,
+    ProjectionImpactReport, ProjectionImpactRequest, QueryShape, anchor::rank_anchors,
+    classify_query_shape, projection_impact, resolve_event_targets, resolve_route_target,
+    shared_contract::shared_contract_candidate_ids, shared_contract_impact, trace_across_repos,
 };
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
 use gather_step_storage::{GraphStore, SearchStore, StorageCoordinator};
@@ -99,6 +100,28 @@ pub fn execute(
     repo_filter: Option<&str>,
     args: ImpactArgs,
 ) -> Result<RenderedCommand> {
+    if args.symbol.contains('.') {
+        let field_report = projection_impact(
+            storage.graph(),
+            ProjectionImpactRequest {
+                target: args.symbol.clone(),
+                repo: repo_filter.map(ToOwned::to_owned),
+                max_results: args.limit,
+                evidence_verbosity: ProjectionEvidenceVerbosity::Full,
+            },
+        )?;
+        if field_report.resolved
+            && field_report.candidates.iter().any(|candidate| {
+                candidate
+                    .field_path
+                    .eq_ignore_ascii_case(args.symbol.trim())
+            })
+        {
+            let lines = render_field_impact_lines(&field_report);
+            return RenderedCommand::success_serialized(&field_report, lines);
+        }
+    }
+
     let hits = storage
         .search()
         .search(&args.symbol, args.limit.max(1))
@@ -341,6 +364,85 @@ pub fn execute(
     }
 
     Ok(RenderedCommand::success(json!(payload), lines))
+}
+
+fn render_field_impact_lines(report: &ProjectionImpactReport) -> Vec<String> {
+    let mut lines = vec![format!(
+        "field impact for `{}`: {} {}, confidence {}",
+        report.target,
+        report.candidates.len(),
+        pluralize(report.candidates.len(), "candidate", "candidates"),
+        report.confidence
+    )];
+    if let Some(ambiguity) = &report.ambiguity {
+        lines.push(format!("ambiguity: {ambiguity}"));
+    }
+    if report.ambiguity.is_some() && !report.candidates.is_empty() {
+        lines.push(format!(
+            "candidate fields: {}",
+            format_projection_fields(&report.candidates)
+        ));
+    }
+    if !report.readers.is_empty() {
+        lines.push(format!(
+            "readers: {}",
+            format_projection_evidence(&report.readers)
+        ));
+    }
+    if !report.writers.is_empty() {
+        lines.push(format!(
+            "writers: {}",
+            format_projection_evidence(&report.writers)
+        ));
+    }
+    if !report.filters.is_empty() {
+        lines.push(format!(
+            "filters: {}",
+            format_projection_evidence(&report.filters)
+        ));
+    }
+    if !report.indexes.is_empty() {
+        lines.push(format!(
+            "indexes: {}",
+            format_projection_evidence(&report.indexes)
+        ));
+    }
+    if !report.backfills.is_empty() {
+        lines.push(format!(
+            "backfills: {}",
+            format_projection_evidence(&report.backfills)
+        ));
+    }
+    if !report.missing_evidence.is_empty() {
+        lines.push(format!(
+            "missing evidence: {}",
+            report.missing_evidence.join(", ")
+        ));
+    }
+    if !report.risk_hints.is_empty() {
+        lines.push(format!("next checks: {}", report.risk_hints.join(", ")));
+    }
+    lines
+}
+
+fn format_projection_fields(fields: &[ProjectionField]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{}:{}", field.repo, field.field_path))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_projection_evidence(evidence: &[ProjectionEvidence]) -> String {
+    evidence
+        .iter()
+        .map(|item| format!("{}:{} ({})", item.repo, item.file_path, item.field_path))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
 }
 
 /// Parse a `METHOD /path` string into `(method, path)`.

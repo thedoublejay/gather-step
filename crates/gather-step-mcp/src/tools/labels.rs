@@ -70,6 +70,7 @@ pub fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::PropagatesEvent => "propagates_event",
         EdgeKind::DriftsFrom => "drifts_from",
         EdgeKind::ContractOn => "contract_on",
+        EdgeKind::MigratesCollection => "migrates_collection",
         _ => "unknown",
     }
 }

@@ -146,6 +146,7 @@ export default defineConfig({
           items: [
             { slug: 'guides/operator-workflows' },
             { slug: 'guides/memory-backed-planning' },
+            { slug: 'guides/data-shape-verification' },
           ],
         },
         {

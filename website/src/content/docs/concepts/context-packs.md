@@ -25,6 +25,9 @@ The planning pack returns:
 - related route and event surfaces (if the target is near a handler or producer)
 - shared symbol dependencies and version information
 - cross-repo touchpoints likely affected by a change to the target
+- Mongoose migration siblings, filter literals, and a best-effort coverage note
+  when the target is a supported migration; see
+  [Data-shape verification](/guides/data-shape-verification/)
 - next-step suggestions for where to look before writing any code
 
 This is the mode to use when you want to answer "what do I need to understand before I touch this?"

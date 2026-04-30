@@ -1,5 +1,7 @@
 # Gather Step Implementation Plan: Projection Impact
 
+**Status:** v2.1 released and complete as of 2026-04-30. Follow-on data-shape awareness work continues in `v2.2-data-shape-awareness-plan.md`.
+
 ## Summary
 
 Build projection impact as a graph-backed analysis that answers: "If this source field changes, which derived fields, persisted projections, readers, filters, indexes, backfills, and planning risks must be reviewed?"

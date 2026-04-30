@@ -5,6 +5,34 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## v2.2.0 (2026-04-30)
+
+Release status: **released**.
+
+Data-shape awareness release for field-level impact review and Mongo/Mongoose migration planning.
+
+### Highlights
+
+- Added direct TypeScript field reader/writer evidence for typed member access, including nested dotted paths such as `WorkItem.workflow.stepIds`.
+- Extended `projection-impact` and `projection_impact` so exact dotted field targets include direct readers, writers, filters, indexes, and backfills in one report.
+- Let planning and change-impact packs surface field-impact reminders while preserving the existing context-pack follow-up budget.
+- Added Mongoose migration sibling awareness so planning packs can show prior migrations on the same collection, including captured filter literals.
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.2.0`.
+
+### Data-Shape Awareness
+
+- Direct field extraction is intentionally scoped to typed local receivers and parameters; dynamic keys, aliases, destructuring, broad `any`/`unknown`, generic containers, and deep optional chains remain unsupported.
+- Migration detection is intentionally conservative: files must look like Mongoose-style migration files and expose `up`/`down` behavior before sibling hints are emitted.
+- Deployment note: v2.2 changes generated graph/schema state for migration collection edges. Existing `.gather-step` storage should be rebuilt with `gather-step reindex` before relying on v2.2 migration-sibling output.
+
+### Verification Coverage
+
+- Added parser extraction-fidelity coverage for direct field readers/writers and false-positive skips.
+- Added analysis and MCP coverage for direct field evidence in projection-impact reports.
+- Added CLI routing coverage for dotted field targets through projection-impact.
+- Added planning-pack and oracle coverage for migration siblings, pack response shape, and follow-up budget behavior.
+- Verified format, clippy, all-features test build, targeted parser/analysis/MCP/CLI tests, and website build during release preparation.
+
 ## v2.1.1 (2026-04-30)
 
 Release status: **released**.

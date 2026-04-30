@@ -107,6 +107,9 @@ pub enum EdgeKind {
     PropagatesEvent = 84,
     DriftsFrom = 85,
     ContractOn = 86,
+    /// A migration symbol changes documents in a virtual database collection
+    /// node such as `__migration_collection__alerts`.
+    MigratesCollection = 87,
     ReadsField = 90,
     WritesField = 91,
     DerivesFieldFrom = 92,
@@ -268,6 +271,7 @@ impl EdgeKind {
             Self::PropagatesEvent,
             Self::DriftsFrom,
             Self::ContractOn,
+            Self::MigratesCollection,
             Self::ReadsField,
             Self::WritesField,
             Self::DerivesFieldFrom,
@@ -360,6 +364,7 @@ impl TryFrom<u8> for EdgeKind {
             84 => Ok(Self::PropagatesEvent),
             85 => Ok(Self::DriftsFrom),
             86 => Ok(Self::ContractOn),
+            87 => Ok(Self::MigratesCollection),
             90 => Ok(Self::ReadsField),
             91 => Ok(Self::WritesField),
             92 => Ok(Self::DerivesFieldFrom),
@@ -533,7 +538,7 @@ mod tests {
 
     #[test]
     fn edge_kind_round_trips_through_u8() {
-        let original = EdgeKind::DriftsFrom;
+        let original = EdgeKind::MigratesCollection;
         let decoded = EdgeKind::try_from(original.as_u8()).expect("edge kind should decode");
 
         assert_eq!(decoded, original);
@@ -559,7 +564,7 @@ mod tests {
 
     #[test]
     fn edge_kind_invalid_u8_rejects() {
-        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 87, 100, 255] {
+        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 88, 89, 100, 255] {
             assert!(EdgeKind::try_from(value).is_err(), "{value} should reject");
         }
     }

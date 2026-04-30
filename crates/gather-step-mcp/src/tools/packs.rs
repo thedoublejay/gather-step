@@ -11,11 +11,13 @@ use gather_step_analysis::proofs::{
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
 use gather_step_analysis::{
-    ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact,
+    ProjectionEvidenceVerbosity, ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
 };
-use gather_step_core::{EdgeKind, NodeId, NodeKind, PlanningProof, node_id};
+use gather_step_core::{
+    EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeId, NodeKind, PlanningProof, node_id,
+};
 use gather_step_output::evidence::render_evidence_chain;
-use gather_step_storage::GraphStore;
+use gather_step_storage::{GraphStore, MetadataStore};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,7 +43,8 @@ use crate::{
 
 const DEFAULT_PACK_LIMIT: usize = 6;
 const MAX_CONTEXT_PACK_CACHE_BYTES: i64 = 64 * 1024 * 1024;
-const CONTEXT_PACK_CACHE_KEY_VERSION: &str = "v1";
+const CONTEXT_PACK_CACHE_KEY_VERSION: &str = "v2";
+const MIGRATION_COLLECTION_PREFIX: &str = "__migration_collection__";
 const PACK_CONFIDENCE_MODEL_VERSION: &str = "v1.0";
 const PACK_CONFIDENCE_HIGH_MARGIN: i32 = 125;
 const PACK_CONFIDENCE_MEDIUM_MARGIN: i32 = 75;
@@ -219,6 +222,30 @@ pub struct ContextPackData {
     /// when the anchor has no cross-repo edges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planning_proofs: Vec<serde_json::Value>,
+    /// Migration-specific sibling evidence for planning packs anchored on a
+    /// supported Mongo migration. Absent for non-migration anchors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_siblings: Option<MigrationSiblingBand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MigrationSiblingBand {
+    pub collection_name: String,
+    pub coverage_note: String,
+    pub verification_hint: String,
+    pub siblings: Vec<MigrationSiblingEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MigrationSiblingEntry {
+    pub repo: String,
+    pub file_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_short_sha: Option<String>,
+    pub symbol_name: String,
+    pub symbol_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter_literals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -618,6 +645,7 @@ pub fn context_pack_tool(
                     transport_links: None,
                     planning_rescue: None,
                     planning_proofs: Vec::new(),
+                    migration_siblings: None,
                 },
                 meta: Some(ContextPackMeta {
                     response_schema_version: response_schema_version(),
@@ -683,6 +711,7 @@ pub fn context_pack_tool(
                 transport_links: None,
                 planning_rescue: None,
                 planning_proofs: Vec::new(),
+                migration_siblings: None,
             },
             meta: Some(ContextPackMeta {
                 response_schema_version: response_schema_version(),
@@ -1025,6 +1054,7 @@ fn assemble_context_pack_for_symbol(
     if let Some(repo) = options.repo_filter {
         semantic_bridges.retain(|bridge| bridge.repo == repo);
     }
+    let migration_siblings = migration_sibling_band_for_pack(ctx, symbol_id, mode)?;
 
     let mut next_steps = suggested_next_steps(mode);
     if !semantic_bridges.is_empty() {
@@ -1171,6 +1201,7 @@ fn assemble_context_pack_for_symbol(
             transport_links,
             planning_rescue: None,
             planning_proofs,
+            migration_siblings,
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -1234,27 +1265,55 @@ fn apply_projection_impact_summary(
             },
         )
         .ok()?;
-        (report.resolved && report.ambiguity.is_none() && !report.derivation_edges.is_empty())
+        (report.resolved && report.ambiguity.is_none() && report_has_field_summary(&report))
             .then_some(report)
     }) else {
         return;
     };
 
-    let projected = report
-        .projected_fields
-        .iter()
-        .map(|field| field.field_path.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sources = report
-        .source_fields
-        .iter()
-        .map(|field| field.field_path.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    response.data.next_steps.push(format!(
-        "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
-    ));
+    if report.derivation_edges.is_empty() {
+        let readers = report
+            .readers
+            .iter()
+            .map(|item| item.field_path.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let writers = report
+            .writers
+            .iter()
+            .map(|item| item.field_path.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_projection_impact_next_step(
+            response,
+            format!(
+                "Review field impact: readers [{readers}], writers [{writers}]. Use projection_impact for full evidence."
+            ),
+        );
+    } else {
+        let projected = report
+            .projected_fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sources = report
+            .source_fields
+            .iter()
+            .map(|field| field.field_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_projection_impact_next_step(
+            response,
+            format!(
+                "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
+            ),
+        );
+    }
 
     for hint in report.risk_hints {
         let gap = format!("projection_impact:{hint}");
@@ -1266,6 +1325,29 @@ fn apply_projection_impact_summary(
         meta.warnings
             .push("projection impact evidence is available for this target".to_owned());
     }
+}
+
+fn push_projection_impact_next_step(response: &mut ContextPackResponse, step: String) {
+    const PACK_FOLLOW_UP_BUDGET: usize = 6;
+    if response.data.next_steps.len() < PACK_FOLLOW_UP_BUDGET {
+        response.data.next_steps.push(step);
+    } else if let Some(index) = response
+        .data
+        .next_steps
+        .iter()
+        .position(|existing| matches!(existing.as_str(), "brief" | "context" | "search"))
+    {
+        response.data.next_steps[index] = step;
+    }
+}
+
+fn report_has_field_summary(report: &ProjectionImpactReport) -> bool {
+    !report.derivation_edges.is_empty()
+        || !report.readers.is_empty()
+        || !report.writers.is_empty()
+        || !report.filters.is_empty()
+        || !report.indexes.is_empty()
+        || !report.backfills.is_empty()
 }
 
 fn projection_impact_targets(
@@ -1609,10 +1691,184 @@ fn finalize_bridges(
     (bridges, files)
 }
 
+fn migration_sibling_band_for_pack(
+    ctx: &McpContext,
+    symbol_id: &str,
+    mode: PackMode,
+) -> Result<Option<MigrationSiblingBand>, McpServerError> {
+    if mode != PackMode::Planning {
+        return Ok(None);
+    }
+    let anchor_id = decode_node_id(symbol_id).map_err(McpServerError::InvalidInput)?;
+    let mut band = migration_sibling_band_for_anchor(ctx.graph(), anchor_id)?;
+    if let Some(band) = band.as_mut() {
+        for sibling in &mut band.siblings {
+            sibling.commit_short_sha =
+                latest_commit_short_sha(ctx, &sibling.repo, &sibling.file_path)?;
+        }
+    }
+    Ok(band)
+}
+
+fn migration_sibling_band_for_anchor(
+    graph: &dyn GraphStore,
+    anchor_id: NodeId,
+) -> Result<Option<MigrationSiblingBand>, McpServerError> {
+    let Some(anchor) = graph.get_node(anchor_id)? else {
+        return Ok(None);
+    };
+    let (collection_node_id, current_owner_file) =
+        if is_migration_collection_node(anchor.external_id.as_deref()) {
+            (anchor.id, None)
+        } else {
+            let Some(edge) = migration_collection_edge_for_anchor(graph, anchor_id, &anchor)?
+            else {
+                return Ok(None);
+            };
+            (edge.target, Some(edge.owner_file))
+        };
+
+    let Some(collection_node) = graph.get_node(collection_node_id)? else {
+        return Ok(None);
+    };
+    let collection_name = collection_node
+        .external_id
+        .as_deref()
+        .and_then(|external_id| external_id.strip_prefix(MIGRATION_COLLECTION_PREFIX))
+        .unwrap_or(&collection_node.name)
+        .to_owned();
+
+    let mut siblings = Vec::new();
+    for edge in graph.get_incoming(collection_node_id)? {
+        if edge.kind != EdgeKind::MigratesCollection {
+            continue;
+        }
+        if current_owner_file == Some(edge.owner_file) {
+            continue;
+        }
+        let Some(source) = graph.get_node(edge.source)? else {
+            continue;
+        };
+        siblings.push(MigrationSiblingEntry {
+            repo: source.repo,
+            file_path: source.file_path,
+            commit_short_sha: None,
+            symbol_name: source.name,
+            symbol_id: encode_node_id(edge.source),
+            filter_literals: decode_migration_filters(edge.metadata.drift_kind.as_deref()),
+        });
+    }
+    siblings.sort_by(|left, right| {
+        left.repo
+            .cmp(&right.repo)
+            .then(left.file_path.cmp(&right.file_path))
+            .then(left.symbol_name.cmp(&right.symbol_name))
+            .then(left.symbol_id.cmp(&right.symbol_id))
+    });
+    siblings.dedup_by(|left, right| left.symbol_id == right.symbol_id);
+
+    Ok(Some(MigrationSiblingBand {
+        coverage_note: migration_coverage_note().to_owned(),
+        verification_hint: migration_verification_hint(&collection_name),
+        collection_name,
+        siblings,
+    }))
+}
+
+fn migration_collection_edge_for_anchor(
+    graph: &dyn GraphStore,
+    anchor_id: NodeId,
+    anchor: &gather_step_core::NodeData,
+) -> Result<Option<gather_step_core::EdgeData>, McpServerError> {
+    let file_id = node_id(
+        &anchor.repo,
+        &anchor.file_path,
+        NodeKind::File,
+        &anchor.file_path,
+    );
+    let mut edges = graph.get_outgoing(anchor_id)?;
+    if file_id != anchor_id {
+        edges.extend(graph.edges_by_owner(file_id)?);
+    }
+    edges.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then(left.target.cmp(&right.target))
+            .then(left.owner_file.cmp(&right.owner_file))
+    });
+    edges.dedup_by(|left, right| {
+        left.source == right.source
+            && left.target == right.target
+            && left.kind == right.kind
+            && left.owner_file == right.owner_file
+    });
+    Ok(edges
+        .into_iter()
+        .find(|edge| edge.kind == EdgeKind::MigratesCollection))
+}
+
+fn is_migration_collection_node(external_id: Option<&str>) -> bool {
+    external_id.is_some_and(|external_id| external_id.starts_with(MIGRATION_COLLECTION_PREFIX))
+}
+
+fn decode_migration_filters(value: Option<&str>) -> Vec<String> {
+    let Some(raw) = value.and_then(|value| value.strip_prefix(MIGRATION_FILTERS_METADATA_PREFIX))
+    else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+fn migration_verification_hint(collection_name: &str) -> String {
+    format!(
+        "Run db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
+    )
+}
+
+fn migration_coverage_note() -> &'static str {
+    "Best-effort v2.2 coverage: Mongoose migrations using db.collection(...).updateMany(...) or same-file mongoose.model(..., ..., 'collection') Model.updateMany(...). TypeORM, Knex, Prisma, Atlas, dynamic collection names, imported model resolution, and multi-collection migrations are not detected."
+}
+
+fn latest_commit_short_sha(
+    ctx: &McpContext,
+    repo: &str,
+    file_path: &str,
+) -> Result<Option<String>, McpServerError> {
+    let (commits, deltas) = ctx
+        .metadata()
+        .get_history_for_file_with_renames(repo, file_path)
+        .map_err(McpServerError::Metadata)?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
+    let touched_shas = deltas
+        .iter()
+        .filter(|delta| {
+            delta.file_path == file_path || delta.old_path.as_deref() == Some(file_path)
+        })
+        .map(|delta| delta.sha.as_str())
+        .collect::<BTreeSet<_>>();
+    let latest = commits
+        .iter()
+        .rev()
+        .find(|commit| touched_shas.contains(commit.sha.as_str()))
+        .or_else(|| commits.last());
+    Ok(latest.map(|commit| commit.sha.chars().take(7).collect()))
+}
+
 fn trim_context_pack(response: &mut ContextPackResponse) -> bool {
-    response.data.items.pop().is_some()
+    if response.data.items.pop().is_some()
         || response.data.semantic_bridges.pop().is_some()
         || response.data.unresolved_gaps.pop().is_some()
+    {
+        return true;
+    }
+    if let Some(band) = response.data.migration_siblings.as_mut()
+        && band.siblings.pop().is_some()
+    {
+        return true;
+    }
+    response.data.migration_siblings.take().is_some()
         || response
             .data
             .change_impact
@@ -2192,6 +2448,12 @@ fn cache_dependency_files_for_response(
                      scan; downstream cache_dep_files set may be incomplete"
                 );
             }
+        }
+    }
+
+    if let Some(band) = &response.data.migration_siblings {
+        for sibling in &band.siblings {
+            insert_cache_dep(&mut files, &sibling.repo, &sibling.file_path);
         }
     }
 
@@ -3551,8 +3813,9 @@ fn gap_warnings(unresolved_gaps: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         ChangeImpactSummary, ContextPackData, ContextPackMeta, ContextPackResponse,
-        CrossRepoCaller, PackItem, PackResolutionDetails, PlanningRescue, RankedPackCandidate,
-        RescueAnchor, ResolvedPackTarget, TruncatedRepos, apply_planning_evidence_ranking,
+        CrossRepoCaller, MigrationSiblingBand, MigrationSiblingEntry, PackItem,
+        PackResolutionDetails, PlanningRescue, RankedPackCandidate, RescueAnchor,
+        ResolvedPackTarget, TruncatedRepos, apply_planning_evidence_ranking,
         build_ranked_alternate_anchors, build_resolution_details, cap_change_impact_repos,
         clamp_margin_u16, compute_unresolved_gaps, file_path_packability_bonus,
         merge_probable_downstream_repos, pack_candidate_query_penalty, pack_is_structurally_weak,
@@ -3571,8 +3834,8 @@ mod tests {
         derive_repo_sets, finalize_proofs, is_eventish_kind, same_repo_event_context_targets,
     };
     use gather_step_core::{
-        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, PlanningProof, ProofHop,
-        ProofKind, Visibility, node_id,
+        EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId,
+        NodeKind, PlanningProof, ProofHop, ProofKind, Visibility, node_id, ref_node_id,
     };
     use gather_step_storage::{GraphStore, GraphStoreDb, WorkspaceStores};
     use smallvec::smallvec;
@@ -3989,6 +4252,102 @@ mod tests {
     }
 
     #[test]
+    fn migration_sibling_band_collects_prior_filters() {
+        let temp = TempDb::new("migration-sibling-band");
+        let store = GraphStoreDb::open(temp.path()).expect("graph should open");
+        let current_file = file("api", "migrations/20260430-alerts.ts");
+        let current_up = node(
+            "api",
+            "migrations/20260430-alerts.ts",
+            NodeKind::Function,
+            "up",
+            0,
+        );
+        let prior_file = file("api", "migrations/20260401-alerts.ts");
+        let prior_up = node(
+            "api",
+            "migrations/20260401-alerts.ts",
+            NodeKind::Function,
+            "up",
+            0,
+        );
+        let collection_external_id = "__migration_collection__alerts";
+        let collection = NodeData {
+            id: ref_node_id(NodeKind::Entity, collection_external_id),
+            kind: NodeKind::Entity,
+            repo: "api".to_owned(),
+            file_path: "migrations/20260430-alerts.ts".to_owned(),
+            name: "alerts".to_owned(),
+            qualified_name: Some(collection_external_id.to_owned()),
+            external_id: Some(collection_external_id.to_owned()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+        };
+        for node in [
+            &current_file,
+            &current_up,
+            &prior_file,
+            &prior_up,
+            &collection,
+        ] {
+            store.insert_node(node).expect("node should insert");
+        }
+        store
+            .insert_edge(&EdgeData {
+                source: current_up.id,
+                target: collection.id,
+                kind: EdgeKind::MigratesCollection,
+                metadata: EdgeMetadata {
+                    drift_kind: Some(format!(
+                        "{}{}",
+                        MIGRATION_FILTERS_METADATA_PREFIX,
+                        serde_json::to_string(&["{ workflow: { $exists: false } }"])
+                            .expect("filters should serialize")
+                    )),
+                    ..EdgeMetadata::default()
+                },
+                owner_file: current_file.id,
+                is_cross_file: false,
+            })
+            .expect("current migration edge should insert");
+        store
+            .insert_edge(&EdgeData {
+                source: prior_up.id,
+                target: collection.id,
+                kind: EdgeKind::MigratesCollection,
+                metadata: EdgeMetadata {
+                    drift_kind: Some(format!(
+                        "{}{}",
+                        MIGRATION_FILTERS_METADATA_PREFIX,
+                        serde_json::to_string(&["{ workflow: { $type: 'object' } }"])
+                            .expect("filters should serialize")
+                    )),
+                    ..EdgeMetadata::default()
+                },
+                owner_file: prior_file.id,
+                is_cross_file: false,
+            })
+            .expect("prior migration edge should insert");
+
+        let band = super::migration_sibling_band_for_anchor(&store, current_up.id)
+            .expect("sibling lookup should succeed")
+            .expect("migration anchor should produce sibling band");
+
+        assert_eq!(band.collection_name, "alerts");
+        assert!(band.coverage_note.contains("Mongoose migrations"));
+        assert!(band.coverage_note.contains("TypeORM"));
+        assert!(band.verification_hint.contains("db.alerts.aggregate"));
+        assert_eq!(band.siblings.len(), 1);
+        assert_eq!(band.siblings[0].file_path, "migrations/20260401-alerts.ts");
+        assert_eq!(
+            band.siblings[0].filter_literals,
+            vec!["{ workflow: { $type: 'object' } }".to_owned()]
+        );
+    }
+
+    #[test]
     fn evidence_items_rank_above_equal_score_items_without_evidence() {
         let mut items = vec![
             make_pack_item(100, "no_evidence.rs", false),
@@ -4100,12 +4459,17 @@ mod tests {
             transport_links: None,
             planning_rescue: None,
             planning_proofs: Vec::new(),
+            migration_siblings: None,
         };
 
         let json = serde_json::to_value(&data).unwrap();
         assert!(
             json.get("planning_rescue").is_none(),
             "planning_rescue must be absent when None (non-planning mode)"
+        );
+        assert!(
+            json.get("migration_siblings").is_none(),
+            "migration_siblings must be absent when None"
         );
     }
 
@@ -4530,6 +4894,7 @@ mod tests {
                 transport_links: None,
                 planning_rescue: None,
                 planning_proofs: Vec::new(),
+                migration_siblings: None,
             },
             meta: None,
         }
@@ -4769,6 +5134,19 @@ mod tests {
             ))
             .unwrap(),
         ];
+        response.data.migration_siblings = Some(MigrationSiblingBand {
+            collection_name: "alerts".to_owned(),
+            coverage_note: super::migration_coverage_note().to_owned(),
+            verification_hint: super::migration_verification_hint("alerts"),
+            siblings: vec![MigrationSiblingEntry {
+                repo: "backend_standard".to_owned(),
+                file_path: "migrations/20260401-alerts.ts".to_owned(),
+                commit_short_sha: Some("abc1234".to_owned()),
+                symbol_name: "up".to_owned(),
+                symbol_id: "migration-id".to_owned(),
+                filter_literals: vec!["{ workflow: { $type: 'object' } }".to_owned()],
+            }],
+        });
         response.meta = Some(ContextPackMeta {
             response_schema_version: crate::budget::response_schema_version(),
             generation: 7,
@@ -4884,6 +5262,23 @@ mod tests {
                 "symbol_name": "string"
               }
             ],
+            "migration_siblings": {
+              "collection_name": "string",
+              "coverage_note": "string",
+              "siblings": [
+                {
+                  "commit_short_sha": "string",
+                  "file_path": "string",
+                  "filter_literals": [
+                    "string"
+                  ],
+                  "repo": "string",
+                  "symbol_id": "string",
+                  "symbol_name": "string"
+                }
+              ],
+              "verification_hint": "string"
+            },
             "mode": "string",
             "next_steps": [],
             "planning_proofs": [

@@ -1,6 +1,11 @@
-use std::{collections::BTreeSet, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
-use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, virtual_node};
+use gather_step_core::{
+    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, virtual_node,
+};
 use regex::Regex;
 
 use crate::{traverse::Language, tree_sitter::ParsedFile};
@@ -17,61 +22,66 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
     }
 
     let source = parsed.source.as_ref();
-    if !should_scan_projection_fields(source, &parsed.file_node.file_path) {
+    let should_scan_projection = should_scan_projection_fields(source, &parsed.file_node.file_path);
+    let direct_edges = direct_field_access_edges(parsed, source);
+    if !should_scan_projection && direct_edges.is_empty() {
         return;
     }
 
     let mut known_fields = BTreeSet::new();
     let mut facts = ProjectionFacts::default();
-    let has_backfill_context = has_backfill_context(source, &parsed.file_node.file_path);
 
-    if has_schema_field_context(source) {
-        for field in property_declarations(source) {
-            known_fields.insert(field);
-        }
-    }
+    if should_scan_projection {
+        let has_backfill_context = has_backfill_context(source, &parsed.file_node.file_path);
 
-    for (target, value) in object_field_assignments(source) {
-        if is_write_context(&value) {
-            known_fields.insert(target.clone());
-            facts.writes.insert(target.clone());
-        }
-
-        let source_fields = source_fields_from_value(&value);
-        if is_derivation(&target, &value, &source_fields) {
-            known_fields.insert(target.clone());
-            facts.writes.insert(target.clone());
-            for source_field in source_fields {
-                known_fields.insert(source_field.clone());
-                facts.reads.insert(source_field.clone());
-                facts.derives.insert((source_field, target.clone()));
+        if has_schema_field_context(source) {
+            for field in property_declarations(source) {
+                known_fields.insert(field);
             }
         }
-    }
 
-    for line in source.lines() {
-        let fields = line_fields(line, &known_fields);
-        if fields.is_empty() {
-            continue;
+        for (target, value) in object_field_assignments(source) {
+            if is_write_context(&value) {
+                known_fields.insert(target.clone());
+                facts.writes.insert(target.clone());
+            }
+
+            let source_fields = source_fields_from_value(&value);
+            if is_derivation(&target, &value, &source_fields) {
+                known_fields.insert(target.clone());
+                facts.writes.insert(target.clone());
+                for source_field in source_fields {
+                    known_fields.insert(source_field.clone());
+                    facts.reads.insert(source_field.clone());
+                    facts.derives.insert((source_field, target.clone()));
+                }
+            }
         }
-        let write_fields = object_line_fields(line, &known_fields);
-        if is_filter_line(line) {
-            facts.filters.extend(fields.iter().cloned());
-            facts.reads.extend(fields.iter().cloned());
-        }
-        if is_write_line(line) {
-            facts.writes.extend(write_fields.iter().cloned());
-        }
-        if is_index_line(line) {
-            facts.indexes.extend(write_fields.iter().cloned());
-        }
-        if is_backfill_line(line, &parsed.file_node.file_path)
-            || (has_backfill_context && is_write_line(line))
-        {
-            if write_fields.is_empty() {
-                facts.backfills.extend(fields);
-            } else {
-                facts.backfills.extend(write_fields);
+
+        for line in source.lines() {
+            let fields = line_fields(line, &known_fields);
+            if fields.is_empty() {
+                continue;
+            }
+            let write_fields = object_line_fields(line, &known_fields);
+            if is_filter_line(line) {
+                facts.filters.extend(fields.iter().cloned());
+                facts.reads.extend(fields.iter().cloned());
+            }
+            if is_write_line(line) {
+                facts.writes.extend(write_fields.iter().cloned());
+            }
+            if is_index_line(line) {
+                facts.indexes.extend(write_fields.iter().cloned());
+            }
+            if is_backfill_line(line, &parsed.file_node.file_path)
+                || (has_backfill_context && is_write_line(line))
+            {
+                if write_fields.is_empty() {
+                    facts.backfills.extend(fields);
+                } else {
+                    facts.backfills.extend(write_fields);
+                }
             }
         }
     }
@@ -85,6 +95,9 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
         .chain(facts.backfills.iter())
     {
         push_node(parsed, data_field_node(parsed, field));
+    }
+    for edge in &direct_edges {
+        push_node(parsed, data_field_node(parsed, &edge.field));
     }
     for (source_field, target_field) in &facts.derives {
         push_node(parsed, data_field_node(parsed, source_field));
@@ -112,6 +125,9 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
     for field in facts.backfills {
         push_field_edge(parsed, &field, EdgeKind::BackfillsField, CONFIDENCE_HIGH);
     }
+    for edge in &direct_edges {
+        push_direct_field_edge(parsed, edge);
+    }
 }
 
 #[derive(Default)]
@@ -122,6 +138,320 @@ struct ProjectionFacts {
     filters: BTreeSet<String>,
     indexes: BTreeSet<String>,
     backfills: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DirectFieldAccessEdge {
+    owner: NodeId,
+    field: String,
+    kind: EdgeKind,
+    confidence: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldAccessMode {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFieldAccessEdge> {
+    let bindings = typed_field_bindings(source);
+    if bindings.is_empty() {
+        return Vec::new();
+    }
+
+    let mut edges = BTreeSet::new();
+    for (line_index, line) in source.lines().enumerate() {
+        let line_number = u32::try_from(line_index + 1).unwrap_or(u32::MAX);
+        let owner = owner_for_line(parsed, line_number);
+        for (binding, type_name) in &bindings {
+            for access in field_accesses_on_line(line, binding, type_name) {
+                for edge in access_edges(owner, &access.field_path, access.mode) {
+                    edges.insert(edge);
+                }
+            }
+        }
+    }
+
+    edges.into_iter().collect()
+}
+
+fn typed_field_bindings(source: &str) -> BTreeMap<String, String> {
+    let mut bindings = BTreeMap::new();
+    for regex in [typed_variable_re(), typed_parameter_re()] {
+        for capture in regex.captures_iter(source) {
+            let Some(name) = capture.get(1).map(|item| item.as_str()) else {
+                continue;
+            };
+            let Some(type_name) = capture
+                .get(2)
+                .and_then(|item| normalize_direct_type_name(item.as_str()))
+            else {
+                continue;
+            };
+            bindings.insert(name.to_owned(), type_name);
+        }
+    }
+    bindings
+}
+
+fn normalize_direct_type_name(raw: &str) -> Option<String> {
+    let mut value = raw.trim();
+    value = value.strip_prefix("readonly ").unwrap_or(value).trim();
+    value = value
+        .split(['|', '&'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_end_matches("[]")
+        .trim();
+    let base = value
+        .split('<')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .rsplit('.')
+        .next()
+        .unwrap_or(value)
+        .trim();
+
+    if base.is_empty()
+        || base.ends_with("Props")
+        || !base.bytes().all(is_field_name_byte)
+        || !base
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        || is_direct_type_noise(base)
+    {
+        return None;
+    }
+
+    Some(base.to_owned())
+}
+
+fn is_direct_type_noise(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "Any"
+            | "Array"
+            | "Boolean"
+            | "Date"
+            | "Error"
+            | "Function"
+            | "Map"
+            | "NonNullable"
+            | "Number"
+            | "Object"
+            | "Omit"
+            | "Partial"
+            | "Pick"
+            | "Promise"
+            | "Readonly"
+            | "Record"
+            | "Required"
+            | "Set"
+            | "String"
+            | "Unknown"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FieldAccess {
+    field_path: String,
+    mode: FieldAccessMode,
+}
+
+fn field_accesses_on_line(line: &str, binding: &str, type_name: &str) -> Vec<FieldAccess> {
+    let mut accesses = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_start) = line[search_from..].find(binding) {
+        let start = search_from + relative_start;
+        let end = start + binding.len();
+        search_from = end;
+
+        if !is_identifier_boundary(line.as_bytes(), start, end)
+            || is_inside_simple_string(line, start)
+            || is_after_line_comment(line, start)
+        {
+            continue;
+        }
+
+        let Some(parsed) = parse_member_chain(line, end) else {
+            continue;
+        };
+        if parsed.props.is_empty() {
+            continue;
+        }
+
+        let mode = access_mode(line, start, parsed.cursor, parsed.mutating_method);
+        let field_path = format!("{}.{}", type_name, parsed.props.join("."));
+        accesses.push(FieldAccess { field_path, mode });
+    }
+    accesses
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedMemberChain {
+    props: Vec<String>,
+    cursor: usize,
+    mutating_method: bool,
+}
+
+fn parse_member_chain(line: &str, mut cursor: usize) -> Option<ParsedMemberChain> {
+    let bytes = line.as_bytes();
+    let mut props = Vec::new();
+    let mut optional_count = 0;
+    loop {
+        cursor = skip_ascii_ws(bytes, cursor);
+        if cursor >= bytes.len() {
+            break;
+        }
+        if bytes[cursor] == b'.' {
+            cursor += 1;
+        } else if cursor + 1 < bytes.len() && bytes[cursor] == b'?' && bytes[cursor + 1] == b'.' {
+            optional_count += 1;
+            if optional_count > 1 {
+                return None;
+            }
+            cursor += 2;
+        } else {
+            break;
+        }
+
+        cursor = skip_ascii_ws(bytes, cursor);
+        if cursor >= bytes.len() || bytes[cursor] == b'[' {
+            return None;
+        }
+
+        let prop_start = cursor;
+        while cursor < bytes.len() && is_field_name_byte(bytes[cursor]) {
+            cursor += 1;
+        }
+        if cursor == prop_start {
+            return None;
+        }
+        props.push(line[prop_start..cursor].to_owned());
+    }
+
+    if props.is_empty() {
+        return None;
+    }
+    if skip_ascii_ws(bytes, cursor) < bytes.len() && bytes[skip_ascii_ws(bytes, cursor)] == b'[' {
+        return None;
+    }
+
+    let mutating_method = strip_terminal_method(line, &mut props, cursor);
+    if props.is_empty() {
+        return None;
+    }
+
+    Some(ParsedMemberChain {
+        props,
+        cursor,
+        mutating_method,
+    })
+}
+
+fn strip_terminal_method(line: &str, props: &mut Vec<String>, cursor: usize) -> bool {
+    let bytes = line.as_bytes();
+    let next = skip_ascii_ws(bytes, cursor);
+    if next < bytes.len() && bytes[next] == b'(' && props.len() > 1 {
+        let terminal = props.pop().unwrap_or_default();
+        return is_mutating_field_method(&terminal);
+    }
+    if props.last().is_some_and(|prop| prop == "length") && props.len() > 1 {
+        props.pop();
+    }
+    false
+}
+
+fn access_mode(
+    line: &str,
+    access_start: usize,
+    access_end: usize,
+    mutating_method: bool,
+) -> FieldAccessMode {
+    if mutating_method {
+        return FieldAccessMode::ReadWrite;
+    }
+    let before = line[..access_start].trim_end();
+    if before.ends_with("delete") {
+        return FieldAccessMode::Write;
+    }
+    if is_assignment_operator_at(line, access_end) || is_update_operator_at(line, access_end) {
+        return FieldAccessMode::Write;
+    }
+    FieldAccessMode::Read
+}
+
+fn access_edges(
+    owner: NodeId,
+    field_path: &str,
+    mode: FieldAccessMode,
+) -> Vec<DirectFieldAccessEdge> {
+    let parts = field_path.split('.').collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    if parts.len() > 2 {
+        for index in 2..parts.len() {
+            edges.push(DirectFieldAccessEdge {
+                owner,
+                field: parts[..index].join("."),
+                kind: EdgeKind::ReadsField,
+                confidence: CONFIDENCE_MEDIUM,
+            });
+        }
+    }
+
+    match mode {
+        FieldAccessMode::Read => edges.push(DirectFieldAccessEdge {
+            owner,
+            field: field_path.to_owned(),
+            kind: EdgeKind::ReadsField,
+            confidence: CONFIDENCE_MEDIUM,
+        }),
+        FieldAccessMode::Write => edges.push(DirectFieldAccessEdge {
+            owner,
+            field: field_path.to_owned(),
+            kind: EdgeKind::WritesField,
+            confidence: CONFIDENCE_HIGH,
+        }),
+        FieldAccessMode::ReadWrite => {
+            edges.push(DirectFieldAccessEdge {
+                owner,
+                field: field_path.to_owned(),
+                kind: EdgeKind::ReadsField,
+                confidence: CONFIDENCE_MEDIUM,
+            });
+            edges.push(DirectFieldAccessEdge {
+                owner,
+                field: field_path.to_owned(),
+                kind: EdgeKind::WritesField,
+                confidence: CONFIDENCE_HIGH,
+            });
+        }
+    }
+
+    edges
+}
+
+fn owner_for_line(parsed: &ParsedFile, line: u32) -> NodeId {
+    parsed
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Function | NodeKind::Class))
+        .filter_map(|node| {
+            let span = node.span.as_ref()?;
+            span_contains_line(span, line).then_some((span.line_len, node.id))
+        })
+        .min_by_key(|(line_len, _)| *line_len)
+        .map_or(parsed.file_node.id, |(_, id)| id)
+}
+
+fn span_contains_line(span: &SourceSpan, line: u32) -> bool {
+    let end = span.line_start.saturating_add(u32::from(span.line_len));
+    (span.line_start..=end).contains(&line)
 }
 
 fn property_declarations(source: &str) -> BTreeSet<String> {
@@ -207,6 +537,86 @@ fn has_projected_object_key(source: &str) -> bool {
 
 fn is_field_name_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
+}
+
+fn is_identifier_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before_ok = start == 0 || !is_field_name_byte(bytes[start - 1]);
+    let after_ok = end >= bytes.len() || !is_field_name_byte(bytes[end]);
+    before_ok && after_ok
+}
+
+fn skip_ascii_ws(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn is_assignment_operator_at(line: &str, cursor: usize) -> bool {
+    let bytes = line.as_bytes();
+    let cursor = skip_ascii_ws(bytes, cursor);
+    let rest = &line[cursor..];
+    if rest.starts_with("==") || rest.starts_with("=>") {
+        return false;
+    }
+    rest.starts_with('=')
+        || rest.starts_with("+=")
+        || rest.starts_with("-=")
+        || rest.starts_with("*=")
+        || rest.starts_with("/=")
+        || rest.starts_with("%=")
+        || rest.starts_with("??=")
+        || rest.starts_with("||=")
+        || rest.starts_with("&&=")
+}
+
+fn is_update_operator_at(line: &str, cursor: usize) -> bool {
+    let bytes = line.as_bytes();
+    let cursor = skip_ascii_ws(bytes, cursor);
+    line[cursor..].starts_with("++") || line[cursor..].starts_with("--")
+}
+
+fn is_mutating_field_method(method: &str) -> bool {
+    matches!(
+        method,
+        "copyWithin"
+            | "fill"
+            | "pop"
+            | "push"
+            | "reverse"
+            | "shift"
+            | "sort"
+            | "splice"
+            | "unshift"
+    )
+}
+
+fn is_after_line_comment(line: &str, cursor: usize) -> bool {
+    line[..cursor].contains("//")
+}
+
+fn is_inside_simple_string(line: &str, cursor: usize) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut backtick = false;
+    let mut escaped = false;
+    for byte in line[..cursor].bytes() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if byte == b'\\' {
+            escaped = true;
+            continue;
+        }
+        match byte {
+            b'\'' if !double && !backtick => single = !single,
+            b'"' if !single && !backtick => double = !double,
+            b'`' if !single && !double => backtick = !backtick,
+            _ => {}
+        }
+    }
+    single || double || backtick
 }
 
 fn object_field_assignments(source: &str) -> Vec<(String, String)> {
@@ -490,6 +900,17 @@ fn push_field_edge(parsed: &mut ParsedFile, field: &str, kind: EdgeKind, confide
     );
 }
 
+fn push_direct_field_edge(parsed: &mut ParsedFile, edge: &DirectFieldAccessEdge) {
+    push_node(parsed, data_field_node(parsed, &edge.field));
+    push_edge(
+        parsed,
+        edge.owner,
+        field_id(parsed, &edge.field),
+        edge.kind,
+        edge.confidence,
+    );
+}
+
 fn push_edge(
     parsed: &mut ParsedFile,
     source: gather_step_core::NodeId,
@@ -525,6 +946,22 @@ fn property_re() -> &'static Regex {
             r"(?m)^\s*(?:public\s+|private\s+|protected\s+|readonly\s+|static\s+)*([A-Za-z_$][A-Za-z0-9_$]*)[!?]?\s*:\s*[^;=\n]+;",
         )
         .expect("property regex should compile")
+    })
+}
+
+fn typed_variable_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*([^=;,\n]+)")
+            .expect("typed variable regex should compile")
+    })
+}
+
+fn typed_parameter_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"[(,]\s*([A-Za-z_$][A-Za-z0-9_$]*)\??\s*:\s*([^=,)\n]+)")
+            .expect("typed parameter regex should compile")
     })
 }
 

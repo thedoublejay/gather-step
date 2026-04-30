@@ -140,6 +140,8 @@ pub fn projection_impact<S: GraphStore>(
     let mut projected_ids = BTreeSet::new();
     let mut derivations = BTreeSet::new();
     let mut relevant_ids = selected_ids.clone();
+    let descendant_ids = descendant_field_ids(store, &selected)?;
+    relevant_ids.extend(descendant_ids);
     if let Some(chain) = chains_by_signature.values().next() {
         derivations.extend(chain.derivations.iter().copied());
         relevant_ids.extend(chain.node_ids.iter().copied());
@@ -287,6 +289,30 @@ fn equivalent_field_ids<S: GraphStore>(
     }
     for node in store.nodes_by_type(NodeKind::DataField)? {
         if keys.contains(&field_key(&node)) {
+            ids.insert(node.id);
+        }
+    }
+    Ok(ids)
+}
+
+fn descendant_field_ids<S: GraphStore>(
+    store: &S,
+    fields: &[NodeData],
+) -> Result<BTreeSet<NodeId>, ProjectionImpactError> {
+    let prefixes = fields
+        .iter()
+        .map(|field| (field.repo.clone(), format!("{}.", field.name)))
+        .collect::<BTreeSet<_>>();
+    if prefixes.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let mut ids = BTreeSet::new();
+    for node in store.nodes_by_type(NodeKind::DataField)? {
+        if prefixes
+            .iter()
+            .any(|(repo, prefix)| node.repo == *repo && starts_with_ascii_case(&node.name, prefix))
+        {
             ids.insert(node.id);
         }
     }
@@ -459,14 +485,33 @@ fn populate_risks_and_confidence(report: &mut ProjectionImpactReport) {
     if report.ambiguity.is_some() {
         report.risk_hints.push("needs_disambiguation".to_owned());
     }
+    let has_field_evidence = !report.readers.is_empty()
+        || !report.writers.is_empty()
+        || !report.filters.is_empty()
+        || !report.indexes.is_empty()
+        || !report.backfills.is_empty();
+    let has_projection_context =
+        !report.source_fields.is_empty() || !report.projected_fields.is_empty();
     if !report.source_fields.is_empty() && !report.projected_fields.is_empty() {
         report.risk_hints.push("source_field_unreviewed".to_owned());
     }
-    if report.derivation_edges.is_empty() {
+    if report.derivation_edges.is_empty() && has_projection_context {
         report
             .risk_hints
             .push("projection_chain_unproven".to_owned());
         report.missing_evidence.push("derivation_edge".to_owned());
+    } else if report.derivation_edges.is_empty() && has_field_evidence {
+        report
+            .risk_hints
+            .push("direct_field_access_observed".to_owned());
+    } else if report.derivation_edges.is_empty() && report.ambiguity.is_some() {
+        report
+            .risk_hints
+            .push("projection_chain_unproven".to_owned());
+        report.missing_evidence.push("derivation_edge".to_owned());
+    } else if report.derivation_edges.is_empty() {
+        report.risk_hints.push("field_evidence_missing".to_owned());
+        report.missing_evidence.push("reader_or_writer".to_owned());
     }
     if !report.projected_fields.is_empty() && report.writers.is_empty() {
         report
@@ -509,8 +554,8 @@ fn populate_risks_and_confidence(report: &mut ProjectionImpactReport) {
     report.missing_evidence.sort();
     report.missing_evidence.dedup();
 
-    report.confidence = if !report.derivation_edges.is_empty()
-        && (!report.writers.is_empty() || !report.readers.is_empty())
+    report.confidence = if (!report.derivation_edges.is_empty() || has_field_evidence)
+        && report.ambiguity.is_none()
     {
         "high".to_owned()
     } else if !report.derivation_edges.is_empty() || !report.candidates.is_empty() {
@@ -542,6 +587,11 @@ fn contains_ascii_case(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn starts_with_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack.len() >= needle.len()
+        && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
 }
 
 fn ends_with_ascii_case(haystack: &str, needle: &str) -> bool {
@@ -683,6 +733,36 @@ mod tests {
             report
                 .risk_hints
                 .contains(&"field_candidate_not_found".to_owned())
+        );
+    }
+
+    #[test]
+    fn direct_field_evidence_reports_parent_and_nested_access() {
+        let temp = TempDb::new("projection-impact", "direct-field");
+        let store = temp.open();
+        let file = file_node("svc", "src/alerts.ts");
+        let workflow = field_in_file("svc", "src/alerts.ts", "Alert.workflow");
+        let task_ids = field_in_file("svc", "src/alerts.ts", "Alert.workflow.taskIds");
+        store
+            .bulk_insert(
+                &[file.clone(), workflow.clone(), task_ids.clone()],
+                &[edge(file.id, task_ids.id, file.id, EdgeKind::WritesField)],
+            )
+            .expect("direct field graph should write");
+
+        let report = projection_impact(&store, request("Alert.workflow"))
+            .expect("projection impact should load");
+
+        assert!(report.resolved);
+        assert_eq!(report.candidates[0].field_path, "Alert.workflow");
+        assert_eq!(report.writers[0].field_path, "Alert.workflow.taskIds");
+        assert!(report.derivation_edges.is_empty());
+        assert!(report.missing_evidence.is_empty());
+        assert_eq!(report.confidence, "high");
+        assert!(
+            report
+                .risk_hints
+                .contains(&"direct_field_access_observed".to_owned())
         );
     }
 
