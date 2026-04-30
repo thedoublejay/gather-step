@@ -873,6 +873,7 @@ fn impact_payload_as_context_pack_response(
             transport_links: None,
             planning_rescue: None,
             planning_proofs: Vec::new(),
+            migration_siblings: None,
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -939,6 +940,7 @@ fn projection_impact_payload_as_context_pack_response(
             transport_links: None,
             planning_rescue: None,
             planning_proofs: Vec::new(),
+            migration_siblings: None,
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -2710,6 +2712,7 @@ mod tests {
                     "source_file": "src/transform_service/pipeline.py",
                     "target_file": "src/shared_models/records.py",
                 })],
+                migration_siblings: None,
             },
             meta: Some(ContextPackMeta {
                 response_schema_version: response_schema_version(),
