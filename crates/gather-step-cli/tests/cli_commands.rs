@@ -486,7 +486,7 @@ fn stable_error_when_config_is_missing() {
 
     let output = run_fail(temp.path(), &["index", "--json"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("config not found:"));
+    assert!(stderr.contains("Config not found:"));
     assert!(stderr.contains("Next step: run `gather-step init`"));
 }
 
@@ -516,7 +516,7 @@ repos:
 
     let output = run_fail(temp.path(), &["index", "--json"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("configured repo path does not exist:"));
+    assert!(stderr.contains("Configured repo path does not exist:"));
     assert!(stderr.contains("repo `backend_standard` path does not exist"));
 }
 
@@ -584,8 +584,8 @@ fn concurrent_graph_open_reports_stable_process_error() {
         .expect("graph should open and hold the redb lock");
     let output = run_fail(temp.path(), &["status", "--json"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("another gather-step process is using this workspace"));
-    assert!(stderr.contains("stop `gather-step watch`"));
+    assert!(stderr.contains("Another gather-step process is using this workspace"));
+    assert!(stderr.contains("Stop `gather-step watch`"));
 }
 
 #[test]
@@ -605,7 +605,7 @@ fn generated_state_permission_denied_reports_stable_error() {
     let output = run_fail(temp.path(), &["index", "--json"]);
     let _ = fs::set_permissions(&generated_root, fs::Permissions::from_mode(0o700));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("cannot write `.gather-step` generated state"));
+    assert!(stderr.contains("Cannot write `.gather-step` generated state"));
     assert!(stderr.contains("fix permissions on `.gather-step`"));
 }
 
