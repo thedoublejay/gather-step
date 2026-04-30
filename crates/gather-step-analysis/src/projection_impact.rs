@@ -140,8 +140,6 @@ pub fn projection_impact<S: GraphStore>(
     let mut projected_ids = BTreeSet::new();
     let mut derivations = BTreeSet::new();
     let mut relevant_ids = selected_ids.clone();
-    let descendant_ids = descendant_field_ids(store, &selected)?;
-    relevant_ids.extend(descendant_ids);
     if let Some(chain) = chains_by_signature.values().next() {
         derivations.extend(chain.derivations.iter().copied());
         relevant_ids.extend(chain.node_ids.iter().copied());
@@ -151,8 +149,15 @@ pub fn projection_impact<S: GraphStore>(
         }
     }
 
+    // `descendant_field_ids` and `equivalent_field_ids` both walk
+    // `nodes_by_type(DataField)` independently — fold them into a single pass
+    // so a workspace with millions of `DataField` nodes pays the cost once per
+    // request rather than twice.
     let projected_keys = field_keys_for_ids(store, &projected_ids)?;
-    relevant_ids.extend(equivalent_field_ids(store, &projected_keys)?);
+    let (descendant_ids, equivalent_ids) =
+        descendant_and_equivalent_field_ids(store, &selected, &projected_keys)?;
+    relevant_ids.extend(descendant_ids);
+    relevant_ids.extend(equivalent_ids);
     relevant_ids.extend(source_ids.iter().copied());
     relevant_ids.extend(projected_ids.iter().copied());
 
@@ -279,44 +284,35 @@ fn field_keys_for_ids<S: GraphStore>(
     Ok(keys)
 }
 
-fn equivalent_field_ids<S: GraphStore>(
+fn descendant_and_equivalent_field_ids<S: GraphStore>(
     store: &S,
-    keys: &BTreeSet<FieldKey>,
-) -> Result<BTreeSet<NodeId>, ProjectionImpactError> {
-    let mut ids = BTreeSet::new();
-    if keys.is_empty() {
-        return Ok(ids);
-    }
-    for node in store.nodes_by_type(NodeKind::DataField)? {
-        if keys.contains(&field_key(&node)) {
-            ids.insert(node.id);
-        }
-    }
-    Ok(ids)
-}
-
-fn descendant_field_ids<S: GraphStore>(
-    store: &S,
-    fields: &[NodeData],
-) -> Result<BTreeSet<NodeId>, ProjectionImpactError> {
-    let prefixes = fields
+    descendant_anchors: &[NodeData],
+    equivalence_keys: &BTreeSet<FieldKey>,
+) -> Result<(BTreeSet<NodeId>, BTreeSet<NodeId>), ProjectionImpactError> {
+    let prefixes = descendant_anchors
         .iter()
         .map(|field| (field.repo.clone(), format!("{}.", field.name)))
         .collect::<BTreeSet<_>>();
-    if prefixes.is_empty() {
-        return Ok(BTreeSet::new());
+
+    let mut descendants = BTreeSet::new();
+    let mut equivalents = BTreeSet::new();
+    if prefixes.is_empty() && equivalence_keys.is_empty() {
+        return Ok((descendants, equivalents));
     }
 
-    let mut ids = BTreeSet::new();
     for node in store.nodes_by_type(NodeKind::DataField)? {
-        if prefixes
-            .iter()
-            .any(|(repo, prefix)| node.repo == *repo && starts_with_ascii_case(&node.name, prefix))
+        if !equivalence_keys.is_empty() && equivalence_keys.contains(&field_key(&node)) {
+            equivalents.insert(node.id);
+        }
+        if !prefixes.is_empty()
+            && prefixes
+                .iter()
+                .any(|(repo, prefix)| node.repo == *repo && starts_with_ascii_case(&node.name, prefix))
         {
-            ids.insert(node.id);
+            descendants.insert(node.id);
         }
     }
-    Ok(ids)
+    Ok((descendants, equivalents))
 }
 
 fn field_key(node: &NodeData) -> FieldKey {
