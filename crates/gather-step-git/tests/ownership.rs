@@ -34,7 +34,7 @@ fn who_owns_does_not_expose_raw_author_email_by_default() {
 
 #[test]
 fn redact_email_is_deterministic() {
-    let email = "contributor@org.example";
+    let email = "contributor@example.com";
     assert_eq!(
         redact_email(email),
         redact_email(email),
@@ -69,7 +69,7 @@ fn distinct_emails_produce_distinct_identifiers() {
 
 #[test]
 fn author_node_redacts_email_in_all_four_fields() {
-    let raw_email = "someone@example.internal";
+    let raw_email = "someone@example.com";
     let node = gather_step_git::intelligence::author_node_for_test(raw_email);
 
     assert!(
@@ -106,28 +106,28 @@ fn author_node_redacts_email_in_all_four_fields() {
         node.external_id
     );
     // Full domain must never appear in any field.
-    assert!(!node.file_path.contains("@example.internal"));
-    assert!(!node.name.contains("@example.internal"));
+    assert!(!node.file_path.contains("@example.com"));
+    assert!(!node.name.contains("@example.com"));
     assert!(
         !node
             .qualified_name
             .as_deref()
             .unwrap_or("")
-            .contains("@example.internal")
+            .contains("@example.com")
     );
     assert!(
         !node
             .external_id
             .as_deref()
             .unwrap_or("")
-            .contains("@example.internal")
+            .contains("@example.com")
     );
 }
 
 #[test]
 fn author_node_redaction_is_deterministic() {
-    let a = gather_step_git::intelligence::author_node_for_test("someone@example.internal");
-    let b = gather_step_git::intelligence::author_node_for_test("someone@example.internal");
+    let a = gather_step_git::intelligence::author_node_for_test("someone@example.com");
+    let b = gather_step_git::intelligence::author_node_for_test("someone@example.com");
     assert_eq!(a.id, b.id);
     assert_eq!(a.name, b.name);
     assert_eq!(a.file_path, b.file_path);
@@ -135,8 +135,8 @@ fn author_node_redaction_is_deterministic() {
 
 #[test]
 fn author_node_distinct_emails_produce_distinct_identifiers() {
-    let a = gather_step_git::intelligence::author_node_for_test("someone@example.internal");
-    let b = gather_step_git::intelligence::author_node_for_test("other@example.internal");
+    let a = gather_step_git::intelligence::author_node_for_test("someone@example.com");
+    let b = gather_step_git::intelligence::author_node_for_test("other@example.com");
     assert_ne!(a.id, b.id);
     assert_ne!(a.name, b.name);
     assert_ne!(a.file_path, b.file_path);

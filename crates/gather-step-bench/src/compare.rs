@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn redact_local_paths_replaces_temp_and_home_prefixes() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/example".to_owned());
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/example".to_owned());
         let value = format!("{home}/repo/bin --sample /tmp/gather-step/sample.json");
         let redacted = redact_local_paths(&value);
         assert!(!redacted.contains(&home));

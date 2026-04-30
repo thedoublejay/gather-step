@@ -208,7 +208,7 @@ search
 
 This is the core value proposition: precomputed structural context before the move, not exploratory prompting after it.
 
-Gather Step also pairs well with a Markdown-first engineering memory such as [Braingent Manifesto](https://github.com/thedoublejay/braingent-manifesto): let memory provide prior decisions and learnings, then use Gather Step to ground the plan in the current code graph. See [memory-backed planning](website/src/content/docs/guides/memory-backed-planning.md) for the loop.
+Gather Step also pairs well with a Markdown-first engineering memory: let memory provide prior decisions and learnings, then use Gather Step to ground the plan in the current code graph. See [memory-backed planning](website/src/content/docs/guides/memory-backed-planning.md) for the loop.
 
 ## Documentation
 
