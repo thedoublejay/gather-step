@@ -9,7 +9,10 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 use console::{set_colors_enabled, set_colors_enabled_stderr, style};
 use indicatif::{MultiProgress, ProgressDrawTarget};
-use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
+use tracing_subscriber::{
+    EnvFilter,
+    fmt::{MakeWriter, time::ChronoLocal},
+};
 
 use crate::{commands::Cli, path_safety};
 
@@ -193,6 +196,7 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .with_writer(io::stderr)
+            .with_timer(ChronoLocal::rfc_3339())
             .with_target(false)
             .with_ansi(false)
             .json()
@@ -214,6 +218,7 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_writer(writer)
+        .with_timer(ChronoLocal::rfc_3339())
         .with_target(false)
         .with_ansi(color_enabled_for(cli.color, stderr_is_tty, cli.json))
         .init();
