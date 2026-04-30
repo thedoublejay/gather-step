@@ -456,6 +456,20 @@ mod tests {
             "OrderState",
             shared_symbol_qn("@workspace/shared-contracts", "2.0.0", "OrderState"),
         );
+        let order_items = virtual_node(
+            NodeKind::DataField,
+            "shared_contracts",
+            "src/types.ts",
+            "orderItems",
+            "data-field::shared_contracts::src/types.ts::orderItems",
+        );
+        let order_item_ids = virtual_node(
+            NodeKind::DataField,
+            "shared_contracts",
+            "src/types.ts",
+            "orderItemIds",
+            "data-field::shared_contracts::src/types.ts::orderItemIds",
+        );
         graph
             .bulk_insert(
                 &[
@@ -466,6 +480,8 @@ mod tests {
                     consumer.clone(),
                     decorator.clone(),
                     shared_symbol.clone(),
+                    order_items.clone(),
+                    order_item_ids.clone(),
                 ],
                 &[
                     sample_edge(caller.id, downstream.id, file.id),
@@ -498,6 +514,17 @@ mod tests {
                         },
                         owner_file: consumer_file.id,
                         is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: order_items.id,
+                        target: order_item_ids.id,
+                        kind: EdgeKind::DerivesFieldFrom,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: file.id,
+                        is_cross_file: false,
                     },
                 ],
             )
@@ -679,6 +706,7 @@ mod tests {
         assert!(tool_names.contains(&"get_conventions"));
         assert!(tool_names.contains(&"get_overview"));
         assert!(tool_names.contains(&"get_context_pack"));
+        assert!(tool_names.contains(&"projection_impact"));
         assert!(tool_names.contains(&"plan_change"));
         assert!(
             !tool_names.contains(&"debug_route"),
@@ -814,6 +842,40 @@ mod tests {
             Some(false)
         );
 
+        let projection_result = client
+            .call_tool(
+                CallToolRequestParams::new("projection_impact").with_arguments(
+                    serde_json::json!({
+                        "target": "orderItemIds",
+                        "repo": "shared_contracts"
+                    })
+                    .as_object()
+                    .expect("projection args should be an object")
+                    .clone(),
+                ),
+            )
+            .await
+            .expect("projection_impact tool call should succeed");
+        let projection_payload = projection_result
+            .structured_content
+            .expect("projection structured content should exist");
+        let projection_data = projection_payload
+            .get("data")
+            .expect("projection response should include data");
+        assert_eq!(
+            projection_data.get("resolved").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            projection_data
+                .get("source_fields")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("field_path"))
+                .and_then(Value::as_str),
+            Some("orderItems")
+        );
+
         let empty_search = client
             .call_tool(
                 CallToolRequestParams::new("search").with_arguments(
@@ -827,6 +889,18 @@ mod tests {
             )
             .await;
         assert!(tool_failed(empty_search));
+
+        let empty_projection_target = client
+            .call_tool(
+                CallToolRequestParams::new("projection_impact").with_arguments(
+                    serde_json::json!({ "target": "   " })
+                        .as_object()
+                        .expect("empty projection args should be an object")
+                        .clone(),
+                ),
+            )
+            .await;
+        assert!(tool_failed(empty_projection_target));
 
         let outgoing_result = client
             .call_tool(

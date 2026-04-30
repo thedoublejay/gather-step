@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use gather_step_core::{EdgeKind, NodeKind};
 use gather_step_parser::{
-    FileEntry, Language, ParsedFile, frameworks::Framework, parse_file, parse_file_with_context,
-    parse_file_with_frameworks, parse_file_with_packs,
+    FileEntry, Language, ParsedFile, classify_language, frameworks::Framework, parse_file,
+    parse_file_with_context, parse_file_with_frameworks, parse_file_with_packs,
 };
 use insta::assert_debug_snapshot;
 
@@ -65,11 +66,8 @@ fn fixture_root() -> PathBuf {
 fn parse_fixture(relative_path: &str, frameworks: &[Framework]) -> ParsedFile {
     let root = fixture_root();
     let path = Path::new(relative_path);
-    let language = match path.extension().and_then(std::ffi::OsStr::to_str) {
-        Some("ts" | "tsx" | "mts" | "cts") => Language::TypeScript,
-        Some("js" | "jsx" | "mjs" | "cjs") => Language::JavaScript,
-        other => panic!("unsupported fixture extension: {other:?}"),
-    };
+    let language = classify_language(path)
+        .unwrap_or_else(|| panic!("unsupported fixture path: {}", path.display()));
     let file = FileEntry {
         path: path.into(),
         language,
@@ -201,6 +199,174 @@ fn summarize(parsed: &ParsedFile) -> ParsedSummary {
         call_sites,
         constant_strings,
     }
+}
+
+fn data_field_names(parsed: &ParsedFile) -> BTreeSet<String> {
+    parsed
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::DataField)
+        .map(|node| node.name.clone())
+        .collect()
+}
+
+fn field_edge_kinds(parsed: &ParsedFile, field: &str) -> BTreeSet<String> {
+    parsed
+        .edges
+        .iter()
+        .filter_map(|edge| {
+            parsed
+                .nodes
+                .iter()
+                .find(|node| node.id == edge.target && node.kind == NodeKind::DataField)
+                .filter(|node| node.name == field)
+                .map(|_| format!("{:?}", edge.kind))
+        })
+        .collect()
+}
+
+fn has_derivation(parsed: &ParsedFile, source: &str, target: &str) -> bool {
+    parsed.edges.iter().any(|edge| {
+        if edge.kind != EdgeKind::DerivesFieldFrom {
+            return false;
+        }
+        let source_name = parsed
+            .nodes
+            .iter()
+            .find(|node| node.id == edge.source)
+            .map(|node| node.name.as_str());
+        let target_name = parsed
+            .nodes
+            .iter()
+            .find(|node| node.id == edge.target)
+            .map(|node| node.name.as_str());
+        source_name == Some(source) && target_name == Some(target)
+    })
+}
+
+fn assert_fields(parsed: &ParsedFile, expected: &[&str]) {
+    let fields = data_field_names(parsed);
+    for field in expected {
+        assert!(
+            fields.contains(*field),
+            "missing data field `{field}`; observed={fields:?}"
+        );
+    }
+}
+
+#[test]
+fn projection_schema_pipeline_extracts_class_interface_and_mongoose_fields() {
+    let parsed = parse_fixture("projection_schema_pipeline.ts", &[Framework::NestJs]);
+
+    assert_fields(
+        &parsed,
+        &["customers", "customerIds", "status", "customerStatus"],
+    );
+    assert!(has_derivation(&parsed, "customers", "customerIds"));
+    assert!(has_derivation(&parsed, "status", "customerStatus"));
+}
+
+#[test]
+fn projection_mongo_pipeline_extracts_update_lookup_and_mapping_edges() {
+    let parsed = parse_fixture("projection_mongo_pipeline.ts", &[]);
+
+    assert_fields(
+        &parsed,
+        &[
+            "invoiceItems",
+            "invoiceItemTotal",
+            "orders",
+            "orderIds",
+            "archivedOrderIds",
+            "tagIds",
+        ],
+    );
+    assert!(has_derivation(&parsed, "invoiceItems", "invoiceItemTotal"));
+    assert!(has_derivation(&parsed, "orders", "orderIds"));
+    assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("WritesField"));
+    assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("BackfillsField"));
+    assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("FiltersOnField"));
+    assert!(field_edge_kinds(&parsed, "invoiceItemTotal").contains("IndexesField"));
+    assert!(field_edge_kinds(&parsed, "orderIds").contains("WritesField"));
+    assert!(field_edge_kinds(&parsed, "orderIds").contains("FiltersOnField"));
+    assert!(field_edge_kinds(&parsed, "archivedOrderIds").contains("WritesField"));
+    assert!(field_edge_kinds(&parsed, "tagIds").contains("WritesField"));
+}
+
+#[test]
+fn projection_optional_chaining_fixture_extracts_derivations() {
+    let parsed = parse_fixture("projection_optional_chaining.ts", &[]);
+
+    assert_fields(
+        &parsed,
+        &[
+            "lineItems",
+            "lineItemTotal",
+            "orders",
+            "orderIds",
+            "status",
+            "accountStatus",
+        ],
+    );
+    assert!(has_derivation(&parsed, "lineItems", "lineItemTotal"));
+    assert!(has_derivation(&parsed, "orders", "orderIds"));
+    assert!(has_derivation(&parsed, "status", "accountStatus"));
+}
+
+#[test]
+fn projection_mapping_fixtures_extract_json_and_yaml_index_fields() {
+    let json = parse_fixture("projection_json_mapping.json", &[]);
+    let yaml = parse_fixture("projection_yaml_mapping.yaml", &[]);
+
+    for parsed in [&json, &yaml] {
+        assert_fields(parsed, &["invoiceItemTotal", "orderIds"]);
+        assert!(
+            field_edge_kinds(parsed, "invoiceItemTotal").contains("IndexesField"),
+            "mapping fixture should mark invoiceItemTotal as indexed"
+        );
+        assert!(
+            field_edge_kinds(parsed, "orderIds").contains("IndexesField"),
+            "mapping fixture should mark orderIds as indexed"
+        );
+    }
+}
+
+#[test]
+fn projection_false_positive_fixtures_do_not_emit_data_fields() {
+    for fixture in [
+        "projection_false_positive_logs.ts",
+        "translations/projection_labels.ts",
+        "ui/projection_summary.tsx",
+        "__mocks__/projection_mock.ts",
+        "projection_contract.test.ts",
+        "projection_false_positive_count_locals.ts",
+    ] {
+        let parsed = parse_fixture(fixture, &[]);
+        assert!(
+            data_field_names(&parsed).is_empty(),
+            "fixture `{fixture}` should not emit projection fields; observed={:?}",
+            data_field_names(&parsed)
+        );
+    }
+}
+
+#[test]
+fn projection_fixtures_accept_separate_domain_names() {
+    let parsed = parse_fixture("projection_acme_loyalty.ts", &[]);
+
+    assert_fields(
+        &parsed,
+        &[
+            "pointEvents",
+            "loyaltyPointTotal",
+            "households",
+            "householdIds",
+            "rewardBalance",
+        ],
+    );
+    assert!(has_derivation(&parsed, "pointEvents", "loyaltyPointTotal"));
+    assert!(has_derivation(&parsed, "households", "householdIds"));
+    assert!(has_derivation(&parsed, "pointEvents", "rewardBalance"));
 }
 
 #[test]

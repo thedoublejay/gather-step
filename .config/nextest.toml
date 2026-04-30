@@ -8,6 +8,10 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 status-level = "all"
 final-status-level = "slow"
 
+[[profile.default.overrides]]
+filter = 'test(incremental_reindex_updates_contract_drift)'
+threads-required = "num-test-threads"
+
 [profile.stress]
 fail-fast = true
 retries = 0

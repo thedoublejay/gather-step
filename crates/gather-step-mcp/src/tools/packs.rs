@@ -10,6 +10,9 @@ use gather_step_analysis::proofs::{
 };
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
+use gather_step_analysis::{
+    ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact,
+};
 use gather_step_core::{EdgeKind, NodeId, NodeKind, PlanningProof, node_id};
 use gather_step_output::evidence::render_evidence_chain;
 use gather_step_storage::GraphStore;
@@ -1185,6 +1188,9 @@ fn assemble_context_pack_for_symbol(
             warnings,
         }),
     };
+    if matches!(mode, PackMode::Planning | PackMode::ChangeImpact) {
+        apply_projection_impact_summary(ctx, request, planning_repo_filter, &mut response);
+    }
     let budget = apply_response_budget(
         options.budget_tool,
         request.budget_bytes,
@@ -1208,6 +1214,110 @@ fn assemble_context_pack_for_symbol(
     refresh_context_pack_completeness(&mut response);
 
     Ok(AssembledPack { response })
+}
+
+fn apply_projection_impact_summary(
+    ctx: &McpContext,
+    request: &ContextPackRequest,
+    repo_filter: Option<&str>,
+    response: &mut ContextPackResponse,
+) {
+    let targets = projection_impact_targets(ctx, request, repo_filter, response);
+    let Some(report) = targets.into_iter().find_map(|target| {
+        let report = projection_impact(
+            ctx.graph(),
+            ProjectionImpactRequest {
+                target,
+                repo: repo_filter.map(str::to_owned),
+                max_results: 10,
+                evidence_verbosity: ProjectionEvidenceVerbosity::Summary,
+            },
+        )
+        .ok()?;
+        (report.resolved && report.ambiguity.is_none() && !report.derivation_edges.is_empty())
+            .then_some(report)
+    }) else {
+        return;
+    };
+
+    let projected = report
+        .projected_fields
+        .iter()
+        .map(|field| field.field_path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sources = report
+        .source_fields
+        .iter()
+        .map(|field| field.field_path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    response.data.next_steps.push(format!(
+        "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
+    ));
+
+    for hint in report.risk_hints {
+        let gap = format!("projection_impact:{hint}");
+        if !response.data.unresolved_gaps.contains(&gap) {
+            response.data.unresolved_gaps.push(gap);
+        }
+    }
+    if let Some(meta) = &mut response.meta {
+        meta.warnings
+            .push("projection impact evidence is available for this target".to_owned());
+    }
+}
+
+fn projection_impact_targets(
+    ctx: &McpContext,
+    request: &ContextPackRequest,
+    repo_filter: Option<&str>,
+    response: &ContextPackResponse,
+) -> Vec<String> {
+    let mut targets = vec![request.target.clone()];
+    let files = response
+        .data
+        .items
+        .iter()
+        .take(10)
+        .filter(|item| item.category == "target")
+        .filter(|item| repo_filter.is_none_or(|repo| item.repo == repo))
+        .map(|item| (item.repo.as_str(), item.file_path.as_str()))
+        .collect::<BTreeSet<_>>();
+    if files.is_empty() {
+        return targets;
+    }
+    let Ok(fields) = ctx.graph().nodes_by_type(NodeKind::DataField) else {
+        return targets;
+    };
+    for field in fields {
+        if !files.contains(&(field.repo.as_str(), field.file_path.as_str())) {
+            continue;
+        }
+        if field_has_derivation(ctx.graph(), field.id) {
+            push_unique_projection_target(&mut targets, field.name);
+        }
+        if targets.len() >= 10 {
+            break;
+        }
+    }
+    targets
+}
+
+fn push_unique_projection_target(targets: &mut Vec<String>, target: String) {
+    if !targets.iter().any(|existing| existing == &target) {
+        targets.push(target);
+    }
+}
+
+fn field_has_derivation<S: GraphStore>(graph: &S, field_id: NodeId) -> bool {
+    graph
+        .get_incoming(field_id)
+        .ok()
+        .into_iter()
+        .flatten()
+        .chain(graph.get_outgoing(field_id).ok().into_iter().flatten())
+        .any(|edge| edge.kind == EdgeKind::DerivesFieldFrom)
 }
 
 fn pack_is_structurally_weak(response: &ContextPackResponse) -> bool {

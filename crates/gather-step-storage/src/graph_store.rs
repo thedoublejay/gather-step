@@ -143,9 +143,17 @@ const SIGNATURE_IDS: TableDefinition<&str, u32> = TableDefinition::new("signatur
 /// Reverse map: interned ID → signature string.
 const SIGNATURES: TableDefinition<u32, &str> = TableDefinition::new("signatures");
 const STRING_METADATA: TableDefinition<u8, u32> = TableDefinition::new("string_metadata");
+const GRAPH_SCHEMA: TableDefinition<&str, u32> = TableDefinition::new("graph_schema");
+const GRAPH_SCHEMA_VERSION_KEY: &str = "version";
 const NEXT_REPO_ID_KEY: u8 = 0;
 const NEXT_FILE_PATH_ID_KEY: u8 = 1;
 const NEXT_SIGNATURE_ID_KEY: u8 = 2;
+
+/// Current graph-store schema version.
+///
+/// Bump this when node/edge discriminants or graph-derived evidence semantics
+/// change in a way that requires rebuilding `.gather-step/storage/graph.redb`.
+pub const GRAPH_SCHEMA_VERSION: u32 = 1;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -282,6 +290,10 @@ pub enum GraphStoreError {
     )]
     Corrupt { path: PathBuf },
     #[error(
+        "your local graph index uses an unsupported schema; run `gather-step clean --storage && gather-step index` to rebuild"
+    )]
+    SchemaVersionMismatch { stored: u32, expected: u32 },
+    #[error(
         "graph storage `{path}` is already locked by another gather-step process; \
          if `watch` or `serve --watch` is running, stop it or wait for it to exit before retrying"
     )]
@@ -346,11 +358,56 @@ impl GraphStoreDb {
             crate::fs_mode::apply_private_file(&path)?;
         }
 
-        Ok(Self {
+        let store = Self {
             db,
             path,
             bulk_mode: std::sync::atomic::AtomicBool::new(false),
-        })
+        };
+        store.check_or_write_schema_version(is_new)?;
+        Ok(store)
+    }
+
+    fn check_or_write_schema_version(&self, is_new: bool) -> Result<(), GraphStoreError> {
+        if is_new {
+            self.write_schema_version()?;
+            return Ok(());
+        }
+
+        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let table = match read_txn.open_table(GRAPH_SCHEMA) {
+            Ok(table) => table,
+            Err(error) if Self::is_missing_table_error(&error) => {
+                return Err(GraphStoreError::SchemaVersionMismatch {
+                    stored: 0,
+                    expected: GRAPH_SCHEMA_VERSION,
+                });
+            }
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let stored = table
+            .get(GRAPH_SCHEMA_VERSION_KEY)
+            .map_err(GraphStoreError::storage)?
+            .map_or(0, |value| value.value());
+        if stored != GRAPH_SCHEMA_VERSION {
+            return Err(GraphStoreError::SchemaVersionMismatch {
+                stored,
+                expected: GRAPH_SCHEMA_VERSION,
+            });
+        }
+        Ok(())
+    }
+
+    fn write_schema_version(&self) -> Result<(), GraphStoreError> {
+        let write_txn = self.begin_write_txn()?;
+        {
+            let mut table = write_txn
+                .open_table(GRAPH_SCHEMA)
+                .map_err(GraphStoreError::storage)?;
+            table
+                .insert(GRAPH_SCHEMA_VERSION_KEY, GRAPH_SCHEMA_VERSION)
+                .map_err(GraphStoreError::storage)?;
+        }
+        write_txn.commit().map_err(GraphStoreError::storage)
     }
 
     /// Run redb's integrity check.
@@ -3318,6 +3375,71 @@ mod tests {
             err,
             super::GraphStoreError::StorageHeld { path } if path == graph_path
         ));
+    }
+
+    #[test]
+    fn open_reports_schema_mismatch_when_schema_table_missing() {
+        let graph_path = temp_db_path("missing-graph-schema");
+        let db = redb::Database::create(&graph_path).expect("legacy graph db should create");
+        let write_txn = db
+            .begin_write()
+            .expect("legacy graph write txn should begin");
+        {
+            let _nodes = write_txn
+                .open_table(super::NODES)
+                .expect("legacy nodes table should create");
+        }
+        write_txn
+            .commit()
+            .expect("legacy graph write txn should commit");
+        drop(db);
+
+        let Err(err) = GraphStoreDb::open(&graph_path) else {
+            panic!("legacy db missing schema table should fail");
+        };
+
+        assert!(matches!(
+            err,
+            super::GraphStoreError::SchemaVersionMismatch {
+                stored: 0,
+                expected
+            } if expected == super::GRAPH_SCHEMA_VERSION
+        ));
+        fs::remove_file(graph_path).ok();
+    }
+
+    #[test]
+    fn open_reports_schema_mismatch_when_schema_version_is_old() {
+        let graph_path = temp_db_path("old-graph-schema");
+        let db = redb::Database::create(&graph_path).expect("legacy graph db should create");
+        let write_txn = db
+            .begin_write()
+            .expect("legacy graph write txn should begin");
+        {
+            let mut schema = write_txn
+                .open_table(super::GRAPH_SCHEMA)
+                .expect("schema table should create");
+            schema
+                .insert(super::GRAPH_SCHEMA_VERSION_KEY, 0)
+                .expect("old schema version should insert");
+        }
+        write_txn
+            .commit()
+            .expect("legacy graph write txn should commit");
+        drop(db);
+
+        let Err(err) = GraphStoreDb::open(&graph_path) else {
+            panic!("legacy db with old schema version should fail");
+        };
+
+        assert!(matches!(
+            err,
+            super::GraphStoreError::SchemaVersionMismatch {
+                stored: 0,
+                expected
+            } if expected == super::GRAPH_SCHEMA_VERSION
+        ));
+        fs::remove_file(graph_path).ok();
     }
 
     #[test]

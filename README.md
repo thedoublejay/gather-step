@@ -163,6 +163,7 @@ gather-step --workspace /path/to/workspace search createOrder
 gather-step --workspace /path/to/workspace trace crud --method POST --path /orders
 gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace impact CreateOrderInput
+gather-step --workspace /path/to/workspace projection-impact --target subtaskIds
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
 gather-step --workspace /path/to/workspace conventions
 gather-step --workspace /path/to/workspace generate claude-md
@@ -207,7 +208,7 @@ search
 
 This is the core value proposition: precomputed structural context before the move, not exploratory prompting after it.
 
-Gather Step also pairs well with a Markdown-first engineering memory such as [Braingent Manifesto](https://github.com/thedoublejay/braingent-manifesto): let memory provide prior decisions and learnings, then use Gather Step to ground the plan in the current code graph. See [memory-backed planning](website/src/content/docs/guides/memory-backed-planning.md) for the loop.
+Gather Step also pairs well with a Markdown-first engineering memory: let memory provide prior decisions and learnings, then use Gather Step to ground the plan in the current code graph. See [memory-backed planning](website/src/content/docs/guides/memory-backed-planning.md) for the loop.
 
 ## Documentation
 
@@ -225,6 +226,7 @@ Reference:
 - [CLI reference](website/src/content/docs/reference/cli.md)
 - [Configuration reference](website/src/content/docs/reference/configuration.md)
 - [MCP tools reference](website/src/content/docs/reference/mcp-tools.md)
+- [Projection impact](docs/projection-impact.md)
 
 Concepts:
 - [Polyrepo graph](website/src/content/docs/concepts/polyrepo-graph.md)

@@ -9,6 +9,7 @@ pub mod index;
 pub mod init;
 pub mod no_args;
 pub mod pack;
+pub mod projection_impact;
 pub mod reindex;
 pub mod search;
 pub mod serve;
@@ -83,6 +84,7 @@ pub enum Command {
     Doctor(doctor::DoctorArgs),
     Generate(generate::GenerateCommand),
     Impact(impact::ImpactArgs),
+    ProjectionImpact(projection_impact::ProjectionImpactArgs),
     Pack(pack::PackArgs),
     Events(events::EventsArgs),
     Conventions(conventions::ConventionsArgs),
@@ -118,6 +120,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Doctor(args)) => doctor::run(&app, args),
         Some(Command::Generate(command)) => generate::run(&app, command),
         Some(Command::Impact(args)) => impact::run(&app, args),
+        Some(Command::ProjectionImpact(args)) => projection_impact::run(&app, args),
         Some(Command::Pack(args)) => pack::run(&app, &args),
         Some(Command::Events(args)) => events::run(&app, args),
         Some(Command::Conventions(args)) => conventions::run(&app, args),
@@ -146,8 +149,9 @@ mod tests {
 
     use super::{Cli, Command};
     use crate::commands::{
-        clean::CleanArgs, compact::CompactArgs, index::IndexArgs, reindex::ReindexArgs,
-        serve::ServeArgs, setup_mcp::McpScope, trace::TraceCommand, tui::TuiArgs, watch::WatchArgs,
+        clean::CleanArgs, compact::CompactArgs, index::IndexArgs,
+        projection_impact::EvidenceVerbosityArg, reindex::ReindexArgs, serve::ServeArgs,
+        setup_mcp::McpScope, trace::TraceCommand, tui::TuiArgs, watch::WatchArgs,
     };
 
     #[test]
@@ -187,6 +191,52 @@ mod tests {
                 watch: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_projection_impact_args_with_bounded_limit() {
+        let cli = Cli::parse_from([
+            "gather-step",
+            "--repo",
+            "backend_standard",
+            "projection-impact",
+            "--target",
+            "subtaskIds",
+            "--limit",
+            "25",
+            "--evidence-verbosity",
+            "summary",
+        ]);
+
+        let Some(Command::ProjectionImpact(args)) = cli.command else {
+            unreachable!("expected projection-impact command");
+        };
+
+        assert_eq!(args.target, "subtaskIds");
+        assert_eq!(args.limit, 25);
+        assert_eq!(args.evidence_verbosity, EvidenceVerbosityArg::Summary);
+    }
+
+    #[test]
+    fn rejects_projection_impact_limit_outside_supported_range() {
+        for limit in ["0", "101", "many"] {
+            let error = Cli::try_parse_from([
+                "gather-step",
+                "projection-impact",
+                "--target",
+                "subtaskIds",
+                "--limit",
+                limit,
+            ])
+            .expect_err("unsupported limit should be rejected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("limit must be an integer between 1 and 100"),
+                "unexpected error for {limit}: {error}"
+            );
+        }
     }
 
     #[test]

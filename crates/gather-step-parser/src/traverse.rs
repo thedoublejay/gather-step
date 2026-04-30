@@ -294,6 +294,9 @@ impl TraverseConfig {
         // `.gather-step.local.yaml` is intentionally excluded from the parser
         // allow-list: changes to it should be picked up only by the dedicated
         // `local_config::LocalConfig::load` path, not by the source walker.
+        if file_name.is_some_and(|name| name == ".gather-step.local.yaml") {
+            return false;
+        }
         if file_name
             .is_some_and(|name| matches!(name, "package.json" | "tsconfig.json" | ".gitignore"))
         {
@@ -675,6 +678,10 @@ pub fn classify_language(path: impl AsRef<Path>) -> Option<Language> {
     } else if ["js", "jsx", "mjs", "cjs"]
         .iter()
         .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        || (["json", "yaml", "yml"]
+            .iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            && is_static_mapping_path(path.as_ref()))
     {
         Some(Language::JavaScript)
     } else if ["py", "pyi"]
@@ -691,6 +698,22 @@ pub fn classify_language(path: impl AsRef<Path>) -> Option<Language> {
     } else {
         None
     }
+}
+
+fn is_static_mapping_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    ["mapping", "index", "search", "projection"]
+        .iter()
+        .any(|token| contains_ascii_case(file_name, token))
+}
+
+fn contains_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn is_binary_path(path: &Path) -> bool {
@@ -1003,8 +1026,18 @@ mod tests {
         fs::write(temp_dir.path().join("b.mts"), "export const mts = 1;\n").expect("mts");
         fs::write(temp_dir.path().join("c.cts"), "export const cts = 1;\n").expect("cts");
         fs::write(temp_dir.path().join("d.js"), "export const js = 1;\n").expect("js");
-        fs::write(temp_dir.path().join("e.py"), "x = 1\n").expect("py");
-        fs::write(temp_dir.path().join("f.pyi"), "x: int\n").expect("pyi");
+        fs::write(
+            temp_dir.path().join("e.search-index.json"),
+            r#"{"name":"fixture"}"#,
+        )
+        .expect("json");
+        fs::write(
+            temp_dir.path().join("f.search-index.yaml"),
+            "name: fixture\n",
+        )
+        .expect("yaml");
+        fs::write(temp_dir.path().join("g.py"), "x = 1\n").expect("py");
+        fs::write(temp_dir.path().join("h.pyi"), "x: int\n").expect("pyi");
 
         let summary =
             collect_repo_files(temp_dir.path(), &TraverseConfig::default()).expect("walk passes");
@@ -1021,8 +1054,10 @@ mod tests {
                 (PathBuf::from("b.mts"), Language::TypeScript),
                 (PathBuf::from("c.cts"), Language::TypeScript),
                 (PathBuf::from("d.js"), Language::JavaScript),
-                (PathBuf::from("e.py"), Language::Python),
-                (PathBuf::from("f.pyi"), Language::Python),
+                (PathBuf::from("e.search-index.json"), Language::JavaScript),
+                (PathBuf::from("f.search-index.yaml"), Language::JavaScript),
+                (PathBuf::from("g.py"), Language::Python),
+                (PathBuf::from("h.pyi"), Language::Python),
             ]
         );
     }
@@ -1198,6 +1233,20 @@ mod tests {
             Some(Language::TypeScript)
         );
         assert_eq!(classify_language("src/main.js"), Some(Language::JavaScript));
+        assert_eq!(
+            classify_language("src/search-index.json"),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(
+            classify_language("src/search-index.yaml"),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(
+            classify_language("src/search-index.yml"),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(classify_language("package.json"), None);
+        assert_eq!(classify_language("tsconfig.json"), None);
         assert_eq!(classify_language("src/main.py"), Some(Language::Python));
         assert_eq!(classify_language("src/main.pyi"), Some(Language::Python));
         assert_eq!(classify_language("src/main.rs"), Some(Language::Rust));

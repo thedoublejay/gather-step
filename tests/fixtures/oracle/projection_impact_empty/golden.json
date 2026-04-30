@@ -1,0 +1,10 @@
+{
+  "resolved": false,
+  "ambiguity": null,
+  "candidates": [],
+  "source_fields": [],
+  "projected_fields": [],
+  "derivation_edges": [],
+  "risk_hints": ["field_candidate_not_found"],
+  "missing_evidence": ["data_field"]
+}

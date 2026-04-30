@@ -128,6 +128,24 @@ struct OracleExpectations {
     /// still appear in advisory/co-change-only output.
     #[serde(default)]
     forbidden_advisory_in_primary: Vec<String>,
+    #[serde(default)]
+    expected_projection_fields: Vec<String>,
+    #[serde(default)]
+    expected_source_fields: Vec<String>,
+    #[serde(default)]
+    expected_projection_risks: Vec<String>,
+    #[serde(default)]
+    forbidden_projection_risks: Vec<String>,
+    #[serde(default)]
+    expected_projection_resolved: Option<bool>,
+    #[serde(default)]
+    expected_projection_ambiguity: Option<String>,
+    #[serde(default)]
+    expected_backfill_files: Vec<String>,
+    #[serde(default)]
+    expected_index_files: Vec<String>,
+    #[serde(default)]
+    forbidden_focus_only_files: Vec<String>,
 }
 
 fn gather_step() -> process::Command {
@@ -719,6 +737,161 @@ fn primary_impact_structural_repos(json: &serde_json::Value) -> BTreeSet<String>
     repos
 }
 
+fn projection_field_names(json: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    json.get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("field_path"))
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn projection_risk_hints(json: &serde_json::Value) -> BTreeSet<String> {
+    json.get("risk_hints")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn projection_evidence_files(json: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    json.get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("file_path"))
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn projection_field_files(json: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    json.get(key)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("qualified_name"))
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|qualified| {
+            let mut parts = qualified.split("::");
+            let _prefix = parts.next()?;
+            let _repo = parts.next()?;
+            parts.next().map(str::to_owned)
+        })
+        .collect()
+}
+
+fn projection_report_files(json: &serde_json::Value) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for key in [
+        "readers",
+        "writers",
+        "filters",
+        "indexes",
+        "backfills",
+        "candidates",
+        "source_fields",
+        "projected_fields",
+    ] {
+        files.extend(projection_evidence_files(json, key));
+        files.extend(projection_field_files(json, key));
+    }
+    files
+}
+
+fn assert_projection_impact_scenario(json: &serde_json::Value, scenario: &OracleScenario) {
+    let output_size = serde_json::to_vec(json)
+        .expect("projection impact response should serialize")
+        .len();
+    assert!(
+        output_size <= scenario.oracle.max_response_bytes,
+        "scenario `{}` exceeded response budget: {} > {}",
+        scenario.name,
+        output_size,
+        scenario.oracle.max_response_bytes
+    );
+    let expected_resolved = scenario.oracle.expected_projection_resolved.unwrap_or(true);
+    assert_eq!(
+        json.get("resolved").and_then(serde_json::Value::as_bool),
+        Some(expected_resolved),
+        "scenario `{}` projection target resolved mismatch",
+        scenario.name
+    );
+    if let Some(expected) = &scenario.oracle.expected_projection_ambiguity {
+        assert_eq!(
+            json.get("ambiguity").and_then(serde_json::Value::as_str),
+            Some(expected.as_str()),
+            "scenario `{}` projection ambiguity mismatch",
+            scenario.name
+        );
+    }
+
+    let projection_fields = projection_field_names(json, "projected_fields");
+    for expected in &scenario.oracle.expected_projection_fields {
+        assert!(
+            projection_fields.contains(expected),
+            "scenario `{}` missing projected field `{expected}`; observed={projection_fields:?}",
+            scenario.name
+        );
+    }
+
+    let source_fields = projection_field_names(json, "source_fields");
+    for expected in &scenario.oracle.expected_source_fields {
+        assert!(
+            source_fields.contains(expected),
+            "scenario `{}` missing source field `{expected}`; observed={source_fields:?}",
+            scenario.name
+        );
+    }
+
+    let risk_hints = projection_risk_hints(json);
+    for expected in &scenario.oracle.expected_projection_risks {
+        assert!(
+            risk_hints.contains(expected),
+            "scenario `{}` missing projection risk `{expected}`; observed={risk_hints:?}",
+            scenario.name
+        );
+    }
+    for forbidden in &scenario.oracle.forbidden_projection_risks {
+        assert!(
+            !risk_hints.contains(forbidden),
+            "scenario `{}` unexpectedly included projection risk `{forbidden}`; observed={risk_hints:?}",
+            scenario.name
+        );
+    }
+
+    let backfill_files = projection_evidence_files(json, "backfills");
+    for expected in &scenario.oracle.expected_backfill_files {
+        assert!(
+            backfill_files.contains(expected),
+            "scenario `{}` missing backfill file `{expected}`; observed={backfill_files:?}",
+            scenario.name
+        );
+    }
+
+    let index_files = projection_evidence_files(json, "indexes");
+    for expected in &scenario.oracle.expected_index_files {
+        assert!(
+            index_files.contains(expected),
+            "scenario `{}` missing index file `{expected}`; observed={index_files:?}",
+            scenario.name
+        );
+    }
+
+    let report_files = projection_report_files(json);
+    for forbidden in &scenario.oracle.forbidden_focus_only_files {
+        assert!(
+            !report_files.contains(forbidden),
+            "scenario `{}` unexpectedly included focus-only file `{forbidden}`; observed={report_files:?}",
+            scenario.name
+        );
+    }
+}
+
 fn assert_impact_scenario(json: &serde_json::Value, scenario: &OracleScenario) {
     assert_eq!(
         json.get("event").and_then(serde_json::Value::as_str),
@@ -892,6 +1065,21 @@ fn run_cli_pack_for_scenario(workspace: &Path, scenario: &OracleScenario) -> ser
             ),
         );
     }
+    if scenario.mode == "projection_impact" {
+        return run_ok_json(
+            workspace,
+            &pack_cli_args(
+                repo_filter,
+                &[
+                    "projection-impact",
+                    "--target",
+                    &scenario.target.qn,
+                    "--limit",
+                    "20",
+                ],
+            ),
+        );
+    }
     match scenario.target.kind.as_str() {
         "symbol" => run_ok_json(
             workspace,
@@ -994,6 +1182,11 @@ fn run_pack_oracle_suite(workspace: &Path) {
             maybe_assert_golden_fragment(&cli_json, &scenario);
             continue;
         }
+        if scenario.mode == "projection_impact" {
+            assert_projection_impact_scenario(&cli_json, &scenario);
+            maybe_assert_golden_fragment(&cli_json, &scenario);
+            continue;
+        }
 
         let response = {
             let ctx = mcp_context(workspace);
@@ -1012,10 +1205,30 @@ fn run_pack_oracle_suite(workspace: &Path) {
     }
 }
 
+fn run_projection_impact_oracle_suite(workspace: &Path) {
+    let index = run_ok_json(workspace, &["index"]);
+    assert_eq!(index["event"], "index_completed");
+
+    for scenario in load_scenarios()
+        .into_iter()
+        .filter(|scenario| scenario.mode == "projection_impact")
+    {
+        let cli_json = run_cli_pack_for_scenario(workspace, &scenario);
+        assert_projection_impact_scenario(&cli_json, &scenario);
+        maybe_assert_golden_fragment(&cli_json, &scenario);
+    }
+}
+
 #[test]
 fn pack_oracle_suite_proves_pack_quality_on_fixture_workspace() {
     let temp = stage_fixture_workspace("suite");
     run_pack_oracle_suite(temp.path());
+}
+
+#[test]
+fn projection_impact_oracle_scenarios_prove_field_contracts() {
+    let temp = stage_fixture_workspace("projection-impact");
+    run_projection_impact_oracle_suite(temp.path());
 }
 
 #[test]

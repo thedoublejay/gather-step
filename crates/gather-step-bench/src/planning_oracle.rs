@@ -12,7 +12,10 @@ use std::{
     time::Instant,
 };
 
-use gather_step::commands::impact::{self, ImpactArgs};
+use gather_step::commands::{
+    impact::{self, ImpactArgs},
+    projection_impact::{self, EvidenceVerbosityArg, ProjectionImpactArgs},
+};
 use gather_step_core::{GatherStepConfig, RegistryStore};
 use gather_step_mcp::{
     McpContext, McpServerConfig,
@@ -126,6 +129,24 @@ pub struct OracleExpectations {
     pub expected_structural_repos: Vec<String>,
     #[serde(default)]
     pub forbidden_advisory_in_primary: Vec<String>,
+    #[serde(default)]
+    pub expected_projection_resolved: Option<bool>,
+    #[serde(default)]
+    pub expected_projection_ambiguity: Option<String>,
+    #[serde(default)]
+    pub expected_projection_risks: Vec<String>,
+    #[serde(default)]
+    pub forbidden_projection_risks: Vec<String>,
+    #[serde(default)]
+    pub expected_projection_fields: Vec<String>,
+    #[serde(default)]
+    pub expected_source_fields: Vec<String>,
+    #[serde(default)]
+    pub expected_backfill_files: Vec<String>,
+    #[serde(default)]
+    pub expected_index_files: Vec<String>,
+    #[serde(default)]
+    pub forbidden_focus_only_files: Vec<String>,
     pub max_response_bytes: usize,
     /// When set, the scenario specifies which anchor (by file path) should rank
     /// first.  Used to compute `anchor_top1` across scenarios.
@@ -784,6 +805,30 @@ fn run_impact_for_scenario(
     Ok((response, payload))
 }
 
+fn run_projection_impact_for_scenario(
+    storage: &StorageCoordinator,
+    scenario: &OracleScenario,
+) -> anyhow::Result<(ContextPackResponse, serde_json::Value)> {
+    anyhow::ensure!(
+        scenario.target.kind == "field",
+        "projection_impact oracle target kind must be `field`"
+    );
+    let rendered = projection_impact::execute(
+        storage,
+        scenario.repo.as_deref(),
+        ProjectionImpactArgs {
+            target: scenario.target.qn.clone(),
+            limit: 20,
+            evidence_verbosity: EvidenceVerbosityArg::Full,
+        },
+    )?;
+    let payload = rendered.payload.ok_or_else(|| {
+        anyhow::anyhow!("projection-impact command did not return a JSON payload")
+    })?;
+    let response = projection_impact_payload_as_context_pack_response(&payload, scenario);
+    Ok((response, payload))
+}
+
 fn impact_payload_as_context_pack_response(
     payload: &serde_json::Value,
     scenario: &OracleScenario,
@@ -855,6 +900,75 @@ fn impact_payload_as_context_pack_response(
     }
 }
 
+fn projection_impact_payload_as_context_pack_response(
+    payload: &serde_json::Value,
+    scenario: &OracleScenario,
+) -> ContextPackResponse {
+    let candidates = payload
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[] as &[serde_json::Value], Vec::as_slice);
+    let output_bytes = serde_json::to_vec(payload).map_or(0, |bytes| bytes.len());
+    let found = payload
+        .get("resolved")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    ContextPackResponse {
+        data: ContextPackData {
+            mode: "projection_impact".to_owned(),
+            target: scenario.target.qn.clone(),
+            found,
+            items: candidates
+                .iter()
+                .enumerate()
+                .map(|(index, item)| projection_field_as_pack_item(index, item))
+                .collect(),
+            semantic_bridges: Vec::new(),
+            next_steps: Vec::new(),
+            unresolved_gaps: unexpected_projection_missing_evidence(payload, scenario),
+            change_impact: ChangeImpactSummary {
+                direct_repos: Vec::new(),
+                cross_repo_callers: Vec::new(),
+                confirmed_downstream_repos: Vec::new(),
+                probable_downstream_repos: Vec::new(),
+                downstream_repos: Vec::new(),
+                unresolved_possible: Vec::new(),
+                truncated_repos: None,
+            },
+            transport_links: None,
+            planning_rescue: None,
+            planning_proofs: Vec::new(),
+        },
+        meta: Some(ContextPackMeta {
+            response_schema_version: response_schema_version(),
+            generation: 0,
+            ambiguity: None,
+            budget: ResponseBudget::not_truncated(
+                BudgetedTool::ChangeImpact,
+                scenario.oracle.max_response_bytes,
+                output_bytes,
+            ),
+            candidate_count: candidates.len(),
+            completeness: if found {
+                "complete".to_owned()
+            } else {
+                "unresolved".to_owned()
+            },
+            resolution: "projection_impact".to_owned(),
+            resolution_details: None,
+            confidence_model_version: None,
+            resolution_confidence: payload
+                .get("confidence")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            resolved_symbol_id: None,
+            winner_margin: None,
+            warnings: Vec::new(),
+        }),
+    }
+}
+
 fn impact_match_as_pack_item(index: usize, item: &serde_json::Value) -> PackItem {
     let is_primary = item
         .get("primary")
@@ -896,6 +1010,81 @@ fn impact_match_as_pack_item(index: usize, item: &serde_json::Value) -> PackItem
             .to_owned(),
         evidence_chain: None,
     }
+}
+
+fn projection_field_as_pack_item(index: usize, item: &serde_json::Value) -> PackItem {
+    PackItem {
+        category: "projection_candidate".to_owned(),
+        file_path: item
+            .get("field_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        line_start: None,
+        reason: "projection field candidate".to_owned(),
+        repo: item
+            .get("repo")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        score: 900u16.saturating_sub(u16::try_from(index).unwrap_or(u16::MAX)),
+        symbol_id: format!("projection-field:{index}"),
+        symbol_kind: "data_field".to_owned(),
+        symbol_name: item
+            .get("field_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        evidence_chain: None,
+    }
+}
+
+fn expected_projection_missing_evidence(scenario: &OracleScenario) -> BTreeSet<&'static str> {
+    scenario
+        .oracle
+        .expected_projection_risks
+        .iter()
+        .filter_map(|risk| match risk.as_str() {
+            "field_candidate_not_found" => Some("data_field"),
+            "projection_chain_unproven" => Some("derivation_edge"),
+            "projection_writer_missing" => Some("writer"),
+            "backfill_unproven" => Some("backfill"),
+            "index_or_search_mapping_unproven" => Some("index_or_search_mapping"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn unexpected_projection_missing_evidence(
+    payload: &serde_json::Value,
+    scenario: &OracleScenario,
+) -> Vec<String> {
+    let expected = expected_projection_missing_evidence(scenario);
+    payload
+        .get("missing_evidence")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|missing| !expected.contains(missing))
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+}
+
+fn scenario_expects_empty_projection_result(
+    scenario: &OracleScenario,
+    response: &ContextPackResponse,
+) -> bool {
+    scenario.mode == "projection_impact"
+        && scenario.oracle.expected_projection_resolved == Some(false)
+        && !response.data.found
+        && scenario
+            .oracle
+            .expected_projection_risks
+            .iter()
+            .any(|risk| risk == "field_candidate_not_found")
 }
 
 fn primary_impact_match(payload: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -1042,11 +1231,12 @@ fn execute_oracle_run(
     let mut runs = Vec::with_capacity(scenarios.len());
     for scenario in scenarios {
         let started = Instant::now();
-        let result = if scenario.mode == "impact" {
-            run_impact_for_scenario(&storage, scenario)
-                .map(|(response, impact_response)| (response, Some(impact_response)))
-        } else {
-            run_pack_for_scenario(&ctx, scenario).map(|response| (response, None))
+        let result = match scenario.mode.as_str() {
+            "impact" => run_impact_for_scenario(&storage, scenario)
+                .map(|(response, impact_response)| (response, Some(impact_response))),
+            "projection_impact" => run_projection_impact_for_scenario(&storage, scenario)
+                .map(|(response, impact_response)| (response, Some(impact_response))),
+            _ => run_pack_for_scenario(&ctx, scenario).map(|response| (response, None)),
         };
         match result {
             Ok((response, impact_response)) => runs.push(OracleRun {
@@ -1130,6 +1320,132 @@ fn add_impact_response_findings(
         if primary_structural_repos.contains(forbidden_repo) {
             findings.push(format!(
                 "advisory repo `{forbidden_repo}` appeared in primary structural impact"
+            ));
+        }
+    }
+}
+
+fn projection_string_set(payload: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(BTreeSet::new, |items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+}
+
+fn projection_field_paths(payload: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(BTreeSet::new, |items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("field_path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+}
+
+fn projection_evidence_files(payload: &serde_json::Value, key: &str) -> BTreeSet<String> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(BTreeSet::new, |items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("file_path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+}
+
+fn add_projection_response_findings(
+    findings: &mut Vec<String>,
+    payload: &serde_json::Value,
+    scenario: &OracleScenario,
+) {
+    if let Some(expected) = scenario.oracle.expected_projection_resolved {
+        let observed = payload
+            .get("resolved")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if observed != expected {
+            findings.push(format!(
+                "projection resolved mismatch; expected `{expected}`"
+            ));
+        }
+    }
+
+    if let Some(expected) = &scenario.oracle.expected_projection_ambiguity {
+        let observed = payload.get("ambiguity").and_then(serde_json::Value::as_str);
+        if observed != Some(expected.as_str()) {
+            findings.push(format!(
+                "projection ambiguity mismatch; expected `{expected}`"
+            ));
+        }
+    }
+
+    let risks = projection_string_set(payload, "risk_hints");
+    for expected in &scenario.oracle.expected_projection_risks {
+        if !risks.contains(expected) {
+            findings.push(format!("missing projection risk `{expected}`"));
+        }
+    }
+    for forbidden in &scenario.oracle.forbidden_projection_risks {
+        if risks.contains(forbidden) {
+            findings.push(format!(
+                "forbidden projection risk `{forbidden}` was present"
+            ));
+        }
+    }
+
+    let projected_fields = projection_field_paths(payload, "projected_fields");
+    for expected in &scenario.oracle.expected_projection_fields {
+        if !projected_fields.contains(expected) {
+            findings.push(format!("missing projected field `{expected}`"));
+        }
+    }
+
+    let source_fields = projection_field_paths(payload, "source_fields");
+    for expected in &scenario.oracle.expected_source_fields {
+        if !source_fields.contains(expected) {
+            findings.push(format!("missing source field `{expected}`"));
+        }
+    }
+
+    let backfill_files = projection_evidence_files(payload, "backfills");
+    for expected in &scenario.oracle.expected_backfill_files {
+        if !backfill_files.contains(expected) {
+            findings.push(format!("missing projection backfill file `{expected}`"));
+        }
+    }
+
+    let index_files = projection_evidence_files(payload, "indexes");
+    for expected in &scenario.oracle.expected_index_files {
+        if !index_files.contains(expected) {
+            findings.push(format!("missing projection index file `{expected}`"));
+        }
+    }
+
+    let observed_evidence_files = ["readers", "writers", "filters", "indexes", "backfills"]
+        .into_iter()
+        .flat_map(|key| projection_evidence_files(payload, key))
+        .collect::<BTreeSet<_>>();
+    for forbidden in &scenario.oracle.forbidden_focus_only_files {
+        if observed_evidence_files.contains(forbidden) {
+            findings.push(format!(
+                "projection included forbidden focus-only file `{forbidden}`"
             ));
         }
     }
@@ -1282,11 +1598,12 @@ fn build_scenario_report(
             scenario.oracle.max_follow_ups
         ));
     }
-    if response
-        .data
-        .items
-        .iter()
-        .all(|item| item.score < scenario.oracle.min_confidence)
+    if !response.data.items.is_empty()
+        && response
+            .data
+            .items
+            .iter()
+            .all(|item| item.score < scenario.oracle.min_confidence)
     {
         findings.push(format!(
             "no item met minimum confidence {}",
@@ -1329,7 +1646,11 @@ fn build_scenario_report(
         findings.push(format!("primary file mismatch; expected `{expected}`"));
     }
     if let Some(impact_response) = &run.impact_response {
-        add_impact_response_findings(&mut findings, impact_response, scenario);
+        if scenario.mode == "projection_impact" {
+            add_projection_response_findings(&mut findings, impact_response, scenario);
+        } else {
+            add_impact_response_findings(&mut findings, impact_response, scenario);
+        }
     }
     if let Some(expected) = &scenario.oracle.expected_resolved_symbol_kind
         && observed_resolved_symbol_kind(response).is_none_or(|kind| kind != expected.as_str())
@@ -1483,7 +1804,8 @@ fn build_scenario_report(
         expected_file_recall,
         expected_repo_recall,
         forbidden_hit_count,
-        empty_result: response.data.items.is_empty(),
+        empty_result: response.data.items.is_empty()
+            && !scenario_expects_empty_projection_result(scenario, response),
         unresolved_gap_count: response.data.unresolved_gaps.len(),
         event_target_resolved: run.event_target_resolved,
         ranking_kendall_tau: stability_run.and_then(|other| {
@@ -2046,7 +2368,7 @@ mod tests {
     use super::{
         WorkspaceFileIndex, advisory_only_repo_fraction, build_scenario_report,
         compute_split_metrics, kendall_tau, load_oracle_scenarios, parse_proofs, percentile,
-        unexplained_confirmed_repo_fraction,
+        projection_impact_payload_as_context_pack_response, unexplained_confirmed_repo_fraction,
     };
     use crate::planning_oracle::{
         OracleExpectations, OracleRun, OracleScenario, OracleTarget, PythonOracleExpectations,
@@ -2295,6 +2617,15 @@ mod tests {
                 forbidden_primary_edge_kinds: vec![],
                 expected_structural_repos: vec![],
                 forbidden_advisory_in_primary: vec![],
+                expected_projection_resolved: None,
+                expected_projection_ambiguity: None,
+                expected_projection_risks: vec![],
+                forbidden_projection_risks: vec![],
+                expected_projection_fields: vec![],
+                expected_source_fields: vec![],
+                expected_backfill_files: vec![],
+                expected_index_files: vec![],
+                forbidden_focus_only_files: vec![],
                 max_response_bytes: 1_000_000,
                 expected_canonical_anchor,
                 require_top1_canonical: None,
@@ -2756,6 +3087,120 @@ max_response_bytes = 1000
             "expected missing Python bridge finding; got {:?}",
             report.findings
         );
+    }
+
+    #[test]
+    fn oracle_expectations_accept_projection_impact_fields() {
+        let raw = r#"
+name = "projection_impact_contract"
+mode = "projection_impact"
+repo = "backend_standard"
+
+[target]
+kind = "field"
+qn = "legacySeatIds"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+expected_projection_resolved = true
+expected_projection_ambiguity = "multiple_field_candidates"
+expected_projection_risks = ["source_field_unreviewed"]
+forbidden_projection_risks = ["backfill_unproven"]
+expected_projection_fields = ["legacySeatIds"]
+expected_source_fields = ["seats"]
+expected_backfill_files = []
+expected_index_files = []
+forbidden_focus_only_files = ["src/projection_fixed.ts"]
+max_response_bytes = 12000
+"#;
+
+        let scenario =
+            toml::from_str::<OracleScenario>(raw).expect("projection oracle keys should parse");
+
+        assert_eq!(scenario.oracle.expected_projection_resolved, Some(true));
+        assert_eq!(
+            scenario.oracle.expected_projection_ambiguity.as_deref(),
+            Some("multiple_field_candidates")
+        );
+        assert_eq!(
+            scenario.oracle.expected_projection_risks,
+            vec!["source_field_unreviewed".to_owned()]
+        );
+    }
+
+    #[test]
+    fn projection_expected_not_found_does_not_count_as_empty_regression() {
+        let mut scenario = minimal_scenario(
+            "projection_impact",
+            "field",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        );
+        scenario.oracle.expected_projection_resolved = Some(false);
+        scenario.oracle.expected_projection_risks = vec!["field_candidate_not_found".to_owned()];
+
+        let payload = json!({
+            "resolved": false,
+            "confidence": "low",
+            "candidates": [],
+            "risk_hints": ["field_candidate_not_found"],
+            "missing_evidence": ["data_field"],
+        });
+        let response = projection_impact_payload_as_context_pack_response(&payload, &scenario);
+        let mut run = run_with(response);
+        run.impact_response = Some(payload);
+        let workspace_index = WorkspaceFileIndex {
+            unique_file_to_repo: BTreeMap::new(),
+        };
+
+        let report = build_scenario_report(&workspace_index, &scenario, &run, None);
+
+        assert!(
+            report.passed,
+            "expected not-found projection scenario to pass; got {:?}",
+            report.findings
+        );
+        assert!(!report.empty_result);
+        assert_eq!(report.unresolved_gap_count, 0);
+    }
+
+    #[test]
+    fn projection_expected_missing_evidence_is_not_a_generic_unresolved_gap() {
+        let mut scenario = minimal_scenario(
+            "projection_impact",
+            "field",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        );
+        scenario.oracle.expected_projection_risks = vec![
+            "backfill_unproven".to_owned(),
+            "index_or_search_mapping_unproven".to_owned(),
+        ];
+
+        let payload = json!({
+            "resolved": true,
+            "confidence": "high",
+            "candidates": [],
+            "risk_hints": [
+                "backfill_unproven",
+                "index_or_search_mapping_unproven",
+                "projection_writer_missing"
+            ],
+            "missing_evidence": ["backfill", "index_or_search_mapping", "writer"],
+        });
+
+        let response = projection_impact_payload_as_context_pack_response(&payload, &scenario);
+
+        assert_eq!(response.data.unresolved_gaps, vec!["writer".to_owned()]);
     }
 
     #[test]

@@ -78,6 +78,7 @@ pub fn proof_strength(kind: ProofKind) -> u8 {
         ProofKind::DirectCall => 85,
         ProofKind::EventProducerConsumer | ProofKind::GuardUsage => 80,
         ProofKind::SharedContractConsumer => 75,
+        ProofKind::ProjectionFieldEvidence => 72,
         ProofKind::RouteClientServer => 70,
         ProofKind::ImportBridge => 55,
         ProofKind::CoChangeAdvisory => 25,
@@ -153,6 +154,12 @@ fn edge_to_proof_kind(edge: EdgeKind) -> Option<ProofKind> {
         | EdgeKind::ImplementsContractFrom
         | EdgeKind::ContractOn
         | EdgeKind::UsesShared => Some(ProofKind::SharedContractConsumer),
+        EdgeKind::ReadsField
+        | EdgeKind::WritesField
+        | EdgeKind::DerivesFieldFrom
+        | EdgeKind::FiltersOnField
+        | EdgeKind::IndexesField
+        | EdgeKind::BackfillsField => Some(ProofKind::ProjectionFieldEvidence),
         EdgeKind::ConsumesApiFrom | EdgeKind::Serves => Some(ProofKind::RouteClientServer),
         EdgeKind::Imports | EdgeKind::ConsumesHookFrom => Some(ProofKind::ImportBridge),
         EdgeKind::CoChangesWith => Some(ProofKind::CoChangeAdvisory),
@@ -195,7 +202,7 @@ fn base_graph_proofs<S: GraphStore>(
                 continue;
             };
 
-            if neighbor.is_virtual {
+            if neighbor.is_virtual && neighbor.kind != NodeKind::DataField {
                 continue;
             }
 
@@ -970,7 +977,7 @@ pub fn derive_repo_sets(
 mod tests {
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, PlanningProof, ProofHop,
-        ProofKind, Visibility, node_id,
+        ProofKind, Visibility, node_id, virtual_node,
     };
     use gather_step_storage::GraphStore;
 
@@ -1028,6 +1035,16 @@ mod tests {
             span: None,
             is_virtual: true,
         }
+    }
+
+    fn field_node(repo: &str, file_path: &str, field_path: &str) -> NodeData {
+        virtual_node(
+            NodeKind::DataField,
+            repo,
+            file_path,
+            field_path,
+            format!("data-field::{repo}::{file_path}::{field_path}"),
+        )
     }
 
     fn planning_proof_with_edge(edge_kind: EdgeKind, target_file: &str) -> PlanningProof {
@@ -1100,6 +1117,58 @@ mod tests {
 
         assert_eq!(confirmed, vec!["backend_standard".to_owned()]);
         assert_eq!(probable, vec!["payments_standard".to_owned()]);
+    }
+
+    #[test]
+    fn projection_field_edges_emit_pack_proofs() {
+        let temp = TempDb::new("proofs", "projection-field-edge");
+        let store = temp.open();
+        let source_file = file_node("api_standard", "src/projection.ts");
+        let target_file = file_node("web_frontend", "src/search.ts");
+        let source_field = field_node("api_standard", "src/projection.ts", "legacySeats");
+        let projected_field = field_node("web_frontend", "src/search.ts", "legacySeatIds");
+        store
+            .bulk_insert(
+                &[
+                    source_file.clone(),
+                    target_file,
+                    source_field.clone(),
+                    projected_field.clone(),
+                ],
+                &[edge(
+                    source_field.id,
+                    projected_field.id,
+                    EdgeKind::DerivesFieldFrom,
+                    source_file.id,
+                )],
+            )
+            .expect("projection field graph should insert");
+
+        let output = build_pack_proofs(
+            &store,
+            source_field.id,
+            "api_standard",
+            ProofEngineOptions {
+                include_shared_peer_callers: false,
+                traversal_depth: 1,
+                traversal_limit: 20,
+            },
+        )
+        .expect("proof engine should run");
+
+        assert_eq!(output.proofs.len(), 1);
+        assert_eq!(output.proofs[0].kind, ProofKind::ProjectionFieldEvidence);
+        assert_eq!(output.proofs[0].target_repo, "web_frontend");
+        assert_eq!(output.proofs[0].target_file, "src/search.ts");
+        assert!(
+            output.proofs[0]
+                .edge_kinds
+                .contains(&EdgeKind::DerivesFieldFrom)
+        );
+        assert_eq!(
+            output.confirmed_downstream_repos,
+            vec!["web_frontend".to_owned()]
+        );
     }
 
     #[test]

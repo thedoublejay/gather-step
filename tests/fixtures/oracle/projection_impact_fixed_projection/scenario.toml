@@ -1,0 +1,29 @@
+name = "projection_impact_fixed_projection"
+mode = "projection_impact"
+repo = "backend_standard"
+
+[target]
+kind = "field"
+qn = "invoiceItemTotal"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+required_ambiguity_codes = []
+expected_projection_fields = ["invoiceItemTotal"]
+expected_source_fields = ["invoiceItems"]
+expected_projection_risks = [
+  "deployed_owner_unchecked",
+  "filter_contract_impacted",
+]
+forbidden_projection_risks = [
+  "backfill_unproven",
+  "index_or_search_mapping_unproven",
+  "projection_chain_unproven",
+]
+expected_backfill_files = ["src/projection_fixed.ts"]
+expected_index_files = ["src/projection_fixed.ts"]
+forbidden_focus_only_files = ["src/projection_stale.ts"]
+max_response_bytes = 12000

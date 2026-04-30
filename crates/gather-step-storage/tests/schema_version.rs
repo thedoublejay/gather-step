@@ -7,13 +7,31 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gather_step_storage::{FileIndexState, MetadataStore, MetadataStoreDb};
+use gather_step_storage::{FileIndexState, GraphStoreDb, MetadataStore, MetadataStoreDb};
+use redb::TableDefinition;
 use rusqlite::Connection;
+
+const GRAPH_SCHEMA: TableDefinition<&str, u32> = TableDefinition::new("graph_schema");
+const GRAPH_SCHEMA_VERSION_KEY: &str = "version";
 
 fn create_unsupported_schema_database(path: &std::path::Path) {
     let conn = Connection::open(path).expect("create metadata db");
     conn.pragma_update(None, "user_version", 99_i64)
         .expect("set unsupported user_version");
+}
+
+fn create_unsupported_graph_database(path: &std::path::Path) {
+    let db = redb::Database::create(path).expect("create graph db");
+    let write_txn = db.begin_write().expect("begin graph write");
+    {
+        let mut schema = write_txn
+            .open_table(GRAPH_SCHEMA)
+            .expect("open graph schema table");
+        schema
+            .insert(GRAPH_SCHEMA_VERSION_KEY, 99_u32)
+            .expect("write unsupported graph schema version");
+    }
+    write_txn.commit().expect("commit graph schema");
 }
 
 fn temp_db_path(label: &str) -> PathBuf {
@@ -50,6 +68,35 @@ fn unsupported_schema_requires_reindex() {
     let message = err.to_string();
     assert!(message.contains("unsupported schema"));
     assert!(message.contains("gather-step clean && gather-step index"));
+}
+
+#[test]
+fn unsupported_graph_schema_requires_reindex() {
+    let db_path = temp_db_path("graph-schema-version");
+    let _cleanup = Cleanup(db_path.clone());
+
+    create_unsupported_graph_database(&db_path);
+
+    let Err(err) = GraphStoreDb::open(&db_path) else {
+        panic!("unsupported graph schema must fail fast");
+    };
+    let message = err.to_string();
+    assert!(message.contains("unsupported schema"));
+    assert!(message.contains("gather-step clean --storage && gather-step index"));
+}
+
+#[test]
+fn unstamped_graph_schema_requires_reindex() {
+    let db_path = temp_db_path("graph-unstamped");
+    let _cleanup = Cleanup(db_path.clone());
+    redb::Database::create(&db_path).expect("create unstamped graph db");
+
+    let Err(err) = GraphStoreDb::open(&db_path) else {
+        panic!("unstamped graph schema must fail fast");
+    };
+    let message = err.to_string();
+    assert!(message.contains("unsupported schema"));
+    assert!(message.contains("gather-step clean --storage && gather-step index"));
 }
 
 #[test]

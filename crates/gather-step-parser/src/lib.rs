@@ -4,6 +4,7 @@ pub mod frameworks;
 pub mod manifests;
 pub(crate) mod path_guard;
 pub mod payload;
+pub(crate) mod projection;
 pub mod resolve;
 pub mod traverse;
 pub mod tree_sitter;

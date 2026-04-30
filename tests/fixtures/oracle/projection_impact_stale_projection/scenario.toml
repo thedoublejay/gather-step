@@ -1,0 +1,28 @@
+name = "projection_impact_stale_projection"
+mode = "projection_impact"
+repo = "backend_standard"
+
+[target]
+kind = "field"
+qn = "legacySeatIds"
+
+[oracle]
+expected_files = []
+forbidden_files = []
+max_follow_ups = 6
+min_confidence = 0
+required_ambiguity_codes = []
+expected_projection_fields = ["legacySeatIds"]
+expected_source_fields = ["seats"]
+expected_projection_risks = [
+  "backfill_unproven",
+  "deployed_owner_unchecked",
+  "filter_contract_impacted",
+  "frontend_only_focus",
+  "index_or_search_mapping_unproven",
+  "source_field_unreviewed",
+]
+expected_backfill_files = []
+expected_index_files = []
+forbidden_focus_only_files = ["src/projection_fixed.ts"]
+max_response_bytes = 12000

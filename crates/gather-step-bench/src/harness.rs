@@ -6,7 +6,8 @@ use gather_step_core::{
     ConfigError, GatherStepConfig, RegistryError, RegistryStore, WorkspaceIndexError,
 };
 use gather_step_storage::{
-    GraphStoreError, IndexingOptions, RepoIndexer, RepoIndexerError, index_workspace_with_storage,
+    GraphStoreError, IndexingOptions, RepoIndexer, RepoIndexerError, StorageCoordinator,
+    StorageCoordinatorError, index_workspace_with_storage,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -68,6 +69,8 @@ pub enum HarnessError {
     Registry(#[from] RegistryError),
     #[error("workspace index error: {0}")]
     Workspace(#[from] Box<WorkspaceIndexError<RepoIndexerError>>),
+    #[error("storage coordinator error: {0}")]
+    Storage(#[from] StorageCoordinatorError),
 }
 
 /// Run a full indexing pass over `fixture_path` and collect metrics.
@@ -210,6 +213,28 @@ pub fn index_fixture(
     let indexer = RepoIndexer::open(&storage_dir, IndexingOptions::default())?;
     indexer.index_repo(repo_name, fixture_path, None)?;
     Ok((indexer, guard))
+}
+
+/// Index a configured workspace fixture and return an opened storage coordinator.
+///
+/// Each repo's nodes are keyed by its configured `name` in
+/// `gather-step.config.yaml`, which is required for cross-repo benchmark tasks.
+pub fn index_workspace_fixture(
+    fixture_path: &Path,
+) -> Result<(StorageCoordinator, StorageDirGuard), HarnessError> {
+    let storage_dir = tempdir_for_pass(fixture_path)?;
+    let guard = StorageDirGuard(storage_dir.clone());
+    let config = GatherStepConfig::from_yaml_file(fixture_path.join("gather-step.config.yaml"))?;
+    let mut registry = RegistryStore::open(storage_dir.join("registry.json"))?;
+    index_workspace_with_storage(
+        &config,
+        fixture_path,
+        &mut registry,
+        &storage_dir,
+        IndexingOptions::default(),
+    )?;
+    let storage = StorageCoordinator::open(&storage_dir)?;
+    Ok((storage, guard))
 }
 
 /// Summary produced by comparing actual metrics against a recorded snapshot.
