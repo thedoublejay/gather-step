@@ -16,6 +16,7 @@ expected_projection_resolved = true
 expected_projection_ambiguity = "multiple_field_candidates"
 expected_projection_risks = [
   "needs_disambiguation",
+  "projection_chain_unproven",
 ]
 expected_projection_fields = []
 expected_source_fields = []

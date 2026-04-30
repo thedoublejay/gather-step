@@ -926,16 +926,7 @@ fn projection_impact_payload_as_context_pack_response(
                 .collect(),
             semantic_bridges: Vec::new(),
             next_steps: Vec::new(),
-            unresolved_gaps: payload
-                .get("missing_evidence")
-                .and_then(serde_json::Value::as_array)
-                .map_or_else(Vec::new, |items| {
-                    items
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned)
-                        .collect()
-                }),
+            unresolved_gaps: unexpected_projection_missing_evidence(payload, scenario),
             change_impact: ChangeImpactSummary {
                 direct_repos: Vec::new(),
                 cross_repo_callers: Vec::new(),
@@ -1046,6 +1037,54 @@ fn projection_field_as_pack_item(index: usize, item: &serde_json::Value) -> Pack
             .to_owned(),
         evidence_chain: None,
     }
+}
+
+fn expected_projection_missing_evidence(scenario: &OracleScenario) -> BTreeSet<&'static str> {
+    scenario
+        .oracle
+        .expected_projection_risks
+        .iter()
+        .filter_map(|risk| match risk.as_str() {
+            "field_candidate_not_found" => Some("data_field"),
+            "projection_chain_unproven" => Some("derivation_edge"),
+            "projection_writer_missing" => Some("writer"),
+            "backfill_unproven" => Some("backfill"),
+            "index_or_search_mapping_unproven" => Some("index_or_search_mapping"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn unexpected_projection_missing_evidence(
+    payload: &serde_json::Value,
+    scenario: &OracleScenario,
+) -> Vec<String> {
+    let expected = expected_projection_missing_evidence(scenario);
+    payload
+        .get("missing_evidence")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(Vec::new, |items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|missing| !expected.contains(missing))
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+}
+
+fn scenario_expects_empty_projection_result(
+    scenario: &OracleScenario,
+    response: &ContextPackResponse,
+) -> bool {
+    scenario.mode == "projection_impact"
+        && scenario.oracle.expected_projection_resolved == Some(false)
+        && !response.data.found
+        && scenario
+            .oracle
+            .expected_projection_risks
+            .iter()
+            .any(|risk| risk == "field_candidate_not_found")
 }
 
 fn primary_impact_match(payload: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -1765,7 +1804,8 @@ fn build_scenario_report(
         expected_file_recall,
         expected_repo_recall,
         forbidden_hit_count,
-        empty_result: response.data.items.is_empty(),
+        empty_result: response.data.items.is_empty()
+            && !scenario_expects_empty_projection_result(scenario, response),
         unresolved_gap_count: response.data.unresolved_gaps.len(),
         event_target_resolved: run.event_target_resolved,
         ranking_kendall_tau: stability_run.and_then(|other| {
@@ -2328,7 +2368,7 @@ mod tests {
     use super::{
         WorkspaceFileIndex, advisory_only_repo_fraction, build_scenario_report,
         compute_split_metrics, kendall_tau, load_oracle_scenarios, parse_proofs, percentile,
-        unexplained_confirmed_repo_fraction,
+        projection_impact_payload_as_context_pack_response, unexplained_confirmed_repo_fraction,
     };
     use crate::planning_oracle::{
         OracleExpectations, OracleRun, OracleScenario, OracleTarget, PythonOracleExpectations,
@@ -3089,6 +3129,78 @@ max_response_bytes = 12000
             scenario.oracle.expected_projection_risks,
             vec!["source_field_unreviewed".to_owned()]
         );
+    }
+
+    #[test]
+    fn projection_expected_not_found_does_not_count_as_empty_regression() {
+        let mut scenario = minimal_scenario(
+            "projection_impact",
+            "field",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        );
+        scenario.oracle.expected_projection_resolved = Some(false);
+        scenario.oracle.expected_projection_risks = vec!["field_candidate_not_found".to_owned()];
+
+        let payload = json!({
+            "resolved": false,
+            "confidence": "low",
+            "candidates": [],
+            "risk_hints": ["field_candidate_not_found"],
+            "missing_evidence": ["data_field"],
+        });
+        let response = projection_impact_payload_as_context_pack_response(&payload, &scenario);
+        let mut run = run_with(response);
+        run.impact_response = Some(payload);
+        let workspace_index = WorkspaceFileIndex {
+            unique_file_to_repo: BTreeMap::new(),
+        };
+
+        let report = build_scenario_report(&workspace_index, &scenario, &run, None);
+
+        assert!(
+            report.passed,
+            "expected not-found projection scenario to pass; got {:?}",
+            report.findings
+        );
+        assert!(!report.empty_result);
+        assert_eq!(report.unresolved_gap_count, 0);
+    }
+
+    #[test]
+    fn projection_expected_missing_evidence_is_not_a_generic_unresolved_gap() {
+        let mut scenario = minimal_scenario(
+            "projection_impact",
+            "field",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        );
+        scenario.oracle.expected_projection_risks = vec![
+            "backfill_unproven".to_owned(),
+            "index_or_search_mapping_unproven".to_owned(),
+        ];
+
+        let payload = json!({
+            "resolved": true,
+            "confidence": "high",
+            "candidates": [],
+            "risk_hints": [
+                "backfill_unproven",
+                "index_or_search_mapping_unproven",
+                "projection_writer_missing"
+            ],
+            "missing_evidence": ["backfill", "index_or_search_mapping", "writer"],
+        });
+
+        let response = projection_impact_payload_as_context_pack_response(&payload, &scenario);
+
+        assert_eq!(response.data.unresolved_gaps, vec!["writer".to_owned()]);
     }
 
     #[test]

@@ -4,5 +4,5 @@
   "source_fields": [],
   "projected_fields": [],
   "derivation_edges": [],
-  "risk_hints": ["needs_disambiguation"]
+  "risk_hints": ["needs_disambiguation", "projection_chain_unproven"]
 }
