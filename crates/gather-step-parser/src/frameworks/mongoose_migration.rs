@@ -1,3 +1,5 @@
+use gather_step_core::{NodeId, NodeKind};
+
 use crate::tree_sitter::ParsedFile;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,9 +42,11 @@ pub fn detect_migration(parsed: &ParsedFile) -> Option<MongooseMigration> {
         return None;
     };
 
+    let up_owner_id = migration_up_owner_id(parsed);
     let filter_literals = parsed
         .call_sites
         .iter()
+        .filter(|call_site| up_owner_id == Some(call_site.owner_id))
         .filter(|call_site| call_site.callee_name == "updateMany")
         .filter_map(|call_site| call_site.raw_arguments.as_deref())
         .filter_map(first_argument)
@@ -54,6 +58,14 @@ pub fn detect_migration(parsed: &ParsedFile) -> Option<MongooseMigration> {
         collection_name: collection_name.clone(),
         filter_literals,
     })
+}
+
+fn migration_up_owner_id(parsed: &ParsedFile) -> Option<NodeId> {
+    parsed
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.name == "up")
+        .map(|node| node.id)
 }
 
 fn is_migration_path(path: &std::path::Path) -> bool {
@@ -203,6 +215,13 @@ export async function down(db: mongoose.Connection['db']): Promise<void> {
     { $unset: { migrated: '' } },
   );
 }
+
+async function helper(db: mongoose.Connection['db']): Promise<void> {
+  await db.collection('alerts').updateMany(
+    { helperOnly: true },
+    { $set: { ignored: true } },
+  );
+}
 "#,
         )
         .expect("fixture should write");
@@ -225,10 +244,7 @@ export async function down(db: mongoose.Connection['db']): Promise<void> {
         assert_eq!(migration.collection_name, "alerts");
         assert_eq!(
             migration.filter_literals,
-            vec![
-                "{ workflow: { $type: 'object' } }".to_owned(),
-                "{ migrated: true }".to_owned()
-            ]
+            vec!["{ workflow: { $type: 'object' } }".to_owned()]
         );
     }
 

@@ -874,7 +874,17 @@ export async function up(db: Connection): Promise<void> {
 }
 
 export async function down(db: Connection): Promise<void> {
-  await db.collection('alerts').updateMany({}, { $unset: { migrated: '' } });
+  await db.collection('alerts').updateMany(
+    { migrated: true },
+    { $unset: { migrated: '' } }
+  );
+}
+
+async function helper(db: Connection): Promise<void> {
+  await db.collection('alerts').updateMany(
+    { helperOnly: true },
+    { $set: { ignored: true } }
+  );
 }
 "#,
         )
@@ -920,5 +930,7 @@ export async function down(db: Connection): Promise<void> {
             .expect("filter metadata should be stored");
         assert!(filter_metadata.starts_with(gather_step_core::MIGRATION_FILTERS_METADATA_PREFIX));
         assert!(filter_metadata.contains("{ workflow: { $type: 'object' } }"));
+        assert!(!filter_metadata.contains("{ migrated: true }"));
+        assert!(!filter_metadata.contains("{ helperOnly: true }"));
     }
 }
