@@ -36,8 +36,13 @@ gather-step --help
 
 ```bash
 brew update
-brew upgrade gather-step
+brew upgrade thedoublejay/tap/gather-step
 ```
+
+Plain `brew upgrade` upgrades Gather Step only after Homebrew has refreshed the
+local tap metadata. If it still reports an older installed version, run the two
+commands above, or rerun `brew install thedoublejay/tap/gather-step` to force
+Homebrew through the tapped formula.
 
 ### Uninstall
 

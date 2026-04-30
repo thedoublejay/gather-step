@@ -189,7 +189,7 @@ fn reset_and_reopen_indexer(
         )
     })?;
     output.line(format!(
-        "  {} Auto-recovered generated index state; rebuilding from source repos.",
+        "  {} Rebuilding generated index state from source repos.",
         style("→").cyan()
     ));
     RepoIndexer::open(storage_root, IndexingOptions::default())

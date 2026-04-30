@@ -295,8 +295,8 @@ fn watch_rejects_concurrent_index_with_storage_held_error_and_cleans_up_daemon_f
 
     let stderr = run_fail_text(workspace.path(), &["index"]);
     assert!(
-        stderr.contains("another gather-step process is using this workspace")
-            && stderr.contains("stop `gather-step watch` or `gather-step serve --watch`"),
+        stderr.contains("Another gather-step process is using this workspace")
+            && stderr.contains("Stop `gather-step watch` or `gather-step serve --watch`"),
         "expected actionable storage-held error, got:\n{stderr}"
     );
 

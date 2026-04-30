@@ -5,6 +5,27 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## v2.1.1 (2026-04-30)
+
+Release status: **released**.
+
+Patch release for setup recovery and upgrade UX.
+
+### Highlights
+
+- Fixed `gather-step init --index` so setup-triggered indexing rebuilds generated index state from source repos instead of exiting when old `.gather-step/storage` state is stale or incompatible.
+- Improved storage/schema operator messages with sentence-cased, actionable guidance. Graph schema mismatches now point to `gather-step index --auto-recover`.
+- Changed recovery progress output to say `Rebuilding generated index state from source repos`.
+- Clarified Homebrew upgrade docs to use `brew update` followed by `brew upgrade thedoublejay/tap/gather-step`.
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.1.1`.
+
+### Verification Coverage
+
+- Added regression coverage for `init --index` auto-recovering stale generated state.
+- Added unit coverage for graph schema mismatch operator guidance.
+- Re-ran existing corrupt graph and unsupported metadata schema recovery tests.
+- Verified manual smoke indexing with temporary generated state and direct graph/metadata/search store checks.
+
 ## v2.1.0 (2026-04-30)
 
 This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph, promotes Python to first-class parsing parity with TypeScript and JavaScript, and adds static projection-impact tracing.

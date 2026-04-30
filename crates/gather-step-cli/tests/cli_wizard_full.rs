@@ -57,6 +57,42 @@ fn init_flag_overrides_run_full_setup_without_prompting() {
 }
 
 #[test]
+fn init_index_auto_recovers_existing_generated_state() {
+    let tmp = tempdir().expect("temp dir");
+    fs::create_dir_all(tmp.path().join(".git")).expect("git dir");
+    fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+    fs::write(tmp.path().join("src/lib.rs"), "pub fn demo() -> u8 { 1 }\n").expect("source");
+
+    let storage_root = tmp.path().join(".gather-step/storage");
+    fs::create_dir_all(&storage_root).expect("storage dir");
+    fs::write(storage_root.join("graph.redb"), b"not a redb database").expect("stale graph");
+    fs::write(tmp.path().join(".gather-step/registry.json"), "{}\n").expect("stale registry");
+
+    let output = Command::new(bin())
+        .args([
+            "--workspace",
+            tmp.path().to_str().expect("utf-8 temp path"),
+            "init",
+            "--force",
+            "--index",
+            "--no-generate-ai-files",
+            "--no-watch",
+        ])
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Rebuilding generated index state from source repos"));
+    assert!(tmp.path().join(".gather-step/registry.json").exists());
+}
+
+#[test]
 fn init_flag_overrides_keep_setup_mcp_idempotent() {
     let tmp = tempdir().expect("temp dir");
     fs::create_dir_all(tmp.path().join(".git")).expect("git dir");
