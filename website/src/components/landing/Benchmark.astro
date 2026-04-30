@@ -47,7 +47,7 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
           through repos. Right bar is a single Gather Step pack query.
         </p>
       </div>
-      <span class="bp-stamp">v2.1 · 2026-04-29</span>
+      <span class="bp-stamp">v2.1 · 2026-04-30</span>
     </div>
 
     <div class="bp-bench__hero">
@@ -58,7 +58,8 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         </div>
         <div class="bp-bench__stat__small">
           <b>{totalManual}s</b> of manual exploration, compressed into <b>{totalGatherStep.toFixed(2)}s</b> of
-          pack queries once the graph is built. The committed release-gate baseline indexed the 26-repo workspace in 118.2s.
+          pack queries once the graph is built. The v2.1 release-ready run also passed link quality,
+          planning oracle, Python planning, and projection-impact slices at High.
         </div>
       </div>
 
@@ -122,8 +123,8 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         <line x1="12" y1="16" x2="12.01" y2="16"></line>
       </svg>
       <div>
-        <b>Release gate baseline.</b> The committed gate passed all HIGH probes across planning,
-        event tracing, and change impact. PR-oracle median F1 and recall both scored 1.000.
+        <b>v2.1 release-ready benchmark.</b> Fresh release build passed all release-scored slices
+        at High. Raw search remains a diagnostic baseline, not a graph-quality gate.
       </div>
     </div>
   </div>

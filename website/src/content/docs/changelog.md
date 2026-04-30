@@ -5,7 +5,7 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
-## v2.1.0 (Draft)
+## v2.1.0 (2026-04-30)
 
 This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph, promotes Python to first-class parsing parity with TypeScript and JavaScript, and adds static projection-impact tracing.
 
@@ -19,6 +19,7 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Refreshed Cargo dependencies with `cargo update`, including moving `gix` from the yanked `0.82.0` line to `0.83.0`.
 - Promoted Python to first-class parsing alongside TypeScript and JavaScript (see [Language Support](/concepts/language-support/)).
 - Added projection-impact tracing for derived fields, persisted projections, filters, indexes, and backfills.
+- Marked v2.1 release readiness with a fresh release-build benchmark where release-scored Gather Step slices are all High/passing.
 
 ### Projection Impact
 
@@ -45,9 +46,11 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Documented the [private corpus benchmarking convention](/concepts/language-support/#private-corpus-convention) for measuring against repositories that cannot be checked in.
 - Renamed `StorageMetrics::metadata_wal_bytes` to `metadata_sidecar_bytes` since the field actually sums the SQLite WAL and SHM files. Deserialization remains backward-compatible with the old bench JSON field name.
 - Promoted `HarnessError::Workspace` from a stringified message to a typed `Box<WorkspaceIndexError<RepoIndexerError>>` so `anyhow::downcast` and structured logging can recover the source chain.
+- Recorded the fresh 2026-04-30 release-build benchmark summary without checking in local benchmark artifacts.
 
 ### Verification Coverage
 
+- Fresh release benchmark from a clean release build at `3f0093e`: curated index High, link quality 3/3 passing, planning oracle 25/25 passing, Python planning 1/1 passing, projection CLI fixture index High, and all projection targets release-scored High.
 - Website build and Cloudflare Pages checks.
 - Rust CI summary: format, clippy, cargo-deny, cargo-shear, macOS tests, MVCC stress, and MSRV check.
 - Added regression tests for configured-repo identity resolution and malformed `gather-step.config.yaml` fallback.

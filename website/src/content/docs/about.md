@@ -30,7 +30,7 @@ Gather Step is not a code generator and it is not a chat memory system.
 - A coding assistant handles synthesis, explanation, and code changes.
 - Gather Step handles retrieval over the current indexed workspace.
 
-In practice, the assistant launches `gather-step serve` through MCP and calls tools such as `search`, `trace_route`, `trace_event`, `trace_impact`, or `planning_pack` automatically when it needs them. The person using the assistant does not need to memorize the tool list for day-to-day work.
+In practice, the assistant launches `gather-step serve` through MCP and calls tools such as `search`, `trace_route`, `trace_event`, `trace_impact`, `projection_impact`, or `planning_pack` automatically when it needs them. The person using the assistant does not need to memorize the tool list for day-to-day work.
 
 ## Implemented Capabilities
 
@@ -42,6 +42,7 @@ The documentation site is intentionally limited to implemented behavior. The cur
 - route tracing for request flows
 - event tracing and downstream event blast radius
 - cross-repo dependency and impact tracing
+- static projection-impact tracing for source fields, derived fields, filters, indexes, and backfills
 - shared type usage lookup
 - payload schema inspection and contract drift analysis
 - context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
