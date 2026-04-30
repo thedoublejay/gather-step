@@ -231,6 +231,7 @@ pub struct ContextPackData {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct MigrationSiblingBand {
     pub collection_name: String,
+    pub coverage_note: String,
     pub verification_hint: String,
     pub siblings: Vec<MigrationSiblingEntry>,
 }
@@ -1716,6 +1717,7 @@ fn migration_sibling_band_for_anchor(
     siblings.dedup_by(|left, right| left.symbol_id == right.symbol_id);
 
     Ok(Some(MigrationSiblingBand {
+        coverage_note: migration_coverage_note().to_owned(),
         verification_hint: migration_verification_hint(&collection_name),
         collection_name,
         siblings,
@@ -1770,6 +1772,10 @@ fn migration_verification_hint(collection_name: &str) -> String {
     format!(
         "Run db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
     )
+}
+
+fn migration_coverage_note() -> &'static str {
+    "Best-effort v2.2 coverage: Mongoose migrations using db.collection(...).updateMany(...) or same-file mongoose.model(..., ..., 'collection') Model.updateMany(...). TypeORM, Knex, Prisma, Atlas, dynamic collection names, imported model resolution, and multi-collection migrations are not detected."
 }
 
 fn latest_commit_short_sha(
@@ -4279,6 +4285,8 @@ mod tests {
             .expect("migration anchor should produce sibling band");
 
         assert_eq!(band.collection_name, "alerts");
+        assert!(band.coverage_note.contains("Mongoose migrations"));
+        assert!(band.coverage_note.contains("TypeORM"));
         assert!(band.verification_hint.contains("db.alerts.aggregate"));
         assert_eq!(band.siblings.len(), 1);
         assert_eq!(band.siblings[0].file_path, "migrations/20260401-alerts.ts");
@@ -5077,6 +5085,7 @@ mod tests {
         ];
         response.data.migration_siblings = Some(MigrationSiblingBand {
             collection_name: "alerts".to_owned(),
+            coverage_note: super::migration_coverage_note().to_owned(),
             verification_hint: super::migration_verification_hint("alerts"),
             siblings: vec![MigrationSiblingEntry {
                 repo: "backend_standard".to_owned(),
@@ -5204,6 +5213,7 @@ mod tests {
             ],
             "migration_siblings": {
               "collection_name": "string",
+              "coverage_note": "string",
               "siblings": [
                 {
                   "commit_short_sha": "string",

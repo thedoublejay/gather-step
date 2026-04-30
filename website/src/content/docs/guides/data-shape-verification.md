@@ -27,9 +27,14 @@ Mongoose migration only when all of these are true:
 - the path contains a `migrations` directory segment,
 - the file imports or requires `mongoose`,
 - the file exports `up` and `down`,
-- the migration touches exactly one `db.collection('<name>')` collection.
+- the migration touches exactly one collection in `up` through either:
+  - `db.collection('<name>').updateMany(...)`, or
+  - a same-file `mongoose.model(..., ..., '<name>')` model followed by
+    `Model.updateMany(...)`.
 
-TypeORM, Knex, Prisma, Atlas migration definitions, and multi-collection
+The `migration_siblings` response includes a coverage note with the same
+best-effort boundary. TypeORM, Knex, Prisma, Atlas migration definitions,
+dynamic collection names, imported model resolution, and multi-collection
 migrations are not treated as Mongoose migration siblings in v2.2. Silence from
 the `migration_siblings` band means "not detected", not "safe".
 

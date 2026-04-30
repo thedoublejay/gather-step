@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use gather_step_core::{NodeId, NodeKind};
 
-use crate::tree_sitter::ParsedFile;
+use crate::tree_sitter::{EnrichedCallSite, ParsedFile};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MongooseMigration {
@@ -20,20 +22,13 @@ pub fn detect_migration(parsed: &ParsedFile) -> Option<MongooseMigration> {
         return None;
     }
 
+    let up_owner_id = migration_up_owner_id(parsed);
+    let model_collections = mongoose_model_collection_names(&parsed.source);
     let mut collection_names = parsed
         .call_sites
         .iter()
-        .filter(|call_site| {
-            call_site.callee_name == "collection"
-                && call_site
-                    .callee_qualified_hint
-                    .as_deref()
-                    .is_some_and(|hint| hint.contains("db.collection"))
-        })
-        .filter_map(|call_site| call_site.literal_argument.as_deref())
-        .map(strip_quotes)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
+        .filter(|call_site| up_owner_id == Some(call_site.owner_id))
+        .filter_map(|call_site| migration_collection_name(call_site, &model_collections))
         .collect::<Vec<_>>();
     collection_names.sort();
     collection_names.dedup();
@@ -42,7 +37,6 @@ pub fn detect_migration(parsed: &ParsedFile) -> Option<MongooseMigration> {
         return None;
     };
 
-    let up_owner_id = migration_up_owner_id(parsed);
     let filter_literals = parsed
         .call_sites
         .iter()
@@ -66,6 +60,71 @@ fn migration_up_owner_id(parsed: &ParsedFile) -> Option<NodeId> {
         .iter()
         .find(|node| node.kind == NodeKind::Function && node.name == "up")
         .map(|node| node.id)
+}
+
+fn migration_collection_name(
+    call_site: &EnrichedCallSite,
+    model_collections: &BTreeMap<String, String>,
+) -> Option<String> {
+    if call_site.callee_name == "collection"
+        && call_site
+            .callee_qualified_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("db.collection"))
+    {
+        return call_site
+            .literal_argument
+            .as_deref()
+            .map(strip_quotes)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned);
+    }
+
+    if call_site.callee_name != "updateMany" {
+        return None;
+    }
+    let hint = call_site.callee_qualified_hint.as_deref()?;
+    let receiver = hint.rsplit_once('.')?.0.rsplit('.').next()?;
+    let model_name = normalize_model_receiver(receiver)?;
+    model_collections.get(&model_name).cloned()
+}
+
+fn normalize_model_receiver(receiver: &str) -> Option<String> {
+    let base = receiver.strip_suffix("Model").unwrap_or(receiver);
+    let mut chars = base.chars();
+    let first = chars.next()?;
+    let mut normalized: String = first.to_uppercase().collect();
+    normalized.push_str(chars.as_str());
+    Some(normalized)
+}
+
+fn mongoose_model_collection_names(source: &str) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::new();
+    let mut cursor = 0;
+    while let Some(relative_index) = source[cursor..].find("mongoose.model") {
+        let start = cursor + relative_index + "mongoose.model".len();
+        let Some(open_relative) = source[start..].find('(') else {
+            break;
+        };
+        let open = start + open_relative;
+        let Some(close) = matching_closing_paren(source, open) else {
+            cursor = open + 1;
+            continue;
+        };
+        if let Some(raw_arguments) = source.get(open + 1..close) {
+            let arguments = top_level_arguments(raw_arguments);
+            if arguments.len() >= 3
+                && let (Some(model_name), Some(collection_name)) = (
+                    quoted_literal_value(arguments[0]),
+                    quoted_literal_value(arguments[2]),
+                )
+            {
+                result.insert(model_name.to_owned(), collection_name.to_owned());
+            }
+        }
+        cursor = close + 1;
+    }
+    result
 }
 
 fn is_migration_path(path: &std::path::Path) -> bool {
@@ -104,9 +163,15 @@ fn has_exported_member(source: &str, name: &str) -> bool {
 }
 
 fn first_argument(raw_arguments: &str) -> Option<&str> {
+    top_level_arguments(raw_arguments).into_iter().next()
+}
+
+fn top_level_arguments(raw_arguments: &str) -> Vec<&str> {
+    let mut arguments = Vec::new();
     let mut depth = 0_u32;
     let mut quote: Option<char> = None;
     let mut escaped = false;
+    let mut argument_start = 0;
 
     for (index, ch) in raw_arguments.char_indices() {
         if let Some(current_quote) = quote {
@@ -128,13 +193,57 @@ fn first_argument(raw_arguments: &str) -> Option<&str> {
             '\'' | '"' | '`' => quote = Some(ch),
             '{' | '[' | '(' => depth = depth.saturating_add(1),
             '}' | ']' | ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => return Some(raw_arguments[..index].trim()),
+            ',' if depth == 0 => {
+                arguments.push(raw_arguments[argument_start..index].trim());
+                argument_start = index + ch.len_utf8();
+            }
             _ => {}
         }
     }
 
-    let trimmed = raw_arguments.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
+    let trailing = raw_arguments[argument_start..].trim();
+    if !trailing.is_empty() {
+        arguments.push(trailing);
+    }
+    arguments
+}
+
+fn matching_closing_paren(source: &str, open: usize) -> Option<usize> {
+    let mut depth = 0_u32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (relative_index, ch) in source.get(open..)?.char_indices() {
+        let index = open + relative_index;
+        if let Some(current_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == current_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn normalize_literal(raw: &str) -> String {
@@ -143,6 +252,15 @@ fn normalize_literal(raw: &str) -> String {
 
 fn strip_quotes(value: &str) -> &str {
     value.trim().trim_matches('"').trim_matches('\'').trim()
+}
+
+fn quoted_literal_value(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let is_quoted = (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''));
+    is_quoted
+        .then(|| strip_quotes(trimmed))
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]
@@ -246,6 +364,134 @@ async function helper(db: mongoose.Connection['db']): Promise<void> {
             migration.filter_literals,
             vec!["{ workflow: { $type: 'object' } }".to_owned()]
         );
+    }
+
+    #[test]
+    fn detects_model_update_many_collection_and_filter_literal() {
+        let temp_dir = TestDir::new("model-update-many");
+        fs::write(
+            temp_dir
+                .path()
+                .join("migrations/20260430-backfill-alert-workflow.ts"),
+            r#"
+import mongoose from 'mongoose';
+
+const alertSchema = new mongoose.Schema({});
+const AlertModel = mongoose.model('Alert', alertSchema, 'alerts');
+const OtherModel = mongoose.model('Other', alertSchema, 'other_records');
+
+export async function up(): Promise<void> {
+  await AlertModel.updateMany(
+    { workflow: { $exists: false } },
+    { $set: { migrated: true } },
+  );
+}
+
+export async function down(): Promise<void> {
+  await OtherModel.updateMany(
+    { migrated: true },
+    { $unset: { migrated: '' } },
+  );
+}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file_with_frameworks(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-backfill-alert-workflow.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::Mongoose],
+        )
+        .expect("fixture should parse");
+
+        let migration = detect_migration(&parsed).expect("migration should be detected");
+        assert_eq!(migration.collection_name, "alerts");
+        assert_eq!(
+            migration.filter_literals,
+            vec!["{ workflow: { $exists: false } }".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ignores_model_update_many_with_dynamic_collection_name() {
+        let temp_dir = TestDir::new("dynamic-model-collection");
+        fs::write(
+            temp_dir.path().join("migrations/20260430-alerts.ts"),
+            r#"
+import mongoose from 'mongoose';
+
+const collectionName = 'alerts';
+const alertSchema = new mongoose.Schema({});
+const AlertModel = mongoose.model('Alert', alertSchema, collectionName);
+
+export async function up(): Promise<void> {
+  await AlertModel.updateMany({}, { $set: { migrated: true } });
+}
+
+export async function down(): Promise<void> {}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file_with_frameworks(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-alerts.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::Mongoose],
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(detect_migration(&parsed), None);
+    }
+
+    #[test]
+    fn ignores_down_collection_when_detecting_target_collection() {
+        let temp_dir = TestDir::new("down-other-collection");
+        fs::write(
+            temp_dir.path().join("migrations/20260430-alerts.ts"),
+            r#"
+import mongoose from 'mongoose';
+
+export async function up(db: mongoose.Connection['db']): Promise<void> {
+  await db.collection('alerts').updateMany({}, { $set: { migrated: true } });
+}
+
+export async function down(db: mongoose.Connection['db']): Promise<void> {
+  await db.collection('users').updateMany({}, { $unset: { migrated: '' } });
+}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file_with_frameworks(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-alerts.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::Mongoose],
+        )
+        .expect("fixture should parse");
+
+        let migration = detect_migration(&parsed).expect("migration should be detected");
+        assert_eq!(migration.collection_name, "alerts");
     }
 
     #[test]
