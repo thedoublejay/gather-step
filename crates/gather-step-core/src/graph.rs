@@ -167,6 +167,8 @@ pub struct EdgeMetadata {
     pub resolver: Option<String>,
 }
 
+pub const MIGRATION_FILTERS_METADATA_PREFIX: &str = "migration_filters:";
+
 impl EdgeMetadata {
     #[must_use]
     pub fn resolver_strategy(&self) -> Option<crate::ResolverStrategy> {

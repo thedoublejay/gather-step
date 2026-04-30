@@ -1,5 +1,9 @@
-use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id};
+use gather_step_core::{
+    EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeKind,
+    ref_node_id,
+};
 
+use crate::frameworks::mongoose_migration;
 use crate::tree_sitter::{EnrichedCallSite, ParsedFile};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -20,6 +24,8 @@ pub struct MongooseAugmentation {
 /// - `@InjectModel()` → virtual model `Service` node + `DependsOn` edges.
 /// - Common repository operation calls → virtual entity `References` edges.
 /// - `db.collection()` → virtual collection `Entity` node + `References` edge.
+/// - Mongoose migration files → virtual migration-collection `Entity` node +
+///   `MigratesCollection` edge.
 pub fn augment(parsed: &ParsedFile) -> MongooseAugmentation {
     let mut augmentation = MongooseAugmentation::default();
 
@@ -35,6 +41,7 @@ pub fn augment(parsed: &ParsedFile) -> MongooseAugmentation {
     add_for_feature_edges(parsed, &mut augmentation);
     add_repository_operation_edges(parsed, &mut augmentation);
     add_db_collection_edges(parsed, &mut augmentation);
+    add_migration_collection_edges(parsed, &mut augmentation);
 
     augmentation
 }
@@ -249,6 +256,51 @@ fn add_db_collection_edges(parsed: &ParsedFile, augmentation: &mut MongooseAugme
     }
 }
 
+fn add_migration_collection_edges(parsed: &ParsedFile, augmentation: &mut MongooseAugmentation) {
+    let Some(migration) = mongoose_migration::detect_migration(parsed) else {
+        return;
+    };
+    let qualified_name = format!("__migration_collection__{}", migration.collection_name);
+    let span = parsed
+        .call_sites
+        .iter()
+        .find(|call_site| {
+            is_db_collection_call(call_site)
+                && call_site
+                    .literal_argument
+                    .as_deref()
+                    .map(|literal| strip_quotes(literal.trim()))
+                    == Some(migration.collection_name.as_str())
+        })
+        .and_then(|call_site| call_site.span.clone());
+    let collection_node = NodeData {
+        id: ref_node_id(NodeKind::Entity, &qualified_name),
+        kind: NodeKind::Entity,
+        repo: parsed.file_node.repo.clone(),
+        file_path: parsed.file_node.file_path.clone(),
+        name: migration.collection_name,
+        qualified_name: Some(qualified_name.clone()),
+        external_id: Some(qualified_name),
+        signature: None,
+        visibility: None,
+        span,
+        is_virtual: true,
+    };
+    let metadata = EdgeMetadata {
+        drift_kind: migration_filters_metadata(&migration.filter_literals),
+        ..EdgeMetadata::default()
+    };
+    augmentation.edges.push(EdgeData {
+        source: migration_primary_symbol(parsed),
+        target: collection_node.id,
+        kind: EdgeKind::MigratesCollection,
+        metadata,
+        owner_file: parsed.file_node.id,
+        is_cross_file: false,
+    });
+    augmentation.nodes.push(collection_node);
+}
+
 // ---------------------------------------------------------------------------
 // Predicate helpers
 // ---------------------------------------------------------------------------
@@ -353,6 +405,23 @@ fn strip_quotes(value: &str) -> &str {
     let value = value.trim_matches('"');
     let value = value.trim_matches('\'');
     value.trim()
+}
+
+fn migration_primary_symbol(parsed: &ParsedFile) -> gather_step_core::NodeId {
+    parsed
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Function && node.name == "up")
+        .map_or(parsed.file_node.id, |node| node.id)
+}
+
+fn migration_filters_metadata(filters: &[String]) -> Option<String> {
+    if filters.is_empty() {
+        return None;
+    }
+    serde_json::to_string(filters)
+        .ok()
+        .map(|json| format!("{MIGRATION_FILTERS_METADATA_PREFIX}{json}"))
 }
 
 fn extract_for_feature_model_names(call_site: &EnrichedCallSite) -> Vec<String> {
@@ -786,5 +855,70 @@ export async function up(db: Db): Promise<void> {
             references_edge.is_some(),
             "expected a References edge to __collection__orders"
         );
+    }
+
+    #[test]
+    fn mongoose_migration_produces_migration_collection_edge() {
+        let temp_dir = TestDir::new("migration-collection-edge");
+        fs::create_dir_all(temp_dir.path().join("migrations")).expect("fixture dir should write");
+        fs::write(
+            temp_dir.path().join("migrations/20260430-alerts.ts"),
+            r#"
+import type { Connection } from 'mongoose';
+
+export async function up(db: Connection): Promise<void> {
+  await db.collection('alerts').updateMany(
+    { workflow: { $type: 'object' } },
+    { $set: { migrated: true } }
+  );
+}
+
+export async function down(db: Connection): Promise<void> {
+  await db.collection('alerts').updateMany({}, { $unset: { migrated: '' } });
+}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-alerts.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        let collection_node = parsed
+            .nodes
+            .iter()
+            .find(|node| node.external_id.as_deref() == Some("__migration_collection__alerts"));
+        let collection_node =
+            collection_node.expect("expected __migration_collection__alerts virtual node");
+        let edge = parsed
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.kind == gather_step_core::EdgeKind::MigratesCollection
+                    && edge.target == collection_node.id
+            })
+            .expect("expected MigratesCollection edge");
+        let source = parsed
+            .nodes
+            .iter()
+            .find(|node| node.id == edge.source)
+            .expect("edge source should resolve");
+        assert_eq!(source.name, "up");
+        let filter_metadata = edge
+            .metadata
+            .drift_kind
+            .as_deref()
+            .expect("filter metadata should be stored");
+        assert!(filter_metadata.starts_with(gather_step_core::MIGRATION_FILTERS_METADATA_PREFIX));
+        assert!(filter_metadata.contains("{ workflow: { $type: 'object' } }"));
     }
 }

@@ -16,7 +16,8 @@ pub use config::{
     LanguageExcludeConfig, RepoConfig,
 };
 pub use graph::{
-    EdgeData, EdgeMetadata, NodeData, NodeId, SourceSpan, Visibility, node_id, ref_node_id,
+    EdgeData, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId, SourceSpan,
+    Visibility, node_id, ref_node_id,
 };
 pub use path_id::{PathId, normalize_path_separators};
 pub use payload::{
