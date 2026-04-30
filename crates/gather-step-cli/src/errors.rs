@@ -29,7 +29,7 @@ pub fn format_operator_error(error: &Error) -> String {
                 | GraphStoreError::StorageHeldByDaemon { .. } => {
                     return "another gather-step process is using this workspace; stop `gather-step watch` or `gather-step serve --watch`, then retry".to_owned();
                 }
-                GraphStoreError::Corrupt { .. } => {
+                GraphStoreError::Corrupt { .. } | GraphStoreError::SchemaVersionMismatch { .. } => {
                     return "your index is corrupt or incomplete; run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`".to_owned();
                 }
                 _ => {}
@@ -117,4 +117,25 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use gather_step_storage::GraphStoreError;
+
+    use super::format_operator_error;
+
+    #[test]
+    fn graph_schema_mismatch_reports_auto_recover() {
+        let error = anyhow::Error::new(GraphStoreError::SchemaVersionMismatch {
+            stored: 0,
+            expected: 1,
+        })
+        .context("opening storage at /tmp/workspace/.gather-step/storage");
+
+        let message = format_operator_error(&error);
+
+        assert!(message.contains("index is corrupt or incomplete"));
+        assert!(message.contains("gather-step index --auto-recover"));
+    }
 }

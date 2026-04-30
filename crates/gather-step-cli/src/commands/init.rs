@@ -95,7 +95,7 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
     let output = app.output();
 
     if args.index && !args.no_index {
-        index::run(app, index::IndexArgs::default()).await?;
+        index::run(app, init_index_args()).await?;
     }
     if args.generate_ai_files && !args.no_generate_ai_files {
         generate::run_summary_pair(app)?;
@@ -167,7 +167,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     write_default_config_with_repos(app, &args, repos)?;
 
     if do_index {
-        index::run(app, index::IndexArgs::default()).await?;
+        index::run(app, init_index_args()).await?;
     }
     if do_ai {
         generate::run_summary_pair(app)?;
@@ -184,6 +184,13 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_index_args() -> index::IndexArgs {
+    index::IndexArgs {
+        auto_recover: true,
+        ..index::IndexArgs::default()
+    }
 }
 
 fn write_default_config(app: &AppContext, args: &InitArgs) -> Result<()> {
