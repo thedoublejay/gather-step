@@ -233,6 +233,8 @@ pub struct MigrationSiblingBand {
     pub collection_name: String,
     pub coverage_note: String,
     pub verification_hint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probe_plans: Vec<MigrationProbePlan>,
     pub siblings: Vec<MigrationSiblingEntry>,
     /// True when more migration siblings touched this collection than the band
     /// can include. Consumers should treat the list as a sample, not a full
@@ -249,6 +251,15 @@ pub struct MigrationSiblingBand {
 )]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MigrationProbePlan {
+    pub field_path: String,
+    pub command: String,
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter_literals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1822,11 +1833,13 @@ fn migration_sibling_band_for_anchor(
     if truncated {
         siblings.truncate(MIGRATION_SIBLING_LIMIT);
     }
+    let probe_plans = migration_probe_plans(&collection_name, &siblings);
 
     Ok(Some(MigrationSiblingBand {
         coverage_note: migration_coverage_note().to_owned(),
         verification_hint: migration_verification_hint(&collection_name),
         collection_name,
+        probe_plans,
         siblings,
         truncated,
     }))
@@ -1881,6 +1894,136 @@ fn decode_migration_filters(value: Option<&str>) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
+fn migration_probe_plans(
+    collection_name: &str,
+    siblings: &[MigrationSiblingEntry],
+) -> Vec<MigrationProbePlan> {
+    let mut filters_by_field = BTreeMap::<String, BTreeSet<String>>::new();
+    for sibling in siblings {
+        for filter in &sibling.filter_literals {
+            for field_path in field_paths_from_migration_filter(filter) {
+                filters_by_field
+                    .entry(field_path)
+                    .or_default()
+                    .insert(filter.clone());
+            }
+        }
+    }
+
+    filters_by_field
+        .into_iter()
+        .map(|(field_path, filters)| MigrationProbePlan {
+            command: mongo_type_probe_command(collection_name, &field_path),
+            rationale: format!(
+                "Count live Mongo BSON types for `{field_path}` before relying on migration filters that scope by field type."
+            ),
+            field_path,
+            filter_literals: filters.into_iter().collect(),
+        })
+        .collect()
+}
+
+fn field_paths_from_migration_filter(filter: &str) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    let bytes = filter.as_bytes();
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        cursor = skip_non_filter_key(bytes, cursor);
+        if cursor >= bytes.len() {
+            break;
+        }
+
+        let (raw_key, next_cursor) = if bytes[cursor] == b'\'' || bytes[cursor] == b'"' {
+            quoted_filter_key(filter, cursor).unwrap_or_else(|| (String::new(), cursor + 1))
+        } else {
+            unquoted_filter_key(filter, cursor).unwrap_or_else(|| (String::new(), cursor + 1))
+        };
+        cursor = next_cursor;
+
+        let after_key = skip_ascii_ws_bytes(bytes, cursor);
+        if after_key >= bytes.len() || bytes[after_key] != b':' {
+            continue;
+        }
+        if let Some(field) = normalize_filter_field_path(&raw_key) {
+            fields.insert(field);
+        }
+    }
+
+    fields
+}
+
+fn skip_non_filter_key(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len()
+        && bytes[cursor] != b'\''
+        && bytes[cursor] != b'"'
+        && !is_filter_key_start(bytes[cursor])
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn quoted_filter_key(filter: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = filter.as_bytes();
+    let quote = *bytes.get(cursor)?;
+    let mut end = cursor + 1;
+    while end < bytes.len() && bytes[end] != quote {
+        end += 1;
+    }
+    if end >= bytes.len() {
+        return None;
+    }
+    Some((filter[cursor + 1..end].to_owned(), end + 1))
+}
+
+fn unquoted_filter_key(filter: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = filter.as_bytes();
+    if !is_filter_key_start(*bytes.get(cursor)?) {
+        return None;
+    }
+    let mut end = cursor + 1;
+    while end < bytes.len() && is_filter_key_continue(bytes[end]) {
+        end += 1;
+    }
+    Some((filter[cursor..end].to_owned(), end))
+}
+
+fn normalize_filter_field_path(raw_key: &str) -> Option<String> {
+    let key = raw_key.trim();
+    if key.is_empty() || key.starts_with('$') {
+        return None;
+    }
+    if !key
+        .bytes()
+        .all(|byte| is_filter_key_continue(byte) && byte != b'$')
+    {
+        return None;
+    }
+    Some(key.to_owned())
+}
+
+fn mongo_type_probe_command(collection_name: &str, field_path: &str) -> String {
+    format!(
+        "db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '${field_path}' }}, count: {{ $sum: 1 }} }} }}, {{ $sort: {{ count: -1 }} }}])"
+    )
+}
+
+fn skip_ascii_ws_bytes(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn is_filter_key_start(byte: u8) -> bool {
+    byte == b'$' || byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_filter_key_continue(byte: u8) -> bool {
+    byte == b'$' || byte == b'_' || byte == b'.' || byte.is_ascii_alphanumeric()
+}
+
 fn migration_verification_hint(collection_name: &str) -> String {
     format!(
         "Run db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
@@ -1925,10 +2068,13 @@ fn trim_context_pack(response: &mut ContextPackResponse) -> bool {
     {
         return true;
     }
-    if let Some(band) = response.data.migration_siblings.as_mut()
-        && band.siblings.pop().is_some()
-    {
-        return true;
+    if let Some(band) = response.data.migration_siblings.as_mut() {
+        if band.siblings.pop().is_some() {
+            return true;
+        }
+        if band.probe_plans.pop().is_some() {
+            return true;
+        }
     }
     response.data.migration_siblings.take().is_some()
         || response
@@ -3875,7 +4021,7 @@ fn gap_warnings(unresolved_gaps: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         ChangeImpactSummary, ContextPackData, ContextPackMeta, ContextPackResponse,
-        CrossRepoCaller, MigrationSiblingBand, MigrationSiblingEntry, PackItem,
+        CrossRepoCaller, MigrationProbePlan, MigrationSiblingBand, MigrationSiblingEntry, PackItem,
         PackResolutionDetails, PlanningRescue, RankedPackCandidate, RescueAnchor,
         ResolvedPackTarget, TruncatedRepos, apply_planning_evidence_ranking,
         build_ranked_alternate_anchors, build_resolution_details, cap_change_impact_repos,
@@ -4407,6 +4553,10 @@ mod tests {
             band.siblings[0].filter_literals,
             vec!["{ workflow: { $type: 'object' } }".to_owned()]
         );
+        assert_eq!(band.probe_plans.len(), 1);
+        assert_eq!(band.probe_plans[0].field_path, "workflow");
+        assert!(band.probe_plans[0].command.contains("db.alerts.aggregate"));
+        assert!(band.probe_plans[0].command.contains("$type: '$workflow'"));
     }
 
     #[test]
@@ -5200,6 +5350,12 @@ mod tests {
             collection_name: "alerts".to_owned(),
             coverage_note: super::migration_coverage_note().to_owned(),
             verification_hint: super::migration_verification_hint("alerts"),
+            probe_plans: vec![MigrationProbePlan {
+                field_path: "workflow".to_owned(),
+                command: super::mongo_type_probe_command("alerts", "workflow"),
+                rationale: "Count live Mongo BSON types for `workflow` before relying on migration filters that scope by field type.".to_owned(),
+                filter_literals: vec!["{ workflow: { $type: 'object' } }".to_owned()],
+            }],
             siblings: vec![MigrationSiblingEntry {
                 repo: "backend_standard".to_owned(),
                 file_path: "migrations/20260401-alerts.ts".to_owned(),
@@ -5328,6 +5484,16 @@ mod tests {
             "migration_siblings": {
               "collection_name": "string",
               "coverage_note": "string",
+              "probe_plans": [
+                {
+                  "command": "string",
+                  "field_path": "string",
+                  "filter_literals": [
+                    "string"
+                  ],
+                  "rationale": "string"
+                }
+              ],
               "siblings": [
                 {
                   "commit_short_sha": "string",
