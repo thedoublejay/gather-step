@@ -115,19 +115,49 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
         );
     }
     for field in facts.reads {
-        push_field_edge(parsed, &mut dedup, &field, EdgeKind::ReadsField, CONFIDENCE_MEDIUM);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::ReadsField,
+            CONFIDENCE_MEDIUM,
+        );
     }
     for field in facts.writes {
-        push_field_edge(parsed, &mut dedup, &field, EdgeKind::WritesField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::WritesField,
+            CONFIDENCE_HIGH,
+        );
     }
     for field in facts.filters {
-        push_field_edge(parsed, &mut dedup, &field, EdgeKind::FiltersOnField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::FiltersOnField,
+            CONFIDENCE_HIGH,
+        );
     }
     for field in facts.indexes {
-        push_field_edge(parsed, &mut dedup, &field, EdgeKind::IndexesField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::IndexesField,
+            CONFIDENCE_HIGH,
+        );
     }
     for field in facts.backfills {
-        push_field_edge(parsed, &mut dedup, &field, EdgeKind::BackfillsField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::BackfillsField,
+            CONFIDENCE_HIGH,
+        );
     }
     for edge in &direct_edges {
         push_direct_field_edge(parsed, &mut dedup, edge);

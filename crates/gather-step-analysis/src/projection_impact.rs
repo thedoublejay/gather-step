@@ -305,9 +305,9 @@ fn descendant_and_equivalent_field_ids<S: GraphStore>(
             equivalents.insert(node.id);
         }
         if !prefixes.is_empty()
-            && prefixes
-                .iter()
-                .any(|(repo, prefix)| node.repo == *repo && starts_with_ascii_case(&node.name, prefix))
+            && prefixes.iter().any(|(repo, prefix)| {
+                node.repo == *repo && starts_with_ascii_case(&node.name, prefix)
+            })
         {
             descendants.insert(node.id);
         }

@@ -243,7 +243,10 @@ pub struct MigrationSiblingBand {
 
 // `skip_serializing_if` requires `fn(&T) -> bool`; clippy's
 // `trivially_copy_pass_by_ref` doesn't see through serde's signature contract.
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if signature")]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if signature"
+)]
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -1307,7 +1310,8 @@ fn apply_projection_impact_summary(
         // absence) authoritatively.
         let next_step = match (readers.is_empty(), writers.is_empty()) {
             (true, true) => {
-                "Inspect this field with projection_impact for direct read/write evidence.".to_owned()
+                "Inspect this field with projection_impact for direct read/write evidence."
+                    .to_owned()
             }
             (false, true) => format!(
                 "Review field impact: readers [{readers}]. Use projection_impact for full evidence."
@@ -1698,9 +1702,7 @@ fn extended_bridges(
     Ok(keyed.into_iter().map(|(_, node, _, _)| node).collect())
 }
 
-fn finalize_bridges(
-    bridge_nodes: Vec<gather_step_core::NodeData>,
-) -> (Vec<PackBridge>, PackFiles) {
+fn finalize_bridges(bridge_nodes: Vec<gather_step_core::NodeData>) -> (Vec<PackBridge>, PackFiles) {
     // Sort by debug-rendered kind, but render once per node — `format!("{:?}",
     // kind)` inside `sort_by` allocates O(N log N) Strings during comparison.
     let mut keyed_nodes: Vec<(String, gather_step_core::NodeData)> = bridge_nodes
