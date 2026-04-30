@@ -4,7 +4,7 @@
 
 Build projection impact as a graph-backed analysis that answers: "If this source field changes, which derived fields, persisted projections, readers, filters, indexes, backfills, and planning risks must be reviewed?"
 
-The first implementation target is static projection tracing. It identifies projection-related runtime surfaces, but it does not infer deployed runtime ownership. Deployed runtime ownership is a separate workstream because it uses a different evidence class: CI workflows, Helm releases, deployment manifests, repo profiles, and Braingent learnings.
+The first implementation target is static projection tracing. It identifies projection-related runtime surfaces, but it does not infer deployed runtime ownership. Deployed runtime ownership is a separate workstream because it uses a different evidence class: CI workflows, Helm releases, deployment manifests, repo profiles, and advisory notes.
 
 Old Gather Step schema compatibility is explicitly out of scope. If the graph vocabulary changes, bump the schema and require a clean rebuild/reindex.
 
@@ -12,8 +12,8 @@ Old Gather Step schema compatibility is explicitly out of scope. If the graph vo
 
 ## Goals
 
-- Add a generic projection-impact capability that works beyond RegASK.
-- Make it stronger for RegASK through fixtures, repo profiles, and Braingent advisory hints without hardcoding RegASK rules into core logic.
+- Add a generic projection-impact capability that works beyond any single workspace.
+- Make it stronger for particular workspaces through fixtures, repo profiles, and advisory hints without hardcoding customer-specific rules into core logic.
 - Keep the MVP scoped to extractable static evidence first.
 - Use dedicated CLI/MCP surfaces first, then inject short projection summaries into existing `planning` and `change_impact` packs.
 - Add regression oracles that catch the original planning failure shape and the later "which consumer is deployed?" failure shape.
@@ -23,7 +23,7 @@ Old Gather Step schema compatibility is explicitly out of scope. If the graph vo
 - No backward compatibility with old `.gather-step` graph schema versions.
 - No full database ERD, live database introspection, or runtime query tracing.
 - No new `PackMode` for projection impact in the MVP.
-- No RegASK-specific invariants in core graph, parser, storage, or analysis logic.
+- No customer-specific invariants in core graph, parser, storage, or analysis logic.
 - No deployed-runtime ownership inference inside the projection MVP.
 - No attempt to solve every hidden-coupling case in the first slice.
 
@@ -46,7 +46,7 @@ Old Gather Step schema compatibility is explicitly out of scope. If the graph vo
 ## Subagent Review Incorporated
 
 - QA review: add red/green projection oracles, clean-slate schema rebuild acceptance, negative parser fixtures, strict CLI/MCP JSON snapshots, and a separate deployment-owner oracle.
-- Architecture review: split projection tracing from deployed-runtime ownership, keep schema minimal until extractor proof exists, keep RegASK knowledge advisory, and prefer a dedicated CLI/MCP tool over a new pack mode.
+- Architecture review: split projection tracing from deployed-runtime ownership, keep schema minimal until extractor proof exists, keep workspace-specific knowledge advisory, and prefer a dedicated CLI/MCP tool over a new pack mode.
 - Code-map review: schema enum changes must stay aligned with graph data/id contracts, parser virtual-node conventions, both storage indexer parse paths, proof mapping, MCP server registration, and benchmark oracle edge-kind assertions.
 
 ## Workstream A: Projection Impact MVP
@@ -150,9 +150,9 @@ Use small parser fixtures first, then the oracle workspace.
    - `→ verify: negative fixtures emit no projection edges, or emit low-confidence advisory evidence that analysis can ignore by default.`
 
 5. Keep extractors generic.
-   - RegASK-like names are allowed in oracle fixtures.
+   - Domain-like names are allowed in oracle fixtures.
    - Core extraction logic must key off syntax and evidence type, not project or ticket names.
-   - `→ verify: fixtures include at least one non-RegASK naming example so `subtaskIds` is not a special case.`
+   - `→ verify: fixtures include at least one separate-domain naming example so `subtaskIds` is not a special case.`
 
 6. Keep parser branch behavior consistent.
    - Update both `parse_file_with_packs` and `parse_file_with_context` paths where extraction semantics depend on enabled packs or context.
@@ -214,10 +214,10 @@ Add analysis as a dedicated module, likely `crates/gather-step-analysis/src/proj
    - `deployed_owner_unchecked` when deployment evidence is outside the MVP.
    - `→ verify: stale oracle reports required risks; fixed oracle clears risks when evidence exists.`
 
-5. Keep RegASK enhancements advisory.
-   - Braingent/profile hints may influence wording and suggested next checks.
+5. Keep workspace-specific enhancements advisory.
+   - Profile/advisory hints may influence wording and suggested next checks.
    - They must not create hard graph facts unless code or config evidence exists.
-   - `→ verify: non-RegASK fixture still works with no Braingent data loaded.`
+   - `→ verify: separate-domain fixture still works with no advisory data loaded.`
 
 6. Integrate proof mapping only after the dedicated report is stable.
    - Add projection edge proof labels in `proofs.rs` so pack summaries can explain why a field or file was included.
@@ -240,7 +240,7 @@ Expose projection impact through a dedicated surface. Do not add a new pack mode
    - Structured content mirrors the analysis report.
    - Use stable null/empty-array conventions.
    - Register the tool in MCP server tool listing and dispatch, not only in `tools/packs.rs`.
-   - `→ verify: MCP `call_tool("projection_impact")` test asserts registration, input validation, and structured-content snapshot.`
+   - `→ verify: MCP call_tool("projection_impact") test asserts registration, input validation, and structured-content snapshot.`
 
 3. Keep text output concise.
    - Show target, most likely source/projection chain, missing evidence, and next checks.
@@ -286,10 +286,10 @@ Document the workflow as an implementation-facing operator guide.
    - Include clean/reindex commands.
    - `→ verify: docs mention no compatibility migration and point to `clean`/`reindex`.`
 
-3. Document RegASK-strengthening path.
-   - RegASK hints come from fixtures, Braingent, and repo profiles.
+3. Document workspace-specific strengthening path.
+   - Workspace-specific hints come from fixtures, advisory notes, and repo profiles.
    - Core logic remains generic.
-   - `→ verify: docs explicitly say RegASK-specific memories are advisory unless backed by indexed evidence.`
+   - `→ verify: docs explicitly say workspace-specific hints are advisory unless backed by indexed evidence.`
 
 **Review checkpoint R8:** Review docs with implementation diff before release.
 
@@ -307,7 +307,7 @@ This should follow Workstream A or run in parallel only if it does not expand pr
    - Include two plausible notification consumers.
    - One candidate has consumer code but no deployment evidence.
    - The other candidate has consumer code plus GitHub Actions/Helm deployment evidence.
-   - Model the RegASK failure shape using generic fixture names where possible, with RegASK-specific notes only in fixture metadata.
+   - Model the duplicate-consumer failure shape using generic fixture names.
    - `→ verify: oracle fails before implementation because Gather Step cannot prove which candidate is deployed.`
 
 2. Add expectation fields or reuse rollout oracle fields.
@@ -334,7 +334,7 @@ This should follow Workstream A or run in parallel only if it does not expand pr
 
 1. Add analysis that ranks candidate consumers by deployment proof.
    - Inputs: topic/event/consumer target, repo scope, optional environment.
-   - Signals: code consumer, workflow deploy, Helm release, recent substantive commits, Braingent/profile advisory hints.
+   - Signals: code consumer, workflow deploy, Helm release, recent substantive commits, profile/advisory hints.
    - Warnings: `repo_name_bias`, `duplicate_service_candidates`, `migration_target_not_live`, `deployment_owner_mismatch`, `deployed_consumer_unproven`.
    - `→ verify: fixture ranks deployed candidate first and flags standalone candidate as advisory/migration-only when evidence supports that.`
 
@@ -342,16 +342,16 @@ This should follow Workstream A or run in parallel only if it does not expand pr
    - Planning packs should ask "which candidate is deployed?" when duplicate consumers exist.
    - `→ verify: planning oracle for the duplicate notification fixture does not stop at the first repo-name match.`
 
-### B3. Braingent/Profile Integration
+### B3. Advisory/Profile Integration
 
 1. Add advisory lookup support.
-   - Braingent learnings can raise risk hints or suggest checks.
+   - Advisory notes can raise risk hints or suggest checks.
    - They must not override indexed deployment evidence.
-   - `→ verify: fixture passes without Braingent and gets stronger wording with Braingent/profile data.`
+   - `→ verify: fixture passes without advisory data and gets stronger wording with advisory/profile data.`
 
-2. Capture the RegASK learning as reusable context if not already captured.
-   - Learning: deployed notification consumer lives in `platform-services/apps/notification`, while standalone `notification` may be a migration target.
-   - `→ verify: Braingent record validates and reindexes.`
+2. Capture the deployment-owner learning as reusable context if not already captured.
+   - Learning: deployed consumers should be distinguished from standalone or migration-target consumers using indexed deployment evidence.
+   - `→ verify: advisory record validates and reindexes.`
 
 **Review checkpoint B2:** Review deployment-owner behavior separately from projection-impact release readiness.
 
@@ -418,7 +418,7 @@ These are real planning-risk classes, but they should not be bundled into Workst
 - Dedicated CLI and MCP projection-impact surfaces return stable structured output.
 - Existing pack modes still pass and do not gain a new projection-specific mode.
 - Planning/change-impact packs include concise projection hints without budget regressions.
-- No RegASK-specific rule exists in core extraction or analysis logic.
+- No customer-specific rule exists in core extraction or analysis logic.
 - Deployed runtime ownership is either implemented as Workstream B or clearly left out of the projection MVP with `deployed_owner_unchecked` risk hints.
 
 ## Open Review Questions
@@ -432,5 +432,5 @@ These are real planning-risk classes, but they should not be bundled into Workst
 3. Should deployment ownership add new graph vocabulary, or can it reuse `Service`, `Repo`, `PartOf`, `OwnedBy`, and existing event edges with deployment metadata?
    - `→ verify: answer during B1 based on the deployment-owner oracle.`
 
-4. How much Braingent data should pack integration read automatically?
-   - `→ verify: keep MVP functional without Braingent; use Braingent only to strengthen warnings and next checks.`
+4. How much advisory profile data should pack integration read automatically?
+   - `→ verify: keep MVP functional without advisory profile data; use it only to strengthen warnings and next checks.`

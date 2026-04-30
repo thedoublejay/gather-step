@@ -98,6 +98,7 @@ pub fn projection_impact_tool(
             "target must not be empty".to_owned(),
         ));
     }
+    validate_projection_impact_limit(request.limit)?;
     let report = projection_impact(
         ctx.graph(),
         AnalysisRequest {
@@ -140,6 +141,16 @@ pub fn projection_impact_tool(
     })
 }
 
+fn validate_projection_impact_limit(limit: usize) -> Result<(), McpServerError> {
+    if (1..=100).contains(&limit) {
+        Ok(())
+    } else {
+        Err(McpServerError::InvalidInput(
+            "limit must be between 1 and 100".to_owned(),
+        ))
+    }
+}
+
 impl From<gather_step_analysis::ProjectionField> for ProjectionFieldItem {
     fn from(field: gather_step_analysis::ProjectionField) -> Self {
         Self {
@@ -169,8 +180,9 @@ mod tests {
     use super::{
         ProjectionDerivationItem, ProjectionEvidenceItem, ProjectionEvidenceVerbosity,
         ProjectionFieldItem, ProjectionImpactData, ProjectionImpactRequest,
-        ProjectionImpactResponse,
+        ProjectionImpactResponse, validate_projection_impact_limit,
     };
+    use crate::McpServerError;
 
     fn empty_data(target: &str) -> ProjectionImpactData {
         ProjectionImpactData {
@@ -234,6 +246,19 @@ mod tests {
             summary_request.evidence_verbosity,
             ProjectionEvidenceVerbosity::Summary
         );
+    }
+
+    #[test]
+    fn validates_limit_bounds_before_analysis() {
+        assert!(validate_projection_impact_limit(1).is_ok());
+        assert!(validate_projection_impact_limit(100).is_ok());
+
+        let error = validate_projection_impact_limit(0).expect_err("limit 0 should be rejected");
+        assert!(matches!(
+            error,
+            McpServerError::InvalidInput(message)
+                if message == "limit must be between 1 and 100"
+        ));
     }
 
     #[test]

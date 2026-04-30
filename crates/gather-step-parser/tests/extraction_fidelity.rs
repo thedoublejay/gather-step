@@ -351,7 +351,7 @@ fn projection_false_positive_fixtures_do_not_emit_data_fields() {
 }
 
 #[test]
-fn projection_fixtures_accept_non_regask_domain_names() {
+fn projection_fixtures_accept_separate_domain_names() {
     let parsed = parse_fixture("projection_acme_loyalty.ts", &[]);
 
     assert_fields(

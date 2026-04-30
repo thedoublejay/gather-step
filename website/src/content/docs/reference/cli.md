@@ -446,7 +446,7 @@ gather-step [GLOBAL FLAGS] projection-impact --target <FIELD> [--limit <N>] \
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--target <FIELD>` | string | required | Field or projected field name to inspect. |
-| `--limit <N>` | usize | 20 | Maximum field candidates to inspect. |
+| `--limit <N>` | usize | 20 | Maximum field candidates to inspect (1-100). |
 | `--evidence-verbosity <summary\|full>` | enum | `full` | Controls whether large evidence lists are capped (`summary`) or returned in full (`full`). |
 
 **Example**

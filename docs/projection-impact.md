@@ -28,7 +28,7 @@ gather-step projection-impact --target subtaskIds
 Example text output for a projected-field query:
 
 ```text
-projection impact for `subtaskIds`: 1 candidate(s), confidence high
+projection impact for `subtaskIds`: 1 candidate, confidence high
 source fields: backend:id, backend:subtasks
 projected fields: backend:subtaskIds
 projection chain: backend:id -> backend:subtaskIds; backend:subtasks -> backend:subtaskIds
@@ -102,6 +102,8 @@ Use the `projection_impact` tool:
 
 Set `evidence_verbosity` to `summary` to cap large evidence lists while keeping source/projected fields, derivation chains, risks, and missing-evidence fields intact.
 
+Set `limit` between 1 and 100 to control how many matching field candidates are inspected.
+
 The tool is read-only. It does not infer which deployed runtime owns a service. When projection evidence exists, planning packs may include a short next step and `projection_impact:*` gap hints, but the full evidence stays behind the dedicated tool.
 
 ## Static Mapping Files
@@ -133,8 +135,8 @@ If generated AI context files are committed in the workspace, regenerate them af
 
 Projection impact only traces static code and config evidence. It does not decide which service is deployed in production; verify deployed runtime ownership separately when multiple repos can serve the same business capability.
 
-## RegASK Usage
+## Workspace-Specific Usage
 
-The extractor is generic. RegASK-specific strength should come from fixtures, repo profiles, and Braingent advisory learnings. Core graph facts must come from indexed code/config evidence, not project names or ticket-specific assumptions.
+The extractor is generic. Workspace-specific strength should come from fixtures, repo profiles, and advisory notes. Core graph facts must come from indexed code/config evidence, not project names or ticket-specific assumptions.
 
-For RegASK planning, use projection impact to check the field chain first, then separately verify deployed runtime ownership when duplicate or transitioning services exist.
+For planning in a workspace with duplicate or transitioning services, use projection impact to check the field chain first, then separately verify deployed runtime ownership.

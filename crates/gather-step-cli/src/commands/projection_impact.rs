@@ -16,7 +16,8 @@ pub struct ProjectionImpactArgs {
     #[arg(
         long,
         default_value_t = 20,
-        help = "Maximum field candidates to inspect"
+        value_parser = parse_projection_impact_limit,
+        help = "Maximum field candidates to inspect (1-100)"
     )]
     pub limit: usize,
     #[arg(
@@ -74,9 +75,10 @@ fn render_text_lines(report: &ProjectionImpactReport) -> Vec<String> {
     let mut lines = Vec::new();
     if report.resolved {
         lines.push(format!(
-            "projection impact for `{}`: {} candidate(s), confidence {}",
+            "projection impact for `{}`: {} {}, confidence {}",
             report.target,
             report.candidates.len(),
+            pluralize(report.candidates.len(), "candidate", "candidates"),
             report.confidence
         ));
         if let Some(ambiguity) = &report.ambiguity {
@@ -152,4 +154,19 @@ fn format_fields(fields: &[ProjectionField]) -> String {
 
 fn format_field(field: &ProjectionField) -> String {
     format!("{}:{}", field.repo, field.field_path)
+}
+
+fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+fn parse_projection_impact_limit(value: &str) -> std::result::Result<usize, String> {
+    let limit = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be an integer between 1 and 100".to_owned())?;
+    if (1..=100).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err("limit must be an integer between 1 and 100".to_owned())
+    }
 }
