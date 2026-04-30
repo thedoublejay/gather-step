@@ -12,46 +12,68 @@ pub struct MongooseMigration {
 
 #[must_use]
 pub fn detect_migration(parsed: &ParsedFile) -> Option<MongooseMigration> {
+    let mut migrations = detect_migrations(parsed);
+    (migrations.len() == 1).then(|| migrations.remove(0))
+}
+
+#[must_use]
+pub fn detect_migrations(parsed: &ParsedFile) -> Vec<MongooseMigration> {
     if !is_migration_path(&parsed.file.path) {
-        return None;
+        return Vec::new();
     }
     if !imports_mongoose(&parsed.source) {
-        return None;
+        return Vec::new();
     }
     if !exports_up_down(&parsed.source) {
-        return None;
+        return Vec::new();
     }
 
     let up_owner_id = migration_up_owner_id(parsed);
     let model_collections = mongoose_model_collection_names(&parsed.source);
-    let mut collection_names = parsed
+    let mut collection_calls = parsed
         .call_sites
         .iter()
         .filter(|call_site| up_owner_id == Some(call_site.owner_id))
-        .filter_map(|call_site| migration_collection_name(call_site, &model_collections))
+        .filter_map(collection_call_hint)
         .collect::<Vec<_>>();
-    collection_names.sort();
-    collection_names.dedup();
+    collection_calls.sort_by_key(|(line, _)| *line);
 
-    let [collection_name] = collection_names.as_slice() else {
-        return None;
-    };
-
-    let filter_literals = parsed
+    let mut filters_by_collection = BTreeMap::<String, Vec<String>>::new();
+    for call_site in parsed
         .call_sites
         .iter()
         .filter(|call_site| up_owner_id == Some(call_site.owner_id))
-        .filter(|call_site| call_site.callee_name == "updateMany")
-        .filter_map(|call_site| call_site.raw_arguments.as_deref())
-        .filter_map(first_argument)
-        .map(normalize_literal)
-        .filter(|literal| !literal.is_empty())
-        .collect::<Vec<_>>();
+        .filter(|call_site| is_migration_write_method(&call_site.callee_name))
+    {
+        let Some(collection_name) =
+            migration_write_collection_name(call_site, &model_collections, &collection_calls)
+        else {
+            continue;
+        };
+        let filter_literals = call_site
+            .raw_arguments
+            .as_deref()
+            .and_then(first_argument)
+            .map(normalize_literal)
+            .filter(|literal| !literal.is_empty())
+            .into_iter();
+        filters_by_collection
+            .entry(collection_name)
+            .or_default()
+            .extend(filter_literals);
+    }
 
-    Some(MongooseMigration {
-        collection_name: collection_name.clone(),
-        filter_literals,
-    })
+    filters_by_collection
+        .into_iter()
+        .map(|(collection_name, mut filter_literals)| {
+            filter_literals.sort();
+            filter_literals.dedup();
+            MongooseMigration {
+                collection_name,
+                filter_literals,
+            }
+        })
+        .collect()
 }
 
 fn migration_up_owner_id(parsed: &ParsedFile) -> Option<NodeId> {
@@ -62,31 +84,52 @@ fn migration_up_owner_id(parsed: &ParsedFile) -> Option<NodeId> {
         .map(|node| node.id)
 }
 
-fn migration_collection_name(
+fn migration_write_collection_name(
     call_site: &EnrichedCallSite,
     model_collections: &BTreeMap<String, String>,
+    collection_calls: &[(u32, String)],
 ) -> Option<String> {
-    if call_site.callee_name == "collection"
-        && call_site
+    let hint = call_site.callee_qualified_hint.as_deref()?;
+    let receiver = hint.rsplit_once('.')?.0.rsplit('.').next()?;
+    if let Some(model_name) = normalize_model_receiver(receiver)
+        && let Some(collection_name) = model_collections.get(&model_name)
+    {
+        return Some(collection_name.clone());
+    }
+
+    let line_start = call_site.span.as_ref()?.line_start;
+    collection_calls
+        .iter()
+        .rev()
+        .find(|(line, _)| *line <= line_start)
+        .map(|(_, collection_name)| collection_name.clone())
+}
+
+fn collection_call_hint(call_site: &EnrichedCallSite) -> Option<(u32, String)> {
+    if call_site.callee_name != "collection"
+        || !call_site
             .callee_qualified_hint
             .as_deref()
             .is_some_and(|hint| hint.contains("db.collection"))
     {
-        return call_site
-            .literal_argument
-            .as_deref()
-            .map(strip_quotes)
-            .filter(|name| !name.is_empty())
-            .map(ToOwned::to_owned);
-    }
-
-    if call_site.callee_name != "updateMany" {
         return None;
     }
-    let hint = call_site.callee_qualified_hint.as_deref()?;
-    let receiver = hint.rsplit_once('.')?.0.rsplit('.').next()?;
-    let model_name = normalize_model_receiver(receiver)?;
-    model_collections.get(&model_name).cloned()
+
+    let line_start = call_site.span.as_ref()?.line_start;
+    let collection_name = call_site
+        .literal_argument
+        .as_deref()
+        .map(strip_quotes)
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    Some((line_start, collection_name))
+}
+
+fn is_migration_write_method(name: &str) -> bool {
+    matches!(
+        name,
+        "updateMany" | "updateOne" | "replaceOne" | "deleteMany" | "deleteOne"
+    )
 }
 
 fn normalize_model_receiver(receiver: &str) -> Option<String> {
@@ -291,7 +334,10 @@ mod tests {
 
     use crate::{
         Language,
-        frameworks::{Framework, mongoose_migration::detect_migration},
+        frameworks::{
+            Framework,
+            mongoose_migration::{detect_migration, detect_migrations},
+        },
         tree_sitter::parse_file_with_frameworks,
     };
 
@@ -576,5 +622,61 @@ export async function down(db: mongoose.Connection['db']): Promise<void> {}
         .expect("fixture should parse");
 
         assert_eq!(detect_migration(&parsed), None);
+    }
+
+    #[test]
+    fn detects_multi_collection_migration_for_graph_edges() {
+        let temp_dir = TestDir::new("multi-collection");
+        fs::write(
+            temp_dir.path().join("migrations/20260430-alerts.ts"),
+            r#"
+import mongoose from 'mongoose';
+
+export async function up(db: mongoose.Connection['db']): Promise<void> {
+  await db.collection('alerts').updateMany(
+    { workflow: { $type: 'object' } },
+    { $set: { migrated: true } },
+  );
+  await db.collection('users').deleteMany(
+    { stale: true },
+  );
+}
+
+export async function down(db: mongoose.Connection['db']): Promise<void> {}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file_with_frameworks(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-alerts.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::Mongoose],
+        )
+        .expect("fixture should parse");
+
+        let migrations = detect_migrations(&parsed);
+        assert_eq!(migrations.len(), 2);
+        assert_eq!(migrations[0].collection_name, "alerts");
+        assert_eq!(
+            migrations[0].filter_literals,
+            vec!["{ workflow: { $type: 'object' } }".to_owned()]
+        );
+        assert_eq!(migrations[1].collection_name, "users");
+        assert_eq!(
+            migrations[1].filter_literals,
+            vec!["{ stale: true }".to_owned()]
+        );
+        assert_eq!(
+            detect_migration(&parsed),
+            None,
+            "single-migration compatibility helper should stay conservative for multi-collection files"
+        );
     }
 }
