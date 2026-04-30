@@ -1,6 +1,6 @@
 {
   "event": "context_pack_completed",
-  "response_schema_version": 1,
+  "response_schema_version": 3,
   "data": {
     "mode": "planning",
     "items": [

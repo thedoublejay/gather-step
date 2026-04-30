@@ -1288,9 +1288,12 @@ fn apply_projection_impact_summary(
             .into_iter()
             .collect::<Vec<_>>()
             .join(", ");
-        response.data.next_steps.push(format!(
-            "Review field impact: readers [{readers}], writers [{writers}]. Use projection_impact for full evidence."
-        ));
+        push_projection_impact_next_step(
+            response,
+            format!(
+                "Review field impact: readers [{readers}], writers [{writers}]. Use projection_impact for full evidence."
+            ),
+        );
     } else {
         let projected = report
             .projected_fields
@@ -1304,9 +1307,12 @@ fn apply_projection_impact_summary(
             .map(|field| field.field_path.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        response.data.next_steps.push(format!(
-            "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
-        ));
+        push_projection_impact_next_step(
+            response,
+            format!(
+                "Review projection impact: source fields [{sources}], projected fields [{projected}]. Use projection_impact for full evidence."
+            ),
+        );
     }
 
     for hint in report.risk_hints {
@@ -1318,6 +1324,13 @@ fn apply_projection_impact_summary(
     if let Some(meta) = &mut response.meta {
         meta.warnings
             .push("projection impact evidence is available for this target".to_owned());
+    }
+}
+
+fn push_projection_impact_next_step(response: &mut ContextPackResponse, step: String) {
+    const PACK_FOLLOW_UP_BUDGET: usize = 6;
+    if response.data.next_steps.len() < PACK_FOLLOW_UP_BUDGET {
+        response.data.next_steps.push(step);
     }
 }
 
