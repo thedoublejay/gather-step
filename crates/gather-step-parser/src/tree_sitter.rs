@@ -4145,6 +4145,7 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Tailwind => &[PackId::Tailwind],
         Framework::Prisma => &[PackId::Prisma],
         Framework::Drizzle => &[PackId::Drizzle],
+        Framework::TypeOrm => &[PackId::TypeOrm],
         Framework::React => &[PackId::React],
         Framework::ReactRouter => &[PackId::ReactRouter],
         Framework::ReactHookForm => &[PackId::ReactHookForm],

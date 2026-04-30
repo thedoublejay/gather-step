@@ -40,6 +40,11 @@ pub enum ResolverStrategy {
     HistoryOwnership,
     /// Co-change edge inferred from commits that touched two files together.
     CoChange,
+    // --- data-shape field evidence ---
+    /// Field evidence observed through a direct typed receiver access.
+    FieldDirect,
+    /// Field evidence observed through a same-file local alias or destructuring rebind.
+    FieldLocalAlias,
     // --- storage two-pass fallback ---
     /// First-pass edge emitted during the initial repo index (pre-cross-repo).
     FirstPass,
@@ -66,6 +71,8 @@ impl ResolverStrategy {
             Self::FrontendLiteral => "frontend_literal",
             Self::HistoryOwnership => "history_ownership",
             Self::CoChange => "co_change",
+            Self::FieldDirect => "field_direct",
+            Self::FieldLocalAlias => "field_local_alias",
             Self::FirstPass => "first-pass",
             Self::SecondPass => "second-pass",
         }
@@ -98,6 +105,8 @@ impl ResolverStrategy {
             "frontend_literal" => Self::FrontendLiteral,
             "history_ownership" => Self::HistoryOwnership,
             "co_change" => Self::CoChange,
+            "field_direct" => Self::FieldDirect,
+            "field_local_alias" => Self::FieldLocalAlias,
             "first-pass" => Self::FirstPass,
             "second-pass" => Self::SecondPass,
             _ => return None,
@@ -120,6 +129,8 @@ impl ResolverStrategy {
             Self::FrontendHint => 60,
             Self::HistoryOwnership => 50,
             Self::CoChange => 45,
+            Self::FieldDirect => 80,
+            Self::FieldLocalAlias => 55,
             Self::Suffix => 40,
             Self::FuzzyName => 30,
             Self::FirstPass => 25,
@@ -155,6 +166,8 @@ mod tests {
             ResolverStrategy::FrontendLiteral,
             ResolverStrategy::HistoryOwnership,
             ResolverStrategy::CoChange,
+            ResolverStrategy::FieldDirect,
+            ResolverStrategy::FieldLocalAlias,
             ResolverStrategy::FirstPass,
             ResolverStrategy::SecondPass,
         ];

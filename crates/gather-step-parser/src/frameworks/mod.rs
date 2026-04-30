@@ -15,5 +15,7 @@ pub mod profile;
 pub mod registry;
 pub mod storybook;
 pub mod tailwind;
+pub mod typeorm;
+pub mod typeorm_migration;
 
 pub use detect::{Framework, detect_frameworks};

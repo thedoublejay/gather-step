@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind};
+use gather_step_core::{
+    EdgeData, EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId, NodeKind,
+    PayloadContractRecord, ResolverStrategy,
+};
 use gather_step_storage::{GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +71,8 @@ pub struct ProjectionEvidence {
     pub field_path: String,
     pub edge_kind: EdgeKind,
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_source: Option<String>,
 }
 
 const FIELD_EDGE_KINDS: [EdgeKind; 6] = [
@@ -79,6 +84,8 @@ const FIELD_EDGE_KINDS: [EdgeKind; 6] = [
     EdgeKind::BackfillsField,
 ];
 const MAX_DERIVATION_DEPTH: usize = 4;
+const MIGRATION_COLLECTION_PREFIX: &str = "__migration_collection__";
+const OPTIONALITY_MIN_CONFIDENCE: u16 = 750;
 
 type FieldKey = (String, String);
 type LogicalDerivation = (FieldKey, FieldKey);
@@ -196,6 +203,62 @@ pub fn projection_impact<S: GraphStore>(
     populate_risks_and_confidence(&mut report);
     apply_evidence_verbosity(&mut report, request.evidence_verbosity);
     Ok(report)
+}
+
+pub fn projection_impact_with_payload_contracts<S: GraphStore>(
+    store: &S,
+    request: ProjectionImpactRequest,
+    payload_contracts: &[PayloadContractRecord],
+) -> Result<ProjectionImpactReport, ProjectionImpactError> {
+    let mut report = projection_impact(store, request)?;
+    apply_optional_payload_filter_risk(store, &mut report, payload_contracts)?;
+    Ok(report)
+}
+
+pub fn apply_optional_payload_filter_risk<S: GraphStore>(
+    store: &S,
+    report: &mut ProjectionImpactReport,
+    payload_contracts: &[PayloadContractRecord],
+) -> Result<(), ProjectionImpactError> {
+    if !report.resolved || payload_contracts.is_empty() {
+        return Ok(());
+    }
+
+    let report_repos = report_repos(report);
+    let target_fields = report_logical_fields(report);
+    let filter_fields = report_filter_fields(store, report, &report_repos)?;
+    if target_fields.is_empty() || filter_fields.is_empty() {
+        return Ok(());
+    }
+
+    let has_mismatch = payload_contracts.iter().any(|record| {
+        (report_repos.is_empty() || report_repos.contains(&record.repo))
+            && record.confidence >= OPTIONALITY_MIN_CONFIDENCE
+            && record.contract.fields.iter().any(|field| {
+                field.optional
+                    && field.confidence >= OPTIONALITY_MIN_CONFIDENCE
+                    && target_fields
+                        .iter()
+                        .any(|target| logical_field_matches_payload(target, &field.name))
+                    && filter_fields
+                        .iter()
+                        .any(|filter| filter_field_matches_payload(filter, &field.name))
+            })
+    });
+
+    if has_mismatch {
+        report
+            .risk_hints
+            .push("optional_payload_filter_mismatch".to_owned());
+        report
+            .missing_evidence
+            .push("runtime_shape_probe".to_owned());
+        report.risk_hints.sort();
+        report.risk_hints.dedup();
+        report.missing_evidence.sort();
+        report.missing_evidence.dedup();
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -428,7 +491,220 @@ fn evidence_item<S: GraphStore>(
         field_path: field.name.clone(),
         edge_kind: edge.kind,
         confidence: edge.metadata.confidence,
+        evidence_source: evidence_source_from_resolver(edge.metadata.resolver.as_deref()),
     }))
+}
+
+fn evidence_source_from_resolver(resolver: Option<&str>) -> Option<String> {
+    Some(
+        match resolver.and_then(ResolverStrategy::from_str)? {
+            ResolverStrategy::FieldDirect => "direct_field_access",
+            ResolverStrategy::FieldLocalAlias => "local_alias_field_access",
+            _ => return None,
+        }
+        .to_owned(),
+    )
+}
+
+fn report_repos(report: &ProjectionImpactReport) -> BTreeSet<String> {
+    report
+        .candidates
+        .iter()
+        .chain(report.source_fields.iter())
+        .chain(report.projected_fields.iter())
+        .map(|field| field.repo.clone())
+        .collect()
+}
+
+fn report_logical_fields(report: &ProjectionImpactReport) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    fields.extend(
+        report
+            .candidates
+            .iter()
+            .chain(report.source_fields.iter())
+            .chain(report.projected_fields.iter())
+            .map(|field| field.field_path.clone()),
+    );
+    fields.extend(
+        report
+            .readers
+            .iter()
+            .chain(report.writers.iter())
+            .chain(report.filters.iter())
+            .chain(report.indexes.iter())
+            .chain(report.backfills.iter())
+            .map(|evidence| evidence.field_path.clone()),
+    );
+    fields
+}
+
+fn report_filter_fields<S: GraphStore>(
+    store: &S,
+    report: &ProjectionImpactReport,
+    report_repos: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, ProjectionImpactError> {
+    let mut fields = report
+        .filters
+        .iter()
+        .map(|evidence| evidence.field_path.clone())
+        .collect::<BTreeSet<_>>();
+
+    for node in store.nodes_by_type(NodeKind::Entity)? {
+        if !node
+            .external_id
+            .as_deref()
+            .is_some_and(|external_id| external_id.starts_with(MIGRATION_COLLECTION_PREFIX))
+        {
+            continue;
+        }
+        for edge in store.get_incoming(node.id)? {
+            if edge.kind != EdgeKind::MigratesCollection {
+                continue;
+            }
+            let owner = store.get_node(edge.owner_file)?;
+            if let Some(owner) = owner.as_ref()
+                && !report_repos.is_empty()
+                && !report_repos.contains(&owner.repo)
+            {
+                continue;
+            }
+            for filter in decode_migration_filters(edge.metadata.drift_kind.as_deref()) {
+                fields.extend(field_paths_from_filter_literal(&filter));
+            }
+        }
+    }
+
+    if fields.is_empty() && !report.filters.is_empty() {
+        fields.extend(
+            report
+                .filters
+                .iter()
+                .map(|evidence| evidence.field_path.clone()),
+        );
+    }
+    Ok(fields)
+}
+
+fn logical_field_matches_payload(field_path: &str, payload_field: &str) -> bool {
+    field_path == payload_field
+        || field_path.ends_with(&format!(".{payload_field}"))
+        || field_path.contains(&format!(".{payload_field}."))
+        || field_path.starts_with(&format!("{payload_field}."))
+}
+
+fn filter_field_matches_payload(filter_field: &str, payload_field: &str) -> bool {
+    filter_field == payload_field
+        || filter_field.starts_with(&format!("{payload_field}."))
+        || payload_field.starts_with(&format!("{filter_field}."))
+}
+
+fn decode_migration_filters(value: Option<&str>) -> Vec<String> {
+    let Some(raw) = value.and_then(|value| value.strip_prefix(MIGRATION_FILTERS_METADATA_PREFIX))
+    else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+fn field_paths_from_filter_literal(filter: &str) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    let bytes = filter.as_bytes();
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        cursor = skip_non_filter_key(bytes, cursor);
+        if cursor >= bytes.len() {
+            break;
+        }
+
+        let (raw_key, next_cursor) = if bytes[cursor] == b'\'' || bytes[cursor] == b'"' {
+            quoted_filter_key(filter, cursor).unwrap_or_else(|| (String::new(), cursor + 1))
+        } else {
+            unquoted_filter_key(filter, cursor).unwrap_or_else(|| (String::new(), cursor + 1))
+        };
+        cursor = next_cursor;
+
+        let after_key = skip_ascii_ws_bytes(bytes, cursor);
+        if after_key >= bytes.len() || bytes[after_key] != b':' {
+            continue;
+        }
+        if let Some(field) = normalize_filter_field_path(&raw_key) {
+            fields.insert(field);
+        }
+    }
+
+    fields
+}
+
+fn skip_non_filter_key(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len()
+        && bytes[cursor] != b'\''
+        && bytes[cursor] != b'"'
+        && !is_filter_key_start(bytes[cursor])
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn quoted_filter_key(filter: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = filter.as_bytes();
+    let quote = *bytes.get(cursor)?;
+    let mut end = cursor + 1;
+    while end < bytes.len() && bytes[end] != quote {
+        end += 1;
+    }
+    if end >= bytes.len() {
+        return None;
+    }
+    Some((filter[cursor + 1..end].to_owned(), end + 1))
+}
+
+fn unquoted_filter_key(filter: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = filter.as_bytes();
+    if !is_filter_key_start(*bytes.get(cursor)?) {
+        return None;
+    }
+    let mut end = cursor + 1;
+    while end < bytes.len() && is_filter_key_continue(bytes[end]) {
+        end += 1;
+    }
+    Some((filter[cursor..end].to_owned(), end))
+}
+
+fn normalize_filter_field_path(raw_key: &str) -> Option<String> {
+    let key = raw_key.trim();
+    if key.is_empty() || key.starts_with('$') || key.contains(' ') {
+        return None;
+    }
+    let field = key.trim_start_matches("this.");
+    if field.split('.').all(|part| {
+        !part.is_empty()
+            && part
+                .as_bytes()
+                .iter()
+                .all(|byte| is_filter_key_continue(*byte))
+    }) {
+        Some(field.to_owned())
+    } else {
+        None
+    }
+}
+
+fn is_filter_key_start(byte: u8) -> bool {
+    byte == b'$' || byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_filter_key_continue(byte: u8) -> bool {
+    byte == b'$' || byte == b'_' || byte == b'.' || byte.is_ascii_alphanumeric()
+}
+
+fn skip_ascii_ws_bytes(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    cursor
 }
 
 #[derive(Default)]
@@ -600,7 +876,10 @@ fn ends_with_ascii_case(haystack: &str, needle: &str) -> bool {
 mod tests {
     use super::*;
     use crate::test_utils::{TempDb, file_node};
-    use gather_step_core::{EdgeMetadata, node_id, virtual_node};
+    use gather_step_core::{
+        EdgeMetadata, PayloadContractDoc, PayloadField, PayloadInferenceKind, PayloadSide, node_id,
+        virtual_node,
+    };
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
     fn field(repo: &str, name: &str) -> NodeData {
@@ -630,6 +909,27 @@ mod tests {
             kind,
             metadata: EdgeMetadata {
                 confidence: Some(900),
+                ..EdgeMetadata::default()
+            },
+            owner_file,
+            is_cross_file: false,
+        }
+    }
+
+    fn edge_with_resolver(
+        source: NodeId,
+        target: NodeId,
+        owner_file: NodeId,
+        kind: EdgeKind,
+        resolver: ResolverStrategy,
+    ) -> EdgeData {
+        EdgeData {
+            source,
+            target,
+            kind,
+            metadata: EdgeMetadata {
+                confidence: Some(900),
+                resolver: Some(resolver.as_str().to_owned()),
                 ..EdgeMetadata::default()
             },
             owner_file,
@@ -676,6 +976,44 @@ mod tests {
             .expect("projection graph should write");
         std::mem::forget(temp);
         store
+    }
+
+    fn payload_contract(repo: &str, file_path: &str, field_name: &str) -> PayloadContractRecord {
+        let target = node_id(repo, file_path, NodeKind::Function, "publish");
+        let source = node_id(repo, file_path, NodeKind::Class, "AlertPayload");
+        PayloadContractRecord {
+            payload_contract_node_id: node_id(
+                repo,
+                file_path,
+                NodeKind::DataField,
+                "payload-contract",
+            ),
+            contract_target_node_id: target,
+            contract_target_kind: NodeKind::Function,
+            contract_target_qualified_name: Some("publish".to_owned()),
+            repo: repo.to_owned(),
+            file_path: file_path.to_owned(),
+            source_symbol_node_id: source,
+            line_start: Some(1),
+            side: PayloadSide::Producer,
+            inference_kind: PayloadInferenceKind::TypedParameter,
+            confidence: 900,
+            source_type_name: Some("AlertPayload".to_owned()),
+            contract: PayloadContractDoc {
+                content_type: "application/json".to_owned(),
+                schema_format: "typescript".to_owned(),
+                side: PayloadSide::Producer,
+                inference_kind: PayloadInferenceKind::TypedParameter,
+                confidence: 900,
+                fields: vec![PayloadField {
+                    name: field_name.to_owned(),
+                    type_name: "object".to_owned(),
+                    optional: true,
+                    confidence: 900,
+                }],
+                source_type_name: Some("AlertPayload".to_owned()),
+            },
+        }
     }
 
     fn request(target: &str) -> ProjectionImpactRequest {
@@ -742,7 +1080,13 @@ mod tests {
         store
             .bulk_insert(
                 &[file.clone(), workflow.clone(), task_ids.clone()],
-                &[edge(file.id, task_ids.id, file.id, EdgeKind::WritesField)],
+                &[edge_with_resolver(
+                    file.id,
+                    task_ids.id,
+                    file.id,
+                    EdgeKind::WritesField,
+                    ResolverStrategy::FieldLocalAlias,
+                )],
             )
             .expect("direct field graph should write");
 
@@ -752,6 +1096,10 @@ mod tests {
         assert!(report.resolved);
         assert_eq!(report.candidates[0].field_path, "Alert.workflow");
         assert_eq!(report.writers[0].field_path, "Alert.workflow.taskIds");
+        assert_eq!(
+            report.writers[0].evidence_source.as_deref(),
+            Some("local_alias_field_access")
+        );
         assert!(report.derivation_edges.is_empty());
         assert!(report.missing_evidence.is_empty());
         assert_eq!(report.confidence, "high");
@@ -759,6 +1107,74 @@ mod tests {
             report
                 .risk_hints
                 .contains(&"direct_field_access_observed".to_owned())
+        );
+    }
+
+    #[test]
+    fn optionality_mismatch_risk_joins_payload_contract_and_migration_filter() {
+        let temp = TempDb::new("projection-impact", "optionality-mismatch");
+        let store = temp.open();
+        let source_file = file_node("svc", "src/alerts.ts");
+        let migration_file = file_node("svc", "migrations/20260430-alerts.ts");
+        let workflow = field_in_file("svc", "src/alerts.ts", "Alert.workflow");
+        let collection = virtual_node(
+            NodeKind::Entity,
+            "svc",
+            "migrations/20260430-alerts.ts",
+            "alerts",
+            "__migration_collection__alerts",
+        );
+        let migration_filter = serde_json::to_string(&vec!["{ workflow: { $type: 'object' } }"])
+            .expect("filter metadata should serialize");
+        store
+            .bulk_insert(
+                &[
+                    source_file.clone(),
+                    migration_file.clone(),
+                    workflow.clone(),
+                    collection.clone(),
+                ],
+                &[
+                    edge_with_resolver(
+                        source_file.id,
+                        workflow.id,
+                        source_file.id,
+                        EdgeKind::ReadsField,
+                        ResolverStrategy::FieldDirect,
+                    ),
+                    EdgeData {
+                        source: migration_file.id,
+                        target: collection.id,
+                        kind: EdgeKind::MigratesCollection,
+                        metadata: EdgeMetadata {
+                            drift_kind: Some(format!(
+                                "{MIGRATION_FILTERS_METADATA_PREFIX}{migration_filter}"
+                            )),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: migration_file.id,
+                        is_cross_file: false,
+                    },
+                ],
+            )
+            .expect("optionality graph should write");
+
+        let report = projection_impact_with_payload_contracts(
+            &store,
+            request("Alert.workflow"),
+            &[payload_contract("svc", "src/contracts.ts", "workflow")],
+        )
+        .expect("projection impact should load");
+
+        assert!(
+            report
+                .risk_hints
+                .contains(&"optional_payload_filter_mismatch".to_owned())
+        );
+        assert!(
+            report
+                .missing_evidence
+                .contains(&"runtime_shape_probe".to_owned())
         );
     }
 

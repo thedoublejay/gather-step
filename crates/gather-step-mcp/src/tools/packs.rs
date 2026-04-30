@@ -11,7 +11,8 @@ use gather_step_analysis::proofs::{
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
 use gather_step_analysis::{
-    ProjectionEvidenceVerbosity, ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
+    ProjectionEvidenceVerbosity, ProjectionImpactReport, ProjectionImpactRequest,
+    projection_impact_with_payload_contracts,
 };
 use gather_step_core::{
     EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeId, NodeKind, PayloadContractRecord,
@@ -1310,8 +1311,22 @@ fn apply_projection_impact_summary(
     response: &mut ContextPackResponse,
 ) {
     let targets = projection_impact_targets(ctx, request, repo_filter, response);
+    let payload_contracts = ctx
+        .metadata()
+        .payload_contracts_for_query(PayloadContractQuery {
+            repo: repo_filter.map(str::to_owned),
+            min_confidence: Some(OPTIONALITY_MIN_CONFIDENCE),
+            ..PayloadContractQuery::default()
+        })
+        .map(|records| {
+            records
+                .into_iter()
+                .map(|record| record.record)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let Some(report) = targets.into_iter().find_map(|target| {
-        let report = projection_impact(
+        let report = projection_impact_with_payload_contracts(
             ctx.graph(),
             ProjectionImpactRequest {
                 target,
@@ -1319,6 +1334,7 @@ fn apply_projection_impact_summary(
                 max_results: 10,
                 evidence_verbosity: ProjectionEvidenceVerbosity::Summary,
             },
+            &payload_contracts,
         )
         .ok()?;
         (report.resolved && report.ambiguity.is_none() && report_has_field_summary(&report))
@@ -2130,7 +2146,7 @@ fn migration_verification_hint(collection_name: &str) -> String {
 }
 
 fn migration_coverage_note() -> &'static str {
-    "Best-effort v2.2 coverage: Mongoose migrations using db.collection(...).updateMany(...) or same-file mongoose.model(..., ..., 'collection') Model.updateMany(...). TypeORM, Knex, Prisma, Atlas, dynamic collection names, imported model resolution, and multi-collection migrations are not detected."
+    "Best-effort v2.3 coverage: Mongoose migrations using db.collection(...) writes or statically resolved mongoose.model(..., ..., 'collection') model writes, including imported local model declarations and multi-collection migration files. TypeORM migrations are detected for static queryRunner SQL/table method table names. Dynamic collection/table names, Knex, Prisma, Atlas, TypeORM entity metadata, and SQL WHERE-field extraction remain conservative coverage gaps."
 }
 
 fn latest_commit_short_sha(
@@ -4145,7 +4161,9 @@ mod tests {
         NodeKind, PayloadContractDoc, PayloadContractRecord, PayloadField, PayloadInferenceKind,
         PayloadSide, PlanningProof, ProofHop, ProofKind, Visibility, node_id, ref_node_id,
     };
-    use gather_step_storage::{GraphStore, GraphStoreDb, WorkspaceStores};
+    use gather_step_storage::{
+        GraphStore, GraphStoreDb, MetadataStore, PayloadContractStoreRecord, WorkspaceStores,
+    };
     use smallvec::smallvec;
     use std::{
         collections::BTreeMap,
@@ -4734,6 +4752,116 @@ mod tests {
         assert_eq!(evidence.field_name, "workflow");
         assert_eq!(evidence.source_type_name.as_deref(), Some("AlertPayload"));
         assert_eq!(evidence.side, "consumer");
+    }
+
+    #[test]
+    fn planning_projection_summary_surfaces_optionality_mismatch_oracle() {
+        let (ctx, _storage_dir) = empty_test_context();
+        let source_file = file("backend_standard", "src/alerts.ts");
+        let migration_file = file("backend_standard", "migrations/20260430-alerts.ts");
+        let workflow = node(
+            "backend_standard",
+            "src/alerts.ts",
+            NodeKind::DataField,
+            "Alert.workflow",
+            0,
+        );
+        let collection_external_id = "__migration_collection__alerts";
+        let collection = NodeData {
+            id: ref_node_id(NodeKind::Entity, collection_external_id),
+            kind: NodeKind::Entity,
+            repo: "backend_standard".to_owned(),
+            file_path: "migrations/20260430-alerts.ts".to_owned(),
+            name: "alerts".to_owned(),
+            qualified_name: Some(collection_external_id.to_owned()),
+            external_id: Some(collection_external_id.to_owned()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+        };
+        let filter = serde_json::to_string(&["{ workflow: { $type: 'object' } }"])
+            .expect("filters should serialize");
+        ctx.graph()
+            .bulk_insert(
+                &[
+                    source_file.clone(),
+                    migration_file.clone(),
+                    workflow.clone(),
+                    collection.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: source_file.id,
+                        target: workflow.id,
+                        kind: EdgeKind::ReadsField,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            resolver: Some("field_direct".to_owned()),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: source_file.id,
+                        is_cross_file: false,
+                    },
+                    EdgeData {
+                        source: migration_file.id,
+                        target: collection.id,
+                        kind: EdgeKind::MigratesCollection,
+                        metadata: EdgeMetadata {
+                            drift_kind: Some(format!(
+                                "{MIGRATION_FILTERS_METADATA_PREFIX}{filter}"
+                            )),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: migration_file.id,
+                        is_cross_file: false,
+                    },
+                ],
+            )
+            .expect("oracle graph should seed");
+        let record = payload_contract_record(
+            "backend_standard",
+            "src/contracts/alert.ts",
+            "AlertPayload",
+            "workflow",
+            true,
+        );
+        ctx.metadata()
+            .replace_payload_contracts_for_files(
+                "backend_standard",
+                &["src/contracts/alert.ts".to_owned()],
+                &[PayloadContractStoreRecord { record }],
+            )
+            .expect("payload contract should seed");
+
+        let request = super::ContextPackRequest {
+            budget_bytes: None,
+            depth: None,
+            limit: None,
+            repo: Some("backend_standard".to_owned()),
+            mode: "planning".to_owned(),
+            target: "Alert.workflow".to_owned(),
+        };
+        let mut response = make_pack_response(0, 0, 0, 0);
+        response.data.items[0].repo = "backend_standard".to_owned();
+        response.data.items[0].file_path = "src/alerts.ts".to_owned();
+
+        super::apply_projection_impact_summary(
+            &ctx,
+            &request,
+            Some("backend_standard"),
+            &mut response,
+        );
+
+        assert!(response.data.next_steps.iter().any(|step| {
+            step.contains("Review field impact") && step.contains("Alert.workflow")
+        }));
+        assert!(
+            response
+                .data
+                .unresolved_gaps
+                .contains(&"projection_impact:optional_payload_filter_mismatch".to_owned())
+        );
     }
 
     #[test]

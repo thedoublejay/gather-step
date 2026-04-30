@@ -6,7 +6,8 @@ use std::{
 use rustc_hash::FxHashSet;
 
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, virtual_node,
+    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, ResolverStrategy, SourceSpan,
+    virtual_node,
 };
 use regex::Regex;
 
@@ -112,6 +113,7 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
             field_id(parsed, target_field),
             EdgeKind::DerivesFieldFrom,
             CONFIDENCE_HIGH,
+            None,
         );
     }
     for field in facts.reads {
@@ -201,6 +203,22 @@ struct DirectFieldAccessEdge {
     field: String,
     kind: EdgeKind,
     confidence: u16,
+    origin: FieldEvidenceOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FieldEvidenceOrigin {
+    Direct,
+    LocalAlias,
+}
+
+impl FieldEvidenceOrigin {
+    const fn resolver(self) -> ResolverStrategy {
+        match self {
+            Self::Direct => ResolverStrategy::FieldDirect,
+            Self::LocalAlias => ResolverStrategy::FieldLocalAlias,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +249,9 @@ fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFie
         let owner = owner_for_line(parsed, line_number);
         for (binding, field_binding) in &bindings {
             for access in field_accesses_on_line(line, binding, field_binding) {
-                for edge in access_edges(owner, &access.field_path, access.mode) {
+                for edge in
+                    access_edges(owner, &access.field_path, access.mode, field_binding.origin)
+                {
                     edges.insert(edge);
                 }
             }
@@ -246,15 +266,22 @@ const MAX_DIRECT_FIELD_SOURCE_LEN: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FieldBinding {
     root: String,
+    origin: FieldEvidenceOrigin,
 }
 
 impl FieldBinding {
     fn typed(type_name: String) -> Self {
-        Self { root: type_name }
+        Self {
+            root: type_name,
+            origin: FieldEvidenceOrigin::Direct,
+        }
     }
 
     fn alias(field_path: String) -> Self {
-        Self { root: field_path }
+        Self {
+            root: field_path,
+            origin: FieldEvidenceOrigin::LocalAlias,
+        }
     }
 
     fn field_path(&self, props: &[String]) -> String {
@@ -598,6 +625,7 @@ fn access_edges(
     owner: NodeId,
     field_path: &str,
     mode: FieldAccessMode,
+    origin: FieldEvidenceOrigin,
 ) -> Vec<DirectFieldAccessEdge> {
     let parts = field_path.split('.').collect::<Vec<_>>();
     let mut edges = Vec::new();
@@ -608,6 +636,7 @@ fn access_edges(
                 field: parts[..index].join("."),
                 kind: EdgeKind::ReadsField,
                 confidence: CONFIDENCE_MEDIUM,
+                origin,
             });
         }
     }
@@ -618,12 +647,14 @@ fn access_edges(
             field: field_path.to_owned(),
             kind: EdgeKind::ReadsField,
             confidence: CONFIDENCE_MEDIUM,
+            origin,
         }),
         FieldAccessMode::Write => edges.push(DirectFieldAccessEdge {
             owner,
             field: field_path.to_owned(),
             kind: EdgeKind::WritesField,
             confidence: CONFIDENCE_HIGH,
+            origin,
         }),
         FieldAccessMode::ReadWrite => {
             edges.push(DirectFieldAccessEdge {
@@ -631,12 +662,14 @@ fn access_edges(
                 field: field_path.to_owned(),
                 kind: EdgeKind::ReadsField,
                 confidence: CONFIDENCE_MEDIUM,
+                origin,
             });
             edges.push(DirectFieldAccessEdge {
                 owner,
                 field: field_path.to_owned(),
                 kind: EdgeKind::WritesField,
                 confidence: CONFIDENCE_HIGH,
+                origin,
             });
         }
     }
@@ -1112,6 +1145,7 @@ fn push_field_edge(
         field_id(parsed, field),
         kind,
         confidence,
+        None,
     );
 }
 
@@ -1128,6 +1162,7 @@ fn push_direct_field_edge(
         field_id(parsed, &edge.field),
         edge.kind,
         edge.confidence,
+        Some(edge.origin.resolver()),
     );
 }
 
@@ -1138,6 +1173,7 @@ fn push_edge(
     target: gather_step_core::NodeId,
     kind: EdgeKind,
     confidence: u16,
+    resolver: Option<ResolverStrategy>,
 ) {
     let owner_file = parsed.file_node.id;
     if !dedup.edges.insert((source, target, kind, owner_file)) {
@@ -1149,6 +1185,7 @@ fn push_edge(
         kind,
         metadata: EdgeMetadata {
             confidence: Some(confidence),
+            resolver: resolver.map(|resolver| resolver.as_str().to_owned()),
             ..EdgeMetadata::default()
         },
         owner_file,
@@ -1371,6 +1408,56 @@ mod tests {
                 .qualified_name
                 .as_deref()
                 .is_some_and(|name| name.contains("src/task_projection.ts::subtaskIds"))
+        );
+    }
+
+    #[test]
+    fn labels_direct_and_alias_field_access_resolvers() {
+        let mut parsed = parsed(
+            r#"
+            function update(alert: Alert) {
+                const workflow = alert.workflow;
+                alert.status;
+                workflow.stepIds.push("task-1");
+            }
+            "#,
+            "src/alerts.ts",
+        );
+
+        augment_projection_fields(&mut parsed);
+
+        let direct = parsed
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.kind == EdgeKind::ReadsField
+                    && parsed
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == edge.target)
+                        .is_some_and(|node| node.name == "Alert.status")
+            })
+            .expect("direct typed receiver read should be indexed");
+        assert_eq!(
+            direct.metadata.resolver.as_deref(),
+            Some(ResolverStrategy::FieldDirect.as_str())
+        );
+
+        let alias = parsed
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.kind == EdgeKind::WritesField
+                    && parsed
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == edge.target)
+                        .is_some_and(|node| node.name == "Alert.workflow.stepIds")
+            })
+            .expect("local alias write should be indexed");
+        assert_eq!(
+            alias.metadata.resolver.as_deref(),
+            Some(ResolverStrategy::FieldLocalAlias.as_str())
         );
     }
 }

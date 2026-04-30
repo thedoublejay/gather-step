@@ -1,7 +1,8 @@
 use gather_step_analysis::{
     ProjectionEvidenceVerbosity as AnalysisEvidenceVerbosity,
-    ProjectionImpactRequest as AnalysisRequest, projection_impact,
+    ProjectionImpactRequest as AnalysisRequest, projection_impact_with_payload_contracts,
 };
+use gather_step_storage::{MetadataStore, PayloadContractQuery};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -83,6 +84,8 @@ pub struct ProjectionEvidenceItem {
     pub edge_kind: String,
     #[serde(default)]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_source: Option<String>,
 }
 
 fn default_limit() -> usize {
@@ -103,7 +106,18 @@ pub fn projection_impact_tool(
         validate_input_length("repo", repo)?;
     }
     validate_projection_impact_limit(request.limit)?;
-    let report = projection_impact(
+    let payload_contracts = ctx
+        .metadata()
+        .payload_contracts_for_query(PayloadContractQuery {
+            repo: request.repo.clone(),
+            min_confidence: Some(750),
+            ..PayloadContractQuery::default()
+        })?
+        .into_iter()
+        .map(|record| record.record)
+        .collect::<Vec<_>>();
+
+    let report = projection_impact_with_payload_contracts(
         ctx.graph(),
         AnalysisRequest {
             target: request.target,
@@ -111,6 +125,7 @@ pub fn projection_impact_tool(
             max_results: request.limit,
             evidence_verbosity: request.evidence_verbosity.into(),
         },
+        &payload_contracts,
     )?;
 
     Ok(ProjectionImpactResponse {
@@ -173,6 +188,7 @@ impl From<gather_step_analysis::ProjectionEvidence> for ProjectionEvidenceItem {
             field_path: item.field_path,
             edge_kind: item.edge_kind.to_string(),
             confidence: item.confidence,
+            evidence_source: item.evidence_source,
         }
     }
 }
@@ -228,6 +244,7 @@ mod tests {
             field_path: field_path.to_owned(),
             edge_kind: edge_kind.to_owned(),
             confidence,
+            evidence_source: None,
         }
     }
 
@@ -354,11 +371,16 @@ mod tests {
             "BackfillsField",
             None,
         )];
+        data.backfills[0].evidence_source = Some("local_alias_field_access".to_owned());
         let response = ProjectionImpactResponse { data };
 
         let value = serde_json::to_value(&response).expect("response should serialize");
         assert_eq!(value["data"]["ambiguity"], json!(null));
         assert_eq!(value["data"]["indexes"][0]["confidence"], json!(900));
         assert_eq!(value["data"]["backfills"][0]["confidence"], json!(null));
+        assert_eq!(
+            value["data"]["backfills"][0]["evidence_source"],
+            json!("local_alias_field_access")
+        );
     }
 }

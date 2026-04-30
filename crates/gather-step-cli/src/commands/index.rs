@@ -1079,6 +1079,7 @@ fn framework_label(framework: Framework) -> String {
         Framework::Tailwind => "tailwind",
         Framework::Prisma => "prisma",
         Framework::Drizzle => "drizzle",
+        Framework::TypeOrm => "typeorm",
         Framework::React => "react",
         Framework::ReactRouter => "react_router",
         Framework::ReactHookForm => "react_hook_form",
