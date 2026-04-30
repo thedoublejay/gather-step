@@ -55,7 +55,7 @@ pub enum PackId {
     Prisma,
     /// Drizzle schema and query extraction.
     Drizzle,
-    /// TypeORM migration table extraction.
+    /// `TypeORM` migration table extraction.
     TypeOrm,
     /// React hooks and service-wrapper extraction.
     React,

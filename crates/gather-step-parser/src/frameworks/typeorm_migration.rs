@@ -117,19 +117,22 @@ fn table_names_from_sql(sql: &str) -> BTreeSet<String> {
     for index in 0..tokens.len() {
         let token = tokens[index].as_str();
         let next = tokens.get(index + 1).map(String::as_str);
-        match (token, next) {
-            ("update", Some(table))
-            | ("into", Some(table))
-            | ("table", Some(table))
-            | ("from", Some(table)) => {
+        match next {
+            Some(table) if is_sql_table_keyword(token) => {
                 if let Some(table_name) = normalize_table_name(table) {
                     table_names.insert(table_name);
                 }
             }
-            _ => {}
+            None | Some(_) => {}
         }
     }
     table_names
+}
+
+fn is_sql_table_keyword(token: &str) -> bool {
+    ["update", "into", "table", "from"]
+        .iter()
+        .any(|keyword| token.eq_ignore_ascii_case(keyword))
 }
 
 fn sql_tokens(sql: &str) -> Vec<String> {
@@ -137,8 +140,8 @@ fn sql_tokens(sql: &str) -> Vec<String> {
         ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | '`' | ';' | '(' | ')' | ',')
     })
     .filter_map(|token| {
-        let normalized = token.trim().trim_matches('.').to_ascii_lowercase();
-        (!normalized.is_empty()).then_some(normalized)
+        let normalized = token.trim().trim_matches('.');
+        (!normalized.is_empty()).then_some(normalized.to_owned())
     })
     .collect()
 }
@@ -266,8 +269,6 @@ fn strip_quotes(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::needless_raw_string_hashes)]
-
     use pretty_assertions::assert_eq;
 
     use crate::{

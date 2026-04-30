@@ -224,7 +224,7 @@ pub fn is_drizzle(repo_root: &Path) -> bool {
         )
 }
 
-/// Returns `true` when TypeORM is present by dependency.
+/// Returns `true` when `TypeORM` is present by dependency.
 #[must_use]
 pub fn is_typeorm(repo_root: &Path) -> bool {
     has_any_dependency(repo_root, &["typeorm"])

@@ -76,8 +76,6 @@ fn migration_filters_metadata(filters: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::needless_raw_string_hashes)]
-
     use gather_step_core::EdgeKind;
 
     use crate::{
