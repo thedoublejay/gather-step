@@ -88,7 +88,7 @@ fn init_index_auto_recovers_existing_generated_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Auto-recovered generated index state"));
+    assert!(stdout.contains("Rebuilding generated index state from source repos"));
     assert!(tmp.path().join(".gather-step/registry.json").exists());
 }
 
