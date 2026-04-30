@@ -234,6 +234,18 @@ pub struct MigrationSiblingBand {
     pub coverage_note: String,
     pub verification_hint: String,
     pub siblings: Vec<MigrationSiblingEntry>,
+    /// True when more migration siblings touched this collection than the band
+    /// can include. Consumers should treat the list as a sample, not a full
+    /// inventory.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+// `skip_serializing_if` requires `fn(&T) -> bool`; clippy's
+// `trivially_copy_pass_by_ref` doesn't see through serde's signature contract.
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if signature")]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -598,7 +610,7 @@ pub fn context_pack_tool(
             .context_pack_files_for_key(&cache_key)
             .map_err(McpServerError::Metadata)?;
         let mut response = serde_json::from_slice::<ContextPackResponse>(&record.response)
-            .map_err(|error| McpServerError::InvalidInput(error.to_string()))?;
+            .map_err(|error| McpServerError::Internal(format!("cache deserialize: {error}")))?;
         let current_generation =
             current_cache_generation(ctx, &dep_files, &response, request.repo.as_deref())?;
         if current_generation == record.generation && cached_context_pack_is_current(&response) {
@@ -1288,12 +1300,26 @@ fn apply_projection_impact_summary(
             .into_iter()
             .collect::<Vec<_>>()
             .join(", ");
-        push_projection_impact_next_step(
-            response,
-            format!(
+        // Suppress empty-set noise: when neither readers nor writers were
+        // detected, an `[], []` reminder invites hallucinated commentary from
+        // the AI consumer. Drop the literal lists in that case and let the
+        // downstream `projection_impact` call surface evidence (or its
+        // absence) authoritatively.
+        let next_step = match (readers.is_empty(), writers.is_empty()) {
+            (true, true) => {
+                "Inspect this field with projection_impact for direct read/write evidence.".to_owned()
+            }
+            (false, true) => format!(
+                "Review field impact: readers [{readers}]. Use projection_impact for full evidence."
+            ),
+            (true, false) => format!(
+                "Review field impact: writers [{writers}]. Use projection_impact for full evidence."
+            ),
+            (false, false) => format!(
                 "Review field impact: readers [{readers}], writers [{writers}]. Use projection_impact for full evidence."
             ),
-        );
+        };
+        push_projection_impact_next_step(response, next_step);
     } else {
         let projected = report
             .projected_fields
@@ -1372,7 +1398,17 @@ fn projection_impact_targets(
     let Ok(fields) = ctx.graph().nodes_by_type(NodeKind::DataField) else {
         return targets;
     };
+    // Pre-filter by repo when scoped — a workspace-wide DataField scan is the
+    // worst case for this loop, and the in-loop file membership check already
+    // discards out-of-scope nodes. The repo guard here is a cheap short-circuit
+    // that avoids the per-node `BTreeSet::contains` hash and `field_has_derivation`
+    // edge lookup for every DataField in unrelated repos.
     for field in fields {
+        if let Some(repo) = repo_filter
+            && field.repo != repo
+        {
+            continue;
+        }
         if !files.contains(&(field.repo.as_str(), field.file_path.as_str())) {
             continue;
         }
@@ -1644,37 +1680,50 @@ fn extended_bridges(
     }
 
     // Rank: shortest hop first, then highest specificity, then stable sort key.
-    found.sort_by(|(ln, lh, ls), (rn, rh, rs)| {
+    // Pre-render the kind label per node — comparing `format!("{:?}", kind)`
+    // inside the closure allocates a String for every comparison and is
+    // O(N log N) heap traffic during the sort.
+    let mut keyed: Vec<(String, gather_step_core::NodeData, usize, u8)> = found
+        .into_iter()
+        .map(|(node, hop, spec)| (ascii_lower_debug(node.kind), node, hop, spec))
+        .collect();
+    keyed.sort_by(|(lk, ln, lh, ls), (rk, rn, rh, rs)| {
         lh.cmp(rh)
             .then(rs.cmp(ls)) // higher specificity wins
-            .then(format!("{:?}", ln.kind).cmp(&format!("{:?}", rn.kind)))
+            .then(lk.cmp(rk))
             .then(ln.repo.cmp(&rn.repo))
             .then(ln.name.cmp(&rn.name))
     });
-    found.dedup_by(|(ln, _, _), (rn, _, _)| ln.id == rn.id);
-    Ok(found.into_iter().map(|(node, _, _)| node).collect())
+    keyed.dedup_by(|(_, ln, _, _), (_, rn, _, _)| ln.id == rn.id);
+    Ok(keyed.into_iter().map(|(_, node, _, _)| node).collect())
 }
 
 fn finalize_bridges(
-    mut bridge_nodes: Vec<gather_step_core::NodeData>,
+    bridge_nodes: Vec<gather_step_core::NodeData>,
 ) -> (Vec<PackBridge>, PackFiles) {
-    bridge_nodes.sort_by(|left, right| {
-        format!("{:?}", left.kind)
-            .cmp(&format!("{:?}", right.kind))
-            .then(left.repo.cmp(&right.repo))
-            .then(left.file_path.cmp(&right.file_path))
-            .then(left.name.cmp(&right.name))
-            .then(left.id.cmp(&right.id))
-    });
-    bridge_nodes.dedup_by(|left, right| left.id == right.id);
-    let files = bridge_nodes
-        .iter()
-        .map(|node| (node.repo.clone(), node.file_path.clone()))
-        .collect::<Vec<_>>();
-    let mut bridges = bridge_nodes
+    // Sort by debug-rendered kind, but render once per node — `format!("{:?}",
+    // kind)` inside `sort_by` allocates O(N log N) Strings during comparison.
+    let mut keyed_nodes: Vec<(String, gather_step_core::NodeData)> = bridge_nodes
         .into_iter()
-        .map(|node| PackBridge {
-            kind: ascii_lower_debug(node.kind),
+        .map(|node| (ascii_lower_debug(node.kind), node))
+        .collect();
+    keyed_nodes.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.repo.cmp(&right.1.repo))
+            .then(left.1.file_path.cmp(&right.1.file_path))
+            .then(left.1.name.cmp(&right.1.name))
+            .then(left.1.id.cmp(&right.1.id))
+    });
+    keyed_nodes.dedup_by(|left, right| left.1.id == right.1.id);
+    let files = keyed_nodes
+        .iter()
+        .map(|(_, node)| (node.repo.clone(), node.file_path.clone()))
+        .collect::<Vec<_>>();
+    let mut bridges = keyed_nodes
+        .into_iter()
+        .map(|(kind_label, node)| PackBridge {
+            kind: kind_label,
             name: node.name,
             repo: node.repo,
             symbol_id: encode_node_id(node.id),
@@ -1767,13 +1816,24 @@ fn migration_sibling_band_for_anchor(
     });
     siblings.dedup_by(|left, right| left.symbol_id == right.symbol_id);
 
+    let truncated = siblings.len() > MIGRATION_SIBLING_LIMIT;
+    if truncated {
+        siblings.truncate(MIGRATION_SIBLING_LIMIT);
+    }
+
     Ok(Some(MigrationSiblingBand {
         coverage_note: migration_coverage_note().to_owned(),
         verification_hint: migration_verification_hint(&collection_name),
         collection_name,
         siblings,
+        truncated,
     }))
 }
+
+/// Cap the number of migration siblings included in a planning band. Bounds
+/// both response size and the per-sibling history-store reads issued from
+/// `migration_sibling_band_for_pack`.
+const MIGRATION_SIBLING_LIMIT: usize = 25;
 
 fn migration_collection_edge_for_anchor(
     graph: &dyn GraphStore,
@@ -5146,6 +5206,7 @@ mod tests {
                 symbol_id: "migration-id".to_owned(),
                 filter_literals: vec!["{ workflow: { $type: 'object' } }".to_owned()],
             }],
+            truncated: false,
         });
         response.meta = Some(ContextPackMeta {
             response_schema_version: crate::budget::response_schema_version(),

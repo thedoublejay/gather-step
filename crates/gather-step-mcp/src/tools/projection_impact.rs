@@ -6,7 +6,7 @@ use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{McpContext, McpServerError};
+use crate::{McpContext, McpServerError, config::validate_input_length};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ProjectionImpactRequest {
@@ -97,6 +97,10 @@ pub fn projection_impact_tool(
         return Err(McpServerError::InvalidInput(
             "target must not be empty".to_owned(),
         ));
+    }
+    validate_input_length("target", &request.target)?;
+    if let Some(repo) = &request.repo {
+        validate_input_length("repo", repo)?;
     }
     validate_projection_impact_limit(request.limit)?;
     let report = projection_impact(
