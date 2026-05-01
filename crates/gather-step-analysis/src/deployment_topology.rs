@@ -207,6 +207,7 @@ pub fn deployment_topology<S: GraphStore>(
                 if report.edges.len() >= limit {
                     break;
                 }
+                let edge_count = report.edges.len();
                 collect_incoming(
                     store,
                     &mut report,
@@ -215,7 +216,9 @@ pub fn deployment_topology<S: GraphStore>(
                     Some(NodeKind::Service),
                     limit,
                 )?;
-                report.shared_infra.push(node_item(&infra_node));
+                if report.edges.len() > edge_count {
+                    report.shared_infra.push(node_item(&infra_node));
+                }
             }
             if report.shared_infra.is_empty() {
                 report
@@ -501,6 +504,12 @@ mod tests {
             "api-worker",
             "__deployment__backend__api-worker",
         );
+        let ghost_deployment = node(
+            NodeKind::Deployment,
+            "backend",
+            "ghost",
+            "__deployment__backend__ghost",
+        );
         let orphan = node(
             NodeKind::Service,
             "backend",
@@ -512,6 +521,18 @@ mod tests {
             "backend",
             "UNUSED_PORT",
             "__env_var__unused_port",
+        );
+        let database = node(
+            NodeKind::Database,
+            "backend",
+            "postgres",
+            "__database__postgres",
+        );
+        let unused_database = node(
+            NodeKind::Database,
+            "backend",
+            "unused",
+            "__database__unused",
         );
         let other_service = node(NodeKind::Service, "worker", "api", "__service__worker__api");
         let other_deployment = node(
@@ -528,8 +549,15 @@ mod tests {
         graph
             .insert_node(&worker_deployment)
             .expect("worker deployment");
+        graph
+            .insert_node(&ghost_deployment)
+            .expect("ghost deployment");
         graph.insert_node(&orphan).expect("orphan service");
         graph.insert_node(&unused_env).expect("unused env");
+        graph.insert_node(&database).expect("database");
+        graph
+            .insert_node(&unused_database)
+            .expect("unused database");
         graph.insert_node(&other_service).expect("other service");
         graph
             .insert_node(&other_deployment)
@@ -586,6 +614,19 @@ mod tests {
                 is_cross_file: false,
             })
             .expect("env edge");
+        graph
+            .insert_edge(&EdgeData {
+                source: service.id,
+                target: database.id,
+                kind: EdgeKind::UsesDatabase,
+                metadata: EdgeMetadata {
+                    confidence: Some(900),
+                    ..EdgeMetadata::default()
+                },
+                owner_file: file.id,
+                is_cross_file: false,
+            })
+            .expect("database edge");
         let report = deployment_topology(
             &graph,
             DeploymentTopologyQuery::WhereDeployed {
@@ -663,6 +704,56 @@ mod tests {
         )
         .expect("limited where deployed");
         assert_eq!(report.edges.len(), 1);
+
+        let report = deployment_topology(
+            &graph,
+            DeploymentTopologyQuery::UndeployedServices,
+            Some("backend"),
+            20,
+        )
+        .expect("undeployed services");
+        assert_eq!(
+            report
+                .services
+                .iter()
+                .map(|node| node.qualified_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("__service__backend__orphan")]
+        );
+
+        let report = deployment_topology(
+            &graph,
+            DeploymentTopologyQuery::DeployedButNoCode,
+            Some("backend"),
+            20,
+        )
+        .expect("deployed but no code");
+        assert_eq!(
+            report
+                .deployments
+                .iter()
+                .map(|node| node.qualified_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("__deployment__backend__ghost")]
+        );
+
+        let report = deployment_topology(
+            &graph,
+            DeploymentTopologyQuery::SharedInfra,
+            Some("backend"),
+            20,
+        )
+        .expect("shared infra");
+        assert_eq!(
+            report
+                .shared_infra
+                .iter()
+                .map(|node| node.qualified_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("__database__postgres")]
+        );
+        assert_eq!(report.edges.len(), 1);
+        assert_eq!(report.edges[0].kind, EdgeKind::UsesDatabase);
 
         drop(graph);
         let _ = std::fs::remove_file(graph_path);

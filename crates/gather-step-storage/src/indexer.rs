@@ -531,6 +531,11 @@ impl RepoIndexer {
             .try_into()
             .unwrap_or(i64::MAX);
         let candidates = collect_deployment_artifact_paths(repo_root, &self.options.deployment)?;
+        let mut stats = IndexingStats::default();
+        if candidates.is_empty() {
+            stats.duration_ms = started_at.elapsed().as_millis();
+            return Ok(stats);
+        }
         if let Some(progress) = progress {
             progress(IndexProgress {
                 phase: "deployment",
@@ -539,7 +544,6 @@ impl RepoIndexer {
             });
         }
 
-        let mut stats = IndexingStats::default();
         for (index, relative_path) in candidates.iter().enumerate() {
             if let Some(progress) = progress {
                 progress(IndexProgress {
@@ -550,6 +554,8 @@ impl RepoIndexer {
             }
 
             let full_path = repo_root.join(relative_path);
+            let file_path =
+                normalize_path_separators(&relative_path.to_string_lossy()).into_owned();
             let metadata = file_metadata_stamp(&full_path)?;
             if u64::try_from(metadata.size_bytes).unwrap_or(u64::MAX)
                 > MAX_DEPLOYMENT_ARTIFACT_BYTES
@@ -560,12 +566,12 @@ impl RepoIndexer {
                     size_bytes = metadata.size_bytes,
                     "skipping oversized deployment artifact"
                 );
+                self.storage
+                    .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
                 continue;
             }
             let bytes = fs::read(&full_path)?;
             let content = String::from_utf8_lossy(&bytes);
-            let file_path =
-                normalize_path_separators(&relative_path.to_string_lossy()).into_owned();
             let forced_artifact_kind = self
                 .options
                 .deployment
@@ -579,10 +585,14 @@ impl RepoIndexer {
                 Ok(output) => output,
                 Err(error) => {
                     warn!(repo, path = %file_path, error = %error, "skipping malformed deployment artifact");
+                    self.storage
+                        .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
                     continue;
                 }
             };
             if output.artifact_kind == DeploymentArtifactKind::Unknown {
+                self.storage
+                    .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
                 continue;
             }
             if output.artifact_kind == DeploymentArtifactKind::Compose {
@@ -2488,6 +2498,105 @@ services:
                 .nodes_by_file("sample-service", "compose.yaml")
                 .expect("compose file nodes should load")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn incremental_index_purges_deployment_artifacts_that_stop_parsing() {
+        let repo_root = TestDir::new("deployment-incremental-stale-repo");
+        let storage_root = TestDir::new("deployment-incremental-stale-storage");
+        fs::write(
+            repo_root.path().join("deploy.yaml"),
+            r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: DATABASE_URL
+              value: redacted
+"#,
+        )
+        .expect("kubernetes fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("initial indexing should succeed");
+        assert!(
+            indexer
+                .storage()
+                .graph()
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url"))
+        );
+
+        fs::write(repo_root.path().join("deploy.yaml"), "name: not deploy\n")
+            .expect("non-deployment yaml should write");
+        let hint = vec!["deploy.yaml".to_owned()];
+        indexer
+            .index_repo_incremental_with_hint("sample-service", repo_root.path(), Some(&hint), None)
+            .expect("incremental unknown artifact should succeed");
+        assert!(
+            !indexer
+                .storage()
+                .graph()
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url"))
+        );
+
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            "services:\n  api:\n    environment:\n      API_TOKEN: redacted\n",
+        )
+        .expect("compose fixture should write");
+        let compose_hint = vec!["compose.yaml".to_owned()];
+        indexer
+            .index_repo_incremental_with_hint(
+                "sample-service",
+                repo_root.path(),
+                Some(&compose_hint),
+                None,
+            )
+            .expect("incremental compose add should succeed");
+        assert!(
+            indexer
+                .storage()
+                .graph()
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+        );
+
+        fs::write(repo_root.path().join("compose.yaml"), "services: [\n")
+            .expect("malformed compose should write");
+        indexer
+            .index_repo_incremental_with_hint(
+                "sample-service",
+                repo_root.path(),
+                Some(&compose_hint),
+                None,
+            )
+            .expect("incremental malformed artifact should succeed");
+        assert!(
+            !indexer
+                .storage()
+                .graph()
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
         );
     }
 

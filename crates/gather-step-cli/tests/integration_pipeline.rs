@@ -705,7 +705,10 @@ export async function backfill(TaskModel: any) {
             .iter()
             .any(|hint| hint == "filter_contract_impacted")
     );
-    assert_eq!(cli_report["missing_evidence"], json!([]));
+    assert_eq!(
+        cli_report["missing_evidence"],
+        json!(["deployment_topology"])
+    );
     assert_eq!(
         json!({
             "target": cli_report["target"],
@@ -744,7 +747,7 @@ export async function backfill(TaskModel: any) {
                 "filter_contract_impacted",
                 "source_field_unreviewed"
             ],
-            "missing_evidence": [],
+            "missing_evidence": ["deployment_topology"],
             "confidence": "high"
         })
     );

@@ -253,8 +253,24 @@ fn query_kind(query: &DeploymentTopologyQuery) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{RepoTopologyRequest, validate_repo_and_limit};
+    use gather_step_analysis::{
+        DeploymentTopologyEdge, DeploymentTopologyNode, DeploymentTopologyQuery,
+        DeploymentTopologyReport,
+    };
+    use gather_step_core::{EdgeKind, NodeKind};
+
+    use super::{DeploymentTopologyResponse, RepoTopologyRequest, validate_repo_and_limit};
     use crate::McpServerError;
+
+    fn topology_node(kind: NodeKind, name: &str, qualified_name: &str) -> DeploymentTopologyNode {
+        DeploymentTopologyNode {
+            repo: "backend".to_owned(),
+            kind,
+            name: name.to_owned(),
+            file_path: "compose.yaml".to_owned(),
+            qualified_name: Some(qualified_name.to_owned()),
+        }
+    }
 
     #[test]
     fn validates_limit_bounds() {
@@ -274,5 +290,46 @@ mod tests {
         let request = serde_json::from_value::<RepoTopologyRequest>(serde_json::json!({}))
             .expect("request should parse");
         assert_eq!(request.limit, 20);
+    }
+
+    #[test]
+    fn response_conversion_preserves_topology_vectors() {
+        let service = topology_node(NodeKind::Service, "api", "__service__backend__api");
+        let deployment = topology_node(NodeKind::Deployment, "api", "__deployment__backend__api");
+        let env_var = topology_node(NodeKind::EnvVar, "DATABASE_URL", "__env_var__database_url");
+        let database = topology_node(NodeKind::Database, "postgres", "__database__postgres");
+        let workflow_job = topology_node(NodeKind::WorkflowJob, "deploy", "__workflow_job__deploy");
+
+        let response: DeploymentTopologyResponse = DeploymentTopologyReport {
+            query: DeploymentTopologyQuery::SharedInfra,
+            repo: Some("backend".to_owned()),
+            deployments: vec![deployment],
+            services: vec![service.clone()],
+            env_vars: vec![env_var],
+            shared_infra: vec![database.clone()],
+            workflow_jobs: vec![workflow_job],
+            edges: vec![DeploymentTopologyEdge {
+                source: service,
+                target: database,
+                kind: EdgeKind::UsesDatabase,
+                confidence: Some(900),
+            }],
+            missing_evidence: vec!["partial deployment topology".to_owned()],
+        }
+        .into();
+
+        assert_eq!(response.data.query_kind, "shared_infra");
+        assert_eq!(response.data.repo.as_deref(), Some("backend"));
+        assert_eq!(response.data.deployments[0].kind, "Deployment");
+        assert_eq!(response.data.services[0].name, "api");
+        assert_eq!(response.data.env_vars[0].name, "DATABASE_URL");
+        assert_eq!(response.data.shared_infra[0].name, "postgres");
+        assert_eq!(response.data.workflow_jobs[0].name, "deploy");
+        assert_eq!(response.data.edges[0].kind, "UsesDatabase");
+        assert_eq!(response.data.edges[0].confidence, Some(900));
+        assert_eq!(
+            response.data.missing_evidence,
+            vec!["partial deployment topology"]
+        );
     }
 }

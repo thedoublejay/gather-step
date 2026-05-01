@@ -7,7 +7,7 @@ use gather_step_core::{
     EdgeKind, NodeKind, broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, secret_qn,
 };
 use serde::Deserialize;
-use serde_yaml_ng::Value;
+use serde_norway::Value;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -78,7 +78,7 @@ pub enum DeploymentParseError {
     Yaml {
         path: String,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_norway::Error,
     },
 }
 
@@ -107,10 +107,12 @@ pub fn detect_artifact_kind(path: &str, content: &str) -> DeploymentArtifactKind
     if file_name == "kustomization.yaml" || file_name == "kustomization.yml" {
         return DeploymentArtifactKind::Kustomize;
     }
-    if normalized.starts_with("charts/")
-        || normalized.contains("/charts/")
-        || file_name == "chart.yaml"
-        || file_name == "values.yaml"
+    let in_charts_dir = normalized.starts_with("charts/") || normalized.contains("/charts/");
+    let in_chart_templates_dir = in_charts_dir && normalized.contains("/templates/");
+    if (file_name == "chart.yaml" && (content.is_empty() || looks_like_helm_chart(content)))
+        || (file_name == "values.yaml" && in_charts_dir)
+        || in_chart_templates_dir
+        || looks_like_helm_template(content)
     {
         return DeploymentArtifactKind::Helm;
     }
@@ -427,7 +429,7 @@ fn parse_kubernetes(
     content: &str,
     confidence: u16,
 ) -> Result<(), DeploymentParseError> {
-    for document in serde_yaml_ng::Deserializer::from_str(content) {
+    for document in serde_norway::Deserializer::from_str(content) {
         let value = Value::deserialize(document).map_err(|source| DeploymentParseError::Yaml {
             path: builder.path.to_owned(),
             source,
@@ -674,7 +676,7 @@ fn parse_github_actions(
             "github actions job",
         );
 
-        if workflow_job_is_deployish(job_value) {
+        if workflow_job_is_deployish(job_name, job_value) {
             let deployment_name = format!(
                 "{}:{job_name}",
                 deployment_name_from_path(builder.repo, builder.path)
@@ -1001,7 +1003,7 @@ fn kubernetes_value_from_refs(value: &Value, ref_key: &str) -> BTreeSet<String> 
 
 fn visit_mappings<F>(value: &Value, visitor: &mut F)
 where
-    F: FnMut(&serde_yaml_ng::Mapping),
+    F: FnMut(&serde_norway::Mapping),
 {
     match value {
         Value::Mapping(mapping) => {
@@ -1048,12 +1050,84 @@ fn docker_env_names(rest: &str) -> BTreeSet<String> {
     names
 }
 
-fn workflow_job_is_deployish(value: &Value) -> bool {
-    let mut text = serde_json::to_string(value).unwrap_or_default();
-    text.make_ascii_lowercase();
-    ["deploy", "kubectl", "helm"]
-        .iter()
-        .any(|needle| text.contains(needle))
+fn looks_like_helm_chart(content: &str) -> bool {
+    let Ok(value) = serde_norway::from_str::<Value>(content) else {
+        return false;
+    };
+    let api_version = mapping_get(&value, "apiVersion").and_then(Value::as_str);
+    let name = mapping_get(&value, "name").and_then(Value::as_str);
+    api_version.is_some_and(|value| matches!(value, "v1" | "v2"))
+        && name.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn looks_like_helm_template(content: &str) -> bool {
+    content.contains("{{")
+        && (content.contains(".Values")
+            || content.contains(".Release")
+            || content.contains(".Chart")
+            || content.contains("include "))
+}
+
+fn workflow_job_is_deployish(job_name: &str, value: &Value) -> bool {
+    if deployish_identifier(job_name) || mapping_get(value, "environment").is_some() {
+        return true;
+    }
+    mapping_get(value, "steps")
+        .and_then(Value::as_sequence)
+        .is_some_and(|steps| steps.iter().any(workflow_step_is_deployish))
+}
+
+fn workflow_step_is_deployish(value: &Value) -> bool {
+    if let Some(uses) = mapping_get(value, "uses").and_then(Value::as_str)
+        && deployish_action_ref(uses)
+    {
+        return true;
+    }
+    mapping_get(value, "run")
+        .and_then(Value::as_str)
+        .is_some_and(deployish_run_command)
+}
+
+fn deployish_identifier(value: &str) -> bool {
+    value
+        .split(|ch: char| ch.is_whitespace() || ch == '_' || ch == '-')
+        .any(|part| {
+            ["deploy", "deployment", "release", "publish"]
+                .iter()
+                .any(|deployish| part.eq_ignore_ascii_case(deployish))
+        })
+}
+
+fn deployish_action_ref(value: &str) -> bool {
+    contains_ascii_case_insensitive(value, "deploy")
+        || contains_ascii_case_insensitive(value, "release")
+        || contains_ascii_case_insensitive(value, "peaceiris/actions-gh-pages")
+}
+
+fn deployish_run_command(value: &str) -> bool {
+    [
+        "kubectl apply",
+        "kubectl rollout",
+        "kubectl set image",
+        "kubectl patch",
+        "helm upgrade",
+        "helm install",
+        "helm rollback",
+        "docker stack deploy",
+        "serverless deploy",
+        "sam deploy",
+        "gcloud run deploy",
+        "aws deploy",
+    ]
+    .iter()
+    .any(|needle| contains_ascii_case_insensitive(value, needle))
+}
+
+fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn workflow_needs(value: &Value) -> BTreeSet<String> {
@@ -1076,7 +1150,7 @@ fn workflow_needs(value: &Value) -> BTreeSet<String> {
 }
 
 fn parse_yaml(content: &str, path: &str) -> Result<Value, DeploymentParseError> {
-    serde_yaml_ng::from_str(content).map_err(|source| DeploymentParseError::Yaml {
+    serde_norway::from_str(content).map_err(|source| DeploymentParseError::Yaml {
         path: path.to_owned(),
         source,
     })
@@ -1617,6 +1691,35 @@ jobs:
     }
 
     #[test]
+    fn github_actions_parser_ignores_deployish_env_names_and_tool_checks() {
+        let output = parse_deployment_artifact(
+            "backend",
+            ".github/workflows/build.yml",
+            r"
+name: Build
+on:
+  push:
+jobs:
+  build:
+    env:
+      DEPLOY_TOKEN: example
+    steps:
+      - run: helm lint ./charts/api
+      - run: echo DEPLOY_TOKEN
+",
+        )
+        .expect("workflow should parse");
+
+        assert_eq!(output.artifact_kind, DeploymentArtifactKind::GithubActions);
+        assert!(
+            !output
+                .edges
+                .iter()
+                .any(|edge| edge.kind == EdgeKind::BuiltBy)
+        );
+    }
+
+    #[test]
     fn env_file_parser_records_names_only() {
         let output = super::parse_deployment_artifact_with_kind(
             "backend",
@@ -1668,6 +1771,22 @@ jobs:
         assert_eq!(
             detect_artifact_kind("platform/templates/name.yaml", "name: nginx"),
             DeploymentArtifactKind::Unknown
+        );
+        assert_eq!(
+            detect_artifact_kind("docs/chart.yaml", "title: not a helm chart\n"),
+            DeploymentArtifactKind::Unknown
+        );
+        assert_eq!(
+            detect_artifact_kind("values.yaml", "image:\n  tag: latest\n"),
+            DeploymentArtifactKind::Unknown
+        );
+        assert_eq!(
+            detect_artifact_kind("charts/api/values.yaml", "image:\n  tag: latest\n"),
+            DeploymentArtifactKind::Helm
+        );
+        assert_eq!(
+            detect_artifact_kind("deploy/chart.yaml", "apiVersion: v2\nname: api\n"),
+            DeploymentArtifactKind::Helm
         );
     }
 }

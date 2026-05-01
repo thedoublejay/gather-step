@@ -150,6 +150,12 @@ Use Gather Step tools before reasoning about cross-repo impact, tracing a reques
 | `payload_schema` | Inspect inferred payload schema evidence |
 | `contract_drift` | Find contract drift signals |
 | `projection_impact` | Trace source, projected field, filter, index, and backfill evidence |
+| `where_deployed` | Find deployments for an indexed service |
+| `service_env` | List env vars consumed by an indexed service |
+| `env_var_consumers` | Find services that consume an env var |
+| `undeployed_services` | Find indexed services without deployment evidence |
+| `deployed_but_no_code` | Find deployment nodes without service-code linkage |
+| `shared_infra` | Find databases and brokers with service consumers |
 | `breaking_change_candidates` | Surface likely breaking-change risks |
 | `brief` | Get a compact orientation response |
 | `context` | Get bounded context for a target |
