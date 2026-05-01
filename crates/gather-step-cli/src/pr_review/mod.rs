@@ -5,3 +5,4 @@
 //! safety-guarded handoff to [`StorageContext`].
 
 pub mod artifact_root;
+pub mod index_runner;
