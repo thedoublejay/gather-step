@@ -77,6 +77,7 @@ struct IndexOutput {
     config_path: String,
     registry_path: String,
     storage_root: String,
+    index_size_bytes: u64,
     stats: IndexStatsOutput,
     timings: IndexTimingOutput,
     warnings: Vec<String>,
@@ -159,6 +160,57 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn format_duration_hh_mm_ss(ms: u64) -> String {
+    let total_seconds = ms / 1_000;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut divisor = 1_u128;
+    let mut unit_idx = 0;
+    let bytes = u128::from(bytes);
+    while bytes >= divisor * 1024 && unit_idx + 1 < UNITS.len() {
+        divisor *= 1024;
+        unit_idx += 1;
+    }
+    if unit_idx == 0 {
+        format!("{bytes} {}", UNITS[unit_idx])
+    } else {
+        let mut whole = bytes / divisor;
+        let mut tenth = ((bytes % divisor) * 10 + divisor / 2) / divisor;
+        if tenth == 10 {
+            whole += 1;
+            tenth = 0;
+        }
+        format!("{whole}.{tenth} {}", UNITS[unit_idx])
+    }
+}
+
+fn directory_size_bytes(path: &Path) -> Result<u64> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("reading metadata for {}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
+        let entry = entry.with_context(|| format!("reading entry under {}", path.display()))?;
+        total = total.saturating_add(directory_size_bytes(&entry.path())?);
+    }
+    Ok(total)
+}
+
 fn open_indexer_with_optional_recovery(
     storage_root: &Path,
     registry_path: &Path,
@@ -189,7 +241,7 @@ fn reset_and_reopen_indexer(
         )
     })?;
     output.line(format!(
-        "  {} Rebuilding generated index state from source repos.",
+        "  {} Rebuilding generated index state from source repositories.",
         style("→").cyan()
     ));
     RepoIndexer::open(storage_root, IndexingOptions::default())
@@ -300,6 +352,12 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     config
         .validate_repo_roots_against_config_root(&config_root)
         .with_context(|| format!("validating repo roots under {}", config_root.display()))?;
+    info!(
+        workspace = %app.workspace_path.display(),
+        config = %config_path.display(),
+        repos = config.repos.len(),
+        "Indexing from directory started.",
+    );
 
     let mut repo_results = Vec::with_capacity(config.repos.len());
     let mut warnings = Vec::new();
@@ -329,7 +387,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         let bar = multi.add(ProgressBar::new(config.repos.len() as u64));
         bar.set_style(
             ProgressStyle::with_template(
-                " {spinner:.cyan.bold} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}  {msg}",
+                " {spinner:.cyan.bold} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len}  {msg}",
             )
             .expect("workspace progress template is valid")
             .progress_chars("█░░")
@@ -440,12 +498,13 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
 
                 info!(
                     repo = %prep.repo_name,
+                    path = %prep.repo_root.display(),
                     prepare_ms = prep.prepare_ms,
                     commit_ms,
                     files = authoritative_files,
                     symbols = authoritative_symbols,
                     edges = authoritative_edges,
-                    "workspace index: repo pipeline complete",
+                    "Indexing from directory finished.",
                 );
 
                 let depth_level = config_ref
@@ -490,6 +549,19 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 let repo_root = config_root_ref.join(&repo.path);
                 let detected_frameworks: Vec<Framework> =
                     detect_frameworks(&repo_root).into_iter().collect();
+                if let Some(bar) = workspace_bar_ref {
+                    bar.println(format!(
+                        "  {} {}",
+                        style("Indexing").cyan().bold(),
+                        style(repo_root.display()).dim()
+                    ));
+                    bar.set_message(format!("{}  {}", repo.name, repo_root.display()));
+                }
+                info!(
+                    repo = %repo.name,
+                    path = %repo_root.display(),
+                    "Indexing from directory started.",
+                );
                 let prepare_start = Instant::now();
                 let payload = indexer_ref
                     .prepare_repo_payload_with_frameworks(
@@ -714,10 +786,12 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         bar.finish_and_clear();
     }
     if let Some(bar) = &workspace_bar {
-        bar.finish_with_message("workspace indexing complete");
+        bar.finish_with_message("Workspace indexing complete.");
     }
 
     let total_wall_ms = elapsed_ms(total_start);
+    let index_size_bytes = directory_size_bytes(&storage_root)
+        .with_context(|| format!("measuring index size under {}", storage_root.display()))?;
     let graph_build_ms = writer_timings.storage_commit;
     let parser_augment_ms = producer_timings.prepare_total;
     let pack_precompute_ms = precompute_ms;
@@ -727,6 +801,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         config_path: config_path.display().to_string(),
         registry_path: registry_path.display().to_string(),
         storage_root: storage_root.display().to_string(),
+        index_size_bytes,
         stats: IndexStatsOutput {
             total_repos: stats.total_repos,
             indexed_repos: stats.indexed_repos,
@@ -762,12 +837,25 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         warnings,
         repos: repo_results,
     };
+    info!(
+        workspace = %app.workspace_path.display(),
+        storage_root = %storage_root.display(),
+        duration_ms = total_wall_ms,
+        index_size_bytes,
+        "Indexing from directory finished.",
+    );
 
     output.emit(&payload)?;
+    let repo_label = if payload.stats.indexed_repos == 1 {
+        "repository"
+    } else {
+        "repositories"
+    };
     output.line(format!(
-        "\n  {} {} repo(s)  {}",
+        "\n  {} {} {}  {}",
         style("✓ Indexed").green().bold(),
         style(payload.stats.indexed_repos).cyan(),
+        repo_label,
         style(&payload.storage_root).dim()
     ));
     output.line(format!(
@@ -777,8 +865,13 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         style(payload.stats.total_edges).dim(),
         style(payload.stats.cross_repo_edges).dim()
     ));
+    output.line(format!(
+        "    Time: {}  Index size: {}",
+        style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
+        style(format_bytes(payload.index_size_bytes)).dim(),
+    ));
     for warning in &payload.warnings {
-        output.line(format!("  {} {warning}", style("warning:").yellow().bold()));
+        output.line(format!("  {} {warning}", style("Warning:").yellow().bold()));
     }
 
     // When `--artifact-path` is set, persist the IndexOutput payload so release
@@ -1174,11 +1267,11 @@ fn should_update_numeric_progress(phase: &str) -> bool {
     phase != "traverse"
 }
 
-const SEARCH_FLUSH_MESSAGE: &str = "flushing search index...";
-const CROSS_REPO_COUNT_MESSAGE: &str = "counting cross-repo edges...";
+const SEARCH_FLUSH_MESSAGE: &str = "Flushing search index...";
+const CROSS_REPO_COUNT_MESSAGE: &str = "Counting cross-repo edges...";
 
 fn format_pack_precompute_message(count: usize) -> String {
-    format!("precomputing {count} context packs...")
+    format!("Precomputing {count} context packs...")
 }
 
 #[cfg(test)]
@@ -1187,9 +1280,9 @@ mod tests {
     use gather_step_storage::PackCallLogEntry;
 
     use super::{
-        CROSS_REPO_COUNT_MESSAGE, SEARCH_FLUSH_MESSAGE, enforce_summary_invariant,
-        format_pack_precompute_message, should_precompute_fallback_targets,
-        should_update_numeric_progress,
+        CROSS_REPO_COUNT_MESSAGE, SEARCH_FLUSH_MESSAGE, enforce_summary_invariant, format_bytes,
+        format_duration_hh_mm_ss, format_pack_precompute_message,
+        should_precompute_fallback_targets, should_update_numeric_progress,
     };
 
     #[test]
@@ -1205,12 +1298,19 @@ mod tests {
 
     #[test]
     fn finalization_messages_remain_descriptive() {
-        assert_eq!(SEARCH_FLUSH_MESSAGE, "flushing search index...");
-        assert_eq!(CROSS_REPO_COUNT_MESSAGE, "counting cross-repo edges...");
+        assert_eq!(SEARCH_FLUSH_MESSAGE, "Flushing search index...");
+        assert_eq!(CROSS_REPO_COUNT_MESSAGE, "Counting cross-repo edges...");
         assert_eq!(
             format_pack_precompute_message(47),
-            "precomputing 47 context packs..."
+            "Precomputing 47 context packs..."
         );
+    }
+
+    #[test]
+    fn final_summary_formatters_are_human_readable() {
+        assert_eq!(format_duration_hh_mm_ss(3_723_000), "01:02:03");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1_536), "1.5 KB");
     }
 
     #[test]

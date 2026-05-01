@@ -49,7 +49,7 @@ These flags apply to every command. Pass them before the subcommand name.
 
 ### `init`
 
-Discovers all git repositories nested under the workspace root and writes an initial `gather-step.config.yaml`. Skips `.git`, `.gather-step`, `node_modules`, `dist`, and `target` directories. Fails if no git repositories are found.
+Discovers all git repositories nested under the workspace root and writes or updates `gather-step.config.yaml`. Skips `.git`, `.gather-step`, `node_modules`, `dist`, and `target` directories. Fails if no git repositories are found.
 
 ```bash
 gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
@@ -60,7 +60,7 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--config <PATH>` | path | `<workspace>/gather-step.config.yaml` | Write the config to this path instead of the workspace default. |
-| `--force` | bool flag | false | Overwrite an existing config file. Without this flag, the command exits with an error if the config already exists. |
+| `--force` | bool flag | false | Regenerate the config from discovered repos instead of using the existing config as the starting point. |
 | `--index` / `--no-index` | bool flag | prompt/default | Index discovered repos after writing the config, or skip indexing. |
 | `--watch` / `--no-watch` | bool flag | prompt/default | Start watch mode after setup, or return immediately. |
 | `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.claude/rules/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
@@ -76,7 +76,7 @@ gather-step init
 gather-step init --index --generate-ai-files --setup-mcp local --no-watch
 ```
 
-Interactive `init` asks whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
+Interactive `init` starts with a numbered repository picker. Repos from an existing config are selected by default, removed repos stay unchecked, and `all` / `none` shortcuts let you quickly select or clear the list. The remaining prompts ask whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
 
 **Output shape (`--json`)** — emits one line:
 
@@ -84,7 +84,7 @@ Interactive `init` asks whether to index, generate AI context, register MCP, and
 {"event":"init_completed","config_path":"...","repo_count":3,"repos":[{"name":"backend_standard","path":"apps/backend_standard"}]}
 ```
 
-**When to use** — once, after cloning a multi-repo workspace for the first time.
+**When to use** — after cloning a multi-repo workspace for the first time, or when you want the guided picker to update the repo list in an existing config.
 
 ---
 
@@ -600,13 +600,14 @@ Runs a long-lived file watcher that detects source changes and triggers incremen
 In `--json` mode all events go to stdout as newline-delimited JSON. In human mode all output goes to stderr.
 
 ```bash
-gather-step [GLOBAL FLAGS] watch [--config <PATH>] [--storage <PATH>] \
+gather-step [GLOBAL FLAGS] watch [N] [--config <PATH>] [--storage <PATH>] \
   [--poll-interval-ms <N>] [--debounce-ms <N>] \
   [--consecutive-error-limit <N>] [--error-backoff-ms <N>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
+| `N` | positional u64 | unlimited | Stop after this many completed indexing runs. |
 | `--config <PATH>` | path | `<workspace>/gather-step.config.yaml` | Path to workspace config. |
 | `--storage <PATH>` | path | `<workspace>/.gather-step/storage` | Path to storage root. |
 | `--poll-interval-ms <N>` | u64 | 250 | Watch-loop cadence in milliseconds for debounce/backoff processing. On polling backends this is also the file-system poll interval. |
@@ -618,6 +619,7 @@ gather-step [GLOBAL FLAGS] watch [--config <PATH>] [--storage <PATH>] \
 
 ```bash
 gather-step --workspace /path/to/workspace watch
+gather-step --workspace /path/to/workspace watch 1
 gather-step --workspace /path/to/workspace watch --debounce-ms 500 --poll-interval-ms 100
 ```
 
@@ -720,11 +722,11 @@ The per-repo spinner shows numeric progress only for phases where the count is m
 
 After the per-repo loop finishes, a **finalization spinner** narrates the remaining workspace-level work:
 
-- `flushing search index...` — final search-index commit.
-- `counting cross-repo edges...` — authoritative cross-repo accounting pass.
-- `precomputing N context packs...` — warm-cache pack generation.
+- `Flushing search index...` — final search-index commit.
+- `Counting cross-repo edges...` — authoritative cross-repo accounting pass.
+- `Precomputing N context packs...` — warm-cache pack generation.
 
-The workspace bar stays visually complete during this window and finishes with `workspace indexing complete` once the finalization spinner clears.
+The workspace bar stays visually complete during this window and finishes with `Workspace indexing complete.` once the finalization spinner clears. The final summary also includes elapsed time in `HH:MM:SS` and the on-disk index size.
 
 ### Non-TTY output (pipes, redirects, files)
 

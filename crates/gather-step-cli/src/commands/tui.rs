@@ -106,7 +106,7 @@ pub fn run(app: &AppContext, args: TuiArgs) -> Result<()> {
 pub fn run_with_options(app: &AppContext, args: TuiArgs) -> Result<()> {
     if !app.tui_is_available() {
         bail!(
-            "TUI requires an interactive terminal\nhint: run `gather-step status`, `gather-step watch`, or pass `--json` for scriptable output"
+            "TUI requires an interactive terminal.\nHint: Run `gather-step status`, `gather-step watch`, or pass `--json` for scriptable output."
         );
     }
 

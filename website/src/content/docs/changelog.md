@@ -5,6 +5,32 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## v2.4.0 (2026-05-01)
+
+Release status: **released**.
+
+Setup and indexing usability release for config-respecting onboarding, repo selection, clearer progress copy, watch-count runs, parser-warning cleanup, and docs layout stability.
+
+### Highlights
+
+- Changed `init` to reuse existing `gather-step.config.yaml` files instead of failing or silently regenerating repo lists.
+- Added a numbered, checkbox-style repo picker with `all` and `none` shortcuts; repos already present in the config are selected by default.
+- Preserved selected repos' existing config metadata such as custom `name`, `depth`, provider settings, and indexing rules.
+- Added optional `gather-step watch N` support so watch mode can stop after `N` completed indexing runs.
+- Shortened the indexing progress bar, displayed the current repo path above it, and added final elapsed time plus index size.
+- Reworded indexing finalization copy to sentence case: `Flushing search index...`, `Counting cross-repo edges...`, and `Precomputing N context packs...`.
+- Added start and finish indexing logs with workspace, repo path, duration, and index-size context.
+- Skipped SWC for static JSON/YAML mapping files and downgraded ambiguous sibling Python package resolution from warning to debug/no-resolution.
+- Added a loader while `generate` writes assistant-facing Markdown files.
+- Updated setup-complete copy with a planning prompt example and docs link.
+- Fixed the docs content/sidebar overlap on the CLI reference page.
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.4.0`.
+
+### Verification Coverage
+
+- Added regression coverage for existing config reuse, `watch N` argument parsing, static mapping parser routing, duplicate Python sibling package ambiguity, and indexing summary formatting.
+- Verified with Rust formatting, Cargo check, clippy, targeted CLI/parser tests, and website build during release preparation.
+
 ## v2.3.0 (2026-05-01)
 
 Release status: **released**.

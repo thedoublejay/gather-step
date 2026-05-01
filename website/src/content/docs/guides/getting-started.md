@@ -51,33 +51,39 @@ cd /path/to/workspace
 gather-step init
 ```
 
-The guided defaults cover the common path: write `gather-step.config.yaml`, index the discovered repos, generate assistant-facing context files, register workspace-local Claude MCP settings, and leave watch mode off unless you opt in.
+The guided defaults cover the common path: choose repos, write `gather-step.config.yaml`, index the selected repos, generate assistant-facing context files, register workspace-local Claude MCP settings, and leave watch mode off unless you opt in.
 
 Running `gather-step` with no subcommand also starts the guided flow in an interactive workspace without a config. In a configured workspace, no-args mode shows the status summary instead.
 
 ### Interactive wizard
 
-Press Enter to accept the default shown by each prompt. In the common path, that means index now, generate AI context files, register local MCP settings, and skip foreground watch mode.
+Press Enter to accept the default shown by each prompt. In the common path, that means keep the selected repos, index now, generate AI context files, register local MCP settings, and skip foreground watch mode.
 
 ```text
-  Gather Step workspace setup
-  Found 3 git repo(s) in /path/to/workspace
-    backend  -> backend
-    frontend -> frontend
-    shared   -> shared
+  Hi, welcome to Gather Step setup
+  Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context.
+  Workspace: /path/to/workspace
+  Found 3 Git repositories
 
-Index these repos now? [Y/n]
-Generate AI context files (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md)? [Y/n]
-Register as an MCP server? [local/global/skip] (default: local)
-Watch for changes and re-index automatically? [y/N]
+1) Select repositories to include
+   Use numbers or ranges to toggle, `all`, `none`, or press Enter to confirm.
+   [x] 1. backend  (backend)
+   [x] 2. frontend  (frontend)
+   [x] 3. shared  (shared)
+   Selection [all/none/1,3/1-3/Enter]:
+2) Index the selected repositories now? [Y/n]
+3) Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md) [Y/n]
+4) Register Gather Step as an MCP server? [local/global/skip] (default: local)
+5) Watch for repository changes and re-index automatically? [y/N]
 ```
 
 | Wizard prompt | Default | Equivalent flag |
 |---|---|---|
+| Select repositories to include | Existing config repos, or all discovered repos | edit `gather-step.config.yaml` |
 | Index these repos now? | Yes | `--index` |
 | Generate AI context files? | Yes | `--generate-ai-files` |
 | Register as an MCP server? | Local | `--setup-mcp local` |
-| Watch for changes automatically? | No | `--watch` |
+| Watch for repository changes and re-index automatically? | No | `--watch` |
 
 The watcher runs in the foreground only if you opt in. Use `Ctrl+C` to stop it; indexed state is preserved.
 

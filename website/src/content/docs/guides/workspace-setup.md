@@ -81,11 +81,11 @@ cd /path/to/workspace
 gather-step init
 ```
 
-In an interactive terminal, pressing Enter accepts the default onboarding path: index now, generate AI context files, register local MCP settings, and leave watch mode off.
+In an interactive terminal, pressing Enter accepts the default onboarding path: keep the selected repos, index now, generate AI context files, register local MCP settings, and leave watch mode off.
 
 `init` walks the workspace directory, discovers directories that contain a
-`.git` folder, and writes `gather-step.config.yaml` with one entry per
-discovered repo. It skips directories it should not traverse:
+`.git` folder, and opens a checkbox-style repo picker before writing
+`gather-step.config.yaml`. It skips directories it should not traverse:
 
 - `.git`
 - `.gather-step`
@@ -94,12 +94,13 @@ discovered repo. It skips directories it should not traverse:
 - `target`
 
 The generated config uses each repository's directory name as the logical
-`name`. Review the output before indexing: remove repos you do not want, adjust
-`depth` for large repos you want to scan shallowly, and add any `indexing`
-scoping rules.
+`name`. Select only the repos you want to index, then adjust `depth` for large
+repos you want to scan shallowly and add any `indexing` scoping rules.
 
-If a config already exists, `init` will not overwrite it. Remove or rename the
-existing config first if you want a fresh generated draft.
+If a config already exists, `init` uses it as the starting point. Existing repos
+are preselected, removed repos stay unchecked, and repo-specific settings such
+as `name` and `depth` are preserved for selected repos. Use `--force` only when
+you intentionally want a fresh generated draft from repository discovery.
 
 For scripts or CI, pass flags explicitly instead of relying on prompts:
 
@@ -111,7 +112,6 @@ gather-step --workspace /path/to/workspace init \
   --no-watch
 ```
 
-Use `--force` only when you intentionally want to overwrite an existing config.
 Use `--no-index`, `--no-generate-ai-files`, or `--no-watch` to make a scripted
 setup return immediately after writing the config.
 

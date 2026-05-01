@@ -12,6 +12,7 @@ use gather_step_output::{
     render_workspace_summary_claude,
 };
 use gather_step_storage::{GraphStoreDb, MetadataStore, MetadataStoreDb};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 
 use crate::app::AppContext;
@@ -185,6 +186,7 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
     let output = app.output();
     let paths = app.workspace_paths();
     let metadata_path = paths.storage_root.join("metadata.sqlite");
+    let generation_bar = ai_generation_bar(app);
 
     if paths.graph_path.exists() && metadata_path.exists() {
         run_claude_md_rules(
@@ -196,10 +198,15 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
             },
         )?;
     } else {
-        output.line("warning: skipped .claude/rules/ generation because no workspace index exists");
+        output
+            .line("Warning: Skipped generating .claude/rules/ because no workspace index exists.");
         output.line(
-            "hint: run `gather-step index`, then `gather-step generate claude-md --target rules`",
+            "Hint: Run `gather-step index`, then `gather-step generate claude-md --target rules`.",
         );
+    }
+    if let Some(bar) = &generation_bar {
+        bar.inc(1);
+        bar.set_message("Generating CLAUDE.gather.md...");
     }
 
     run_claude_md_summary(
@@ -210,7 +217,33 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
             target: ClaudeMdTarget::Summary,
         },
     )?;
-    run_agents_md(app, GenerateAgentsMdArgs { output: None })
+    if let Some(bar) = &generation_bar {
+        bar.inc(1);
+        bar.set_message("Generating AGENTS.gather.md...");
+    }
+    run_agents_md(app, GenerateAgentsMdArgs { output: None })?;
+    if let Some(bar) = generation_bar {
+        bar.inc(1);
+        bar.finish_and_clear();
+    }
+    Ok(())
+}
+
+fn ai_generation_bar(app: &AppContext) -> Option<ProgressBar> {
+    app.progress_is_visible().then(|| {
+        let bar = app.multi_progress.add(ProgressBar::new(3));
+        bar.set_style(
+            ProgressStyle::with_template(
+                " {spinner:.cyan.bold} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len}  {msg}",
+            )
+            .expect("AI context progress template is valid")
+            .progress_chars("█░░")
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        bar.set_message("Generating AI context files...");
+        bar.enable_steady_tick(std::time::Duration::from_millis(80));
+        bar
+    })
 }
 
 fn run_codeowners(app: &AppContext, args: GenerateCodeownersArgs) -> Result<()> {

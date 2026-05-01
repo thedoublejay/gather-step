@@ -65,6 +65,19 @@ body {
   --sl-content-width: 52rem;
 }
 
+[data-has-sidebar] .main-frame,
+[data-has-sidebar] main,
+[data-has-sidebar] .content-panel,
+[data-has-sidebar] .sl-container,
+[data-has-sidebar] .sl-markdown-content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+[data-has-sidebar] .content-panel {
+  overflow: clip;
+}
+
 code,
 pre {
   font-family: var(--sl-font-mono);
@@ -112,6 +125,31 @@ h4 {
 .content-panel .sl-container {
   min-width: 0;
   padding-top: 1rem;
+}
+
+.sl-markdown-content {
+  overflow-wrap: anywhere;
+}
+
+.sl-markdown-content :is(table, pre) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.sl-markdown-content table :is(th, td) {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.sl-markdown-content table :is(th, td):not(:last-child) {
+  white-space: nowrap;
+}
+
+@media (min-width: 72rem) {
+  [data-has-sidebar] {
+    --sl-content-width: min(52rem, calc(100vw - var(--sl-sidebar-width) - 8rem));
+  }
 }
 
 .sl-markdown-content h1,

@@ -47,7 +47,7 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
           through repos. Right bar is a single Gather Step pack query.
         </p>
       </div>
-      <span class="bp-stamp">v2.3 · 2026-05-01</span>
+      <span class="bp-stamp">v2.4 · 2026-05-01</span>
     </div>
 
     <div class="bp-bench__hero">
@@ -58,8 +58,8 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         </div>
         <div class="bp-bench__stat__small">
           <b>{totalManual}s</b> of manual exploration, compressed into <b>{totalGatherStep.toFixed(2)}s</b> of
-          pack queries once the graph is built. The v2.3 release prep also covers data-shape
-          oracle, optional payload mismatch, TypeORM migration, and projection-impact slices.
+          pack queries once the graph is built. The v2.4 release keeps setup human-readable,
+          respects edited configs, and reports indexing duration and index size.
         </div>
       </div>
 
@@ -123,8 +123,8 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         <line x1="12" y1="16" x2="12.01" y2="16"></line>
       </svg>
       <div>
-        <b>v2.3 release prep.</b> Data-shape research adds alias-aware field evidence,
-        migration probe plans, and optional payload drift checks while raw search remains a
+        <b>v2.4 release.</b> Onboarding now starts with repo selection, existing configs stay
+        authoritative, and indexing logs use clearer technical copy while raw search remains a
         diagnostic baseline, not a graph-quality gate.
       </div>
     </div>

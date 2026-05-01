@@ -224,7 +224,7 @@ fn parse_file_core(
         .unwrap_or(false);
 
     // ── TS/JS: use swc (unless the diagnostic bypass is active) ─────────────
-    if matches!(file.language, Language::TypeScript | Language::JavaScript) && !force_tree_sitter {
+    if should_use_swc(file) && !force_tree_sitter {
         let file_path_utf8 = path_to_utf8(&file.path);
         let file_path = file_path_utf8.as_str();
 
@@ -570,6 +570,21 @@ fn parse_file_core(
     crate::projection::augment_projection_fields(&mut parsed);
     apply_workspace_semantic_edges(&mut parsed, repo_root);
     Ok(parsed)
+}
+
+fn should_use_swc(file: &FileEntry) -> bool {
+    if !matches!(file.language, Language::TypeScript | Language::JavaScript) {
+        return false;
+    }
+    !file
+        .path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("json")
+                || ext.eq_ignore_ascii_case("yaml")
+                || ext.eq_ignore_ascii_case("yml")
+        })
 }
 
 fn parse_tree_with_timeout(
@@ -3017,15 +3032,14 @@ fn resolve_python_sibling_package_import(
                 if absolute_current_file.starts_with(&package_dir) {
                     return Some(resolved);
                 }
-                if let Some((first_package_dir, first_resolved)) = first_match.as_ref() {
-                    tracing::warn!(
+                if let Some((first_package_dir, _first_resolved)) = first_match.as_ref() {
+                    tracing::debug!(
                         package = package_name,
                         first_package_dir = %first_package_dir.display(),
                         duplicate_package_dir = %package_dir.display(),
-                        resolved = %first_resolved.display(),
-                        "multiple sibling Python packages matched import; using first match"
+                        "Multiple sibling Python packages matched import; leaving import unresolved."
                     );
-                    continue;
+                    return None;
                 }
                 first_match = Some((package_dir, resolved));
             }
@@ -4480,7 +4494,7 @@ mod tests {
         WorkspaceRepoIdentity, configured_workspace_repo_identities,
         import_path_exists_inside_allowed_roots, load_configured_workspace_repo_identities,
         parse_file, parse_file_with_context, resolve_import_path,
-        resolve_python_sibling_package_import, resolve_sibling_package_import,
+        resolve_python_sibling_package_import, resolve_sibling_package_import, should_use_swc,
     };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -5496,7 +5510,7 @@ class Outer:
     }
 
     #[test]
-    fn duplicate_python_sibling_packages_warn_and_resolve_deterministically() {
+    fn duplicate_python_sibling_packages_stay_unresolved_when_current_file_cannot_disambiguate() {
         let temp_dir = TestDir::new("python-sibling-duplicates");
         let app_root = temp_dir.path().join("api_service");
         let first_root = temp_dir.path().join("a_shared_models");
@@ -5526,14 +5540,27 @@ class Outer:
             );
         });
 
-        assert_eq!(
-            resolved.as_deref(),
-            Some(canonical(first_root.join("src/shared_models/records.py")).as_path())
-        );
+        assert_eq!(resolved.as_deref(), None);
         assert!(
-            logs.contains("multiple sibling Python packages matched import"),
-            "expected duplicate warning, got {logs}"
+            !logs.contains("multiple sibling Python packages matched import"),
+            "duplicate sibling package ambiguity should not warn at default log level, got {logs}"
         );
+    }
+
+    #[test]
+    fn swc_skips_static_mapping_files() {
+        let mut file = crate::traverse::FileEntry {
+            path: PathBuf::from("app/src/v2/app/translate/en/globalSearch.json"),
+            language: Language::JavaScript,
+            size_bytes: 0,
+            content_hash: [0; 32],
+            source_bytes: None,
+        };
+        assert!(!should_use_swc(&file));
+
+        file.path = PathBuf::from("src/routes.ts");
+        file.language = Language::TypeScript;
+        assert!(should_use_swc(&file));
     }
 
     #[test]
