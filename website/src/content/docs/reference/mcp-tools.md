@@ -130,7 +130,7 @@ Used automatically when the assistant needs mismatches between the producer-side
 
 > "If this field changes, which source fields, projected fields, filters, indexes, and backfills need review?"
 
-Used automatically when the assistant needs static field-level evidence for denormalized or persisted projections. The request accepts `target`, optional `repo`, optional `limit` (1-100), and optional `evidence_verbosity` (`summary` or `full`). The tool returns source and projected fields, derivation edges, read/write/filter/index/backfill evidence, missing evidence, and risk hints such as `source_field_unreviewed`, `backfill_unproven`, `index_or_search_mapping_unproven`, `frontend_only_focus`, and `deployed_owner_unchecked`.
+Used automatically when the assistant needs static field-level evidence for denormalized or persisted projections. The request accepts `target`, optional `repo`, optional `limit` (1-100), and optional `evidence_verbosity` (`summary` or `full`). The tool returns source and projected fields, derivation edges, read/write/filter/index/backfill evidence, evidence-source labels such as `direct_field_access` and `local_alias_field_access`, missing evidence, and risk hints such as `source_field_unreviewed`, `backfill_unproven`, `index_or_search_mapping_unproven`, `frontend_only_focus`, `optional_payload_filter_mismatch`, and `deployed_owner_unchecked`.
 
 ### `breaking_change_candidates`
 

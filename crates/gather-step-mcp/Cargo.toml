@@ -13,13 +13,13 @@ test-support = []
 
 [dependencies]
 blake3.workspace = true
-gather-step-analysis = { path = "../gather-step-analysis", version = "2.2.0" }
+gather-step-analysis = { path = "../gather-step-analysis", version = "2.3.0" }
 rustc-hash.workspace = true
 smallvec.workspace = true
 subtle.workspace = true
 gather-step-core.workspace = true
-gather-step-git = { path = "../gather-step-git", version = "2.2.0" }
-gather-step-output = { path = "../gather-step-output", version = "2.2.0" }
+gather-step-git = { path = "../gather-step-git", version = "2.3.0" }
+gather-step-output = { path = "../gather-step-output", version = "2.3.0" }
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
 rmcp = { version = "1.5.0", features = ["client", "server", "macros", "transport-io"] }

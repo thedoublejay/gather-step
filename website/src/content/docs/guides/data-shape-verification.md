@@ -7,13 +7,14 @@ Source types and schemas do not prove the current shape of production data. A
 Mongo migration can be type-correct and still miss records because the filter
 assumes an old field distribution.
 
-Gather Step v2.3 adds three best-effort source-code signals:
+Gather Step v2.3 adds these best-effort source-code signals:
 
 - direct field access edges for typed TypeScript receivers, including local
   aliases and destructuring rebinds,
-- a focused planning-pack reminder for supported migration siblings, and
+- generated Mongo `$type` probe plans for supported migration siblings,
 - an optional payload filter-mismatch hint when an optional indexed payload
-  field is also used in a migration filter.
+  field is also used in a migration filter, and
+- broader static migration sibling detection for Mongoose and TypeORM.
 
 ## Field Access Signal
 
@@ -75,7 +76,8 @@ migration when all of these are true:
   declarations are supported when the import resolves inside the repo.
 
 TypeORM migration files are indexed when a static `queryRunner.query(...)` SQL
-literal or supported `queryRunner` table method exposes the table name.
+literal or supported `queryRunner` table method exposes the table name. Static
+schema-qualified SQL table names are normalized to the table name.
 
 The `migration_siblings` response includes a coverage note with the same
 best-effort boundary. Knex, Prisma, Atlas migration definitions, dynamic
@@ -89,7 +91,7 @@ For a detected migration on `work_items`, the planning pack includes a hint in t
 form:
 
 ```text
-Run db.work_items.aggregate([{ $group: { _id: { $type: '$<field>' }, count: { $sum: 1 } } }]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift.
+Run db.getCollection("work_items").aggregate([{ $group: { _id: { $type: '$<field>' }, count: { $sum: 1 } } }]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift.
 ```
 
 Use the sibling filters as prompts, not proof. If an older migration filtered
@@ -100,6 +102,11 @@ When the indexed payload contract says `workflow?` is optional and a migration
 filter scopes by `workflow`, planning and change-impact surfaces add
 `projection_impact:optional_payload_filter_mismatch` and ask for a runtime shape
 probe.
+
+Generated commands use `db.getCollection(<json-escaped name>)`, so collection
+names such as `audit-log` and `foo.bar` remain safe to paste into the Mongo
+shell. Gather Step prints the command only; it does not open a database
+connection.
 
 ## Related Docs
 
