@@ -1056,6 +1056,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
+            deployment: Default::default(),
         };
         let selected = vec![DiscoveredRepo {
             name: "api".to_owned(),
@@ -1081,6 +1082,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
+            deployment: Default::default(),
         };
         let selected = vec![DiscoveredRepo {
             name: "api".to_owned(),
