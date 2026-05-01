@@ -45,6 +45,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`tui`](#tui) — Open the opt-in full-screen workspace dashboard.
 - [`setup-mcp`](#setup-mcp) — Register workspace-pinned Claude MCP settings.
 - [`serve`](#serve) — Start the stdio MCP server.
+- [`pr-review`](#pr-review) — Build an isolated review index for a PR branch and emit a delta report.
 
 ## Command details
 
@@ -163,7 +164,7 @@ Deletes the workspace-local registry and storage directory. This is a destructiv
 Path overrides must stay inside the workspace-local `.gather-step/` directory. Attempts to point `--registry` or `--storage` outside that root are rejected.
 
 ```bash
-gather-step [GLOBAL FLAGS] clean [--registry <PATH>] [--storage <PATH>] [--yes]
+gather-step [GLOBAL FLAGS] clean [--registry <PATH>] [--storage <PATH>] [--yes] [--include-review]
 ```
 
 | Flag | Type | Default | Description |
@@ -171,11 +172,13 @@ gather-step [GLOBAL FLAGS] clean [--registry <PATH>] [--storage <PATH>] [--yes]
 | `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Override the workspace-local registry path. Must stay inside `.gather-step/`. |
 | `--storage <PATH>` | path | `<workspace>/.gather-step/storage` | Override the workspace-local storage directory. Must stay inside `.gather-step/`. |
 | `--yes`, `-y` | bool flag | false | Skip the interactive confirmation prompt. Required when `--json` is active. |
+| `--include-review` | bool flag | false | Also wipe all `pr-review` artifact directories for this workspace (OS cache dir). Without this flag, review artifacts kept with `--keep-cache` are not touched. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace clean --yes
+gather-step --workspace /path/to/workspace clean --yes --include-review
 ```
 
 **Output shape (`--json`)** — emits one line:
@@ -184,7 +187,7 @@ gather-step --workspace /path/to/workspace clean --yes
 {"event":"clean_completed","registry_path":"...","storage_root":"..."}
 ```
 
-**When to use** — before a full re-clone, or to free disk space when the workspace is no longer active.
+**When to use** — before a full re-clone, or to free disk space when the workspace is no longer active. Pass `--include-review` to also remove any kept `pr-review` caches.
 
 ---
 
@@ -744,6 +747,72 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 ```
 
 **When to use** — to connect an MCP-capable AI assistant such as Claude Code to an indexed workspace. Add `--watch` during active development when you want one process to serve MCP and keep the index fresh.
+
+---
+
+### `pr-review`
+
+Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
+
+The MVP report populates `metadata`, `safety`, `changed_files`, and `suggested_followups`. The `added_routes`, `added_symbols`, and `added_payload_contracts` fields are reserved for Phase 2 and are always empty arrays in this release.
+
+**Run a review**
+
+```bash
+gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine <ENGINE>] \
+  [--keep-cache] [--json]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--base <REF>` | string | required | Base ref (branch, tag, SHA, or any git rev). |
+| `--head <REF>` | string | required | Head ref (branch, tag, SHA, `HEAD`, etc.). |
+| `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. Only `temp-index` is supported in this release. |
+| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Without this flag, successful runs delete the artifact directory on exit. |
+| `--json` | bool flag | false | Emit JSON output instead of Markdown. The global `--json` flag also works. |
+
+**Clean up review artifacts**
+
+```bash
+gather-step [GLOBAL FLAGS] pr-review clean --dry-run
+gather-step [GLOBAL FLAGS] pr-review clean --run-id <ID>
+gather-step [GLOBAL FLAGS] pr-review clean --base <REF> --head <REF>
+gather-step [GLOBAL FLAGS] pr-review clean --older-than <DURATION>
+gather-step [GLOBAL FLAGS] pr-review clean --all
+```
+
+Exactly one selector must be given. Combine `--dry-run` with any selector to preview without deleting.
+
+| Flag | Type | Description |
+|---|---|---|
+| `--dry-run` | bool flag | List artifacts that would be deleted; delete nothing. |
+| `--run-id <ID>` | string | Delete the artifact directory for one explicit run ID. Removes `InProgress` artifacts when explicitly targeted. |
+| `--base <REF>` | string | Delete artifacts whose recorded base ref matches this ref. Must be used together with `--head`. |
+| `--head <REF>` | string | Delete artifacts whose recorded head ref matches this ref. Must be used together with `--base`. |
+| `--older-than <DURATION>` | string | Delete completed, failed, and quarantined artifacts older than this duration. Format: `<n><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`. Skips `InProgress` artifacts to avoid racing a live indexing run. |
+| `--all` | bool flag | Delete every review artifact for this workspace, including `InProgress` ones. |
+
+**Examples**
+
+```bash
+# Run a review and print a Markdown report
+gather-step --workspace /path/to/workspace pr-review --base main --head feature/my-branch
+
+# Run with JSON output and keep the cache for follow-up queries
+gather-step --workspace /path/to/workspace pr-review \
+  --base main --head feature/my-branch \
+  --json --keep-cache
+
+# List all kept artifacts (dry run)
+gather-step --workspace /path/to/workspace pr-review clean --dry-run
+
+# Prune artifacts older than one week
+gather-step --workspace /path/to/workspace pr-review clean --older-than 7d
+```
+
+**When to use** — to get a structural delta report before reviewing a PR. The `suggested_followups` in the report include `--registry` / `--storage` overrides that point follow-up commands at the kept review index rather than the workspace baseline.
+
+---
 
 ## Compatibility aliases
 
