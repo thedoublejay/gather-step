@@ -46,6 +46,13 @@ pub enum NodeKind {
     Author = 23,
     Ticket = 24,
     DataField = 25,
+    Deployment = 26,
+    EnvVar = 27,
+    Secret = 28,
+    ConfigMap = 29,
+    WorkflowJob = 30,
+    Broker = 31,
+    Database = 32,
 }
 
 #[derive(
@@ -116,6 +123,12 @@ pub enum EdgeKind {
     FiltersOnField = 93,
     IndexesField = 94,
     BackfillsField = 95,
+    DeployedAs = 100,
+    ReadsEnv = 101,
+    BackedBy = 102,
+    BuiltBy = 103,
+    UsesBroker = 104,
+    UsesDatabase = 105,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -151,7 +164,13 @@ impl NodeKind {
             | Self::Repo
             | Self::Convention
             | Self::Service
-            | Self::DataField => true,
+            | Self::DataField
+            | Self::Deployment
+            | Self::EnvVar
+            | Self::ConfigMap
+            | Self::WorkflowJob
+            | Self::Broker
+            | Self::Database => true,
             Self::Import
             | Self::Decorator
             | Self::Commit
@@ -159,7 +178,8 @@ impl NodeKind {
             | Self::Review
             | Self::Comment
             | Self::Author
-            | Self::Ticket => false,
+            | Self::Ticket
+            | Self::Secret => false,
         }
     }
 
@@ -191,6 +211,13 @@ impl NodeKind {
             Self::Author,
             Self::Ticket,
             Self::DataField,
+            Self::Deployment,
+            Self::EnvVar,
+            Self::Secret,
+            Self::ConfigMap,
+            Self::WorkflowJob,
+            Self::Broker,
+            Self::Database,
         ]
     }
 }
@@ -228,6 +255,12 @@ impl EdgeKind {
                 | Self::DriftsFrom
                 | Self::PropagatesEvent
                 | Self::ConsumesHookFrom
+                | Self::DeployedAs
+                | Self::ReadsEnv
+                | Self::BackedBy
+                | Self::BuiltBy
+                | Self::UsesBroker
+                | Self::UsesDatabase
         )
     }
 
@@ -278,6 +311,12 @@ impl EdgeKind {
             Self::FiltersOnField,
             Self::IndexesField,
             Self::BackfillsField,
+            Self::DeployedAs,
+            Self::ReadsEnv,
+            Self::BackedBy,
+            Self::BuiltBy,
+            Self::UsesBroker,
+            Self::UsesDatabase,
         ]
     }
 }
@@ -313,6 +352,13 @@ impl TryFrom<u8> for NodeKind {
             23 => Ok(Self::Author),
             24 => Ok(Self::Ticket),
             25 => Ok(Self::DataField),
+            26 => Ok(Self::Deployment),
+            27 => Ok(Self::EnvVar),
+            28 => Ok(Self::Secret),
+            29 => Ok(Self::ConfigMap),
+            30 => Ok(Self::WorkflowJob),
+            31 => Ok(Self::Broker),
+            32 => Ok(Self::Database),
             _ => Err(DiscriminantError {
                 kind: "NodeKind",
                 value,
@@ -371,6 +417,12 @@ impl TryFrom<u8> for EdgeKind {
             93 => Ok(Self::FiltersOnField),
             94 => Ok(Self::IndexesField),
             95 => Ok(Self::BackfillsField),
+            100 => Ok(Self::DeployedAs),
+            101 => Ok(Self::ReadsEnv),
+            102 => Ok(Self::BackedBy),
+            103 => Ok(Self::BuiltBy),
+            104 => Ok(Self::UsesBroker),
+            105 => Ok(Self::UsesDatabase),
             _ => Err(DiscriminantError {
                 kind: "EdgeKind",
                 value,
@@ -549,6 +601,9 @@ mod tests {
         assert!(NodeKind::Function.is_search_indexable());
         assert!(NodeKind::Event.is_search_indexable());
         assert!(NodeKind::DataField.is_search_indexable());
+        assert!(NodeKind::Deployment.is_search_indexable());
+        assert!(NodeKind::EnvVar.is_search_indexable());
+        assert!(!NodeKind::Secret.is_search_indexable());
         assert!(!NodeKind::Import.is_search_indexable());
         assert!(!NodeKind::Decorator.is_search_indexable());
         assert!(!NodeKind::PR.is_search_indexable());
@@ -557,14 +612,14 @@ mod tests {
 
     #[test]
     fn node_kind_invalid_u8_rejects() {
-        for value in [26_u8, 50, 100, 255] {
+        for value in [33_u8, 50, 100, 255] {
             assert!(NodeKind::try_from(value).is_err(), "{value} should reject");
         }
     }
 
     #[test]
     fn edge_kind_invalid_u8_rejects() {
-        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 88, 89, 100, 255] {
+        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 88, 89, 106, 255] {
             assert!(EdgeKind::try_from(value).is_err(), "{value} should reject");
         }
     }

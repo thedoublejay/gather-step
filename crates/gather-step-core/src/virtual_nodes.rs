@@ -73,6 +73,45 @@ pub fn queue_qn(protocol: &str, name: &str) -> String {
 }
 
 #[must_use]
+pub fn deployment_qn(repo: &str, name: &str) -> String {
+    let repo = canonical_topology_part(repo, "unknown_repo");
+    let name = canonical_topology_part(name, "unknown_deployment");
+    format!("__deployment__{repo}__{name}")
+}
+
+#[must_use]
+pub fn env_var_qn(name: &str) -> String {
+    let name = canonical_topology_part(name, "unknown_env");
+    format!("__env_var__{name}")
+}
+
+#[must_use]
+pub fn secret_qn(name: &str) -> String {
+    let name = canonical_topology_part(name, "unknown_secret");
+    format!("__secret__{name}")
+}
+
+#[must_use]
+pub fn config_map_qn(name: &str) -> String {
+    let name = canonical_topology_part(name, "unknown_config_map");
+    format!("__config_map__{name}")
+}
+
+#[must_use]
+pub fn broker_qn(kind: &str, endpoint_or_name: &str) -> String {
+    let kind = canonical_topology_part(kind, "unknown");
+    let endpoint_or_name = canonical_topology_part(endpoint_or_name, "unknown");
+    format!("__broker__{kind}__{endpoint_or_name}")
+}
+
+#[must_use]
+pub fn database_qn(kind: &str, endpoint_or_name: &str) -> String {
+    let kind = canonical_topology_part(kind, "unknown");
+    let endpoint_or_name = canonical_topology_part(endpoint_or_name, "unknown");
+    format!("__database__{kind}__{endpoint_or_name}")
+}
+
+#[must_use]
 pub fn shared_symbol_qn(package: &str, version: &str, symbol: &str) -> String {
     let package = package.trim();
     let version = version.trim();
@@ -246,12 +285,40 @@ fn split_shared_symbol_package_version(value: &str) -> (&str, Option<&str>) {
     (package, Some(version))
 }
 
+fn canonical_topology_part(value: &str, fallback: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_separator = false;
+    for ch in value.trim().chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            previous_was_separator = false;
+            ch.to_ascii_lowercase()
+        } else if matches!(ch, '.' | '-' | ':') {
+            previous_was_separator = false;
+            ch
+        } else if !previous_was_separator {
+            previous_was_separator = true;
+            '_'
+        } else {
+            continue;
+        };
+        normalized.push(next);
+    }
+
+    let normalized = normalized.trim_matches('_');
+    if normalized.is_empty() {
+        fallback.to_owned()
+    } else {
+        normalized.replace("__", "_")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        parse_shared_symbol_qn, queue_qn, route_qn, shared_package_root, shared_symbol_qn,
+        broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, parse_shared_symbol_qn,
+        queue_qn, route_qn, secret_qn, shared_package_root, shared_symbol_qn,
         shared_symbol_qn_unversioned, topic_qn, virtual_node, virtual_node_id,
     };
     use crate::NodeKind;
@@ -342,6 +409,26 @@ mod tests {
             queue_qn("bull", "report-generation"),
             "__queue__bull__report-generation"
         );
+    }
+
+    #[test]
+    fn deployment_topology_qns_are_canonical_and_redaction_safe() {
+        assert_eq!(
+            deployment_qn("Backend Standard", "API / Prod"),
+            "__deployment__backend_standard__api_prod"
+        );
+        assert_eq!(env_var_qn(" DATABASE_URL "), "__env_var__database_url");
+        assert_eq!(secret_qn("db/password"), "__secret__db_password");
+        assert_eq!(config_map_qn("App Config"), "__config_map__app_config");
+        assert_eq!(
+            broker_qn("Kafka", "Broker.Internal:9092"),
+            "__broker__kafka__broker.internal:9092"
+        );
+        assert_eq!(
+            database_qn("Postgres", "Primary DB"),
+            "__database__postgres__primary_db"
+        );
+        assert_eq!(database_qn("", ""), "__database__unknown__unknown");
     }
 
     #[test]

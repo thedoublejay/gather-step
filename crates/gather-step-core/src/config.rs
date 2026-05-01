@@ -18,6 +18,8 @@ pub struct GatherStepConfig {
     pub jira: Option<JiraConfig>,
     #[serde(default)]
     pub indexing: IndexingConfig,
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +68,17 @@ pub struct IndexingConfig {
     pub max_file_size: String,
     #[serde(default)]
     pub workspace_concurrency: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentConfig {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub gitops_roots: Vec<String>,
+    #[serde(default)]
+    pub env_files: Vec<String>,
 }
 
 impl Default for IndexingConfig {
@@ -332,8 +345,54 @@ impl GatherStepConfig {
             }
         }
 
+        for include in &self.deployment.include {
+            validate_deployment_pattern(path, "deployment.include", include)?;
+        }
+        for root in &self.deployment.gitops_roots {
+            validate_deployment_pattern(path, "deployment.gitops_roots", root)?;
+        }
+        for env_file in &self.deployment.env_files {
+            validate_deployment_pattern(path, "deployment.env_files", env_file)?;
+        }
+
         Ok(())
     }
+}
+
+fn validate_deployment_pattern(
+    config_path: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), ConfigError> {
+    if value.trim().is_empty() {
+        return Err(ConfigError::Validation {
+            path: config_path.to_owned(),
+            reason: format!("{field} entries must not be empty"),
+        });
+    }
+    if value.contains('\0') {
+        return Err(ConfigError::Validation {
+            path: config_path.to_owned(),
+            reason: format!("{field} entry contains an embedded NUL byte"),
+        });
+    }
+    let value_path = Path::new(value);
+    if value_path.is_absolute() {
+        return Err(ConfigError::Validation {
+            path: config_path.to_owned(),
+            reason: format!("{field} entries must be relative to the config root"),
+        });
+    }
+    if value_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(ConfigError::Validation {
+            path: config_path.to_owned(),
+            reason: format!("{field} entries must not escape the config root"),
+        });
+    }
+    Ok(())
 }
 
 fn normalize_repo_path(path: &Path) -> PathBuf {
@@ -540,6 +599,50 @@ repos:
 ",
         )
         .expect_err("repo names with path separators should fail");
+
+        assert!(matches!(error, ConfigError::Validation { .. }));
+    }
+
+    #[test]
+    fn parses_deployment_config() {
+        let config = GatherStepConfig::from_yaml_str(
+            r"
+repos:
+  - name: backend_standard
+    path: repos/backend
+deployment:
+  include:
+    - Dockerfile
+    - deploy/**/*.yaml
+  gitops_roots:
+    - platform/apps
+  env_files:
+    - .env.example
+",
+        )
+        .expect("deployment config should parse");
+
+        assert_eq!(
+            config.deployment.include,
+            vec!["Dockerfile", "deploy/**/*.yaml"]
+        );
+        assert_eq!(config.deployment.gitops_roots, vec!["platform/apps"]);
+        assert_eq!(config.deployment.env_files, vec![".env.example"]);
+    }
+
+    #[test]
+    fn rejects_deployment_paths_that_escape_config_root() {
+        let error = GatherStepConfig::from_yaml_str(
+            r"
+repos:
+  - name: backend_standard
+    path: repos/backend
+deployment:
+  include:
+    - ../secrets/*.yaml
+",
+        )
+        .expect_err("escaping deployment include should fail");
 
         assert!(matches!(error, ConfigError::Validation { .. }));
     }
