@@ -802,7 +802,7 @@ fn parse_file_with_packs_activates_nestjs_extraction() {
     };
     let nestjs_pack = ResolvedPack {
         id: PackId::Nestjs,
-        options: serde_yaml_ng::Value::Null,
+        options: serde_norway::Value::Null,
     };
     let aliases = PathAliases::empty();
     let parsed = parse_file_with_packs(

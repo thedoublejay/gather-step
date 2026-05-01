@@ -115,7 +115,7 @@ pub enum ConfigError {
     Parse {
         path: String,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_norway::Error,
     },
     #[error("invalid config in {path}: {reason}")]
     Validation { path: String, reason: String },
@@ -128,7 +128,7 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 impl GatherStepConfig {
     pub fn from_yaml_str(input: &str) -> Result<Self, ConfigError> {
-        let config: Self = serde_yaml_ng::from_str(input).map_err(|source| ConfigError::Parse {
+        let config: Self = serde_norway::from_str(input).map_err(|source| ConfigError::Parse {
             path: "<inline>".to_owned(),
             source,
         })?;
@@ -141,7 +141,7 @@ impl GatherStepConfig {
         let path = path_ref.display().to_string();
 
         // Reject files larger than 1 MiB before handing them to the YAML
-        // parser.  serde_yaml_ng internally expands YAML anchors, so an
+        // parser.  serde_norway internally expands YAML anchors, so an
         // adversarially crafted config (billion-laughs style) could otherwise
         // cause unbounded memory growth.
         let file_size = fs::metadata(path_ref)
@@ -162,7 +162,7 @@ impl GatherStepConfig {
             source,
         })?;
 
-        let config: Self = serde_yaml_ng::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let config: Self = serde_norway::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
         })?;

@@ -67,7 +67,7 @@ struct GenerateOutput {
     files: Vec<GeneratedFileOutput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct GeneratedFileOutput {
     path: String,
     bytes: usize,
@@ -82,14 +82,17 @@ pub fn run(app: &AppContext, command: GenerateCommand) -> Result<()> {
 }
 
 fn run_claude_md(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
-    match args.target {
-        ClaudeMdTarget::Rules => run_claude_md_rules(app, args),
-        ClaudeMdTarget::Summary => run_claude_md_summary(app, args),
-    }
+    let payload = match args.target {
+        ClaudeMdTarget::Rules => generate_claude_md_rules(app, args)?,
+        ClaudeMdTarget::Summary => generate_claude_md_summary(app, args)?,
+    };
+    emit_generate_output(app, &payload)
 }
 
-fn run_claude_md_rules(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
-    let output = app.output();
+fn generate_claude_md_rules(
+    app: &AppContext,
+    args: GenerateClaudeMdArgs,
+) -> Result<GenerateOutput> {
     let repo_filter = args.repo.or_else(|| app.repo_filter.clone());
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
@@ -121,25 +124,20 @@ fn run_claude_md_rules(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<(
         write_default_outputs(&app.workspace_path, &files)?
     };
 
-    let payload = GenerateOutput {
+    Ok(GenerateOutput {
         event: "generate_claude_md_completed",
         files: written,
-    };
-
-    output.emit(&payload)?;
-    for file in &payload.files {
-        output.line(format!("Wrote {}", file.path));
-    }
-
-    Ok(())
+    })
 }
 
-fn run_claude_md_summary(app: &AppContext, args: GenerateClaudeMdArgs) -> Result<()> {
+fn generate_claude_md_summary(
+    app: &AppContext,
+    args: GenerateClaudeMdArgs,
+) -> Result<GenerateOutput> {
     if args.repo.is_some() || app.repo_filter.is_some() {
         bail!("--repo is only supported by `generate claude-md --target=rules`");
     }
 
-    let output = app.output();
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
         .with_context(|| format!("opening {}", paths.registry_path.display()))?;
@@ -149,19 +147,13 @@ fn run_claude_md_summary(app: &AppContext, args: GenerateClaudeMdArgs) -> Result
         .unwrap_or_else(|| app.workspace_path.join("CLAUDE.gather.md"));
     let written = write_text_output(&target, &content)?;
 
-    let payload = GenerateOutput {
+    Ok(GenerateOutput {
         event: "generate_claude_md_completed",
         files: vec![written],
-    };
-    output.emit(&payload)?;
-    for file in &payload.files {
-        output.line(format!("Wrote {}", file.path));
-    }
-    Ok(())
+    })
 }
 
-fn run_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<()> {
-    let output = app.output();
+fn generate_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<GenerateOutput> {
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
         .with_context(|| format!("opening {}", paths.registry_path.display()))?;
@@ -171,11 +163,20 @@ fn run_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<()> {
         .unwrap_or_else(|| app.workspace_path.join("AGENTS.gather.md"));
     let written = write_text_output(&target, &content)?;
 
-    let payload = GenerateOutput {
+    Ok(GenerateOutput {
         event: "generate_agents_md_completed",
         files: vec![written],
-    };
-    output.emit(&payload)?;
+    })
+}
+
+fn run_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<()> {
+    let payload = generate_agents_md(app, args)?;
+    emit_generate_output(app, &payload)
+}
+
+fn emit_generate_output(app: &AppContext, payload: &GenerateOutput) -> Result<()> {
+    let output = app.output();
+    output.emit(payload)?;
     for file in &payload.files {
         output.line(format!("Wrote {}", file.path));
     }
@@ -187,9 +188,10 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
     let paths = app.workspace_paths();
     let metadata_path = paths.storage_root.join("metadata.sqlite");
     let generation_bar = ai_generation_bar(app);
+    let mut generated_outputs = Vec::new();
 
     if paths.graph_path.exists() && metadata_path.exists() {
-        run_claude_md_rules(
+        let payload = generate_claude_md_rules(
             app,
             GenerateClaudeMdArgs {
                 output: None,
@@ -197,6 +199,7 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
                 target: ClaudeMdTarget::Rules,
             },
         )?;
+        generated_outputs.push(payload);
     } else {
         output
             .line("Warning: Skipped generating .claude/rules/ because no workspace index exists.");
@@ -209,22 +212,28 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
         bar.set_message("Generating CLAUDE.gather.md...");
     }
 
-    run_claude_md_summary(
+    generated_outputs.push(generate_claude_md_summary(
         app,
         GenerateClaudeMdArgs {
             output: None,
             repo: None,
             target: ClaudeMdTarget::Summary,
         },
-    )?;
+    )?);
     if let Some(bar) = &generation_bar {
         bar.inc(1);
         bar.set_message("Generating AGENTS.gather.md...");
     }
-    run_agents_md(app, GenerateAgentsMdArgs { output: None })?;
+    generated_outputs.push(generate_agents_md(
+        app,
+        GenerateAgentsMdArgs { output: None },
+    )?);
     if let Some(bar) = generation_bar {
         bar.inc(1);
         bar.finish_and_clear();
+    }
+    for payload in generated_outputs {
+        emit_generate_output(app, &payload)?;
     }
     Ok(())
 }

@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::{Serialize, de::DeserializeOwned};
-use serde_yaml_ng::Value;
+use serde_norway::Value;
 use thiserror::Error;
 
 use crate::{ConfigError, DepthLevel, GatherStepConfig};
@@ -110,19 +110,19 @@ pub enum RegistryError {
     Parse {
         path: String,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_norway::Error,
     },
     #[error("failed to serialize registry data for {context}: {source}")]
     ValueSerialize {
         context: String,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_norway::Error,
     },
     #[error("failed to deserialize registry data for {context}: {source}")]
     ValueDeserialize {
         context: String,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_norway::Error,
     },
     #[error("registry at {path} uses unsupported version {version}")]
     UnsupportedVersion { path: String, version: u32 },
@@ -256,7 +256,7 @@ impl WorkspaceRegistry {
             source,
         })?;
         let registry =
-            serde_yaml_ng::from_str::<Self>(&raw).map_err(|source| RegistryError::Parse {
+            serde_norway::from_str::<Self>(&raw).map_err(|source| RegistryError::Parse {
                 path: path_display.clone(),
                 source,
             })?;
@@ -438,7 +438,7 @@ impl WorkspaceRegistry {
             })?;
 
         let value =
-            serde_yaml_ng::to_value(value).map_err(|source| RegistryError::ValueSerialize {
+            serde_norway::to_value(value).map_err(|source| RegistryError::ValueSerialize {
                 context: format!("cursor `{source:?}` for repo `{repo}`"),
                 source,
             })?;
@@ -470,7 +470,7 @@ impl WorkspaceRegistry {
             return Ok(None);
         };
 
-        let value = serde_yaml_ng::from_value(cursor.value.clone()).map_err(|error| {
+        let value = serde_norway::from_value(cursor.value.clone()).map_err(|error| {
             RegistryError::ValueDeserialize {
                 context: format!("cursor `{source:?}`"),
                 source: error,
@@ -482,7 +482,7 @@ impl WorkspaceRegistry {
 
     fn to_json_string(&self) -> Result<String, RegistryError> {
         let value =
-            serde_yaml_ng::to_value(self).map_err(|source| RegistryError::ValueSerialize {
+            serde_norway::to_value(self).map_err(|source| RegistryError::ValueSerialize {
                 context: "workspace registry".to_owned(),
                 source,
             })?;

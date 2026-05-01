@@ -68,7 +68,7 @@ pub struct LinkQualityReport {
 /// Returns an error when the file cannot be read or the YAML is malformed.
 pub fn load_link_quality_task(task_yaml: &Path) -> anyhow::Result<LinkQualityTask> {
     let raw = std::fs::read_to_string(task_yaml)?;
-    let task = serde_yaml_ng::from_str(&raw)?;
+    let task = serde_norway::from_str(&raw)?;
     Ok(task)
 }
 

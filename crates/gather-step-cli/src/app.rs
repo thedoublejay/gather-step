@@ -336,16 +336,20 @@ pub fn maybe_print_banner(app: &AppContext) {
         return;
     }
 
-    eprintln!();
-    eprintln!("{}", style(BANNER).dim());
-    eprintln!(
-        "{}",
-        style(format!(
-            "v{}  ·  © 2026 JJ Adonis",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .dim()
+    let footer = format!(
+        "v{}  ·  © 2026 JJ Adonis  ·  http://gatherstep.dev/",
+        env!("CARGO_PKG_VERSION")
     );
+    let banner_width = BANNER
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(footer.chars().count());
+    let footer_padding = banner_width.saturating_sub(footer.chars().count()) / 2;
+
+    eprintln!();
+    eprintln!("{}", style(BANNER).blue().bold());
+    eprintln!("{}{}", " ".repeat(footer_padding), style(footer).dim());
     eprintln!();
 }
 
