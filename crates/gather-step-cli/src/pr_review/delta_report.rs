@@ -3,8 +3,8 @@
 //! Phase 2 Task 1 formalises the schema: placeholder `Vec<serde_json::Value>`
 //! fields are replaced with typed structs.  `schema_version` is bumped to 2.
 //!
-//! Surfaces not yet populated (symbols, payload contracts, events,
-//! removed-surface risks) ship as empty arrays; Tasks 3-6 will fill them in.
+//! Tasks 3+4 populate symbols and `payload_contracts`.
+//! Events and removed-surface risks remain placeholder for the next batch.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -70,23 +70,99 @@ pub struct RouteDeltaChange {
     pub handler_changed: bool,
 }
 
-// ─── Placeholder surfaces (Tasks 3-6) ─────────────────────────────────────────
+// ─── Symbol deltas (Phase 2 Task 3) ──────────────────────────────────────────
 
-/// Shared-symbol deltas — populated by Phase 2 Task 3.
+/// Added / removed / changed exported symbols and cross-repo shared-symbol stubs.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SymbolDeltas {
-    pub added: Vec<serde_json::Value>,
-    pub removed: Vec<serde_json::Value>,
-    pub changed: Vec<serde_json::Value>,
+    pub added: Vec<SymbolDelta>,
+    pub removed: Vec<SymbolDelta>,
+    pub changed: Vec<SymbolDeltaChange>,
 }
 
-/// Payload-contract deltas — populated by Phase 2 Task 4.
+/// One exported symbol as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolDelta {
+    /// `"function"`, `"class"`, `"type"`, or `"shared_symbol"`.
+    pub kind: String,
+    pub repo: String,
+    pub qualified_name: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub signature: Option<String>,
+    /// `"public"`, `"private"`, `"protected"`, `"package"`, or `"internal"`.
+    pub visibility: Option<String>,
+    pub is_virtual: bool,
+}
+
+/// Same `(repo, qualified_name)` key in both snapshots but signature or
+/// visibility changed.
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolDeltaChange {
+    pub kind: String,
+    pub repo: String,
+    pub qualified_name: String,
+    pub before: SymbolDelta,
+    pub after: SymbolDelta,
+    pub signature_changed: bool,
+    pub visibility_changed: bool,
+}
+
+// ─── Payload-contract deltas (Phase 2 Task 4) ─────────────────────────────────
+
+/// Added / removed / changed payload contracts.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct PayloadContractDeltas {
-    pub added: Vec<serde_json::Value>,
-    pub removed: Vec<serde_json::Value>,
-    pub changed: Vec<serde_json::Value>,
+    pub added: Vec<PayloadContractDelta>,
+    pub removed: Vec<PayloadContractDelta>,
+    pub changed: Vec<PayloadContractDeltaChange>,
 }
+
+/// One payload contract as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct PayloadContractDelta {
+    pub repo: String,
+    pub file: String,
+    pub target_qualified_name: String,
+    /// `"producer"` or `"consumer"`.
+    pub side: String,
+    pub fields: Vec<PayloadFieldSummary>,
+}
+
+/// Compact field descriptor used in the PR-review report.
+#[derive(Debug, Clone, Serialize)]
+pub struct PayloadFieldSummary {
+    pub name: String,
+    pub type_name: Option<String>,
+    pub optional: bool,
+}
+
+/// Same `(repo, file, target_qualified_name, side)` key in both snapshots but
+/// the field set differs.
+#[derive(Debug, Clone, Serialize)]
+pub struct PayloadContractDeltaChange {
+    pub repo: String,
+    pub file: String,
+    pub target_qualified_name: String,
+    pub side: String,
+    pub fields_added: Vec<PayloadFieldSummary>,
+    pub fields_removed: Vec<PayloadFieldSummary>,
+    /// Field names that flipped from `optional = true` to `optional = false`.
+    pub fields_optional_to_required: Vec<String>,
+    /// Field names that flipped from `optional = false` to `optional = true`.
+    pub fields_required_to_optional: Vec<String>,
+    pub fields_type_changed: Vec<PayloadFieldTypeChange>,
+}
+
+/// A single field whose declared type changed between baseline and review.
+#[derive(Debug, Clone, Serialize)]
+pub struct PayloadFieldTypeChange {
+    pub name: String,
+    pub before_type: Option<String>,
+    pub after_type: Option<String>,
+}
+
+// ─── Placeholder surfaces (Tasks 5-6) ─────────────────────────────────────────
 
 /// Event deltas (topics / queues / events) — populated by Phase 2 Task 5.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -262,6 +338,20 @@ impl DeltaReport {
         render_route_section(&mut buf, "Removed routes", &self.routes.removed);
         render_route_changed_section(&mut buf, &self.routes.changed);
 
+        // ── Symbol deltas ─────────────────────────────────────────────────────
+        render_symbol_section(&mut buf, "New symbols", &self.symbols.added);
+        render_symbol_section(&mut buf, "Removed symbols", &self.symbols.removed);
+        render_symbol_changed_section(&mut buf, &self.symbols.changed);
+
+        // ── Payload-contract deltas ───────────────────────────────────────────
+        render_contract_section(&mut buf, "New payload contracts", &self.payload_contracts.added);
+        render_contract_section(
+            &mut buf,
+            "Removed payload contracts",
+            &self.payload_contracts.removed,
+        );
+        render_contract_changed_section(&mut buf, &self.payload_contracts.changed);
+
         buf.push_str("\n## Suggested follow-up commands\n\n");
         buf.push_str("> **Note:** These commands require `--keep-cache` to have been used.\n\n");
         for cmd in &self.suggested_followups {
@@ -317,6 +407,115 @@ fn render_route_changed_section(buf: &mut String, changes: &[RouteDeltaChange]) 
             "| `{}` | `{}` | {} | {} |",
             c.method, c.path, before_h, after_h
         );
+    }
+}
+
+fn render_symbol_section(buf: &mut String, heading: &str, symbols: &[SymbolDelta]) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    if symbols.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Kind | Repo | Qualified name | File | Line | Signature |\n");
+    buf.push_str("|------|------|----------------|------|------|-----------|\n");
+    for s in symbols {
+        let file = s.file.as_deref().unwrap_or("—");
+        let line = s.line.map_or_else(|| "—".to_owned(), |l| l.to_string());
+        let sig = s.signature.as_deref().unwrap_or("—");
+        let _ = writeln!(
+            buf,
+            "| {} | {} | `{}` | {} | {} | `{}` |",
+            s.kind, s.repo, s.qualified_name, file, line, sig
+        );
+    }
+}
+
+fn render_symbol_changed_section(buf: &mut String, changes: &[SymbolDeltaChange]) {
+    let _ = writeln!(buf, "\n## Changed symbols\n");
+    if changes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Kind | Repo | Qualified name | Signature changed | Visibility changed |\n");
+    buf.push_str("|------|------|----------------|------------------|-------------------|\n");
+    for c in changes {
+        let _ = writeln!(
+            buf,
+            "| {} | {} | `{}` | {} | {} |",
+            c.kind,
+            c.repo,
+            c.qualified_name,
+            if c.signature_changed { "yes" } else { "no" },
+            if c.visibility_changed { "yes" } else { "no" },
+        );
+    }
+}
+
+fn render_contract_section(buf: &mut String, heading: &str, contracts: &[PayloadContractDelta]) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    if contracts.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Repo | File | Target | Side | Fields |\n");
+    buf.push_str("|------|------|--------|------|--------|\n");
+    for c in contracts {
+        let fields: Vec<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+        let _ = writeln!(
+            buf,
+            "| {} | {} | `{}` | {} | {} |",
+            c.repo,
+            c.file,
+            c.target_qualified_name,
+            c.side,
+            fields.join(", ")
+        );
+    }
+}
+
+fn render_contract_changed_section(buf: &mut String, changes: &[PayloadContractDeltaChange]) {
+    let _ = writeln!(buf, "\n## Changed payload contracts\n");
+    if changes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    for c in changes {
+        let _ = writeln!(
+            buf,
+            "### `{}` — {} / {}\n",
+            c.target_qualified_name, c.repo, c.side
+        );
+        if !c.fields_added.is_empty() {
+            let names: Vec<&str> = c.fields_added.iter().map(|f| f.name.as_str()).collect();
+            let _ = writeln!(buf, "- **Fields added:** {}", names.join(", "));
+        }
+        if !c.fields_removed.is_empty() {
+            let names: Vec<&str> = c.fields_removed.iter().map(|f| f.name.as_str()).collect();
+            let _ = writeln!(buf, "- **Fields removed:** {}", names.join(", "));
+        }
+        if !c.fields_optional_to_required.is_empty() {
+            let _ = writeln!(
+                buf,
+                "- **Now required:** {}",
+                c.fields_optional_to_required.join(", ")
+            );
+        }
+        if !c.fields_required_to_optional.is_empty() {
+            let _ = writeln!(
+                buf,
+                "- **Now optional:** {}",
+                c.fields_required_to_optional.join(", ")
+            );
+        }
+        if !c.fields_type_changed.is_empty() {
+            let _ = writeln!(buf, "- **Type changes:**");
+            for tc in &c.fields_type_changed {
+                let before = tc.before_type.as_deref().unwrap_or("unknown");
+                let after = tc.after_type.as_deref().unwrap_or("unknown");
+                let _ = writeln!(buf, "  - `{}`: `{}` → `{}`", tc.name, before, after);
+            }
+        }
+        buf.push('\n');
     }
 }
 

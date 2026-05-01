@@ -36,7 +36,11 @@ use crate::{
             CleanupPolicy, DeltaReport, EventDeltas, PayloadContractDeltas, ReviewMetadata,
             RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
         },
-        extract::routes::extract_route_deltas,
+        extract::{
+            payload_contracts::extract_payload_contract_deltas,
+            routes::extract_route_deltas,
+            symbols::extract_symbol_deltas,
+        },
         index_runner::run_review_index,
     },
     storage_context::StorageContext,
@@ -320,12 +324,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         &artifact_root.storage_root,
     );
 
-    // ── 8a. Open baseline storage (workspace) for diff extraction ─────────────
-    // Fail-soft: if the workspace has never been indexed, emit empty route
-    // deltas and log a warning rather than aborting the entire review run.
+    // ── 8a. Open storage coordinators for diff extraction ─────────────────────
+    // Fail-soft: if the workspace has never been indexed, emit empty deltas and
+    // log a warning rather than aborting the entire review run.
     // We check for directory existence first so we never create the baseline
     // storage path as a side effect of opening the coordinator.
-    let route_deltas = {
+    let (route_deltas, symbol_deltas, payload_contract_deltas) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
         if baseline_graph_exists {
             let review_coord = gather_step_storage::StorageCoordinator::open_read_only(
@@ -338,25 +342,52 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
                     );
                     match baseline_coord {
                         Ok(baseline_coord) => {
-                            match extract_route_deltas(baseline_coord.graph(), review_coord.graph())
-                            {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "route delta extraction failed; emitting empty deltas"
-                                    );
-                                    RouteDeltas::default()
-                                }
-                            }
+                            let routes =
+                                match extract_route_deltas(baseline_coord.graph(), review_coord.graph()) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "route delta extraction failed; emitting empty deltas"
+                                        );
+                                        RouteDeltas::default()
+                                    }
+                                };
+                            let symbols =
+                                match extract_symbol_deltas(baseline_coord.graph(), review_coord.graph()) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "symbol delta extraction failed; emitting empty deltas"
+                                        );
+                                        SymbolDeltas::default()
+                                    }
+                                };
+                            let payload_contracts =
+                                match extract_payload_contract_deltas(
+                                    baseline_coord.metadata(),
+                                    review_coord.metadata(),
+                                ) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "payload-contract delta extraction failed; \
+                                             emitting empty deltas"
+                                        );
+                                        PayloadContractDeltas::default()
+                                    }
+                                };
+                            (routes, symbols, payload_contracts)
                         }
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
                                 "baseline storage could not be opened; \
-                                 emitting empty route deltas"
+                                 emitting empty deltas"
                             );
-                            RouteDeltas::default()
+                            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default())
                         }
                     }
                 }
@@ -364,18 +395,18 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
                     tracing::warn!(
                         error = %e,
                         "review storage could not be opened for diff extraction; \
-                         emitting empty route deltas"
+                         emitting empty deltas"
                     );
-                    RouteDeltas::default()
+                    (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default())
                 }
             }
         } else {
             tracing::warn!(
                 storage = %ws_paths.storage_root.display(),
                 "baseline index not found; run `gather-step index` first \
-                 to enable PR-review route deltas"
+                 to enable PR-review deltas"
             );
-            RouteDeltas::default()
+            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default())
         }
     };
 
@@ -405,8 +436,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         changed_files: changed_files_display,
         changed_files_truncated,
         routes: route_deltas,
-        symbols: SymbolDeltas::default(),
-        payload_contracts: PayloadContractDeltas::default(),
+        symbols: symbol_deltas,
+        payload_contracts: payload_contract_deltas,
         events: EventDeltas::default(),
         removed_surface_risks: vec![],
         suggested_followups,
