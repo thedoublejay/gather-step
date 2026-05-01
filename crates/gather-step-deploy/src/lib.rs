@@ -135,6 +135,15 @@ pub fn parse_deployment_artifact(
     content: &str,
 ) -> Result<DeploymentParseOutput, DeploymentParseError> {
     let artifact_kind = detect_artifact_kind(path, content);
+    parse_deployment_artifact_with_kind(repo, path, content, artifact_kind)
+}
+
+pub fn parse_deployment_artifact_with_kind(
+    repo: &str,
+    path: &str,
+    content: &str,
+    artifact_kind: DeploymentArtifactKind,
+) -> Result<DeploymentParseOutput, DeploymentParseError> {
     let mut builder = OutputBuilder::new(repo, path, artifact_kind);
 
     match artifact_kind {

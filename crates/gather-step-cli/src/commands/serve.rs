@@ -139,7 +139,7 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
     let ctx = McpContext::open_with_stores(mcp_config, Arc::clone(&stores))?;
     let watcher = Arc::new(WorkspaceWatcher::new_with_stores(
         stores.as_ref().clone(),
-        IndexingOptions::default(),
+        IndexingOptions::from_config(&workspace),
         WatcherConfig {
             poll_interval: Duration::from_millis(args.poll_interval_ms),
             debounce_duration: Duration::from_millis(args.debounce_ms),

@@ -7,15 +7,17 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use rustc_hash::FxHashMap;
 
 use crossbeam_channel::bounded;
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id, normalize_path_separators,
-    ref_node_id,
+    DeploymentConfig, EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind,
+    node_id, normalize_path_separators, ref_node_id,
 };
 use gather_step_deploy::{
     DeploymentArtifactKind, DeploymentParseOutput, detect_artifact_kind, parse_deployment_artifact,
+    parse_deployment_artifact_with_kind,
 };
 use gather_step_parser::{
     CallSite, FileEntry as SourceFileEntry, FileStat, ManifestError, ParseError, ParsedFile,
@@ -45,6 +47,7 @@ use crate::{
 pub struct IndexingOptions {
     pub traverse: TraverseConfig,
     pub batch_size: usize,
+    pub deployment: DeploymentIndexingOptions,
 }
 
 impl Default for IndexingOptions {
@@ -52,6 +55,34 @@ impl Default for IndexingOptions {
         Self {
             traverse: TraverseConfig::default(),
             batch_size: 500,
+            deployment: DeploymentIndexingOptions::default(),
+        }
+    }
+}
+
+impl IndexingOptions {
+    #[must_use]
+    pub fn from_config(config: &GatherStepConfig) -> Self {
+        Self {
+            deployment: DeploymentIndexingOptions::from(&config.deployment),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeploymentIndexingOptions {
+    pub include: Vec<String>,
+    pub gitops_roots: Vec<String>,
+    pub env_files: Vec<String>,
+}
+
+impl From<&DeploymentConfig> for DeploymentIndexingOptions {
+    fn from(config: &DeploymentConfig) -> Self {
+        Self {
+            include: config.include.clone(),
+            gitops_roots: config.gitops_roots.clone(),
+            env_files: config.env_files.clone(),
         }
     }
 }
@@ -106,6 +137,11 @@ pub enum RepoIndexerError {
     Graph(#[from] GraphStoreError),
     #[error(transparent)]
     Reconcile(#[from] StorageReconcileError),
+    #[error("invalid deployment include glob `{pattern}`: {source}")]
+    DeploymentGlob {
+        pattern: String,
+        source: globset::Error,
+    },
     #[error("parse worker channel closed unexpectedly")]
     ChannelClosed,
     #[error("writer thread panicked")]
@@ -503,7 +539,7 @@ impl RepoIndexer {
             .as_secs()
             .try_into()
             .unwrap_or(i64::MAX);
-        let candidates = collect_deployment_artifact_paths(repo_root)?;
+        let candidates = collect_deployment_artifact_paths(repo_root, &self.options.deployment)?;
         if let Some(progress) = progress {
             progress(IndexProgress {
                 phase: "deployment",
@@ -539,7 +575,16 @@ impl RepoIndexer {
             let content = String::from_utf8_lossy(&bytes);
             let file_path =
                 normalize_path_separators(&relative_path.to_string_lossy()).into_owned();
-            let output = match parse_deployment_artifact(repo, &file_path, &content) {
+            let forced_artifact_kind = self
+                .options
+                .deployment
+                .forced_artifact_kind_for_path(&file_path);
+            let output = match forced_artifact_kind.map_or_else(
+                || parse_deployment_artifact(repo, &file_path, &content),
+                |artifact_kind| {
+                    parse_deployment_artifact_with_kind(repo, &file_path, &content, artifact_kind)
+                },
+            ) {
                 Ok(output) => output,
                 Err(error) => {
                     warn!(repo, path = %file_path, error = %error, "skipping malformed deployment artifact");
@@ -1612,7 +1657,9 @@ fn file_metadata_stamp(path: impl AsRef<Path>) -> Result<FileStat, std::io::Erro
 
 fn collect_deployment_artifact_paths(
     repo_root: &Path,
+    deployment: &DeploymentIndexingOptions,
 ) -> Result<Vec<std::path::PathBuf>, RepoIndexerError> {
+    let include_globs = deployment.include_globs()?;
     let walker = ignore::WalkBuilder::new(repo_root)
         .hidden(false)
         .parents(false)
@@ -1649,12 +1696,67 @@ fn collect_deployment_artifact_paths(
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or_default();
         let could_be_yaml_deploy = matches!(extension, "yaml" | "yml");
-        if path_kind != DeploymentArtifactKind::Unknown || could_be_yaml_deploy {
+        if path_kind != DeploymentArtifactKind::Unknown
+            || could_be_yaml_deploy
+            || deployment.matches_configured_artifact(&file_path, extension, &include_globs)
+        {
             paths.push(relative_path.to_path_buf());
         }
     }
     paths.sort();
     Ok(paths)
+}
+
+impl DeploymentIndexingOptions {
+    fn include_globs(&self) -> Result<GlobSet, RepoIndexerError> {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in &self.include {
+            builder.add(
+                Glob::new(pattern).map_err(|source| RepoIndexerError::DeploymentGlob {
+                    pattern: pattern.clone(),
+                    source,
+                })?,
+            );
+        }
+        builder
+            .build()
+            .map_err(|source| RepoIndexerError::DeploymentGlob {
+                pattern: self.include.join(", "),
+                source,
+            })
+    }
+
+    fn matches_configured_artifact(
+        &self,
+        file_path: &str,
+        extension: &str,
+        include_globs: &GlobSet,
+    ) -> bool {
+        include_globs.is_match(file_path)
+            || self
+                .env_files
+                .iter()
+                .any(|path| normalized_config_path(path) == file_path)
+            || self.gitops_roots.iter().any(|root| {
+                path_is_under_root(file_path, &normalized_config_path(root))
+                    && matches!(extension, "yaml" | "yml" | "json" | "tpl")
+            })
+    }
+
+    fn forced_artifact_kind_for_path(&self, file_path: &str) -> Option<DeploymentArtifactKind> {
+        self.env_files
+            .iter()
+            .any(|path| normalized_config_path(path) == file_path)
+            .then_some(DeploymentArtifactKind::EnvFile)
+    }
+}
+
+fn normalized_config_path(path: &str) -> String {
+    normalize_path_separators(path).trim_matches('/').to_owned()
+}
+
+fn path_is_under_root(path: &str, root: &str) -> bool {
+    !root.is_empty() && (path == root || path.starts_with(&format!("{root}/")))
 }
 
 fn deployment_output_to_batch(
@@ -1805,7 +1907,7 @@ mod tests {
 
     use crate::{GraphStore, MetadataStore, SearchStore};
 
-    use super::{IndexingOptions, RepoIndexer};
+    use super::{DeploymentIndexingOptions, IndexingOptions, RepoIndexer};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -2070,6 +2172,46 @@ jobs:
             compose_edges
                 .iter()
                 .any(|edge| edge.kind == EdgeKind::UsesDatabase)
+        );
+    }
+
+    #[test]
+    fn configured_env_files_are_indexed_as_deployment_artifacts() {
+        let repo_root = TestDir::new("deployment-configured-env-repo");
+        let storage_root = TestDir::new("deployment-configured-env-storage");
+        fs::create_dir_all(repo_root.path().join("config")).expect("config dir should exist");
+        fs::write(
+            repo_root.path().join("config/runtime.vars"),
+            "DATABASE_URL=redacted\nAPI_TOKEN=redacted\n",
+        )
+        .expect("env fixture should write");
+
+        let options = IndexingOptions {
+            deployment: DeploymentIndexingOptions {
+                env_files: vec!["config/runtime.vars".to_owned()],
+                ..DeploymentIndexingOptions::default()
+            },
+            ..IndexingOptions::default()
+        };
+        let indexer = RepoIndexer::open(storage_root.path(), options).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let env_vars = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::EnvVar)
+            .expect("env var nodes should load");
+        assert!(
+            env_vars
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url"))
+        );
+        assert!(
+            env_vars
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
         );
     }
 

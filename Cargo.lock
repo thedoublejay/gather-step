@@ -1283,6 +1283,7 @@ dependencies = [
  "gather-step-deploy",
  "gather-step-parser",
  "gather-step-storage",
+ "globset",
  "ignore",
  "libc",
  "notify",
