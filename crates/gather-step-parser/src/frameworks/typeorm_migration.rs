@@ -115,15 +115,11 @@ fn table_names_from_sql(sql: &str) -> BTreeSet<String> {
     let tokens = sql_tokens(sql);
     let mut table_names = BTreeSet::new();
     for index in 0..tokens.len() {
-        let token = tokens[index].as_str();
-        let next = tokens.get(index + 1).map(String::as_str);
-        match next {
-            Some(table) if is_sql_table_keyword(token) => {
-                if let Some(table_name) = normalize_table_name(table) {
-                    table_names.insert(table_name);
-                }
-            }
-            None | Some(_) => {}
+        if let Some(SqlToken::Identifier(token)) = tokens.get(index)
+            && is_sql_table_keyword(token)
+            && let Some(table_name) = table_name_after_keyword(&tokens, index + 1)
+        {
+            table_names.insert(table_name);
         }
     }
     table_names
@@ -135,15 +131,97 @@ fn is_sql_table_keyword(token: &str) -> bool {
         .any(|keyword| token.eq_ignore_ascii_case(keyword))
 }
 
-fn sql_tokens(sql: &str) -> Vec<String> {
-    sql.split(|ch: char| {
-        ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | '`' | ';' | '(' | ')' | ',')
-    })
-    .filter_map(|token| {
-        let normalized = token.trim().trim_matches('.');
-        (!normalized.is_empty()).then_some(normalized.to_owned())
-    })
-    .collect()
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SqlToken {
+    Identifier(String),
+    Dot,
+}
+
+fn table_name_after_keyword(tokens: &[SqlToken], start: usize) -> Option<String> {
+    let mut cursor = start;
+    let mut table = identifier_token(tokens.get(cursor)?)?.to_owned();
+    cursor += 1;
+    while matches!(tokens.get(cursor), Some(SqlToken::Dot)) {
+        let Some(next) = tokens.get(cursor + 1).and_then(identifier_token) else {
+            break;
+        };
+        next.clone_into(&mut table);
+        cursor += 2;
+    }
+    normalize_table_name(&table)
+}
+
+fn identifier_token(token: &SqlToken) -> Option<&str> {
+    match token {
+        SqlToken::Identifier(value) => Some(value.as_str()),
+        SqlToken::Dot => None,
+    }
+}
+
+fn sql_tokens(sql: &str) -> Vec<SqlToken> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < sql.len() {
+        let Some(ch) = sql[cursor..].chars().next() else {
+            break;
+        };
+        if ch.is_ascii_whitespace() || matches!(ch, ';' | '(' | ')' | ',') {
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if ch == '.' {
+            tokens.push(SqlToken::Dot);
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            let (token, next_cursor) = quoted_sql_token(sql, cursor, ch);
+            if !token.is_empty() {
+                tokens.push(SqlToken::Identifier(token));
+            }
+            cursor = next_cursor;
+            continue;
+        }
+
+        let start = cursor;
+        while cursor < sql.len() {
+            let Some(next) = sql[cursor..].chars().next() else {
+                break;
+            };
+            if next.is_ascii_whitespace()
+                || matches!(next, '"' | '\'' | '`' | ';' | '(' | ')' | ',' | '.')
+            {
+                break;
+            }
+            cursor += next.len_utf8();
+        }
+        let token = sql[start..cursor].trim();
+        if !token.is_empty() {
+            tokens.push(SqlToken::Identifier(token.to_owned()));
+        }
+    }
+    tokens
+}
+
+fn quoted_sql_token(sql: &str, start: usize, quote: char) -> (String, usize) {
+    let mut token = String::new();
+    let mut cursor = start + quote.len_utf8();
+    while cursor < sql.len() {
+        let Some(ch) = sql[cursor..].chars().next() else {
+            break;
+        };
+        cursor += ch.len_utf8();
+        if ch == quote {
+            if sql[cursor..].starts_with(quote) {
+                token.push(quote);
+                cursor += quote.len_utf8();
+                continue;
+            }
+            break;
+        }
+        token.push(ch);
+    }
+    (token, cursor)
 }
 
 fn normalize_table_name(value: &str) -> Option<String> {
@@ -310,6 +388,41 @@ mod tests {
             .map(|migration| migration.table_name)
             .collect::<Vec<_>>();
         assert_eq!(table_names, vec!["alert_events", "alerts"]);
+    }
+
+    #[test]
+    fn detects_typeorm_schema_qualified_quoted_sql_tables() {
+        let parsed = parse_file_with_frameworks(
+            "svc",
+            std::path::Path::new("/repo"),
+            &crate::FileEntry {
+                path: "src/migrations/1714410000001-add-alert-workflow.ts".into(),
+                language: crate::Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: Some(
+                    br#"
+                    import { MigrationInterface, QueryRunner } from 'typeorm';
+
+                    export class AddAlertWorkflow1714410000001 implements MigrationInterface {
+                      public async up(queryRunner: QueryRunner): Promise<void> {
+                        await queryRunner.query(`ALTER TABLE "public"."alerts" ADD COLUMN "workflow" jsonb`);
+                      }
+                    }
+                    "#
+                    .to_vec()
+                    .into(),
+                ),
+            },
+            &[Framework::TypeOrm],
+        )
+        .expect("fixture should parse");
+
+        let table_names = detect_migrations(&parsed)
+            .into_iter()
+            .map(|migration| migration.table_name)
+            .collect::<Vec<_>>();
+        assert_eq!(table_names, vec!["alerts"]);
     }
 
     #[test]

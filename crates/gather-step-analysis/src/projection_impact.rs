@@ -210,8 +210,12 @@ pub fn projection_impact_with_payload_contracts<S: GraphStore>(
     request: ProjectionImpactRequest,
     payload_contracts: &[PayloadContractRecord],
 ) -> Result<ProjectionImpactReport, ProjectionImpactError> {
-    let mut report = projection_impact(store, request)?;
+    let evidence_verbosity = request.evidence_verbosity;
+    let mut full_request = request;
+    full_request.evidence_verbosity = ProjectionEvidenceVerbosity::Full;
+    let mut report = projection_impact(store, full_request)?;
     apply_optional_payload_filter_risk(store, &mut report, payload_contracts)?;
+    apply_evidence_verbosity(&mut report, evidence_verbosity);
     Ok(report)
 }
 
@@ -1166,6 +1170,65 @@ mod tests {
         )
         .expect("projection impact should load");
 
+        assert!(
+            report
+                .risk_hints
+                .contains(&"optional_payload_filter_mismatch".to_owned())
+        );
+        assert!(
+            report
+                .missing_evidence
+                .contains(&"runtime_shape_probe".to_owned())
+        );
+    }
+
+    #[test]
+    fn optionality_mismatch_uses_full_filter_evidence_before_summary_truncation() {
+        let temp = TempDb::new("projection-impact", "optionality-summary-filters");
+        let store = temp.open();
+        let source_file = file_node("svc", "src/alerts.ts");
+        let workflow = field("svc", "workflow");
+        let filter_files = (0..4)
+            .map(|index| file_node("svc", &format!("src/filter-{index}.ts")))
+            .collect::<Vec<_>>();
+        let filter_fields = [
+            field("svc", "workflow.alpha"),
+            field("svc", "workflow.beta"),
+            field("svc", "workflow.gamma"),
+            field("svc", "workflow.taskIds"),
+        ];
+        let mut nodes = vec![source_file.clone(), workflow.clone()];
+        nodes.extend(filter_files.iter().cloned());
+        nodes.extend(filter_fields.iter().cloned());
+        let edges = filter_files
+            .iter()
+            .zip(filter_fields.iter())
+            .map(|(file, field)| edge(file.id, field.id, file.id, EdgeKind::FiltersOnField))
+            .collect::<Vec<_>>();
+        store
+            .bulk_insert(&nodes, &edges)
+            .expect("summary optionality graph should write");
+
+        let mut summary_request = request("workflow");
+        summary_request.evidence_verbosity = ProjectionEvidenceVerbosity::Summary;
+        let report = projection_impact_with_payload_contracts(
+            &store,
+            summary_request,
+            &[payload_contract(
+                "svc",
+                "src/contracts.ts",
+                "workflow.taskIds",
+            )],
+        )
+        .expect("projection impact should load");
+
+        assert_eq!(report.filters.len(), 3);
+        assert!(
+            !report
+                .filters
+                .iter()
+                .any(|filter| filter.field_path == "workflow.taskIds")
+        );
         assert!(
             report
                 .risk_hints

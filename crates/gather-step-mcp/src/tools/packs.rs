@@ -2119,9 +2119,16 @@ fn normalize_filter_field_path(raw_key: &str) -> Option<String> {
 }
 
 fn mongo_type_probe_command(collection_name: &str, field_path: &str) -> String {
+    let collection = mongo_collection_accessor(collection_name);
     format!(
-        "db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '${field_path}' }}, count: {{ $sum: 1 }} }} }}, {{ $sort: {{ count: -1 }} }}])"
+        "{collection}.aggregate([{{ $group: {{ _id: {{ $type: '${field_path}' }}, count: {{ $sum: 1 }} }} }}, {{ $sort: {{ count: -1 }} }}])"
     )
+}
+
+fn mongo_collection_accessor(collection_name: &str) -> String {
+    let encoded =
+        serde_json::to_string(collection_name).expect("Mongo collection names should serialize");
+    format!("db.getCollection({encoded})")
 }
 
 fn skip_ascii_ws_bytes(bytes: &[u8], mut cursor: usize) -> usize {
@@ -2140,8 +2147,9 @@ fn is_filter_key_continue(byte: u8) -> bool {
 }
 
 fn migration_verification_hint(collection_name: &str) -> String {
+    let collection = mongo_collection_accessor(collection_name);
     format!(
-        "Run db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
+        "Run {collection}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
     )
 }
 
@@ -4709,7 +4717,10 @@ mod tests {
         assert_eq!(band.collection_name, "alerts");
         assert!(band.coverage_note.contains("Mongoose migrations"));
         assert!(band.coverage_note.contains("TypeORM"));
-        assert!(band.verification_hint.contains("db.alerts.aggregate"));
+        assert!(
+            band.verification_hint
+                .contains("db.getCollection(\"alerts\").aggregate")
+        );
         assert_eq!(band.siblings.len(), 1);
         assert_eq!(band.siblings[0].file_path, "migrations/20260401-alerts.ts");
         assert_eq!(
@@ -4718,8 +4729,28 @@ mod tests {
         );
         assert_eq!(band.probe_plans.len(), 1);
         assert_eq!(band.probe_plans[0].field_path, "workflow");
-        assert!(band.probe_plans[0].command.contains("db.alerts.aggregate"));
+        assert!(
+            band.probe_plans[0]
+                .command
+                .contains("db.getCollection(\"alerts\").aggregate")
+        );
         assert!(band.probe_plans[0].command.contains("$type: '$workflow'"));
+    }
+
+    #[test]
+    fn migration_probe_commands_use_safe_collection_accessors() {
+        assert_eq!(
+            super::mongo_type_probe_command("audit-log", "workflow"),
+            "db.getCollection(\"audit-log\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
+        );
+        assert_eq!(
+            super::mongo_type_probe_command("foo.bar", "workflow"),
+            "db.getCollection(\"foo.bar\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
+        );
+        assert!(
+            super::migration_verification_hint("audit-log")
+                .contains("db.getCollection(\"audit-log\").aggregate")
+        );
     }
 
     #[test]
@@ -4736,6 +4767,7 @@ mod tests {
                 optional_payload_evidence: Vec::new(),
             }],
             siblings: Vec::new(),
+            truncated: false,
         };
         let records = vec![payload_contract_record(
             "api",
