@@ -5,4 +5,5 @@
 //! safety-guarded handoff to [`StorageContext`].
 
 pub mod artifact_root;
+pub mod delta_report;
 pub mod index_runner;
