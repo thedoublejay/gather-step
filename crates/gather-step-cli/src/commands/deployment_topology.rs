@@ -96,13 +96,13 @@ fn render_text_lines(report: &DeploymentTopologyReport) -> Vec<String> {
         report.workflow_jobs.len()
     ));
     for edge in &report.edges {
+        let mut source_kind = format!("{:?}", edge.source.kind);
+        source_kind.make_ascii_lowercase();
+        let mut target_kind = format!("{:?}", edge.target.kind);
+        target_kind.make_ascii_lowercase();
         lines.push(format!(
             "- {} `{}` -> {} `{}` ({})",
-            format!("{:?}", edge.source.kind).to_ascii_lowercase(),
-            edge.source.name,
-            format!("{:?}", edge.target.kind).to_ascii_lowercase(),
-            edge.target.name,
-            edge.kind
+            source_kind, edge.source.name, target_kind, edge.target.name, edge.kind
         ));
     }
     for missing in &report.missing_evidence {

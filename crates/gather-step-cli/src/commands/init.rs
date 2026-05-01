@@ -16,7 +16,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use gather_step_core::{GatherStepConfig, IndexingConfig, RepoConfig};
+use gather_step_core::{DeploymentConfig, GatherStepConfig, IndexingConfig, RepoConfig};
 use serde::Serialize;
 
 use crate::{
@@ -256,7 +256,7 @@ fn write_default_config_with_repos(
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
-            deployment: Default::default(),
+            deployment: DeploymentConfig::default(),
         },
     };
     let summary_repos = discovered_repos_from_config(&config);
@@ -950,7 +950,9 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use gather_step_core::{DepthLevel, GatherStepConfig, IndexingConfig, RepoConfig};
+    use gather_step_core::{
+        DeploymentConfig, DepthLevel, GatherStepConfig, IndexingConfig, RepoConfig,
+    };
 
     use super::{
         DiscoveredRepo, discover_git_repos, materialize_repo_config,
@@ -1056,7 +1058,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
-            deployment: Default::default(),
+            deployment: DeploymentConfig::default(),
         };
         let selected = vec![DiscoveredRepo {
             name: "api".to_owned(),
@@ -1082,7 +1084,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
-            deployment: Default::default(),
+            deployment: DeploymentConfig::default(),
         };
         let selected = vec![DiscoveredRepo {
             name: "api".to_owned(),
