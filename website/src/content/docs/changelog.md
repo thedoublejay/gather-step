@@ -7,20 +7,34 @@ This changelog lists significant user-visible changes. It is maintained manually
 
 ## Unreleased
 
-Deployment-topology indexing and query surfaces for v3.
+No unreleased changes yet.
+
+## v3.0.0 (Draft)
+
+Release status: **draft**.
+
+Deployment-topology release for indexing runtime deployment artifacts, querying service/runtime relationships from the CLI and MCP, and using concrete topology evidence in projection-impact review.
 
 ### Highlights
 
 - Added deployment topology indexing for Dockerfiles, Docker Compose, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions deploy jobs, configured env files, and Compose `env_file` references.
 - Added graph nodes and edges for deployments, env vars, secrets, config maps, workflow jobs, brokers, and databases.
 - Added `gather-step deployment-topology` plus MCP tools for `where_deployed`, `service_env`, `env_var_consumers`, `undeployed_services`, `deployed_but_no_code`, and `shared_infra`.
-- Projection impact now replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed` when indexed deployment evidence exists for the affected repo.
+- Projection impact now replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed` when indexed deployment evidence exists for the affected service or repo.
+- Refreshed MCP protocol dependencies by updating `rmcp` and `rmcp-macros` to `1.6.0`.
 
 ### Deployment Topology
 
 - Env-file values are not stored. Gather Step indexes env var names only.
 - `deployment.include`, `deployment.gitops_roots`, and `deployment.env_files` can add non-standard deployment paths to the indexer.
 - Deployment topology changes the generated graph schema. Existing `.gather-step` storage should be rebuilt with `gather-step reindex` before relying on deployment-topology output.
+- Helm and GitHub Actions detection is intentionally conservative to avoid treating generic `values.yaml`, `chart.yaml`, `helm lint`, or `DEPLOY_*` env references as deployment evidence.
+- Incremental indexing now purges stale deployment facts when a previously indexed artifact becomes malformed or stops classifying as deployment data.
+
+### Verification Coverage
+
+- Added regression coverage for deployment parser false positives, stale deployment fact purging, service-targeted projection-impact topology matching, shared-infra consumers, topology response mapping, and generated MCP tool summaries.
+- Verified with Rust formatting, deploy/analysis/storage/MCP/CLI tests, workspace clippy, website build, and GitHub Actions during release preparation.
 
 ## v2.4.0 (2026-05-01)
 
