@@ -140,6 +140,7 @@ pub fn projection_impact<S: GraphStore>(
             confidence: "low".to_owned(),
         };
         populate_risks_and_confidence(&mut report);
+        apply_deployment_topology_risk(store, &mut report)?;
         return Ok(report);
     }
 
@@ -201,6 +202,7 @@ pub fn projection_impact<S: GraphStore>(
     };
 
     populate_risks_and_confidence(&mut report);
+    apply_deployment_topology_risk(store, &mut report)?;
     apply_evidence_verbosity(&mut report, request.evidence_verbosity);
     Ok(report)
 }
@@ -833,6 +835,66 @@ fn populate_risks_and_confidence(report: &mut ProjectionImpactReport) {
     };
 }
 
+fn apply_deployment_topology_risk<S: GraphStore>(
+    store: &S,
+    report: &mut ProjectionImpactReport,
+) -> Result<(), ProjectionImpactError> {
+    if !report
+        .risk_hints
+        .iter()
+        .any(|hint| hint == "deployed_owner_unchecked")
+    {
+        return Ok(());
+    }
+
+    if has_deployment_topology_for_report_repos(store, &report_repos(report))? {
+        report
+            .risk_hints
+            .retain(|hint| hint != "deployed_owner_unchecked");
+        report
+            .risk_hints
+            .push("deployed_owner_topology_observed".to_owned());
+    } else {
+        report
+            .missing_evidence
+            .push("deployment_topology".to_owned());
+    }
+
+    report.risk_hints.sort();
+    report.risk_hints.dedup();
+    report.missing_evidence.sort();
+    report.missing_evidence.dedup();
+    Ok(())
+}
+
+fn has_deployment_topology_for_report_repos<S: GraphStore>(
+    store: &S,
+    repos: &BTreeSet<String>,
+) -> Result<bool, ProjectionImpactError> {
+    if repos.is_empty() {
+        return Ok(false);
+    }
+
+    for deployment in store.nodes_by_type(NodeKind::Deployment)? {
+        if !repos.contains(&deployment.repo) {
+            continue;
+        }
+        for edge in store.get_incoming(deployment.id)? {
+            if edge.kind != EdgeKind::DeployedAs {
+                continue;
+            }
+            if store
+                .get_node(edge.source)?
+                .is_some_and(|source| source.kind == NodeKind::Service)
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 fn apply_evidence_verbosity(
     report: &mut ProjectionImpactReport,
     verbosity: ProjectionEvidenceVerbosity,
@@ -1043,6 +1105,56 @@ mod tests {
             report
                 .risk_hints
                 .contains(&"source_field_unreviewed".to_owned())
+        );
+    }
+
+    #[test]
+    fn deployment_topology_replaces_unchecked_deployment_risk() {
+        let store = store_with_projection();
+        let deployment_file = file_node("svc", "compose.yaml");
+        let service = virtual_node(
+            NodeKind::Service,
+            "svc",
+            "compose.yaml",
+            "api",
+            "__service__svc__api",
+        );
+        let deployment = virtual_node(
+            NodeKind::Deployment,
+            "svc",
+            "compose.yaml",
+            "api",
+            "__deployment__svc__api",
+        );
+        store
+            .bulk_insert(
+                &[deployment_file.clone(), service.clone(), deployment.clone()],
+                &[edge(
+                    service.id,
+                    deployment.id,
+                    deployment_file.id,
+                    EdgeKind::DeployedAs,
+                )],
+            )
+            .expect("deployment topology graph should write");
+
+        let report = projection_impact(&store, request("subtaskIds"))
+            .expect("projection impact should load");
+
+        assert!(
+            report
+                .risk_hints
+                .contains(&"deployed_owner_topology_observed".to_owned())
+        );
+        assert!(
+            !report
+                .risk_hints
+                .contains(&"deployed_owner_unchecked".to_owned())
+        );
+        assert!(
+            !report
+                .missing_evidence
+                .contains(&"deployment_topology".to_owned())
         );
     }
 
