@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 
-use crate::{app::AppContext, path_safety};
+use crate::{app::AppContext, path_safety, pr_review::cleanup::clean_all_for_workspace};
 
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct CleanArgs {
@@ -22,6 +22,11 @@ pub struct CleanArgs {
         help = "Skip the destructive-action confirmation prompt"
     )]
     pub yes: bool,
+    #[arg(
+        long,
+        help = "Also wipe all review artifacts for this workspace (OS cache dir)"
+    )]
+    pub include_review: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +58,16 @@ pub fn run(app: &AppContext, args: CleanArgs) -> Result<()> {
         registry_path.display(),
         storage_root.display()
     ));
+
+    if args.include_review {
+        let report = clean_all_for_workspace(&app.workspace_path)?;
+        output.line(format!(
+            "wiped {} review artifact(s) at {}",
+            report.removed_count,
+            report.cache_root.display(),
+        ));
+    }
+
     Ok(())
 }
 

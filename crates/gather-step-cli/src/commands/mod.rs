@@ -349,6 +349,7 @@ mod tests {
                 registry: Some("state/registry.json".into()),
                 storage: Some("state/storage".into()),
                 yes: true,
+                include_review: false,
             }
         );
     }

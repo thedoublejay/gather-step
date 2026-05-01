@@ -593,7 +593,7 @@ fn is_full_sha(s: &str) -> bool {
 /// 4. Attempts worktree removal, then `remove_dir_all`.
 ///
 /// In dry-run mode, logs what would be removed but performs no deletion.
-fn delete_artifact(
+pub(crate) fn delete_artifact(
     artifact: &DiscoveredArtifact,
     workspace_root: &Path,
     dry_run: bool,
