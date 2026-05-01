@@ -132,7 +132,11 @@ pub fn resolve_ref(repo: &Path, input: &str) -> Result<ResolvedRef, RefResolveEr
 }
 
 /// Resolve both ends of a commit range.
-pub fn resolve_range(repo: &Path, base: &str, head: &str) -> Result<ResolvedRange, RefResolveError> {
+pub fn resolve_range(
+    repo: &Path,
+    base: &str,
+    head: &str,
+) -> Result<ResolvedRange, RefResolveError> {
     Ok(ResolvedRange {
         base: resolve_ref(repo, base)?,
         head: resolve_ref(repo, head)?,
@@ -149,9 +153,7 @@ pub fn merge_base(repo: &Path, a: &str, b: &str) -> Result<String, RefResolveErr
     let a_id = parse_object_id(repo, &a_sha)?;
     let b_id = parse_object_id(repo, &b_sha)?;
 
-    let base_id = r
-        .merge_base(a_id, b_id)
-        .map_err(|e| git_op(repo, e))?;
+    let base_id = r.merge_base(a_id, b_id).map_err(|e| git_op(repo, e))?;
 
     Ok(base_id.to_string())
 }
@@ -267,9 +269,7 @@ mod tests {
             std::fs::write(dir.join(name), contents).expect("write");
             run_git(dir, &["add", name]);
             run_git(dir, &["commit", "--quiet", "-m", message]);
-            run_git(dir, &["rev-parse", "HEAD"])
-                .trim()
-                .to_string()
+            run_git(dir, &["rev-parse", "HEAD"]).trim().to_string()
         }
     }
 

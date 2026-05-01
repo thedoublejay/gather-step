@@ -95,11 +95,9 @@ struct BlastRadiusNodeOutput {
 
 pub fn run(app: &AppContext, args: EventsArgs) -> Result<()> {
     let request = daemon_request(&args, app);
-    daemon_proxy::run_read_only_command(
-        app,
-        &request,
-        move |app| run_rendered(app, &StorageContext::workspace_read_only(app), args),
-    )
+    daemon_proxy::run_read_only_command(app, &request, move |app| {
+        run_rendered(app, &StorageContext::workspace_read_only(app), args)
+    })
 }
 
 pub(crate) fn run_rendered(

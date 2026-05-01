@@ -99,10 +99,7 @@ pub fn create_detached_worktree(
 
     // --- create the worktree -------------------------------------------------
     let target_str = target.to_string_lossy();
-    run_git(
-        repo,
-        &["worktree", "add", "--detach", &target_str, sha],
-    )?;
+    run_git(repo, &["worktree", "add", "--detach", &target_str, sha])?;
 
     // --- verify HEAD ---------------------------------------------------------
     // `git rev-parse HEAD` always emits lowercase 40-char hex — no case
@@ -113,10 +110,7 @@ pub fn create_detached_worktree(
         .inspect_err(|_| {
             // Best-effort cleanup: if rev-parse fails the worktree was still
             // created on disk, so remove it before surfacing the error.
-            let _ = run_git(
-                repo,
-                &["worktree", "remove", "--force", &target_str],
-            );
+            let _ = run_git(repo, &["worktree", "remove", "--force", &target_str]);
             let _ = run_git(repo, &["worktree", "prune"]);
             let _ = std::fs::remove_dir_all(target);
         })?;
@@ -124,16 +118,11 @@ pub fn create_detached_worktree(
     let expected = sha.trim();
     if !head.eq_ignore_ascii_case(expected) {
         // Cleanup then error.
-        let _ = run_git(
-            repo,
-            &["worktree", "remove", "--force", &target_str],
-        );
+        let _ = run_git(repo, &["worktree", "remove", "--force", &target_str]);
         let _ = run_git(repo, &["worktree", "prune"]);
         let _ = std::fs::remove_dir_all(target);
         return Err(WorktreeError::GitOperation {
-            message: format!(
-                "worktree HEAD {head} does not match requested SHA {expected}"
-            ),
+            message: format!("worktree HEAD {head} does not match requested SHA {expected}"),
         });
     }
 
@@ -152,10 +141,7 @@ pub fn remove_worktree(wt: &ReviewWorktree) -> Result<(), WorktreeError> {
 
     // `git worktree remove --force` handles modified files.  If the entry is
     // already gone git prints an error but we treat that as success.
-    match run_git(
-        &wt.repo,
-        &["worktree", "remove", "--force", &root_str],
-    ) {
+    match run_git(&wt.repo, &["worktree", "remove", "--force", &root_str]) {
         Ok(_) => {}
         Err(WorktreeError::GitOperation { ref message })
             if message.contains("is not a working tree")
@@ -257,8 +243,8 @@ mod tests {
         // tempdir creates the directory — we need a sub-path that doesn't exist yet.
         let target = wt_tmp.path().join("review-wt");
 
-        let wt = create_detached_worktree(repo, &target, &first_sha)
-            .expect("create_detached_worktree");
+        let wt =
+            create_detached_worktree(repo, &target, &first_sha).expect("create_detached_worktree");
 
         assert!(target.is_dir(), "worktree directory should exist");
         assert!(
@@ -345,8 +331,7 @@ mod tests {
         let wt_tmp = tempfile::tempdir().expect("wt tempdir");
         let target = wt_tmp.path().join("review-wt");
 
-        let wt = create_detached_worktree(repo, &target, &sha)
-            .expect("create_detached_worktree");
+        let wt = create_detached_worktree(repo, &target, &sha).expect("create_detached_worktree");
 
         remove_worktree(&wt).expect("first remove");
         remove_worktree(&wt).expect("second remove should be idempotent");
@@ -371,8 +356,7 @@ mod tests {
         let wt_tmp = tempfile::tempdir().expect("wt tempdir");
         let target = wt_tmp.path().join("review-wt");
 
-        let wt = create_detached_worktree(repo, &target, &sha)
-            .expect("create_detached_worktree");
+        let wt = create_detached_worktree(repo, &target, &sha).expect("create_detached_worktree");
 
         remove_worktree(&wt).expect("remove");
 

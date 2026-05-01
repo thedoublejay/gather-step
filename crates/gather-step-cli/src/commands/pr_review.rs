@@ -34,10 +34,12 @@ use crate::{
         },
         delta_report::{
             CleanupPolicy, DeltaReport, EventDeltas, PayloadContractDeltas, ReviewMetadata,
-            RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            RiskSeverity, RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
         },
         extract::{
+            events::extract_event_deltas,
             payload_contracts::extract_payload_contract_deltas,
+            removed_surfaces::extract_removed_surface_risks,
             routes::extract_route_deltas,
             symbols::extract_symbol_deltas,
         },
@@ -84,6 +86,11 @@ pub struct PrReviewArgs {
     /// Useful for CI and tests.
     #[arg(long, value_name = "PATH", hide = true)]
     pub cache_root: Option<PathBuf>,
+
+    /// Exit with code 2 if any removed-surface risk has severity `High`.
+    /// Without this flag the report is always emitted with exit code 0.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -151,9 +158,10 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 keep_cache: args.keep_cache,
                 json: args.json,
                 cache_root: args.cache_root,
+                strict: args.strict,
             };
 
-            let report = run_inner(app, &review_args)?;
+            let (report, has_high_risk) = run_inner(app, &review_args)?;
             // Print to stdout.
             #[expect(
                 clippy::print_stdout,
@@ -161,6 +169,13 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
             )]
             {
                 println!("{report}");
+            }
+            // Exit code 2 when --strict and High-severity risks exist.
+            // Using std::process::exit after rendering so the report always prints
+            // before the process terminates; callers can distinguish "broke" (exit
+            // 1 from anyhow) from "high-severity risk found" (exit 2).
+            if has_high_risk {
+                std::process::exit(2);
             }
             Ok(())
         }
@@ -180,11 +195,15 @@ pub struct PrReviewRunArgs {
     pub keep_cache: bool,
     pub json: bool,
     pub cache_root: Option<PathBuf>,
+    pub strict: bool,
 }
 
-/// Core implementation — returns the rendered string so tests can assert on it
-/// without capturing stdout.
-pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
+/// Core implementation — returns `(rendered_string, has_high_risk)`.
+///
+/// `has_high_risk` is `true` when `args.strict` is set and at least one
+/// `RemovedSurfaceRisk` has `severity == High`.  The caller uses this to exit
+/// with code 2 AFTER printing the report.
+pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bool)> {
     let emit_json = args.json || app.json_output;
 
     // ── 1. Resolve refs ────────────────────────────────────────────────────
@@ -329,7 +348,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
     // log a warning rather than aborting the entire review run.
     // We check for directory existence first so we never create the baseline
     // storage path as a side effect of opening the coordinator.
-    let (route_deltas, symbol_deltas, payload_contract_deltas) = {
+    let (route_deltas, symbol_deltas, payload_contract_deltas, event_deltas, surface_risks) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
         if baseline_graph_exists {
             let review_coord = gather_step_storage::StorageCoordinator::open_read_only(
@@ -379,7 +398,35 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
                                         PayloadContractDeltas::default()
                                     }
                                 };
-                            (routes, symbols, payload_contracts)
+                            let events =
+                                match extract_event_deltas(baseline_coord.graph(), review_coord.graph()) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "event delta extraction failed; emitting empty deltas"
+                                        );
+                                        EventDeltas::default()
+                                    }
+                                };
+                            let risks = match extract_removed_surface_risks(
+                                baseline_coord.graph(),
+                                review_coord.graph(),
+                                &routes.removed,
+                                &symbols.removed,
+                                &events.removed,
+                            ) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "removed-surface risk extraction failed; \
+                                         emitting empty risks"
+                                    );
+                                    vec![]
+                                }
+                            };
+                            (routes, symbols, payload_contracts, events, risks)
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -387,7 +434,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
                                 "baseline storage could not be opened; \
                                  emitting empty deltas"
                             );
-                            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default())
+                            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![])
                         }
                     }
                 }
@@ -397,7 +444,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
                         "review storage could not be opened for diff extraction; \
                          emitting empty deltas"
                     );
-                    (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default())
+                    (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![])
                 }
             }
         } else {
@@ -406,7 +453,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
                 "baseline index not found; run `gather-step index` first \
                  to enable PR-review deltas"
             );
-            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default())
+            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![])
         }
     };
 
@@ -438,8 +485,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         routes: route_deltas,
         symbols: symbol_deltas,
         payload_contracts: payload_contract_deltas,
-        events: EventDeltas::default(),
-        removed_surface_risks: vec![],
+        events: event_deltas,
+        removed_surface_risks: surface_risks,
         suggested_followups,
     };
 
@@ -456,14 +503,22 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         let _ = std::fs::remove_dir_all(&artifact_root.root);
     }
 
-    // ── 11. Render ─────────────────────────────────────────────────────────
-    if emit_json {
+    // ── 11. Compute strict-mode signal ────────────────────────────────────
+    let has_high_risk = args.strict
+        && report
+            .removed_surface_risks
+            .iter()
+            .any(|r| matches!(r.severity, RiskSeverity::High));
+
+    // ── 12. Render ─────────────────────────────────────────────────────────
+    let rendered = if emit_json {
         report
             .render_json()
-            .context("serializing delta report to JSON")
+            .context("serializing delta report to JSON")?
     } else {
-        Ok(report.render_markdown())
-    }
+        report.render_markdown()
+    };
+    Ok((rendered, has_high_risk))
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1263,6 +1318,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: true,
@@ -1319,6 +1375,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1379,6 +1436,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1438,6 +1496,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1493,6 +1552,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1666,9 +1726,10 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
         };
 
-        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).expect("JSON must parse");
 
@@ -1724,9 +1785,10 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
         };
 
-        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let review_root = PathBuf::from(report["safety"]["review_root"].as_str().unwrap());
@@ -1757,9 +1819,10 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
         };
 
-        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let review_root = PathBuf::from(report["safety"]["review_root"].as_str().unwrap());
@@ -1795,9 +1858,10 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
         };
 
-        run_inner(&app, &args).expect("run_inner should succeed");
+        let _ = run_inner(&app, &args).expect("run_inner should succeed");
 
         // After state: .gather-step should have same existence as before.
         let existed_after = baseline_gather_step.exists();
@@ -1828,6 +1892,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_root.clone()),
+            strict: false,
         };
 
         let err = run_inner(&app, &args).expect_err("overlapping cache root must be rejected");
@@ -1860,9 +1925,10 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
         };
 
-        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let changed_files: Vec<&str> = report["changed_files"]
             .as_array()
@@ -1903,9 +1969,10 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
         };
 
-        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let changed_repos: Vec<&str> = report["metadata"]["changed_repos"]
             .as_array()
@@ -2004,6 +2071,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2062,6 +2130,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2114,6 +2183,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            strict: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,

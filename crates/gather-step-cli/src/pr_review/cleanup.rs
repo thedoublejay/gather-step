@@ -46,8 +46,7 @@ pub fn clean_all_for_workspace(workspace_root: &Path) -> Result<ReviewCleanupRep
         ..ReviewCleanupReport::default()
     };
 
-    let artifacts: Vec<DiscoveredArtifact> =
-        list_review_artifacts(workspace_root, &cache_root)?;
+    let artifacts: Vec<DiscoveredArtifact> = list_review_artifacts(workspace_root, &cache_root)?;
 
     for artifact in &artifacts {
         match delete_artifact(artifact, workspace_root, /* dry_run = */ false) {
@@ -97,8 +96,7 @@ mod tests {
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0);
             let pid = std::process::id();
-            let path =
-                std::env::temp_dir().join(format!("gs-cleanup-{label}-{pid}-{nanos}"));
+            let path = std::env::temp_dir().join(format!("gs-cleanup-{label}-{pid}-{nanos}"));
             fs::create_dir_all(&path).expect("tmp dir");
             Self { path }
         }
@@ -128,8 +126,7 @@ mod tests {
         let root = hash_dir.join(run_id);
         fs::create_dir_all(&root).unwrap();
 
-        let storage_path =
-            storage_path_override.unwrap_or_else(|| root.join("storage"));
+        let storage_path = storage_path_override.unwrap_or_else(|| root.join("storage"));
         let marker = ReviewMarker {
             schema_version: 1,
             workspace_hash: marker_workspace_hash.to_owned(),
@@ -182,8 +179,8 @@ mod tests {
             None,
         );
 
-        let discovered = list_review_artifacts(ws.path(), cache.path())
-            .expect("list should succeed");
+        let discovered =
+            list_review_artifacts(ws.path(), cache.path()).expect("list should succeed");
         assert_eq!(discovered.len(), 2, "should discover 2 artifacts");
 
         let mut removed = 0usize;
@@ -231,8 +228,8 @@ mod tests {
             None,
         );
 
-        let discovered = list_review_artifacts(ws.path(), cache.path())
-            .expect("list should succeed");
+        let discovered =
+            list_review_artifacts(ws.path(), cache.path()).expect("list should succeed");
 
         assert_eq!(
             discovered.len(),

@@ -162,23 +162,83 @@ pub struct PayloadFieldTypeChange {
     pub after_type: Option<String>,
 }
 
-// ─── Placeholder surfaces (Tasks 5-6) ─────────────────────────────────────────
+// ─── Event deltas (Phase 2 Task 5) ────────────────────────────────────────────
 
-/// Event deltas (topics / queues / events) — populated by Phase 2 Task 5.
+/// Event deltas (topics / queues / subjects / streams / events).
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct EventDeltas {
-    pub added: Vec<serde_json::Value>,
-    pub removed: Vec<serde_json::Value>,
-    pub changed: Vec<serde_json::Value>,
+    pub added: Vec<EventDelta>,
+    pub removed: Vec<EventDelta>,
+    pub changed: Vec<EventDeltaChange>,
 }
 
-/// A surface (route / symbol / event) that was removed in the PR and still has
-/// surviving consumers in the graph — populated by Phase 2 Task 6.
+/// One event virtual node as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventDelta {
+    /// `"topic"`, `"queue"`, `"subject"`, `"stream"`, or `"event"`.
+    pub event_kind: String,
+    pub event_name: String,
+    /// Full `external_id` of the virtual node.
+    pub external_id: String,
+    pub producers: Vec<EventEndpointSummary>,
+    pub consumers: Vec<EventEndpointSummary>,
+}
+
+/// A producer or consumer endpoint connected to an event virtual node.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventEndpointSummary {
+    pub repo: String,
+    pub qualified_name: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+}
+
+/// Same `(event_kind, event_name)` key in both snapshots but producer/consumer
+/// sets differ.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventDeltaChange {
+    pub event_kind: String,
+    pub event_name: String,
+    pub producers_added: Vec<EventEndpointSummary>,
+    pub producers_removed: Vec<EventEndpointSummary>,
+    pub consumers_added: Vec<EventEndpointSummary>,
+    pub consumers_removed: Vec<EventEndpointSummary>,
+}
+
+// ─── Removed-surface risks (Phase 2 Task 6) ───────────────────────────────────
+
+/// A surface (route / symbol / event) removed in the PR that still has
+/// surviving consumers in the graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemovedSurfaceRisk {
+    /// `"route"` | `"shared_symbol"` | `"event"`
     pub kind: String,
+    /// route: `"GET /orders/:id"`; symbol: `qualified_name`; event: `"<kind>:<name>"`
     pub identity: String,
-    pub surviving_consumers: u32,
+    /// Owner repo (for routes / symbols).
+    pub repo: Option<String>,
+    pub surviving_consumers: Vec<RemovedSurfaceConsumer>,
+    pub severity: RiskSeverity,
+}
+
+/// One surviving consumer of a removed surface.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemovedSurfaceConsumer {
+    pub repo: String,
+    pub qualified_name: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// e.g. `"ConsumesApiFrom"`, `"UsesShared"`, `"Consumes"`.
+    pub edge_kind: String,
+}
+
+/// Severity of a [`RemovedSurfaceRisk`].
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskSeverity {
+    Low,
+    Medium,
+    High,
 }
 
 // ─── Other shared types ───────────────────────────────────────────────────────
@@ -352,6 +412,14 @@ impl DeltaReport {
         );
         render_contract_changed_section(&mut buf, &self.payload_contracts.changed);
 
+        // ── Event deltas ──────────────────────────────────────────────────────
+        render_event_section(&mut buf, "Events: new producers/consumers", &self.events.added);
+        render_event_section(&mut buf, "Events: removed producers/consumers", &self.events.removed);
+        render_event_changed_section(&mut buf, &self.events.changed);
+
+        // ── Removed-surface risks ─────────────────────────────────────────────
+        render_risks_section(&mut buf, &self.removed_surface_risks);
+
         buf.push_str("\n## Suggested follow-up commands\n\n");
         buf.push_str("> **Note:** These commands require `--keep-cache` to have been used.\n\n");
         for cmd in &self.suggested_followups {
@@ -516,6 +584,118 @@ fn render_contract_changed_section(buf: &mut String, changes: &[PayloadContractD
             }
         }
         buf.push('\n');
+    }
+}
+
+fn render_event_section(buf: &mut String, heading: &str, events: &[EventDelta]) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    if events.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    for e in events {
+        let _ = writeln!(buf, "### `{}` ({})\n", e.event_name, e.event_kind);
+        if !e.producers.is_empty() {
+            buf.push_str("**Producers:**\n");
+            for p in &e.producers {
+                let loc = format_loc(p.file.as_deref(), p.line);
+                let _ = writeln!(buf, "- `{}` / `{}`{}", p.repo, p.qualified_name, loc);
+            }
+        }
+        if !e.consumers.is_empty() {
+            buf.push_str("**Consumers:**\n");
+            for c in &e.consumers {
+                let loc = format_loc(c.file.as_deref(), c.line);
+                let _ = writeln!(buf, "- `{}` / `{}`{}", c.repo, c.qualified_name, loc);
+            }
+        }
+        buf.push('\n');
+    }
+}
+
+fn render_event_changed_section(buf: &mut String, changes: &[EventDeltaChange]) {
+    let _ = writeln!(buf, "\n## Events: changed producers/consumers\n");
+    if changes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    for c in changes {
+        let _ = writeln!(buf, "### `{}` ({})\n", c.event_name, c.event_kind);
+        if !c.producers_added.is_empty() {
+            buf.push_str("**Producers added:**\n");
+            for p in &c.producers_added {
+                let loc = format_loc(p.file.as_deref(), p.line);
+                let _ = writeln!(buf, "- `{}` / `{}`{}", p.repo, p.qualified_name, loc);
+            }
+        }
+        if !c.producers_removed.is_empty() {
+            buf.push_str("**Producers removed:**\n");
+            for p in &c.producers_removed {
+                let loc = format_loc(p.file.as_deref(), p.line);
+                let _ = writeln!(buf, "- `{}` / `{}`{}", p.repo, p.qualified_name, loc);
+            }
+        }
+        if !c.consumers_added.is_empty() {
+            buf.push_str("**Consumers added:**\n");
+            for p in &c.consumers_added {
+                let loc = format_loc(p.file.as_deref(), p.line);
+                let _ = writeln!(buf, "- `{}` / `{}`{}", p.repo, p.qualified_name, loc);
+            }
+        }
+        if !c.consumers_removed.is_empty() {
+            buf.push_str("**Consumers removed:**\n");
+            for p in &c.consumers_removed {
+                let loc = format_loc(p.file.as_deref(), p.line);
+                let _ = writeln!(buf, "- `{}` / `{}`{}", p.repo, p.qualified_name, loc);
+            }
+        }
+        buf.push('\n');
+    }
+}
+
+fn render_risks_section(buf: &mut String, risks: &[RemovedSurfaceRisk]) {
+    let _ = writeln!(buf, "\n## Removed-surface risks\n");
+    if risks.is_empty() {
+        buf.push_str("_no risks_\n");
+        return;
+    }
+    for r in risks {
+        let severity_label = match r.severity {
+            RiskSeverity::High => "HIGH",
+            RiskSeverity::Medium => "MEDIUM",
+            RiskSeverity::Low => "LOW",
+        };
+        let repo_part = r
+            .repo
+            .as_deref()
+            .map_or_else(String::new, |repo| format!(" (`{repo}`)"));
+        let _ = writeln!(
+            buf,
+            "### [{severity_label}] `{}` — {}{}\n",
+            r.identity, r.kind, repo_part
+        );
+        if r.surviving_consumers.is_empty() {
+            buf.push_str("_no surviving consumers_\n");
+        } else {
+            buf.push_str("**Surviving consumers:**\n");
+            for c in &r.surviving_consumers {
+                let loc = format_loc(c.file.as_deref(), c.line);
+                let _ = writeln!(
+                    buf,
+                    "- `{}` / `{}` via `{}`{}",
+                    c.repo, c.qualified_name, c.edge_kind, loc
+                );
+            }
+        }
+        buf.push('\n');
+    }
+}
+
+fn format_loc(file: Option<&str>, line: Option<u32>) -> String {
+    match (file, line) {
+        (Some(f), Some(l)) => format!(" ({f}:{l})"),
+        (Some(f), None) => format!(" ({f})"),
+        _ => String::new(),
     }
 }
 

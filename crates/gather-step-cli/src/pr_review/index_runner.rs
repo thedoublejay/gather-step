@@ -133,8 +133,7 @@ mod tests {
     impl TempDir {
         fn new(name: &str) -> Self {
             let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path =
-                env::temp_dir().join(format!("gather-step-review-index-test-{name}-{id}"));
+            let path = env::temp_dir().join(format!("gather-step-review-index-test-{name}-{id}"));
             fs::create_dir_all(&path).expect("temp dir should exist");
             Self { path }
         }

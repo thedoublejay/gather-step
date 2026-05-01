@@ -89,10 +89,7 @@ fn copy_dir_all(from: &Path, to: &Path) {
 /// directory is removed.
 ///
 /// `run_id` is an arbitrary string identifying this test run (e.g. `"pr-test-status"`).
-pub(crate) fn indexed_fixture(
-    name: &str,
-    run_id: &str,
-) -> (StorageContext, TempDir) {
+pub(crate) fn indexed_fixture(name: &str, run_id: &str) -> (StorageContext, TempDir) {
     let workspace = TempDir::new(name);
     copy_dir_all(&fixture_root(), workspace.path());
 
