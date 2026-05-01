@@ -11,7 +11,7 @@ In normal use, engineers do not call these tools manually. An MCP-aware assistan
 
 - **Orientation**: understand what is indexed before deeper queries
 - **Search and traversal**: find symbols and walk local call relationships
-- **Topology and impact**: trace routes, events, and cross-repo blast radius
+- **Topology and impact**: trace routes, events, deployments, and cross-repo blast radius
 - **Contracts**: inspect payload shape and producer-consumer drift
 - **Context retrieval**: return short summaries, combined context, and task-shaped packs
 - **Repo intelligence**: inspect ownership, dead code, conventions, and repo summaries
@@ -106,6 +106,42 @@ Used automatically for event-topology audits, dead-path investigation, and integ
 
 Used automatically when the assistant needs repo-level dependency structure before a refactor, migration, or deployment-isolation discussion.
 
+### `where_deployed`
+
+> "Where is service `api` deployed?"
+
+Used automatically when the assistant needs concrete deployment evidence for a service-like workload. The request accepts `service`, optional `repo`, and optional `limit` (1-100).
+
+### `service_env`
+
+> "Which env vars does service `worker` read?"
+
+Used automatically before env var changes or deployment-sensitive implementation work. Values from env files are not returned; Gather Step indexes names only.
+
+### `env_var_consumers`
+
+> "Which services consume `DATABASE_URL`?"
+
+Used automatically to find deployment-level env var consumers across indexed Docker, Compose, Kubernetes, Helm-like, GitHub Actions, and configured env-file artifacts.
+
+### `undeployed_services`
+
+> "Which indexed services have no deployment edge?"
+
+Used automatically when planning needs to distinguish code/service nodes from deployable runtime owners.
+
+### `deployed_but_no_code`
+
+> "Which deployments have no connected service/source evidence?"
+
+Used automatically for deployment-topology audits, especially after service renames, repo splits, or GitOps drift.
+
+### `shared_infra`
+
+> "What shared brokers or databases appear in deployment config?"
+
+Used automatically when the assistant needs runtime-adjacent infrastructure names before planning a change.
+
 ### `get_shared_type_usage`
 
 > "Where is this shared type used across the workspace?"
@@ -130,7 +166,7 @@ Used automatically when the assistant needs mismatches between the producer-side
 
 > "If this field changes, which source fields, projected fields, filters, indexes, and backfills need review?"
 
-Used automatically when the assistant needs static field-level evidence for denormalized or persisted projections. The request accepts `target`, optional `repo`, optional `limit` (1-100), and optional `evidence_verbosity` (`summary` or `full`). The tool returns source and projected fields, derivation edges, read/write/filter/index/backfill evidence, evidence-source labels such as `direct_field_access` and `local_alias_field_access`, missing evidence, and risk hints such as `source_field_unreviewed`, `backfill_unproven`, `index_or_search_mapping_unproven`, `frontend_only_focus`, `optional_payload_filter_mismatch`, and `deployed_owner_unchecked`.
+Used automatically when the assistant needs static field-level evidence for denormalized or persisted projections. The request accepts `target`, optional `repo`, optional `limit` (1-100), and optional `evidence_verbosity` (`summary` or `full`). The tool returns source and projected fields, derivation edges, read/write/filter/index/backfill evidence, evidence-source labels such as `direct_field_access` and `local_alias_field_access`, missing evidence, and risk hints such as `source_field_unreviewed`, `backfill_unproven`, `index_or_search_mapping_unproven`, `frontend_only_focus`, `optional_payload_filter_mismatch`, `deployed_owner_unchecked`, and `deployed_owner_topology_observed`.
 
 ### `breaking_change_candidates`
 

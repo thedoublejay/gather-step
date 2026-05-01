@@ -35,6 +35,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`events orphans`](#events-orphans) — List event-like targets that have only producers or only consumers.
 - [`impact`](#impact) — Summarize which repos are touched by a symbol's cross-repo virtual targets.
 - [`projection-impact`](#projection-impact) — Trace static source-to-projection field impact.
+- [`deployment-topology`](#deployment-topology) — Query indexed deployment artifacts, env vars, and shared runtime infrastructure.
 - [`pack`](#pack) — Return a bounded context pack for a target symbol.
 - [`conventions`](#conventions) — Derive repeated structural conventions from the indexed graph.
 - [`generate claude-md`](#generate-claude-md) — Generate assistant-facing CLAUDE.md rule files from the index.
@@ -455,11 +456,46 @@ gather-step [GLOBAL FLAGS] projection-impact --target <FIELD> [--limit <N>] \
 gather-step --workspace /path/to/workspace --repo backend projection-impact --target subtaskIds --evidence-verbosity full --json
 ```
 
-**Output shape (`--json`)** — emits one serialized projection-impact report with `target`, `resolved`, `ambiguity`, `candidates`, `source_fields`, `projected_fields`, `derivation_edges`, `readers`, `writers`, `filters`, `indexes`, `backfills`, `risk_hints`, `missing_evidence`, and `confidence`. Text output includes the most likely projection chain, missing evidence, and next checks.
+**Output shape (`--json`)** — emits one serialized projection-impact report with `target`, `resolved`, `ambiguity`, `candidates`, `source_fields`, `projected_fields`, `derivation_edges`, `readers`, `writers`, `filters`, `indexes`, `backfills`, `risk_hints`, `missing_evidence`, and `confidence`. Text output includes the most likely projection chain, missing evidence, and next checks. When deployment topology evidence exists for the affected repo, projection impact replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed`; otherwise it keeps the warning and adds `deployment_topology` to `missing_evidence`.
 
 JSON/YAML index mapping extraction is intentionally limited to filenames containing `mapping`, `index`, `search`, or `projection`, so ordinary manifests are not parsed as projection maps.
 
 **When to use** — before changing a persisted projection, denormalized field, query filter, search mapping, or backfill-sensitive derived value.
+
+---
+
+### `deployment-topology`
+
+Queries deployment artifacts indexed from Dockerfiles, Docker Compose, Kubernetes manifests, Helm-like templates, GitHub Actions workflows, and configured env files. Values from env files are not stored; only env var names are indexed.
+
+```bash
+gather-step [GLOBAL FLAGS] deployment-topology [--limit <N>] <SUBCOMMAND>
+```
+
+| Subcommand | Required flag | Description |
+|---|---|---|
+| `where-deployed` | `--service <NAME>` | Show deployments connected to a service-like workload. |
+| `service-env` | `--service <NAME>` | Show env vars read by a service-like workload. |
+| `env-var-consumers` | `--env-var <NAME>` | Show services that read an env var. |
+| `undeployed-services` | — | List indexed service nodes with no deployment edge. |
+| `deployed-but-no-code` | — | List deployment nodes with no connected service/source evidence. |
+| `shared-infra` | — | List indexed brokers and databases observed in deployment config. |
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--limit <N>` | usize | 20 | Maximum result count (1-100). |
+
+**Examples**
+
+```bash
+gather-step --workspace /path/to/workspace deployment-topology where-deployed --service api
+gather-step --workspace /path/to/workspace --repo backend deployment-topology service-env --service worker --json
+gather-step --workspace /path/to/workspace deployment-topology env-var-consumers --env-var DATABASE_URL
+```
+
+**Output shape (`--json`)** — emits one serialized deployment-topology report with `query`, optional `repo`, `deployments`, `services`, `env_vars`, `shared_infra`, `workflow_jobs`, `edges`, and `missing_evidence`. Text output starts with counts and then lists matched edges plus missing-evidence markers.
+
+**When to use** — before planning deployment-sensitive code changes, checking runtime ownership, reviewing env var changes, or verifying whether projection-impact risk has concrete deployment evidence.
 
 ---
 

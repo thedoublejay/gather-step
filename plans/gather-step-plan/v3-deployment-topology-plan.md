@@ -1,6 +1,6 @@
 # Gather Step Implementation Plan: Deployment Topology (v3)
 
-**Status:** Started on 2026-05-01 in branch `feat/v3-deployment-topology`.
+**Status:** Implemented and verified on 2026-05-01 in branch `feat/v3-deployment-topology`.
 
 ## Summary
 
@@ -136,7 +136,7 @@ This work is intentionally separate from projection impact. Projection impact tr
 
 1. Discover deployment artifacts through config and cheap defaults.
    - Default families: Dockerfile, compose YAML, `.github/workflows/*.yml`, common k8s/helm directories.
-   - Config can narrow or expand globs.
+   - Config can expand globs and opt in env files outside default naming.
    - `→ verify: fixture workspace indexes only expected deployment files`
 
 2. Convert parser facts into graph nodes and edges.
@@ -207,6 +207,15 @@ This work is intentionally separate from projection impact. Projection impact tr
    - Upgrade notes for schema/index rebuild.
    - `→ verify: release note file exists and names migration/reindex expectations`
 
+## Implementation Notes
+
+- Phase A landed graph vocabulary, virtual-node helpers, and parsed `deployment` config.
+- Phase B added `gather-step-deploy` with redacted parsers for Dockerfile, Compose, Kubernetes, Helm-like YAML/templates, GitHub Actions, and env files.
+- Phase C indexes deployment artifacts into graph-owned file batches and wires `deployment.include`, `deployment.gitops_roots`, and `deployment.env_files` into index/watch/serve paths.
+- Phase D added the `deployment-topology` CLI command and six MCP tools: `where_deployed`, `service_env`, `env_var_consumers`, `undeployed_services`, `deployed_but_no_code`, and `shared_infra`.
+- Phase E updates projection-impact planning risk: concrete deployment topology replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed`; missing topology remains explicit evidence debt.
+- Phase F updated README, CLI reference, MCP tools reference, configuration reference, and changelog notes with redaction and reindex expectations.
+
 ## Sequencing
 
 1. Phase A first because parser and analysis need graph vocabulary.
@@ -221,4 +230,3 @@ This work is intentionally separate from projection impact. Projection impact tr
    - `→ verify: planning oracle covers concrete topology evidence`
 6. Phase F last, after names and JSON shapes settle.
    - `→ verify: docs/release checks pass`
-

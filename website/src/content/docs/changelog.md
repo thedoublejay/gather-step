@@ -5,6 +5,21 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## Unreleased
+
+### Highlights
+
+- Added deployment topology indexing for Dockerfiles, Docker Compose, Kubernetes manifests, Helm-like templates, GitHub Actions deploy jobs, and configured env files.
+- Added graph nodes and edges for deployments, env vars, secrets, config maps, workflow jobs, brokers, and databases.
+- Added `gather-step deployment-topology` plus MCP tools for `where_deployed`, `service_env`, `env_var_consumers`, `undeployed_services`, `deployed_but_no_code`, and `shared_infra`.
+- Projection impact now replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed` when indexed deployment evidence exists for the affected repo.
+
+### Deployment Topology
+
+- Env-file values are not stored. Gather Step indexes env var names only.
+- `deployment.include`, `deployment.gitops_roots`, and `deployment.env_files` can add non-standard deployment paths to the indexer.
+- Deployment topology changes the generated graph schema. Existing `.gather-step` storage should be rebuilt with `gather-step reindex` before relying on deployment-topology output.
+
 ## v2.4.0 (2026-05-01)
 
 Release status: **released**.
