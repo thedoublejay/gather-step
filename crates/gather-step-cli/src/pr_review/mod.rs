@@ -7,4 +7,5 @@
 pub mod artifact_root;
 pub mod cleanup;
 pub mod delta_report;
+pub mod extract;
 pub mod index_runner;

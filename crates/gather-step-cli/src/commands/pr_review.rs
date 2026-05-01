@@ -1,15 +1,13 @@
 //! `pr-review` subcommand — run an isolated review index against a PR branch
-//! and emit an MVP delta report.
+//! and emit a structured delta report.
 //!
-//! Phase 1 Task 5 of the PR review mode plan.
+//! Phase 1 Task 5 introduced the MVP skeleton.
+//! Phase 2 Tasks 1+2 formalise the schema and add route delta extraction.
 //!
 //! # Sub-commands
 //!
 //! - `pr-review` (no subcommand): run a review.  Requires `--base` and `--head`.
 //! - `pr-review clean ...`: clean up stale review artifacts (Phase 1 Task 6).
-//!
-//! `added_routes`, `added_symbols`, and `added_payload_contracts` are all empty
-//! arrays in this MVP. Phase 2 owns diff extraction against the review index.
 
 use std::{
     path::{Path, PathBuf},
@@ -35,8 +33,10 @@ use crate::{
             read_marker, workspace_hash, write_marker_completed, write_marker_quarantined,
         },
         delta_report::{
-            CleanupPolicy, DeltaReport, ReviewMetadata, SafetyMetadata, build_suggested_followups,
+            CleanupPolicy, DeltaReport, EventDeltas, PayloadContractDeltas, ReviewMetadata,
+            RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
         },
+        extract::routes::extract_route_deltas,
         index_runner::run_review_index,
     },
     storage_context::StorageContext,
@@ -320,8 +320,67 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         &artifact_root.storage_root,
     );
 
+    // ── 8a. Open baseline storage (workspace) for diff extraction ─────────────
+    // Fail-soft: if the workspace has never been indexed, emit empty route
+    // deltas and log a warning rather than aborting the entire review run.
+    // We check for directory existence first so we never create the baseline
+    // storage path as a side effect of opening the coordinator.
+    let route_deltas = {
+        let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
+        if baseline_graph_exists {
+            let review_coord = gather_step_storage::StorageCoordinator::open_read_only(
+                &artifact_root.storage_root,
+            );
+            match review_coord {
+                Ok(review_coord) => {
+                    let baseline_coord = gather_step_storage::StorageCoordinator::open_read_only(
+                        &ws_paths.storage_root,
+                    );
+                    match baseline_coord {
+                        Ok(baseline_coord) => {
+                            match extract_route_deltas(baseline_coord.graph(), review_coord.graph())
+                            {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "route delta extraction failed; emitting empty deltas"
+                                    );
+                                    RouteDeltas::default()
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "baseline storage could not be opened; \
+                                 emitting empty route deltas"
+                            );
+                            RouteDeltas::default()
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "review storage could not be opened for diff extraction; \
+                         emitting empty route deltas"
+                    );
+                    RouteDeltas::default()
+                }
+            }
+        } else {
+            tracing::warn!(
+                storage = %ws_paths.storage_root.display(),
+                "baseline index not found; run `gather-step index` first \
+                 to enable PR-review route deltas"
+            );
+            RouteDeltas::default()
+        }
+    };
+
     let report = DeltaReport {
-        schema_version: 1,
+        schema_version: 2,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -345,9 +404,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         },
         changed_files: changed_files_display,
         changed_files_truncated,
-        added_routes: vec![],
-        added_symbols: vec![],
-        added_payload_contracts: vec![],
+        routes: route_deltas,
+        symbols: SymbolDeltas::default(),
+        payload_contracts: PayloadContractDeltas::default(),
+        events: EventDeltas::default(),
+        removed_surface_risks: vec![],
         suggested_followups,
     };
 

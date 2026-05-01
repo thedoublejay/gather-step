@@ -1,10 +1,10 @@
-//! Delta report — MVP output struct for `gather-step pr-review`.
+//! Delta report — typed output struct for `gather-step pr-review`.
 //!
-//! The `added_routes`, `added_symbols`, and `added_payload_contracts` arrays
-//! are intentionally empty in Phase 1 (MVP).  Phase 2 populates them by running
-//! diff extraction against the review index.
+//! Phase 2 Task 1 formalises the schema: placeholder `Vec<serde_json::Value>`
+//! fields are replaced with typed structs.  `schema_version` is bumped to 2.
 //!
-//! Phase 1 Task 5 of the PR review mode plan.
+//! Surfaces not yet populated (symbols, payload contracts, events,
+//! removed-surface risks) ship as empty arrays; Tasks 3-6 will fill them in.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -22,14 +22,90 @@ pub struct DeltaReport {
     pub changed_files: Vec<String>,
     /// `true` if the list was truncated at 200 entries.
     pub changed_files_truncated: bool,
-    // ── Phase 2 placeholders ────────────────────────────────────────────────
-    // These arrays are empty in Phase 1 (MVP).  Phase 2 populates them by
-    // running diff extraction against the review index.
-    pub added_routes: Vec<serde_json::Value>,
-    pub added_symbols: Vec<serde_json::Value>,
-    pub added_payload_contracts: Vec<serde_json::Value>,
+
+    // ── Strongly-typed delta surfaces (Phase 2) ──────────────────────────────
+    pub routes: RouteDeltas,
+    pub symbols: SymbolDeltas,
+    pub payload_contracts: PayloadContractDeltas,
+    pub events: EventDeltas,
+    pub removed_surface_risks: Vec<RemovedSurfaceRisk>,
+
     pub suggested_followups: Vec<SuggestedCommand>,
 }
+
+// ─── Route deltas ─────────────────────────────────────────────────────────────
+
+/// Added / removed / changed HTTP routes.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct RouteDeltas {
+    pub added: Vec<RouteDelta>,
+    pub removed: Vec<RouteDelta>,
+    pub changed: Vec<RouteDeltaChange>,
+}
+
+/// A single HTTP route surface point as observed in one index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteDelta {
+    pub method: String,
+    /// Canonical path with `:id`-style params (e.g. `/orders/:id`).
+    pub path: String,
+    /// Owning repo (the repo that contains the handler).  `None` when no
+    /// `Serves` edge links the route virtual node to a handler yet.
+    pub repo: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub handler_qualified_name: Option<String>,
+}
+
+/// A route present in both baseline and review whose handler details changed.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteDeltaChange {
+    pub method: String,
+    pub path: String,
+    /// Baseline view of the route (handler info as of base).
+    pub before: Option<RouteDelta>,
+    /// Review view of the route (handler info as of head).
+    pub after: Option<RouteDelta>,
+    /// `true` when the handler symbol, file, or owning repo changed.
+    pub handler_changed: bool,
+}
+
+// ─── Placeholder surfaces (Tasks 3-6) ─────────────────────────────────────────
+
+/// Shared-symbol deltas — populated by Phase 2 Task 3.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SymbolDeltas {
+    pub added: Vec<serde_json::Value>,
+    pub removed: Vec<serde_json::Value>,
+    pub changed: Vec<serde_json::Value>,
+}
+
+/// Payload-contract deltas — populated by Phase 2 Task 4.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct PayloadContractDeltas {
+    pub added: Vec<serde_json::Value>,
+    pub removed: Vec<serde_json::Value>,
+    pub changed: Vec<serde_json::Value>,
+}
+
+/// Event deltas (topics / queues / events) — populated by Phase 2 Task 5.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct EventDeltas {
+    pub added: Vec<serde_json::Value>,
+    pub removed: Vec<serde_json::Value>,
+    pub changed: Vec<serde_json::Value>,
+}
+
+/// A surface (route / symbol / event) that was removed in the PR and still has
+/// surviving consumers in the graph — populated by Phase 2 Task 6.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemovedSurfaceRisk {
+    pub kind: String,
+    pub identity: String,
+    pub surviving_consumers: u32,
+}
+
+// ─── Other shared types ───────────────────────────────────────────────────────
 
 /// Review run metadata emitted in every delta report.
 #[derive(Debug, Clone, Serialize)]
@@ -181,12 +257,10 @@ impl DeltaReport {
             }
         }
 
-        buf.push_str("\n## Phase 2 placeholders\n\n");
-        buf.push_str(
-            "- **added routes:** _(empty — Phase 2 populates)_\n\
-             - **added symbols:** _(empty — Phase 2 populates)_\n\
-             - **added payload contracts:** _(empty — Phase 2 populates)_\n",
-        );
+        // ── Route deltas ──────────────────────────────────────────────────────
+        render_route_section(&mut buf, "New routes", &self.routes.added);
+        render_route_section(&mut buf, "Removed routes", &self.routes.removed);
+        render_route_changed_section(&mut buf, &self.routes.changed);
 
         buf.push_str("\n## Suggested follow-up commands\n\n");
         buf.push_str("> **Note:** These commands require `--keep-cache` to have been used.\n\n");
@@ -195,6 +269,54 @@ impl DeltaReport {
         }
 
         buf
+    }
+}
+
+fn render_route_section(buf: &mut String, heading: &str, routes: &[RouteDelta]) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    if routes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Method | Path | Repo | File | Line | Handler |\n");
+    buf.push_str("|--------|------|------|------|------|---------|\n");
+    for r in routes {
+        let repo = r.repo.as_deref().unwrap_or("—");
+        let file = r.file.as_deref().unwrap_or("—");
+        let line = r.line.map_or_else(|| "—".to_owned(), |l| l.to_string());
+        let handler = r.handler_qualified_name.as_deref().unwrap_or("—");
+        let _ = writeln!(
+            buf,
+            "| `{}` | `{}` | {} | {} | {} | {} |",
+            r.method, r.path, repo, file, line, handler
+        );
+    }
+}
+
+fn render_route_changed_section(buf: &mut String, changes: &[RouteDeltaChange]) {
+    let _ = writeln!(buf, "\n## Changed routes\n");
+    if changes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Method | Path | Before handler | After handler |\n");
+    buf.push_str("|--------|------|----------------|---------------|\n");
+    for c in changes {
+        let before_h = c
+            .before
+            .as_ref()
+            .and_then(|b| b.handler_qualified_name.as_deref())
+            .unwrap_or("—");
+        let after_h = c
+            .after
+            .as_ref()
+            .and_then(|a| a.handler_qualified_name.as_deref())
+            .unwrap_or("—");
+        let _ = writeln!(
+            buf,
+            "| `{}` | `{}` | {} | {} |",
+            c.method, c.path, before_h, after_h
+        );
     }
 }
 
@@ -262,6 +384,113 @@ mod tests {
     use super::*;
     use crate::commands::Cli;
 
+    // ── schema snapshot ───────────────────────────────────────────────────────
+
+    /// Assert the JSON top-level keys are stable across refactors.
+    #[test]
+    fn snapshot_top_level_keys() {
+        let report = DeltaReport {
+            schema_version: 2,
+            metadata: ReviewMetadata {
+                workspace: std::path::PathBuf::from("/tmp/ws"),
+                base_input: "main".to_owned(),
+                base_sha: "a".repeat(40),
+                head_input: "HEAD".to_owned(),
+                head_sha: "b".repeat(40),
+                checkout_mode: "head".to_owned(),
+                changed_repos: vec![],
+                indexed_repos: vec![],
+                elapsed_ms: 0,
+            },
+            safety: SafetyMetadata {
+                baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
+                baseline_storage_path: std::path::PathBuf::from("/tmp/storage"),
+                review_registry_path: std::path::PathBuf::from("/tmp/rev/reg.json"),
+                review_storage_path: std::path::PathBuf::from("/tmp/rev/storage"),
+                review_root: std::path::PathBuf::from("/tmp/rev"),
+                run_id: "test-run".to_owned(),
+                cleanup_policy: CleanupPolicy::RemoveOnExit,
+                cache_key: "hash:aaa:bbb".to_owned(),
+            },
+            changed_files: vec![],
+            changed_files_truncated: false,
+            routes: RouteDeltas::default(),
+            symbols: SymbolDeltas::default(),
+            payload_contracts: PayloadContractDeltas::default(),
+            events: EventDeltas::default(),
+            removed_surface_risks: vec![],
+            suggested_followups: vec![],
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        let keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
+        // serde_json (without preserve_order feature) serialises object keys in
+        // alphabetical order.  This list must stay sorted.
+        assert_eq!(
+            keys,
+            [
+                "changed_files",
+                "changed_files_truncated",
+                "events",
+                "metadata",
+                "payload_contracts",
+                "removed_surface_risks",
+                "routes",
+                "safety",
+                "schema_version",
+                "suggested_followups",
+                "symbols",
+            ]
+        );
+    }
+
+    // ── schema_version ────────────────────────────────────────────────────────
+
+    #[test]
+    fn schema_version_is_2() {
+        let report = DeltaReport {
+            schema_version: 2,
+            metadata: ReviewMetadata {
+                workspace: std::path::PathBuf::from("/tmp/ws"),
+                base_input: "main".to_owned(),
+                base_sha: "a".repeat(40),
+                head_input: "HEAD".to_owned(),
+                head_sha: "b".repeat(40),
+                checkout_mode: "head".to_owned(),
+                changed_repos: vec![],
+                indexed_repos: vec![],
+                elapsed_ms: 0,
+            },
+            safety: SafetyMetadata {
+                baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
+                baseline_storage_path: std::path::PathBuf::from("/tmp/storage"),
+                review_registry_path: std::path::PathBuf::from("/tmp/rev/reg.json"),
+                review_storage_path: std::path::PathBuf::from("/tmp/rev/storage"),
+                review_root: std::path::PathBuf::from("/tmp/rev"),
+                run_id: "test-run".to_owned(),
+                cleanup_policy: CleanupPolicy::RemoveOnExit,
+                cache_key: "hash:aaa:bbb".to_owned(),
+            },
+            changed_files: vec![],
+            changed_files_truncated: false,
+            routes: RouteDeltas::default(),
+            symbols: SymbolDeltas::default(),
+            payload_contracts: PayloadContractDeltas::default(),
+            events: EventDeltas::default(),
+            removed_surface_risks: vec![],
+            suggested_followups: vec![],
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["schema_version"], 2);
+    }
+
+    // ── follow-up command helpers ─────────────────────────────────────────────
+
     #[test]
     fn suggested_followups_parse_against_real_cli_surface() {
         let commands = build_suggested_followups(
@@ -304,12 +533,14 @@ mod tests {
                 cmd.command
             );
             assert!(
-                cmd.command.contains("'/Users/foo/My Projects/.cache/registry.json'"),
+                cmd.command
+                    .contains("'/Users/foo/My Projects/.cache/registry.json'"),
                 "registry path with spaces must be single-quoted: {}",
                 cmd.command
             );
             assert!(
-                cmd.command.contains("'/Users/foo/My Projects/.cache/storage'"),
+                cmd.command
+                    .contains("'/Users/foo/My Projects/.cache/storage'"),
                 "storage path with spaces must be single-quoted: {}",
                 cmd.command
             );
