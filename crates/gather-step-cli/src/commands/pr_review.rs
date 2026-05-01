@@ -49,7 +49,7 @@ use crate::{
             routes::{extract_route_deltas, find_route_node_id},
             symbols::{extract_symbol_deltas, find_symbol_node_id},
         },
-        index_runner::run_review_index,
+        engine::{OverlayEngine, ReviewEngineImpl, TempIndexEngine},
     },
     storage_context::StorageContext,
 };
@@ -147,6 +147,11 @@ pub struct CleanArgs {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ReviewEngine {
     TempIndex,
+    /// Graph-only diff overlay over the baseline index.
+    /// `PayloadContracts`, `Events`, `Decorators`, and `ContractAlignments` are
+    /// marked unsupported — Phase 5 Task 3 will resolve the search/metadata
+    /// gap.
+    Overlay,
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -223,6 +228,8 @@ enum RunOutcome {
         worktree: gather_step_git::worktrees::ReviewWorktree,
         elapsed_ms: u64,
         total_repos: usize,
+        /// Surfaces not supported by the active review engine.
+        unsupported_surfaces: Vec<String>,
     },
 }
 
@@ -399,9 +406,13 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     a
                 });
 
-            // ── 6. Index ───────────────────────────────────────────────────────
+            // ── 6. Materialize via engine ──────────────────────────────────────
             let index_start = Instant::now();
-            let stats = match run_review_index(
+            let engine: Box<dyn ReviewEngineImpl> = match args.engine {
+                ReviewEngine::TempIndex => Box::new(TempIndexEngine),
+                ReviewEngine::Overlay => Box::new(OverlayEngine::new()),
+            };
+            let engine_snapshot = match engine.materialize(
                 &artifact_root,
                 affected.as_ref(),
                 IndexingOptions::default(),
@@ -409,9 +420,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 Ok(s) => s,
                 Err(e) => {
                     quarantine_on_error(&artifact_root);
-                    return Err(e).with_context(|| "review indexer failed");
+                    return Err(e).with_context(|| "review engine materialize failed");
                 }
             };
+            let engine_total_repos = engine_snapshot.total_repos;
+            let engine_unsupported: Vec<String> = engine_snapshot
+                .unsupported_surfaces
+                .iter()
+                .map(|s| s.as_str().to_owned())
+                .collect();
             // Truncation is intentional: no real indexing run takes > 584 million years.
             #[expect(
                 clippy::cast_possible_truncation,
@@ -423,20 +440,29 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 artifact_root,
                 worktree,
                 elapsed_ms,
-                total_repos: stats.total_repos,
+                total_repos: engine_total_repos,
+                unsupported_surfaces: engine_unsupported,
             }
         };
 
     // Destructure the outcome for the remainder of the function.
-    let (artifact_root, worktree_opt, elapsed_ms, total_repos_hint) = match outcome {
-        RunOutcome::CacheHit(root) => (root, None, 0u64, None),
-        RunOutcome::ColdRun {
-            artifact_root,
-            worktree,
-            elapsed_ms,
-            total_repos,
-        } => (artifact_root, Some(worktree), elapsed_ms, Some(total_repos)),
-    };
+    let (artifact_root, worktree_opt, elapsed_ms, total_repos_hint, run_unsupported_surfaces) =
+        match outcome {
+            RunOutcome::CacheHit(root) => (root, None, 0u64, None, vec![]),
+            RunOutcome::ColdRun {
+                artifact_root,
+                worktree,
+                elapsed_ms,
+                total_repos,
+                unsupported_surfaces,
+            } => (
+                artifact_root,
+                Some(worktree),
+                elapsed_ms,
+                Some(total_repos),
+                unsupported_surfaces,
+            ),
+        };
 
     // ── 7. Head config-derived repo names ─────────────────────────────────
     let config_path = artifact_root.worktree_root.join("gather-step.config.yaml");
@@ -729,7 +755,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     suggested_followups.extend(pack_cmds);
 
     let report = DeltaReport {
-        schema_version: 3,
+        schema_version: 4,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -761,6 +787,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         contract_alignments,
         decorators: decorator_deltas,
         suggested_followups,
+        unsupported_surfaces: run_unsupported_surfaces,
     };
 
     // ── 9. Update marker ───────────────────────────────────────────────────

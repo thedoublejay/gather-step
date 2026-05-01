@@ -9,5 +9,7 @@ pub mod artifact_root;
 pub mod cache;
 pub mod cleanup;
 pub mod delta_report;
+pub mod engine;
 pub mod extract;
 pub mod index_runner;
+pub mod overlay;

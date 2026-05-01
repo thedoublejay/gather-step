@@ -5,6 +5,11 @@
 //!
 //! Phase 3 Tasks 3+4+5 add contract alignments, decorator deltas, and review
 //! pack synthesis.  `schema_version` is bumped to 3.
+//!
+//! Phase 5 Tasks 1+2 add `unsupported_surfaces` so the renderer can print
+//! "_unavailable on the {engine} engine_" instead of "_no changes_" for
+//! surfaces the active engine cannot populate.  `schema_version` is bumped
+//! to 4.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -35,6 +40,18 @@ pub struct DeltaReport {
     pub decorators: DecoratorDeltas,
 
     pub suggested_followups: Vec<SuggestedCommand>,
+
+    // ── Phase 5 additions ────────────────────────────────────────────────────
+    /// Surfaces not supported by the active review engine.
+    ///
+    /// When non-empty, the renderer should print a note under each affected
+    /// section explaining that the data is unavailable on the current engine
+    /// rather than implying there are no changes.
+    ///
+    /// Serialised as `null` when the engine supports all surfaces (i.e. the
+    /// field is skipped in output for the `temp-index` engine).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unsupported_surfaces: Vec<String>,
 }
 
 // ─── Impact summary (Phase 3 Tasks 1+2) ──────────────────────────────────────
@@ -1079,6 +1096,7 @@ mod tests {
             contract_alignments: ContractAlignments::default(),
             decorators: DecoratorDeltas::default(),
             suggested_followups: vec![],
+            unsupported_surfaces: vec![],
         }
     }
 
@@ -1119,10 +1137,10 @@ mod tests {
     // ── schema_version ────────────────────────────────────────────────────────
 
     #[test]
-    fn schema_version_is_3() {
-        let report = make_empty_report(3);
+    fn schema_version_is_4() {
+        let report = make_empty_report(4);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["schema_version"], 4);
     }
 
     // ── follow-up command helpers ─────────────────────────────────────────────
