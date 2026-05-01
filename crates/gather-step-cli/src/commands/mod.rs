@@ -396,12 +396,34 @@ mod tests {
         assert_eq!(
             args,
             WatchArgs {
+                count: None,
                 config: Some("workspace.yaml".into()),
                 storage: Some(".gather-step/storage".into()),
                 poll_interval_ms: 500,
                 debounce_ms: 1500,
                 consecutive_error_limit: 3,
                 error_backoff_ms: 9000,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_watch_count_arg() {
+        let cli = Cli::parse_from(["gather-step", "watch", "3"]);
+
+        let Some(Command::Watch(args)) = cli.command else {
+            unreachable!("expected watch command");
+        };
+        assert_eq!(
+            args,
+            WatchArgs {
+                count: Some(3),
+                config: None,
+                storage: None,
+                poll_interval_ms: 250,
+                debounce_ms: 2000,
+                consecutive_error_limit: 5,
+                error_backoff_ms: 5000,
             }
         );
     }

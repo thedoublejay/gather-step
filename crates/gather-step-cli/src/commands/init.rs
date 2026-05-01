@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -71,18 +71,6 @@ pub struct DiscoveredRepo {
 }
 
 pub async fn run(app: &AppContext, args: InitArgs) -> Result<()> {
-    let config_path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| app.workspace_paths().config_path);
-
-    if config_path.exists() && !args.force {
-        bail!(
-            "config already exists at {}\nhint: pass --force to overwrite",
-            config_path.display()
-        );
-    }
-
     if app.is_interactive() {
         run_wizard(app, args).await
     } else {
@@ -91,11 +79,17 @@ pub async fn run(app: &AppContext, args: InitArgs) -> Result<()> {
 }
 
 async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
-    write_default_config(app, &args)?;
+    let config_path = init_config_path(app, &args);
+    if config_path.exists() && !args.force {
+        let repos = load_existing_config_repos(&config_path)?;
+        emit_config_summary(app, &config_path, &repos, "Using existing config")?;
+    } else {
+        write_default_config(app, &args)?;
+    }
     let output = app.output();
 
     if args.index && !args.no_index {
-        index::run(app, init_index_args()).await?;
+        index::run(app, init_index_args(Some(config_path.clone()))).await?;
     }
     if args.generate_ai_files && !args.no_generate_ai_files {
         generate::run_summary_pair(app)?;
@@ -104,10 +98,7 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
         setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
     }
     if args.watch && !args.no_watch {
-        output.line(format!(
-            "\n  {} Gather Step is ready.",
-            style("✓ Setup complete.").green().bold()
-        ));
+        emit_setup_complete(&output);
         watch::run(app, watch::WatchArgs::default()).await?;
     }
 
@@ -116,31 +107,49 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
 
 async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     let repos = discover_git_repos(&app.workspace_path)?;
+    let config_path = init_config_path(app, &args);
+    let existing_config = if config_path.exists() && !args.force {
+        Some(load_existing_config(&config_path)?)
+    } else {
+        None
+    };
+    let existing_config_repos = existing_config.as_ref().map(discovered_repos_from_config);
 
     let output = app.output();
     output.line(format!(
         "\n  {}",
-        style("Gather Step workspace setup").bold()
+        style("Hi, welcome to Gather Step setup").cyan().bold()
     ));
     output.line(format!(
-        "  Found {} git repo(s) in {}",
-        style(repos.len()).cyan().bold(),
+        "  {}",
+        style(
+            "Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context."
+        )
+        .dim()
+    ));
+    output.line(format!(
+        "  Workspace: {}",
         style(app.workspace_path.display()).dim()
     ));
-    for repo in &repos {
+    if existing_config_repos.is_some() {
         output.line(format!(
-            "    {} {}",
-            style(&repo.name).cyan(),
-            style(format!("→ {}", repo.relative_path)).dim()
+            "  {} {}",
+            style("Existing config:").yellow().bold(),
+            style(config_path.display()).dim()
         ));
     }
+    output.line(format!(
+        "\n  Found {} git repo(s)",
+        style(repos.len()).cyan().bold(),
+    ));
+    let selected_repos = prompt_repo_selection(1, &repos, existing_config_repos.as_deref())?;
 
     let do_index = if args.index {
         true
     } else if args.no_index {
         false
     } else {
-        prompt_yes_no("Index these repos now?", true)?
+        prompt_yes_no(2, "Index the selected repositories now?", true)?
     };
     let do_ai = if args.generate_ai_files {
         true
@@ -148,26 +157,27 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         false
     } else {
         prompt_yes_no(
-            "Generate AI context files (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md)?",
+            3,
+            "Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md)",
             true,
         )?
     };
     let scope = match args.setup_mcp {
         Some(scope) => Some(scope),
-        None => prompt_mcp_scope()?,
+        None => prompt_mcp_scope(4)?,
     };
     let do_watch = if args.watch {
         true
     } else if args.no_watch {
         false
     } else {
-        prompt_yes_no("Watch for changes and re-index automatically?", false)?
+        prompt_yes_no(5, "Enable auto-reindex on repository changes?", false)?
     };
 
-    write_default_config_with_repos(app, &args, repos)?;
+    write_default_config_with_repos(app, &args, &selected_repos, existing_config.as_ref())?;
 
     if do_index {
-        index::run(app, init_index_args()).await?;
+        index::run(app, init_index_args(Some(config_path.clone()))).await?;
     }
     if do_ai {
         generate::run_summary_pair(app)?;
@@ -175,10 +185,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     if let Some(scope) = scope {
         setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
     }
-    output.line(format!(
-        "\n  {} Gather Step is ready.",
-        style("✓ Setup complete.").green().bold()
-    ));
+    emit_setup_complete(&output);
     if do_watch {
         watch::run(app, watch::WatchArgs::default()).await?;
     }
@@ -186,28 +193,32 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-fn init_index_args() -> index::IndexArgs {
+fn init_index_args(config: Option<PathBuf>) -> index::IndexArgs {
     index::IndexArgs {
+        config,
         auto_recover: true,
         ..index::IndexArgs::default()
     }
 }
 
+fn init_config_path(app: &AppContext, args: &InitArgs) -> PathBuf {
+    args.config
+        .clone()
+        .unwrap_or_else(|| app.workspace_paths().config_path)
+}
+
 fn write_default_config(app: &AppContext, args: &InitArgs) -> Result<()> {
     let repos = discover_git_repos(&app.workspace_path)?;
-    write_default_config_with_repos(app, args, repos)
+    write_default_config_with_repos(app, args, &repos, None)
 }
 
 fn write_default_config_with_repos(
     app: &AppContext,
     args: &InitArgs,
-    repos: Vec<DiscoveredRepo>,
+    repos: &[DiscoveredRepo],
+    existing_config: Option<&GatherStepConfig>,
 ) -> Result<()> {
-    let output = app.output();
-    let config_path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| app.workspace_paths().config_path);
+    let config_path = init_config_path(app, args);
 
     if repos.is_empty() {
         bail!(
@@ -216,20 +227,24 @@ fn write_default_config_with_repos(
         );
     }
 
-    let config = GatherStepConfig {
-        allow_listed_repos: Vec::new(),
-        repos: repos
-            .iter()
-            .map(|repo| RepoConfig {
-                name: repo.name.clone(),
-                path: repo.relative_path.clone(),
-                depth: None,
-            })
-            .collect(),
-        github: None,
-        jira: None,
-        indexing: IndexingConfig::default(),
+    let configured_repos = materialize_repo_config(repos, existing_config);
+    let config = match existing_config {
+        Some(existing) => GatherStepConfig {
+            allow_listed_repos: existing.allow_listed_repos.clone(),
+            repos: configured_repos,
+            github: existing.github.clone(),
+            jira: existing.jira.clone(),
+            indexing: existing.indexing.clone(),
+        },
+        None => GatherStepConfig {
+            allow_listed_repos: Vec::new(),
+            repos: configured_repos,
+            github: None,
+            jira: None,
+            indexing: IndexingConfig::default(),
+        },
     };
+    let summary_repos = discovered_repos_from_config(&config);
 
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
@@ -237,33 +252,125 @@ fn write_default_config_with_repos(
     fs::write(&config_path, serde_yaml_ng::to_string(&config)?)
         .with_context(|| format!("writing {}", config_path.display()))?;
 
+    emit_config_summary(app, &config_path, &summary_repos, "Wrote config")?;
+
+    Ok(())
+}
+
+fn materialize_repo_config(
+    repos: &[DiscoveredRepo],
+    existing_config: Option<&GatherStepConfig>,
+) -> Vec<RepoConfig> {
+    let mut existing_by_path = BTreeMap::new();
+    let mut existing_by_name = BTreeMap::new();
+    if let Some(existing) = existing_config {
+        for repo in &existing.repos {
+            existing_by_path.insert(repo.path.as_str(), repo);
+            existing_by_name.insert(repo.name.as_str(), repo);
+        }
+    }
+
+    repos
+        .iter()
+        .map(|repo| {
+            existing_by_path
+                .get(repo.relative_path.as_str())
+                .or_else(|| existing_by_name.get(repo.name.as_str()))
+                .map_or_else(
+                    || RepoConfig {
+                        name: repo.name.clone(),
+                        path: repo.relative_path.clone(),
+                        depth: None,
+                    },
+                    |existing| (*existing).clone(),
+                )
+        })
+        .collect()
+}
+
+fn emit_config_summary(
+    app: &AppContext,
+    config_path: &Path,
+    repos: &[DiscoveredRepo],
+    action: &str,
+) -> Result<()> {
+    let output = app.output();
     let payload = InitOutput {
         event: "init_completed",
         config_path: config_path.display().to_string(),
         repo_count: repos.len(),
         repos: repos
-            .into_iter()
+            .iter()
             .map(|repo| InitRepoOutput {
-                name: repo.name,
-                path: repo.relative_path,
+                name: repo.name.clone(),
+                path: repo.relative_path.clone(),
             })
             .collect(),
     };
 
     output.emit(&payload)?;
-    output.line(format!("Wrote {}", payload.config_path));
-    output.line(format!("Detected {} repo(s)", payload.repo_count));
+    output.line(format!(
+        "{} {}",
+        style(action).green().bold(),
+        style(&payload.config_path).dim()
+    ));
+    output.line(format!(
+        "  {} {}",
+        style(payload.repo_count).cyan().bold(),
+        style("configured repository(ies)").dim()
+    ));
     for repo in payload.repos {
-        output.line(format!("  {} -> {}", repo.name, repo.path));
+        output.line(format!(
+            "  {} {}",
+            style("✓").green().bold(),
+            style(format!("{}  ({})", repo.name, repo.path)).cyan()
+        ));
     }
 
     Ok(())
 }
 
-fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
+fn emit_setup_complete(output: &crate::app::Output) {
+    output.line(format!(
+        "\n  {} Gather Step is ready. Start planning with your agent, for example: {}. Docs: {}",
+        style("✓ Setup complete.").green().bold(),
+        style("\"Start planning for Task A, use gather-step\"").cyan(),
+        style("https://gatherstep.dev/reference/mcp-tools/").underlined()
+    ));
+}
+
+fn load_existing_config_repos(config_path: &Path) -> Result<Vec<DiscoveredRepo>> {
+    Ok(discovered_repos_from_config(&load_existing_config(
+        config_path,
+    )?))
+}
+
+fn load_existing_config(config_path: &Path) -> Result<GatherStepConfig> {
+    GatherStepConfig::from_yaml_file(config_path)
+        .with_context(|| format!("loading existing config {}", config_path.display()))
+}
+
+fn discovered_repos_from_config(config: &GatherStepConfig) -> Vec<DiscoveredRepo> {
+    config
+        .repos
+        .iter()
+        .map(|repo| DiscoveredRepo {
+            name: repo.name.clone(),
+            relative_path: repo.path.clone(),
+        })
+        .collect()
+}
+
+fn prompt_yes_no(step: usize, message: &str, default: bool) -> Result<bool> {
     let suffix = if default { "[Y/n]" } else { "[y/N]" };
     let mut stdout = io::stdout().lock();
-    write!(stdout, "{message} {suffix} ")?;
+    write!(
+        stdout,
+        "{} {} {} ",
+        style(format!("{step})")).cyan().bold(),
+        style(message).white().bold(),
+        style(suffix).yellow().bold()
+    )?;
     stdout.flush()?;
 
     let mut answer = String::new();
@@ -275,11 +382,18 @@ fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
     }
 }
 
-fn prompt_mcp_scope() -> Result<Option<setup_mcp::McpScope>> {
+fn prompt_mcp_scope(step: usize) -> Result<Option<setup_mcp::McpScope>> {
     let mut stdout = io::stdout().lock();
     write!(
         stdout,
-        "Register as an MCP server? [local/global/skip] (default: local) "
+        "{} {} {} ",
+        style(format!("{step})")).cyan().bold(),
+        style("Register Gather Step as an MCP server?")
+            .white()
+            .bold(),
+        style("[local/global/skip] (default: local)")
+            .yellow()
+            .bold()
     )?;
     stdout.flush()?;
 
@@ -290,6 +404,151 @@ fn prompt_mcp_scope() -> Result<Option<setup_mcp::McpScope>> {
         "local" | "" => Some(setup_mcp::McpScope::Local),
         _ => None,
     })
+}
+
+fn prompt_repo_selection(
+    step: usize,
+    repos: &[DiscoveredRepo],
+    existing_config_repos: Option<&[DiscoveredRepo]>,
+) -> Result<Vec<DiscoveredRepo>> {
+    if repos.is_empty() {
+        bail!("No git repositories found under the workspace");
+    }
+
+    let default_names = existing_config_repos.map(|repos| {
+        repos
+            .iter()
+            .map(|repo| repo.name.as_str())
+            .collect::<BTreeSet<_>>()
+    });
+    let default_paths = existing_config_repos.map(|repos| {
+        repos
+            .iter()
+            .map(|repo| repo.relative_path.as_str())
+            .collect::<BTreeSet<_>>()
+    });
+    let mut selected = repos
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, repo)| {
+            let selected_by_name = default_names
+                .as_ref()
+                .is_some_and(|names| names.contains(repo.name.as_str()));
+            let selected_by_path = default_paths
+                .as_ref()
+                .is_some_and(|paths| paths.contains(repo.relative_path.as_str()));
+            (existing_config_repos.is_none() || selected_by_name || selected_by_path).then_some(idx)
+        })
+        .collect::<BTreeSet<_>>();
+    if selected.is_empty() {
+        selected.extend(0..repos.len());
+    }
+
+    loop {
+        let mut stdout = io::stdout().lock();
+        writeln!(
+            stdout,
+            "\n{} {}",
+            style(format!("{step})")).cyan().bold(),
+            style("Select repositories to include").white().bold()
+        )?;
+        writeln!(
+            stdout,
+            "   {}",
+            style("Use numbers or ranges to toggle, `all`, `none`, or press Enter to confirm.")
+                .dim()
+        )?;
+        for (idx, repo) in repos.iter().enumerate() {
+            let checked = selected.contains(&idx);
+            let marker = if checked {
+                style("[x]").green().bold()
+            } else {
+                style("[ ]").yellow()
+            };
+            writeln!(
+                stdout,
+                "   {} {} {}",
+                marker,
+                style(format!("{}.", idx + 1)).cyan(),
+                style(format!("{}  ({})", repo.name, repo.relative_path)).white()
+            )?;
+        }
+        write!(
+            stdout,
+            "   {} ",
+            style("Selection [all/none/1,3/1-3/Enter]:").yellow().bold()
+        )?;
+        stdout.flush()?;
+
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim();
+        if answer.is_empty() || answer.eq_ignore_ascii_case("done") {
+            break;
+        }
+        if answer.eq_ignore_ascii_case("all") || answer.eq_ignore_ascii_case("a") {
+            selected.clear();
+            selected.extend(0..repos.len());
+            continue;
+        }
+        if answer.eq_ignore_ascii_case("none") || answer.eq_ignore_ascii_case("n") {
+            selected.clear();
+            continue;
+        }
+
+        for token in answer.split([',', ' ']).filter(|token| !token.is_empty()) {
+            toggle_selection_token(token, repos.len(), &mut selected)?;
+        }
+    }
+
+    if selected.is_empty() {
+        bail!("select at least one repository before continuing");
+    }
+
+    Ok(selected
+        .into_iter()
+        .filter_map(|idx| repos.get(idx).cloned())
+        .collect())
+}
+
+fn toggle_selection_token(
+    token: &str,
+    repo_count: usize,
+    selected: &mut BTreeSet<usize>,
+) -> Result<()> {
+    if let Some((start, end)) = token.split_once('-') {
+        let start = parse_selection_index(start, repo_count)?;
+        let end = parse_selection_index(end, repo_count)?;
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        for idx in start..=end {
+            toggle_selection_index(idx, selected);
+        }
+        return Ok(());
+    }
+
+    let idx = parse_selection_index(token, repo_count)?;
+    toggle_selection_index(idx, selected);
+    Ok(())
+}
+
+fn parse_selection_index(token: &str, repo_count: usize) -> Result<usize> {
+    let number = token
+        .parse::<usize>()
+        .with_context(|| format!("invalid repository selection `{token}`"))?;
+    if !(1..=repo_count).contains(&number) {
+        bail!("repository selection `{number}` is outside 1..={repo_count}");
+    }
+    Ok(number - 1)
+}
+
+fn toggle_selection_index(idx: usize, selected: &mut BTreeSet<usize>) {
+    if !selected.remove(&idx) {
+        selected.insert(idx);
+    }
 }
 
 /// Thin wrapper around the internal git-repo discovery used by [`run`].

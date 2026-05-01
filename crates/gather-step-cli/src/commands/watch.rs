@@ -26,6 +26,12 @@ use crate::{
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct WatchArgs {
     #[arg(
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Stop after N completed indexing runs"
+    )]
+    pub count: Option<u64>,
+    #[arg(
         long,
         help = "Path to workspace config (default: workspace-local config)"
     )]
@@ -45,6 +51,7 @@ pub struct WatchArgs {
 impl Default for WatchArgs {
     fn default() -> Self {
         Self {
+            count: None,
             config: None,
             storage: None,
             poll_interval_ms: 250,
@@ -147,8 +154,10 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut events = watcher.subscribe();
     let run_cancel = cancel.clone();
+    let limit_cancel = cancel.clone();
     let event_output = output.clone();
     let progress_visible = app.progress_is_visible();
+    let count_limit = args.count;
 
     // Persistent spinner that sits at the bottom while events scroll above it.
     // Only created when MultiProgress is visible; cloned into the event task.
@@ -177,6 +186,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     }
 
     let event_task = tokio::spawn(async move {
+        let mut completed_indexing_runs = 0_u64;
         loop {
             let event = match events.recv().await {
                 Ok(event) => event,
@@ -263,7 +273,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                     changed,
                     stats,
                 } => {
-                    if event_output.is_json() {
+                    let emit_result = if event_output.is_json() {
                         event_output.emit(&WatchEventOutput {
                             event: "watch_indexing_complete",
                             repo,
@@ -302,7 +312,14 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                             stats.files_parsed,
                             stats.duration_ms,
                         ))
+                    };
+                    if emit_result.is_ok() {
+                        completed_indexing_runs = completed_indexing_runs.saturating_add(1);
+                        if count_limit.is_some_and(|limit| completed_indexing_runs >= limit) {
+                            limit_cancel.cancel();
+                        }
                     }
+                    emit_result
                 }
                 WatchEvent::Error { repo, error } => {
                     if event_output.is_json() {
@@ -349,8 +366,13 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     let daemon_cancel = cancel.clone();
     let daemon_task =
         tokio::spawn(async move { daemon.serve_until_cancelled(daemon_cancel).await });
-    tokio::signal::ctrl_c().await?;
-    cancel.cancel();
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            cancel.cancel();
+        }
+        () = cancel.cancelled() => {}
+    }
     watch_task.await??;
     daemon_task.await??;
     let status = watcher.status();
