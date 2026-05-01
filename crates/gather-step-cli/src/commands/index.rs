@@ -356,7 +356,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         workspace = %app.workspace_path.display(),
         config = %config_path.display(),
         repos = config.repos.len(),
-        "indexing from directory started",
+        "Indexing from directory started.",
     );
 
     let mut repo_results = Vec::with_capacity(config.repos.len());
@@ -504,7 +504,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                     files = authoritative_files,
                     symbols = authoritative_symbols,
                     edges = authoritative_edges,
-                    "indexing from directory finished",
+                    "Indexing from directory finished.",
                 );
 
                 let depth_level = config_ref
@@ -560,7 +560,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 info!(
                     repo = %repo.name,
                     path = %repo_root.display(),
-                    "indexing from directory started",
+                    "Indexing from directory started.",
                 );
                 let prepare_start = Instant::now();
                 let payload = indexer_ref
@@ -842,14 +842,20 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         storage_root = %storage_root.display(),
         duration_ms = total_wall_ms,
         index_size_bytes,
-        "indexing from directory finished",
+        "Indexing from directory finished.",
     );
 
     output.emit(&payload)?;
+    let repo_label = if payload.stats.indexed_repos == 1 {
+        "repository"
+    } else {
+        "repositories"
+    };
     output.line(format!(
-        "\n  {} {} repo(s)  {}",
+        "\n  {} {} {}  {}",
         style("✓ Indexed").green().bold(),
         style(payload.stats.indexed_repos).cyan(),
+        repo_label,
         style(&payload.storage_root).dim()
     ));
     output.line(format!(
@@ -865,7 +871,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         style(format_bytes(payload.index_size_bytes)).dim(),
     ));
     for warning in &payload.warnings {
-        output.line(format!("  {} {warning}", style("warning:").yellow().bold()));
+        output.line(format!("  {} {warning}", style("Warning:").yellow().bold()));
     }
 
     // When `--artifact-path` is set, persist the IndexOutput payload so release

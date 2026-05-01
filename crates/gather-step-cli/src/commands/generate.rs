@@ -198,9 +198,10 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
             },
         )?;
     } else {
-        output.line("warning: skipped .claude/rules/ generation because no workspace index exists");
+        output
+            .line("Warning: Skipped generating .claude/rules/ because no workspace index exists.");
         output.line(
-            "hint: run `gather-step index`, then `gather-step generate claude-md --target rules`",
+            "Hint: Run `gather-step index`, then `gather-step generate claude-md --target rules`.",
         );
     }
     if let Some(bar) = &generation_bar {

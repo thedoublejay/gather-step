@@ -63,7 +63,7 @@ Press Enter to accept the default shown by each prompt. In the common path, that
   Hi, welcome to Gather Step setup
   Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context.
   Workspace: /path/to/workspace
-  Found 3 git repo(s)
+  Found 3 Git repositories
 
 1) Select repositories to include
    Use numbers or ranges to toggle, `all`, `none`, or press Enter to confirm.
@@ -74,7 +74,7 @@ Press Enter to accept the default shown by each prompt. In the common path, that
 2) Index the selected repositories now? [Y/n]
 3) Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md) [Y/n]
 4) Register Gather Step as an MCP server? [local/global/skip] (default: local)
-5) Enable auto-reindex on repository changes? [y/N]
+5) Watch for repository changes and re-index automatically? [y/N]
 ```
 
 | Wizard prompt | Default | Equivalent flag |
@@ -83,7 +83,7 @@ Press Enter to accept the default shown by each prompt. In the common path, that
 | Index these repos now? | Yes | `--index` |
 | Generate AI context files? | Yes | `--generate-ai-files` |
 | Register as an MCP server? | Local | `--setup-mcp local` |
-| Watch for changes automatically? | No | `--watch` |
+| Watch for repository changes and re-index automatically? | No | `--watch` |
 
 The watcher runs in the foreground only if you opt in. Use `Ctrl+C` to stop it; indexed state is preserved.
 

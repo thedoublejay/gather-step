@@ -139,8 +139,9 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         ));
     }
     output.line(format!(
-        "\n  Found {} git repo(s)",
+        "\n  Found {} {}",
         style(repos.len()).cyan().bold(),
+        style(git_repository_count_label(repos.len())).dim(),
     ));
     let selected_repos = prompt_repo_selection(1, &repos, existing_config_repos.as_deref())?;
 
@@ -171,7 +172,11 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     } else if args.no_watch {
         false
     } else {
-        prompt_yes_no(5, "Enable auto-reindex on repository changes?", false)?
+        prompt_yes_no(
+            5,
+            "Watch for repository changes and re-index automatically?",
+            false,
+        )?
     };
 
     write_default_config_with_repos(app, &args, &selected_repos, existing_config.as_ref())?;
@@ -222,7 +227,7 @@ fn write_default_config_with_repos(
 
     if repos.is_empty() {
         bail!(
-            "No git repositories found under {}",
+            "No Git repositories found under {}.",
             app.workspace_path.display()
         );
     }
@@ -230,7 +235,7 @@ fn write_default_config_with_repos(
     let configured_repos = materialize_repo_config(repos, existing_config);
     let config = match existing_config {
         Some(existing) => GatherStepConfig {
-            allow_listed_repos: existing.allow_listed_repos.clone(),
+            allow_listed_repos: retain_allow_listed_repos_for_selected(existing, &configured_repos),
             repos: configured_repos,
             github: existing.github.clone(),
             jira: existing.jira.clone(),
@@ -273,18 +278,38 @@ fn materialize_repo_config(
     repos
         .iter()
         .map(|repo| {
-            existing_by_path
-                .get(repo.relative_path.as_str())
-                .or_else(|| existing_by_name.get(repo.name.as_str()))
-                .map_or_else(
-                    || RepoConfig {
-                        name: repo.name.clone(),
-                        path: repo.relative_path.clone(),
-                        depth: None,
-                    },
-                    |existing| (*existing).clone(),
-                )
+            if let Some(existing) = existing_by_path.get(repo.relative_path.as_str()) {
+                return (*existing).clone();
+            }
+            if let Some(existing) = existing_by_name.get(repo.name.as_str()) {
+                return RepoConfig {
+                    name: existing.name.clone(),
+                    path: repo.relative_path.clone(),
+                    depth: existing.depth,
+                };
+            }
+            RepoConfig {
+                name: repo.name.clone(),
+                path: repo.relative_path.clone(),
+                depth: None,
+            }
         })
+        .collect()
+}
+
+fn retain_allow_listed_repos_for_selected(
+    existing_config: &GatherStepConfig,
+    selected_repos: &[RepoConfig],
+) -> Vec<String> {
+    let selected_names = selected_repos
+        .iter()
+        .map(|repo| repo.name.as_str())
+        .collect::<BTreeSet<_>>();
+    existing_config
+        .allow_listed_repos
+        .iter()
+        .filter(|repo_name| selected_names.contains(repo_name.as_str()))
+        .cloned()
         .collect()
 }
 
@@ -317,7 +342,7 @@ fn emit_config_summary(
     output.line(format!(
         "  {} {}",
         style(payload.repo_count).cyan().bold(),
-        style("configured repository(ies)").dim()
+        style(repository_count_label(payload.repo_count)).dim()
     ));
     for repo in payload.repos {
         output.line(format!(
@@ -332,9 +357,9 @@ fn emit_config_summary(
 
 fn emit_setup_complete(output: &crate::app::Output) {
     output.line(format!(
-        "\n  {} Gather Step is ready. Start planning with your agent, for example: {}. Docs: {}",
+        "\n  {} Gather Step is ready. Start planning with your agent. Example: {}. Docs: {}",
         style("✓ Setup complete.").green().bold(),
-        style("\"Start planning for Task A, use gather-step\"").cyan(),
+        style("\"Start planning your next task with gather-step\"").cyan(),
         style("https://gatherstep.dev/reference/mcp-tools/").underlined()
     ));
 }
@@ -359,6 +384,22 @@ fn discovered_repos_from_config(config: &GatherStepConfig) -> Vec<DiscoveredRepo
             relative_path: repo.path.clone(),
         })
         .collect()
+}
+
+fn repository_count_label(count: usize) -> &'static str {
+    if count == 1 {
+        "configured repository"
+    } else {
+        "configured repositories"
+    }
+}
+
+fn git_repository_count_label(count: usize) -> &'static str {
+    if count == 1 {
+        "Git repository"
+    } else {
+        "Git repositories"
+    }
 }
 
 fn prompt_yes_no(step: usize, message: &str, default: bool) -> Result<bool> {
@@ -412,7 +453,7 @@ fn prompt_repo_selection(
     existing_config_repos: Option<&[DiscoveredRepo]>,
 ) -> Result<Vec<DiscoveredRepo>> {
     if repos.is_empty() {
-        bail!("No git repositories found under the workspace");
+        bail!("No Git repositories found under the workspace.");
     }
 
     let default_names = existing_config_repos.map(|repos| {
@@ -502,7 +543,7 @@ fn prompt_repo_selection(
     }
 
     if selected.is_empty() {
-        bail!("select at least one repository before continuing");
+        bail!("Select at least one repository before continuing.");
     }
 
     Ok(selected
@@ -707,7 +748,12 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use super::discover_git_repos;
+    use gather_step_core::{DepthLevel, GatherStepConfig, IndexingConfig, RepoConfig};
+
+    use super::{
+        DiscoveredRepo, discover_git_repos, materialize_repo_config,
+        retain_allow_listed_repos_for_selected,
+    };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -786,6 +832,67 @@ mod tests {
                 ("api".to_owned(), "apps/api".to_owned()),
                 ("web".to_owned(), "apps/web".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn repo_config_merge_filters_allow_list_to_selected_repos() {
+        let existing = GatherStepConfig {
+            allow_listed_repos: vec!["api".to_owned(), "web".to_owned()],
+            repos: vec![
+                RepoConfig {
+                    name: "api".to_owned(),
+                    path: "apps/api".to_owned(),
+                    depth: Some(DepthLevel::Level2),
+                },
+                RepoConfig {
+                    name: "web".to_owned(),
+                    path: "apps/web".to_owned(),
+                    depth: Some(DepthLevel::Level1),
+                },
+            ],
+            github: None,
+            jira: None,
+            indexing: IndexingConfig::default(),
+        };
+        let selected = vec![DiscoveredRepo {
+            name: "api".to_owned(),
+            relative_path: "apps/api".to_owned(),
+        }];
+        let merged = materialize_repo_config(&selected, Some(&existing));
+
+        assert_eq!(
+            retain_allow_listed_repos_for_selected(&existing, &merged),
+            vec!["api".to_owned()]
+        );
+    }
+
+    #[test]
+    fn repo_config_name_match_keeps_discovered_path() {
+        let existing = GatherStepConfig {
+            allow_listed_repos: Vec::new(),
+            repos: vec![RepoConfig {
+                name: "api".to_owned(),
+                path: "old/api".to_owned(),
+                depth: Some(DepthLevel::Level2),
+            }],
+            github: None,
+            jira: None,
+            indexing: IndexingConfig::default(),
+        };
+        let selected = vec![DiscoveredRepo {
+            name: "api".to_owned(),
+            relative_path: "new/api".to_owned(),
+        }];
+        let merged = materialize_repo_config(&selected, Some(&existing));
+
+        assert_eq!(
+            merged,
+            vec![RepoConfig {
+                name: "api".to_owned(),
+                path: "new/api".to_owned(),
+                depth: Some(DepthLevel::Level2),
+            }]
         );
     }
 }

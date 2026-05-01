@@ -90,7 +90,7 @@ fn init_generate_ai_files_without_index_writes_summaries_and_skips_rules() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("warning: skipped .claude/rules/ generation"));
+    assert!(stdout.contains("Warning: Skipped generating .claude/rules/"));
     assert!(tmp.path().join("CLAUDE.gather.md").exists());
     assert!(tmp.path().join("AGENTS.gather.md").exists());
     assert!(!tmp.path().join(".claude/rules").exists());

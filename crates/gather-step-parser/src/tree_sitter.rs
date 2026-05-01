@@ -3037,7 +3037,7 @@ fn resolve_python_sibling_package_import(
                         package = package_name,
                         first_package_dir = %first_package_dir.display(),
                         duplicate_package_dir = %package_dir.display(),
-                        "multiple sibling Python packages matched import; leaving import unresolved"
+                        "Multiple sibling Python packages matched import; leaving import unresolved."
                     );
                     return None;
                 }

@@ -28,6 +28,9 @@ dist/
 # Local-only planning docs (superpowers plans, drafts, scratch)
 docs/superpowers/
 
+# Local release-note drafts
+release-notes/
+
 # Local-only Python private corpus benchmark inputs/results
 benchmark/python/private-corpus.local.yaml
 benchmark/python/private-results/
