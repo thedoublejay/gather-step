@@ -1682,9 +1682,8 @@ fn collect_deployment_artifact_paths(
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        let relative_path = match entry.path().strip_prefix(repo_root) {
-            Ok(path) => path,
-            Err(_) => continue,
+        let Ok(relative_path) = entry.path().strip_prefix(repo_root) else {
+            continue;
         };
         let file_path = normalize_path_separators(&relative_path.to_string_lossy()).into_owned();
         let path_kind = detect_artifact_kind(&file_path, "");

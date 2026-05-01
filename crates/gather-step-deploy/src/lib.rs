@@ -84,7 +84,8 @@ pub enum DeploymentParseError {
 
 #[must_use]
 pub fn detect_artifact_kind(path: &str, content: &str) -> DeploymentArtifactKind {
-    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let mut normalized = path.replace('\\', "/");
+    normalized.make_ascii_lowercase();
     let file_name = Path::new(&normalized)
         .file_name()
         .and_then(|name| name.to_str())
@@ -355,9 +356,9 @@ fn parse_compose(
             "compose service",
         );
 
-        collect_compose_env(service_value)
-            .iter()
-            .for_each(|name| add_env_edge(builder, &service_qn, name, confidence, "compose env"));
+        for name in collect_compose_env(service_value) {
+            add_env_edge(builder, &service_qn, &name, confidence, "compose env");
+        }
         for config_name in collect_compose_resource_refs(service_value, "configs") {
             let qn = config_map_qn(&config_name);
             builder.node(
@@ -757,11 +758,8 @@ fn add_infra_from_image(
     confidence: u16,
     evidence: &'static str,
 ) {
-    let haystack = format!(
-        "{} {}",
-        service_name.to_ascii_lowercase(),
-        image.unwrap_or_default().to_ascii_lowercase()
-    );
+    let mut haystack = format!("{} {}", service_name, image.unwrap_or_default());
+    haystack.make_ascii_lowercase();
     let infra = if haystack.contains("postgres") || haystack.contains("mysql") {
         Some((NodeKind::Database, EdgeKind::UsesDatabase, "sql"))
     } else if haystack.contains("mongo") {
@@ -1051,9 +1049,8 @@ fn docker_env_names(rest: &str) -> BTreeSet<String> {
 }
 
 fn workflow_job_is_deployish(value: &Value) -> bool {
-    let text = serde_json::to_string(value)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let mut text = serde_json::to_string(value).unwrap_or_default();
+    text.make_ascii_lowercase();
     ["deploy", "kubectl", "helm"]
         .iter()
         .any(|needle| text.contains(needle))
@@ -1298,7 +1295,7 @@ mod tests {
         let output = parse_deployment_artifact(
             "platform",
             "compose.yaml",
-            r#"
+            r"
 services:
   api:
     image: platform-api
@@ -1316,7 +1313,7 @@ services:
     image: postgres:16
   redis:
     image: redis:7
-"#,
+",
         )
         .expect("compose should parse");
 
@@ -1359,7 +1356,7 @@ services:
     #[test]
     fn compose_env_file_refs_are_structural_and_service_scoped() {
         let refs = compose_env_file_refs(
-            r#"
+            r"
 services:
   api:
     env_file:
@@ -1368,7 +1365,7 @@ services:
         required: false
   worker:
     env_file: worker.env
-"#,
+",
             "compose.yaml",
         )
         .expect("compose should parse");
@@ -1393,7 +1390,7 @@ services:
         let output = parse_deployment_artifact(
             "backend",
             "deploy/api/deployment.yaml",
-            r#"
+            r"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1429,7 +1426,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: api-secret
-"#,
+",
         )
         .expect("kubernetes should parse");
 
@@ -1534,11 +1531,11 @@ spec:
         let output = parse_deployment_artifact(
             "backend",
             "charts/api/templates/service.yaml",
-            r#"
+            r"
 {{ if .Values.enabled }}
 name: nginx
 {{ end }}
-"#,
+",
         )
         .expect("helm template fallback should not fail parsing");
 
@@ -1556,7 +1553,7 @@ name: nginx
         let output = parse_deployment_artifact(
             "backend",
             ".github/workflows/deploy.yml",
-            r#"
+            r"
 name: Deploy
 on:
   push:
@@ -1568,7 +1565,7 @@ jobs:
     needs: build
     steps:
       - run: helm upgrade api ./charts/api
-"#,
+",
         )
         .expect("workflow should parse");
 
@@ -1598,7 +1595,7 @@ jobs:
         let output = parse_deployment_artifact(
             "backend",
             ".github/workflows/build.yml",
-            r#"
+            r"
 name: Build
 on:
   push:
@@ -1606,7 +1603,7 @@ jobs:
   build:
     steps:
       - run: docker build .
-"#,
+",
         )
         .expect("workflow should parse");
 

@@ -86,7 +86,7 @@ pub fn where_deployed_tool(
         DeploymentTopologyQuery::WhereDeployed {
             service: request.service,
         },
-        request.repo,
+        request.repo.as_deref(),
         request.limit,
     )
 }
@@ -101,7 +101,7 @@ pub fn service_env_tool(
         DeploymentTopologyQuery::ServiceEnv {
             service: request.service,
         },
-        request.repo,
+        request.repo.as_deref(),
         request.limit,
     )
 }
@@ -122,46 +122,46 @@ pub fn env_var_consumers_tool(
         DeploymentTopologyQuery::EnvVarConsumers {
             env_var: request.env_var,
         },
-        request.repo,
+        request.repo.as_deref(),
         request.limit,
     )
 }
 
 pub fn undeployed_services_tool(
     ctx: &McpContext,
-    request: RepoTopologyRequest,
+    request: &RepoTopologyRequest,
 ) -> Result<DeploymentTopologyResponse, McpServerError> {
     validate_repo_and_limit(request.repo.as_deref(), request.limit)?;
     run_query(
         ctx,
         DeploymentTopologyQuery::UndeployedServices,
-        request.repo,
+        request.repo.as_deref(),
         request.limit,
     )
 }
 
 pub fn deployed_but_no_code_tool(
     ctx: &McpContext,
-    request: RepoTopologyRequest,
+    request: &RepoTopologyRequest,
 ) -> Result<DeploymentTopologyResponse, McpServerError> {
     validate_repo_and_limit(request.repo.as_deref(), request.limit)?;
     run_query(
         ctx,
         DeploymentTopologyQuery::DeployedButNoCode,
-        request.repo,
+        request.repo.as_deref(),
         request.limit,
     )
 }
 
 pub fn shared_infra_tool(
     ctx: &McpContext,
-    request: RepoTopologyRequest,
+    request: &RepoTopologyRequest,
 ) -> Result<DeploymentTopologyResponse, McpServerError> {
     validate_repo_and_limit(request.repo.as_deref(), request.limit)?;
     run_query(
         ctx,
         DeploymentTopologyQuery::SharedInfra,
-        request.repo,
+        request.repo.as_deref(),
         request.limit,
     )
 }
@@ -192,10 +192,10 @@ fn validate_repo_and_limit(repo: Option<&str>, limit: usize) -> Result<(), McpSe
 fn run_query(
     ctx: &McpContext,
     query: DeploymentTopologyQuery,
-    repo: Option<String>,
+    repo: Option<&str>,
     limit: usize,
 ) -> Result<DeploymentTopologyResponse, McpServerError> {
-    let report = deployment_topology(ctx.graph(), query, repo.as_deref(), limit)?;
+    let report = deployment_topology(ctx.graph(), query, repo, limit)?;
     Ok(report.into())
 }
 

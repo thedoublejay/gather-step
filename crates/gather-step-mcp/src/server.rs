@@ -695,7 +695,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("undeployed_services", &args, move || {
-            run_undeployed_services(&ctx, request)
+            run_undeployed_services(&ctx, &request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })
@@ -714,7 +714,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("deployed_but_no_code", &args, move || {
-            run_deployed_but_no_code(&ctx, request)
+            run_deployed_but_no_code(&ctx, &request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })
@@ -733,7 +733,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("shared_infra", &args, move || {
-            run_shared_infra(&ctx, request)
+            run_shared_infra(&ctx, &request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })
