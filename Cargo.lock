@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-deploy"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "gather-step-core",
  "pretty_assertions",
