@@ -12,9 +12,12 @@
 //!
 //! Phase 4 Task 1 of the PR review mode plan.
 
-use std::path::Path;
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gather_step_git::refs::resolve_ref;
 
 use super::artifact_root::{
@@ -164,6 +167,115 @@ pub fn compute_cache_key(
         schema_version: super::artifact_root::MARKER_SCHEMA_VERSION,
         gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
+}
+
+// ─── Seed-from-baseline ───────────────────────────────────────────────────────
+
+/// Describes the normal workspace index that can be used to pre-populate a
+/// fresh review artifact root before the review indexer runs.
+pub struct SeedSource {
+    /// Path to `<workspace>/.gather-step/registry.json`.
+    pub registry_path: PathBuf,
+    /// Path to `<workspace>/.gather-step/storage/`.
+    pub storage_root: PathBuf,
+}
+
+/// Decide whether the workspace's normal index is safe to seed from.
+///
+/// The seed is safe when all three conditions hold:
+/// 1. `<workspace>/.gather-step/storage/graph.redb` exists.
+/// 2. `<workspace>/.gather-step/registry.json` exists.
+/// 3. The workspace config file (`gather-step.config.yaml`) has a content hash
+///    that matches `review_config_hash` — i.e. the schema has not changed.
+///
+/// Returns `Some(SeedSource)` when seedable, `None` otherwise.
+pub fn pick_seed_source(
+    workspace_root: &Path,
+    review_config_hash: &str,
+) -> Result<Option<SeedSource>> {
+    let gs_dir = workspace_root.join(".gather-step");
+    let storage_root = gs_dir.join("storage");
+    let registry_path = gs_dir.join("registry.json");
+    let graph_path = storage_root.join("graph.redb");
+
+    // Conditions 1 + 2: required on-disk artifacts.
+    if !graph_path.is_file() || !registry_path.is_file() {
+        return Ok(None);
+    }
+
+    // Condition 3: config hash must match so the schema is compatible.
+    let config_file = workspace_root.join("gather-step.config.yaml");
+    let config_bytes = std::fs::read(&config_file).unwrap_or_default();
+    let ws_config_hash = {
+        let hash = blake3::hash(&config_bytes);
+        let hex = hash.to_hex();
+        hex[..16].to_owned()
+    };
+
+    if ws_config_hash != review_config_hash {
+        tracing::debug!(
+            ws_hash = %ws_config_hash,
+            review_hash = %review_config_hash,
+            "workspace config hash differs from review config hash; skipping seed"
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(SeedSource {
+        registry_path,
+        storage_root,
+    }))
+}
+
+/// Copy `registry.json` and the `storage/` tree from `seed` into
+/// `target_artifact_root`.
+///
+/// Files are copied byte-for-byte; sub-directories are deep-copied.  Existing
+/// files in the target are overwritten.
+pub fn seed_artifact_root(
+    seed: &SeedSource,
+    target_artifact_root: &ReviewArtifactRoot,
+) -> Result<()> {
+    // Copy registry.json.
+    std::fs::copy(&seed.registry_path, &target_artifact_root.registry_path)
+        .with_context(|| {
+            format!(
+                "copying seed registry from `{}` to `{}`",
+                seed.registry_path.display(),
+                target_artifact_root.registry_path.display()
+            )
+        })?;
+
+    // Deep-copy storage/ tree.
+    copy_dir_all(&seed.storage_root, &target_artifact_root.storage_root)
+        .with_context(|| {
+            format!(
+                "copying seed storage from `{}` to `{}`",
+                seed.storage_root.display(),
+                target_artifact_root.storage_root.display()
+            )
+        })?;
+
+    Ok(())
+}
+
+/// Recursively copy all files from `src` into `dst`.  `dst` is created if it
+/// does not exist.  Files in `dst` that are not in `src` are left untouched.
+fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+        // Symlinks are intentionally skipped — review storage never uses them.
+    }
+    Ok(())
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -478,6 +590,149 @@ mod tests {
             key_a.fingerprint(),
             key_b.fingerprint(),
             "different config must change fingerprint"
+        );
+    }
+
+    // ── pick_seed_source tests ────────────────────────────────────────────────
+
+    /// Compute a 16-char blake3 hex hash of `bytes` — mirrors the logic in
+    /// `compute_cache_key` and `pick_seed_source`.
+    fn config_hash_of(bytes: &[u8]) -> String {
+        let hash = blake3::hash(bytes);
+        let hex = hash.to_hex();
+        hex[..16].to_owned()
+    }
+
+    /// Build a minimal workspace fixture:
+    /// ```text
+    /// ws/
+    ///   gather-step.config.yaml
+    ///   .gather-step/
+    ///     storage/
+    ///       graph.redb   (empty placeholder)
+    ///     registry.json  (empty JSON object)
+    /// ```
+    fn write_indexed_workspace(ws: &Path, config_bytes: &[u8]) {
+        fs::write(ws.join("gather-step.config.yaml"), config_bytes).unwrap();
+        let gs = ws.join(".gather-step");
+        let storage = gs.join("storage");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("graph.redb"), b"placeholder").unwrap();
+        fs::write(gs.join("registry.json"), b"{}").unwrap();
+    }
+
+    #[test]
+    fn pick_seed_source_returns_some_when_workspace_indexed() {
+        let ws_tmp = TempDir::new("seed-ws1");
+        let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
+        write_indexed_workspace(ws_tmp.path(), config_bytes);
+
+        let config_hash = config_hash_of(config_bytes);
+        let result = pick_seed_source(ws_tmp.path(), &config_hash)
+            .expect("pick_seed_source must not err");
+
+        assert!(
+            result.is_some(),
+            "should return Some when workspace is indexed and config hash matches"
+        );
+        let seed = result.unwrap();
+        assert!(seed.registry_path.is_file());
+        assert!(seed.storage_root.is_dir());
+    }
+
+    #[test]
+    fn pick_seed_source_returns_none_when_config_hash_differs() {
+        let ws_tmp = TempDir::new("seed-ws2");
+        let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
+        write_indexed_workspace(ws_tmp.path(), config_bytes);
+
+        // Use a hash computed from different bytes.
+        let mismatched_hash = config_hash_of(b"repos:\n  - name: other\n    path: other\n");
+        let result = pick_seed_source(ws_tmp.path(), &mismatched_hash)
+            .expect("pick_seed_source must not err");
+
+        assert!(
+            result.is_none(),
+            "should return None when config hashes differ"
+        );
+    }
+
+    #[test]
+    fn pick_seed_source_returns_none_when_workspace_not_indexed() {
+        let ws_tmp = TempDir::new("seed-ws3");
+        // Write config but no .gather-step/storage/graph.redb.
+        let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
+        fs::write(ws_tmp.path().join("gather-step.config.yaml"), config_bytes).unwrap();
+
+        let config_hash = config_hash_of(config_bytes);
+        let result = pick_seed_source(ws_tmp.path(), &config_hash)
+            .expect("pick_seed_source must not err");
+
+        assert!(
+            result.is_none(),
+            "should return None when workspace has not been indexed"
+        );
+    }
+
+    // ── seed_artifact_root tests ──────────────────────────────────────────────
+
+    #[test]
+    fn seed_artifact_root_copies_storage_files() {
+        let ws_tmp = TempDir::new("seed-ws4");
+        let cache_tmp = TempDir::new("seed-cache4");
+
+        // Build a source workspace with indexed data.
+        let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
+        write_indexed_workspace(ws_tmp.path(), config_bytes);
+
+        // Write an extra file in storage to verify deep copy.
+        let storage = ws_tmp.path().join(".gather-step/storage");
+        fs::write(storage.join("meta.db"), b"metadata").unwrap();
+
+        let seed = SeedSource {
+            registry_path: ws_tmp.path().join(".gather-step/registry.json"),
+            storage_root: storage.clone(),
+        };
+
+        // Create a minimal artifact root (just needs the paths to exist).
+        let key = compute_cache_key(ws_tmp.path(), "base", "head", config_bytes);
+        let artifact = write_cached_artifact(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "seed-test-run",
+            &key,
+            ReviewStatus::InProgress,
+        );
+
+        // Reconstruct a ReviewArtifactRoot from the on-disk layout.
+        let artifact_root = ReviewArtifactRoot {
+            root: artifact.clone(),
+            workspace_root: ws_tmp.path().to_path_buf(),
+            worktree_root: artifact.join("worktree"),
+            registry_path: artifact.join("registry.json"),
+            storage_root: artifact.join("storage"),
+            reports_dir: artifact.join("reports"),
+            logs_dir: artifact.join("logs"),
+            marker_path: artifact.join(MARKER_FILENAME),
+            run_id: "seed-test-run".to_owned(),
+            workspace_hash: workspace_hash(ws_tmp.path()),
+        };
+
+        seed_artifact_root(&seed, &artifact_root).expect("seed_artifact_root must not err");
+
+        // Verify registry copied.
+        assert!(
+            artifact_root.registry_path.is_file(),
+            "registry.json should exist in target"
+        );
+        // Verify storage files copied.
+        assert!(
+            artifact_root.storage_root.join("graph.redb").is_file(),
+            "graph.redb should be copied"
+        );
+        assert!(
+            artifact_root.storage_root.join("meta.db").is_file(),
+            "meta.db should be deep-copied"
         );
     }
 }

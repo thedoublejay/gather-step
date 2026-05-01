@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use gather_step_core::{GatherStepConfig, RegistryStore, WorkspaceStats};
 use gather_step_storage::{IndexingOptions, index_workspace_with_storage};
 
-use crate::pr_review::artifact_root::ReviewArtifactRoot;
+use crate::pr_review::{affected::AffectedRepos, artifact_root::ReviewArtifactRoot};
 
 /// Config filename the runner looks for inside the worktree.
 const CONFIG_FILENAME: &str = "gather-step.config.yaml";
@@ -30,6 +30,16 @@ const CONFIG_FILENAME: &str = "gather-step.config.yaml";
 /// This is a thin wrapper around [`index_workspace_with_storage`].  It does
 /// **not** touch the user's normal `.gather-step/` directory; all output goes
 /// to `artifact_root.storage_root` and `artifact_root.registry_path`.
+///
+/// # `affected` parameter
+///
+/// When `affected` is `Some` and `affected.all_repos == false`, only the repos
+/// listed in `affected.repos` are passed to the underlying indexer.  This lets
+/// the caller pre-seed the storage from the baseline and only reindex the repos
+/// that actually changed.
+///
+/// When `affected` is `None` or `affected.all_repos == true`, all repos in the
+/// config are indexed (the safe default).
 ///
 /// # Pre-condition
 ///
@@ -47,6 +57,7 @@ const CONFIG_FILENAME: &str = "gather-step.config.yaml";
 /// - The underlying indexer fails.
 pub fn run_review_index(
     artifact_root: &ReviewArtifactRoot,
+    affected: Option<&AffectedRepos>,
     options: IndexingOptions,
 ) -> Result<WorkspaceStats> {
     let config_path = artifact_root.worktree_root.join(CONFIG_FILENAME);
@@ -60,10 +71,54 @@ pub fn run_review_index(
         );
     }
 
-    let config = GatherStepConfig::from_yaml_file(&config_path)
+    let full_config = GatherStepConfig::from_yaml_file(&config_path)
         .with_context(|| format!("loading config from `{}`", config_path.display()))?;
 
     let config_root: &Path = &artifact_root.worktree_root;
+
+    // Determine which repos to index.  When `affected` is a strict subset,
+    // build a temporary config containing only those repos so the indexer
+    // skips the unchanged ones.  Fall back to the full config whenever
+    // `affected` is None or all_repos is true.
+    let effective_config: GatherStepConfig;
+    let config = match affected {
+        Some(a) if !a.all_repos && !a.repos.is_empty() => {
+            let subset: Vec<_> = full_config
+                .repos
+                .iter()
+                .filter(|r| a.repos.contains(&r.name))
+                .cloned()
+                .collect();
+
+            if subset.is_empty() {
+                // No repos match — nothing to reindex; short-circuit.
+                tracing::info!("affected-repo filter produced an empty set; skipping reindex");
+                return Ok(gather_step_core::WorkspaceStats {
+                    total_repos: 0,
+                    indexed_repos: 0,
+                    total_files: 0,
+                    total_symbols: 0,
+                    total_edges: 0,
+                    cross_repo_edges: 0,
+                });
+            }
+
+            tracing::info!(
+                repos = ?subset.iter().map(|r| &r.name).collect::<Vec<_>>(),
+                "reindexing only affected repos"
+            );
+
+            effective_config = GatherStepConfig {
+                repos: subset,
+                allow_listed_repos: full_config.allow_listed_repos.clone(),
+                github: full_config.github.clone(),
+                jira: full_config.jira.clone(),
+                indexing: full_config.indexing.clone(),
+            };
+            &effective_config
+        }
+        _ => &full_config,
+    };
 
     // Ensure the review storage directory exists (artifact_root creation
     // already does this, but guard here too so the function is self-contained).
@@ -85,7 +140,7 @@ pub fn run_review_index(
     // update_repo_metadata calls inside index_workspace_with_storage also save
     // after each mutation, so no explicit save is required after the call.
     registry
-        .register_from_config(&config, config_root)
+        .register_from_config(config, config_root)
         .with_context(|| {
             format!(
                 "registering repos from config into review registry at `{}`",
@@ -94,7 +149,7 @@ pub fn run_review_index(
         })?;
 
     let stats = index_workspace_with_storage(
-        &config,
+        config,
         config_root,
         &mut registry,
         &artifact_root.storage_root,
@@ -277,7 +332,7 @@ mod tests {
         .expect("worktree should create");
 
         // ── 4. Run the review indexer ────────────────────────────────────────
-        let stats = run_review_index(&artifact_root, IndexingOptions::default())
+        let stats = run_review_index(&artifact_root, None, IndexingOptions::default())
             .expect("review index should succeed");
 
         // ── 5. Assertions ────────────────────────────────────────────────────

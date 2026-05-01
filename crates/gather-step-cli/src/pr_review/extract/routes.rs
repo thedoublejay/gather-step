@@ -742,7 +742,7 @@ mod tests {
             &base_sha,
         )
         .expect("base worktree");
-        run_review_index(&base_artifact, IndexingOptions::default()).expect("base index");
+        run_review_index(&base_artifact, None, IndexingOptions::default()).expect("base index");
 
         // ── index head ────────────────────────────────────────────────────────
         let head_artifact = create_artifact_root(
@@ -760,7 +760,7 @@ mod tests {
             &head_sha,
         )
         .expect("head worktree");
-        run_review_index(&head_artifact, IndexingOptions::default()).expect("head index");
+        run_review_index(&head_artifact, None, IndexingOptions::default()).expect("head index");
 
         // ── open both stores and call extractor ───────────────────────────────
         let baseline_coord = StorageCoordinator::open_read_only(&base_artifact.storage_root)

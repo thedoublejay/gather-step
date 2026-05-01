@@ -27,12 +27,13 @@ use serde::Serialize;
 use crate::{
     app::AppContext,
     pr_review::{
+        affected::{AffectedRepos, compute_affected_repos},
         artifact_root::{
             ArtifactRootError, MARKER_FILENAME, ReviewArtifactRoot, ReviewStatus,
             default_cache_root, generate_run_id, materialize_artifact_root, plan_artifact_root,
             read_marker, workspace_hash, write_marker_completed, write_marker_quarantined,
         },
-        cache::{compute_cache_key, is_cache_key_active, try_reuse_cache},
+        cache::{compute_cache_key, is_cache_key_active, pick_seed_source, seed_artifact_root, try_reuse_cache},
         delta_report::{
             CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
             PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
@@ -352,9 +353,59 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 }
             };
 
+            // ── 5b. Seed from baseline (Task 3) ───────────────────────────────
+            // If the workspace has a normal index with a matching config hash,
+            // copy it into the review artifact root so the indexer only needs to
+            // update changed repos rather than rebuild from scratch.
+            match pick_seed_source(&app.workspace_path, &cache_key_struct.config_hash) {
+                Ok(Some(seed)) => {
+                    tracing::info!("seeding review artifact from baseline workspace index");
+                    if let Err(e) = seed_artifact_root(&seed, &artifact_root) {
+                        // Non-fatal: log and continue with a full index.
+                        tracing::warn!(
+                            error = %e,
+                            "seed_artifact_root failed; falling back to full reindex"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!("workspace baseline not seedable; doing full review index");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "pick_seed_source error; falling back to full reindex"
+                    );
+                }
+            }
+
+            // ── 5c. Compute affected repos (Task 4) ───────────────────────────
+            // Load the head config from the worktree for prefix matching.
+            let head_cfg_for_affected = {
+                let cfg_path = artifact_root.worktree_root.join("gather-step.config.yaml");
+                GatherStepConfig::from_yaml_file(&cfg_path).ok()
+            };
+            let affected: Option<AffectedRepos> =
+                head_cfg_for_affected.as_ref().map(|cfg| {
+                    let a = compute_affected_repos(cfg, &changed);
+                    if !a.all_repos && !a.repos.is_empty() {
+                        tracing::info!(
+                            repos = ?a.repos,
+                            "seeded baseline + reindexing {} affected repos: {:?}",
+                            a.repos.len(),
+                            a.repos
+                        );
+                    }
+                    a
+                });
+
             // ── 6. Index ───────────────────────────────────────────────────────
             let index_start = Instant::now();
-            let stats = match run_review_index(&artifact_root, IndexingOptions::default()) {
+            let stats = match run_review_index(
+                &artifact_root,
+                affected.as_ref(),
+                IndexingOptions::default(),
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     quarantine_on_error(&artifact_root);
