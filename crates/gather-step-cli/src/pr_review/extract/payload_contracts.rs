@@ -87,6 +87,7 @@ pub fn extract_payload_contract_deltas<M: MetadataStore>(
         added,
         removed,
         changed,
+        unavailable: false,
     })
 }
 

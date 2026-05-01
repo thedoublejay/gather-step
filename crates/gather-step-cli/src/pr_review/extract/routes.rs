@@ -80,6 +80,7 @@ pub fn extract_route_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<R
         added,
         removed,
         changed,
+        unavailable: false,
     })
 }
 

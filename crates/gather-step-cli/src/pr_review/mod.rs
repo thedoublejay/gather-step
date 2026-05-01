@@ -13,3 +13,4 @@ pub mod engine;
 pub mod extract;
 pub mod index_runner;
 pub mod overlay;
+pub mod parity;

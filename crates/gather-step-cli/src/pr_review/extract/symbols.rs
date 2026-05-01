@@ -82,6 +82,7 @@ pub fn extract_symbol_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<
         added,
         removed,
         changed,
+        unavailable: false,
     })
 }
 

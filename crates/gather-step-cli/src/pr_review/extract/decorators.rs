@@ -112,7 +112,7 @@ pub fn extract_decorator_deltas<S: GraphStore>(
             .then_with(|| a.target_qualified_name.cmp(&b.target_qualified_name))
     });
 
-    Ok(DecoratorDeltas { added, removed, changed })
+    Ok(DecoratorDeltas { added, removed, changed, unavailable: false })
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────

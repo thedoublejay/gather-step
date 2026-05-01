@@ -492,6 +492,18 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // log a warning rather than aborting the entire review run.
     // We check for directory existence first so we never create the baseline
     // storage path as a side effect of opening the coordinator.
+    //
+    // Per-surface `unavailable` flags are set when the engine reports a surface
+    // as unsupported.  Extractors are skipped for those surfaces; the flag tells
+    // the renderer to print an informational note instead of an empty section.
+    let unsupported = &run_unsupported_surfaces;
+    let routes_unavailable = unsupported.iter().any(|s| s == "routes");
+    let symbols_unavailable = unsupported.iter().any(|s| s == "symbols");
+    let payload_contracts_unavailable = unsupported.iter().any(|s| s == "payload_contracts");
+    let events_unavailable = unsupported.iter().any(|s| s == "events");
+    let decorators_unavailable = unsupported.iter().any(|s| s == "decorators");
+    let contract_alignments_unavailable = unsupported.iter().any(|s| s == "contract_alignments");
+
     let (route_deltas, symbol_deltas, payload_contract_deltas, event_deltas, surface_risks, contract_alignments, decorator_deltas) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
         if baseline_graph_exists {
@@ -505,7 +517,9 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     );
                     match baseline_coord {
                         Ok(baseline_coord) => {
-                            let routes =
+                            let routes = if routes_unavailable {
+                                RouteDeltas { unavailable: true, ..RouteDeltas::default() }
+                            } else {
                                 match extract_route_deltas(baseline_coord.graph(), review_coord.graph()) {
                                     Ok(d) => d,
                                     Err(e) => {
@@ -515,8 +529,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                         );
                                         RouteDeltas::default()
                                     }
-                                };
-                            let symbols =
+                                }
+                            };
+                            let symbols = if symbols_unavailable {
+                                SymbolDeltas { unavailable: true, ..SymbolDeltas::default() }
+                            } else {
                                 match extract_symbol_deltas(baseline_coord.graph(), review_coord.graph()) {
                                     Ok(d) => d,
                                     Err(e) => {
@@ -526,8 +543,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                         );
                                         SymbolDeltas::default()
                                     }
-                                };
-                            let payload_contracts =
+                                }
+                            };
+                            let payload_contracts = if payload_contracts_unavailable {
+                                PayloadContractDeltas { unavailable: true, ..PayloadContractDeltas::default() }
+                            } else {
                                 match extract_payload_contract_deltas(
                                     baseline_coord.metadata(),
                                     review_coord.metadata(),
@@ -541,8 +561,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                         );
                                         PayloadContractDeltas::default()
                                     }
-                                };
-                            let events =
+                                }
+                            };
+                            let events = if events_unavailable {
+                                EventDeltas { unavailable: true, ..EventDeltas::default() }
+                            } else {
                                 match extract_event_deltas(baseline_coord.graph(), review_coord.graph()) {
                                     Ok(d) => d,
                                     Err(e) => {
@@ -552,7 +575,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                         );
                                         EventDeltas::default()
                                     }
-                                };
+                                }
+                            };
+
+                            // Risks depend on routes/symbols/events removed lists; if any
+                            // of those are unavailable the removed lists are empty so risks
+                            // will be empty too — that is acceptable for the overlay engine.
                             let risks = match extract_removed_surface_risks(
                                 baseline_coord.graph(),
                                 review_coord.graph(),
@@ -573,136 +601,148 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
                             // ── Phase 3: attach impact to removed/changed routes ──
                             let mut routes = routes;
-                            for r in &mut routes.removed {
-                                match find_route_node_id(baseline_coord.graph(), &r.method, &r.path) {
-                                    Ok(Some(node_id)) => {
-                                        match impact_for_node(baseline_coord.graph(), node_id, r.repo.as_deref()) {
-                                            Ok(summary) => r.impact = Some(summary),
-                                            Err(e) => tracing::warn!(
-                                                error = %e,
-                                                method = %r.method,
-                                                path = %r.path,
-                                                "impact attachment failed for removed route"
-                                            ),
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => tracing::warn!(
-                                        error = %e,
-                                        method = %r.method,
-                                        path = %r.path,
-                                        "route node lookup failed"
-                                    ),
-                                }
-                            }
-                            for c in &mut routes.changed {
-                                // Impact is computed against the BASELINE node.
-                                let (method, path) = (&c.method.clone(), &c.path.clone());
-                                match find_route_node_id(baseline_coord.graph(), method, path) {
-                                    Ok(Some(node_id)) => {
-                                        let repo = c.before.as_ref().and_then(|b| b.repo.as_deref());
-                                        match impact_for_node(baseline_coord.graph(), node_id, repo) {
-                                            Ok(summary) => {
-                                                if let Some(before) = c.before.as_mut() {
-                                                    before.impact = Some(summary);
-                                                }
+                            if !routes.unavailable {
+                                for r in &mut routes.removed {
+                                    match find_route_node_id(baseline_coord.graph(), &r.method, &r.path) {
+                                        Ok(Some(node_id)) => {
+                                            match impact_for_node(baseline_coord.graph(), node_id, r.repo.as_deref()) {
+                                                Ok(summary) => r.impact = Some(summary),
+                                                Err(e) => tracing::warn!(
+                                                    error = %e,
+                                                    method = %r.method,
+                                                    path = %r.path,
+                                                    "impact attachment failed for removed route"
+                                                ),
                                             }
-                                            Err(e) => tracing::warn!(
-                                                error = %e,
-                                                method = %method,
-                                                path = %path,
-                                                "impact attachment failed for changed route"
-                                            ),
                                         }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            method = %r.method,
+                                            path = %r.path,
+                                            "route node lookup failed"
+                                        ),
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => tracing::warn!(
-                                        error = %e,
-                                        method = %method,
-                                        path = %path,
-                                        "route node lookup failed for changed"
-                                    ),
+                                }
+                                for c in &mut routes.changed {
+                                    // Impact is computed against the BASELINE node.
+                                    let (method, path) = (&c.method.clone(), &c.path.clone());
+                                    match find_route_node_id(baseline_coord.graph(), method, path) {
+                                        Ok(Some(node_id)) => {
+                                            let repo = c.before.as_ref().and_then(|b| b.repo.as_deref());
+                                            match impact_for_node(baseline_coord.graph(), node_id, repo) {
+                                                Ok(summary) => {
+                                                    if let Some(before) = c.before.as_mut() {
+                                                        before.impact = Some(summary);
+                                                    }
+                                                }
+                                                Err(e) => tracing::warn!(
+                                                    error = %e,
+                                                    method = %method,
+                                                    path = %path,
+                                                    "impact attachment failed for changed route"
+                                                ),
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            method = %method,
+                                            path = %path,
+                                            "route node lookup failed for changed"
+                                        ),
+                                    }
                                 }
                             }
 
                             // ── Phase 3: attach impact to removed/changed symbols ─
                             let mut symbols = symbols;
-                            for s in &mut symbols.removed {
-                                match find_symbol_node_id(baseline_coord.graph(), &s.repo, &s.qualified_name) {
-                                    Ok(Some(node_id)) => {
-                                        match impact_for_node(baseline_coord.graph(), node_id, Some(&s.repo)) {
-                                            Ok(summary) => s.impact = Some(summary),
-                                            Err(e) => tracing::warn!(
-                                                error = %e,
-                                                repo = %s.repo,
-                                                qn = %s.qualified_name,
-                                                "impact attachment failed for removed symbol"
-                                            ),
+                            if !symbols.unavailable {
+                                for s in &mut symbols.removed {
+                                    match find_symbol_node_id(baseline_coord.graph(), &s.repo, &s.qualified_name) {
+                                        Ok(Some(node_id)) => {
+                                            match impact_for_node(baseline_coord.graph(), node_id, Some(&s.repo)) {
+                                                Ok(summary) => s.impact = Some(summary),
+                                                Err(e) => tracing::warn!(
+                                                    error = %e,
+                                                    repo = %s.repo,
+                                                    qn = %s.qualified_name,
+                                                    "impact attachment failed for removed symbol"
+                                                ),
+                                            }
                                         }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            repo = %s.repo,
+                                            qn = %s.qualified_name,
+                                            "symbol node lookup failed"
+                                        ),
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => tracing::warn!(
-                                        error = %e,
-                                        repo = %s.repo,
-                                        qn = %s.qualified_name,
-                                        "symbol node lookup failed"
-                                    ),
                                 }
-                            }
-                            for c in &mut symbols.changed {
-                                // Impact on the BASELINE node.
-                                let (repo, qn) = (c.repo.clone(), c.qualified_name.clone());
-                                match find_symbol_node_id(baseline_coord.graph(), &repo, &qn) {
-                                    Ok(Some(node_id)) => {
-                                        match impact_for_node(baseline_coord.graph(), node_id, Some(&repo)) {
-                                            Ok(summary) => c.before.impact = Some(summary),
-                                            Err(e) => tracing::warn!(
-                                                error = %e,
-                                                repo = %repo,
-                                                qn = %qn,
-                                                "impact attachment failed for changed symbol"
-                                            ),
+                                for c in &mut symbols.changed {
+                                    // Impact on the BASELINE node.
+                                    let (repo, qn) = (c.repo.clone(), c.qualified_name.clone());
+                                    match find_symbol_node_id(baseline_coord.graph(), &repo, &qn) {
+                                        Ok(Some(node_id)) => {
+                                            match impact_for_node(baseline_coord.graph(), node_id, Some(&repo)) {
+                                                Ok(summary) => c.before.impact = Some(summary),
+                                                Err(e) => tracing::warn!(
+                                                    error = %e,
+                                                    repo = %repo,
+                                                    qn = %qn,
+                                                    "impact attachment failed for changed symbol"
+                                                ),
+                                            }
                                         }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            repo = %repo,
+                                            qn = %qn,
+                                            "symbol node lookup failed for changed"
+                                        ),
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => tracing::warn!(
-                                        error = %e,
-                                        repo = %repo,
-                                        qn = %qn,
-                                        "symbol node lookup failed for changed"
-                                    ),
                                 }
                             }
 
                             // ── Phase 3 Task 3: contract alignment ───────────
-                            let contract_alignments = match extract_contract_alignments(
-                                review_coord.metadata(),
-                                &payload_contracts,
-                            ) {
-                                Ok(a) => a,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "contract alignment extraction failed; \
-                                         emitting empty alignments"
-                                    );
-                                    ContractAlignments::default()
+                            let contract_alignments = if contract_alignments_unavailable {
+                                ContractAlignments { unavailable: true, ..ContractAlignments::default() }
+                            } else {
+                                match extract_contract_alignments(
+                                    review_coord.metadata(),
+                                    &payload_contracts,
+                                ) {
+                                    Ok(a) => a,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "contract alignment extraction failed; \
+                                             emitting empty alignments"
+                                        );
+                                        ContractAlignments::default()
+                                    }
                                 }
                             };
 
                             // ── Phase 3 Task 4: decorator deltas ──────────────
-                            let decorator_deltas = match extract_decorator_deltas(
-                                baseline_coord.graph(),
-                                review_coord.graph(),
-                            ) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "decorator delta extraction failed; \
-                                         emitting empty decorator deltas"
-                                    );
-                                    DecoratorDeltas::default()
+                            let decorator_deltas = if decorators_unavailable {
+                                DecoratorDeltas { unavailable: true, ..DecoratorDeltas::default() }
+                            } else {
+                                match extract_decorator_deltas(
+                                    baseline_coord.graph(),
+                                    review_coord.graph(),
+                                ) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "decorator delta extraction failed; \
+                                             emitting empty decorator deltas"
+                                        );
+                                        DecoratorDeltas::default()
+                                    }
                                 }
                             };
 
@@ -754,8 +794,23 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     );
     suggested_followups.extend(pack_cmds);
 
+    // Source unsupported_surfaces from the per-surface unavailable flags so the
+    // report-level list stays in sync with the surface structs.
+    let derived_unsupported_surfaces: Vec<String> = [
+        ("routes", route_deltas.unavailable),
+        ("symbols", symbol_deltas.unavailable),
+        ("payload_contracts", payload_contract_deltas.unavailable),
+        ("events", event_deltas.unavailable),
+        ("decorators", decorator_deltas.unavailable),
+        ("contract_alignments", contract_alignments.unavailable),
+    ]
+    .into_iter()
+    .filter(|&(_, unavailable)| unavailable)
+    .map(|(name, _)| name.to_owned())
+    .collect();
+
     let report = DeltaReport {
-        schema_version: 4,
+        schema_version: 5,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -787,7 +842,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         contract_alignments,
         decorators: decorator_deltas,
         suggested_followups,
-        unsupported_surfaces: run_unsupported_surfaces,
+        unsupported_surfaces: derived_unsupported_surfaces,
     };
 
     // ── 9. Update marker ───────────────────────────────────────────────────

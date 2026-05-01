@@ -158,7 +158,7 @@ pub fn extract_contract_alignments<M: MetadataStore>(
         findings.truncate(MAX_FINDINGS);
     }
 
-    Ok(ContractAlignments { findings })
+    Ok(ContractAlignments { findings, unavailable: false })
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────

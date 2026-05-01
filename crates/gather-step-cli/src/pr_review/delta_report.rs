@@ -10,6 +10,10 @@
 //! "_unavailable on the {engine} engine_" instead of "_no changes_" for
 //! surfaces the active engine cannot populate.  `schema_version` is bumped
 //! to 4.
+//!
+//! Phase 5 Tasks 3+4 add per-surface `unavailable` flags so each delta struct
+//! self-describes whether it was computed or skipped.  `schema_version` is
+//! bumped to 5.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -92,6 +96,10 @@ pub struct RouteDeltas {
     pub added: Vec<RouteDelta>,
     pub removed: Vec<RouteDelta>,
     pub changed: Vec<RouteDeltaChange>,
+    /// `true` when the engine cannot compute these deltas (e.g., overlay
+    /// engine without a graph-level route index).
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// A single HTTP route surface point as observed in one index snapshot.
@@ -133,6 +141,9 @@ pub struct SymbolDeltas {
     pub added: Vec<SymbolDelta>,
     pub removed: Vec<SymbolDelta>,
     pub changed: Vec<SymbolDeltaChange>,
+    /// `true` when the engine cannot compute these deltas.
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// One exported symbol as observed in a single index snapshot.
@@ -175,6 +186,10 @@ pub struct PayloadContractDeltas {
     pub added: Vec<PayloadContractDelta>,
     pub removed: Vec<PayloadContractDelta>,
     pub changed: Vec<PayloadContractDeltaChange>,
+    /// `true` when the engine cannot compute these deltas (e.g., overlay
+    /// engine without a metadata-store overlay).
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// One payload contract as observed in a single index snapshot.
@@ -229,6 +244,9 @@ pub struct EventDeltas {
     pub added: Vec<EventDelta>,
     pub removed: Vec<EventDelta>,
     pub changed: Vec<EventDeltaChange>,
+    /// `true` when the engine cannot compute these deltas.
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// One event virtual node as observed in a single index snapshot.
@@ -306,6 +324,9 @@ pub enum RiskSeverity {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ContractAlignments {
     pub findings: Vec<ContractAlignmentFinding>,
+    /// `true` when the engine cannot compute these alignments.
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// A cluster of related contracts that share the same canonical identity.
@@ -349,6 +370,9 @@ pub struct DecoratorDeltas {
     pub added: Vec<DecoratorDelta>,
     pub removed: Vec<DecoratorDelta>,
     pub changed: Vec<DecoratorDeltaChange>,
+    /// `true` when the engine cannot compute these deltas.
+    #[serde(default)]
+    pub unavailable: bool,
 }
 
 /// A single decorator annotation as observed in one index snapshot.
@@ -528,39 +552,63 @@ impl DeltaReport {
         }
 
         // ── Route deltas ──────────────────────────────────────────────────────
-        render_route_section(&mut buf, "New routes", &self.routes.added);
-        render_route_section(&mut buf, "Removed routes", &self.routes.removed);
-        render_route_changed_section(&mut buf, &self.routes.changed);
+        if self.routes.unavailable {
+            render_unavailable_section(&mut buf, "Routes", "overlay");
+        } else {
+            render_route_section(&mut buf, "New routes", &self.routes.added);
+            render_route_section(&mut buf, "Removed routes", &self.routes.removed);
+            render_route_changed_section(&mut buf, &self.routes.changed);
+        }
 
         // ── Symbol deltas ─────────────────────────────────────────────────────
-        render_symbol_section(&mut buf, "New symbols", &self.symbols.added);
-        render_symbol_section(&mut buf, "Removed symbols", &self.symbols.removed);
-        render_symbol_changed_section(&mut buf, &self.symbols.changed);
+        if self.symbols.unavailable {
+            render_unavailable_section(&mut buf, "Symbols", "overlay");
+        } else {
+            render_symbol_section(&mut buf, "New symbols", &self.symbols.added);
+            render_symbol_section(&mut buf, "Removed symbols", &self.symbols.removed);
+            render_symbol_changed_section(&mut buf, &self.symbols.changed);
+        }
 
         // ── Payload-contract deltas ───────────────────────────────────────────
-        render_contract_section(&mut buf, "New payload contracts", &self.payload_contracts.added);
-        render_contract_section(
-            &mut buf,
-            "Removed payload contracts",
-            &self.payload_contracts.removed,
-        );
-        render_contract_changed_section(&mut buf, &self.payload_contracts.changed);
+        if self.payload_contracts.unavailable {
+            render_unavailable_section(&mut buf, "Payload contracts", "overlay");
+        } else {
+            render_contract_section(&mut buf, "New payload contracts", &self.payload_contracts.added);
+            render_contract_section(
+                &mut buf,
+                "Removed payload contracts",
+                &self.payload_contracts.removed,
+            );
+            render_contract_changed_section(&mut buf, &self.payload_contracts.changed);
+        }
 
         // ── Event deltas ──────────────────────────────────────────────────────
-        render_event_section(&mut buf, "Events: new producers/consumers", &self.events.added);
-        render_event_section(&mut buf, "Events: removed producers/consumers", &self.events.removed);
-        render_event_changed_section(&mut buf, &self.events.changed);
+        if self.events.unavailable {
+            render_unavailable_section(&mut buf, "Events", "overlay");
+        } else {
+            render_event_section(&mut buf, "Events: new producers/consumers", &self.events.added);
+            render_event_section(&mut buf, "Events: removed producers/consumers", &self.events.removed);
+            render_event_changed_section(&mut buf, &self.events.changed);
+        }
 
         // ── Removed-surface risks ─────────────────────────────────────────────
         render_risks_section(&mut buf, &self.removed_surface_risks);
 
         // ── Contract alignments ───────────────────────────────────────────────
-        render_contract_alignments_section(&mut buf, &self.contract_alignments);
+        if self.contract_alignments.unavailable {
+            render_unavailable_section(&mut buf, "Contract alignments", "overlay");
+        } else {
+            render_contract_alignments_section(&mut buf, &self.contract_alignments);
+        }
 
         // ── Decorator deltas ──────────────────────────────────────────────────
-        render_decorator_section(&mut buf, "New decorators", &self.decorators.added);
-        render_decorator_section(&mut buf, "Removed decorators", &self.decorators.removed);
-        render_decorator_changed_section(&mut buf, &self.decorators.changed);
+        if self.decorators.unavailable {
+            render_unavailable_section(&mut buf, "Decorators", "overlay");
+        } else {
+            render_decorator_section(&mut buf, "New decorators", &self.decorators.added);
+            render_decorator_section(&mut buf, "Removed decorators", &self.decorators.removed);
+            render_decorator_changed_section(&mut buf, &self.decorators.changed);
+        }
 
         buf.push_str("\n## Suggested follow-up commands\n\n");
         buf.push_str("> **Note:** These commands require `--keep-cache` to have been used.\n\n");
@@ -570,6 +618,14 @@ impl DeltaReport {
 
         buf
     }
+}
+
+fn render_unavailable_section(buf: &mut String, heading: &str, engine: &str) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    let _ = writeln!(
+        buf,
+        "_unavailable on the {engine} engine — re-run with `--engine temp-index` for full coverage_"
+    );
 }
 
 fn render_route_section(buf: &mut String, heading: &str, routes: &[RouteDelta]) {
@@ -1137,10 +1193,10 @@ mod tests {
     // ── schema_version ────────────────────────────────────────────────────────
 
     #[test]
-    fn schema_version_is_4() {
-        let report = make_empty_report(4);
+    fn schema_version_is_5() {
+        let report = make_empty_report(5);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
     }
 
     // ── follow-up command helpers ─────────────────────────────────────────────

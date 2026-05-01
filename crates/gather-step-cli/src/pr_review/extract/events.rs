@@ -90,6 +90,7 @@ pub fn extract_event_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<E
         added,
         removed,
         changed,
+        unavailable: false,
     })
 }
 
