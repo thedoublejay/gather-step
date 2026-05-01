@@ -4,13 +4,49 @@
 <section class="bp-cta">
   <span class="bp-kicker"><i></i>Start with your architecture, not a blank prompt</span>
   <h2>Index your repos.</h2>
-  <p>No API keys. No account. The graph runs entirely on your machine.</p>
-  <div class="bp-cta__cli" role="text" aria-label="Install command">
+  <p>
+    One unified graph across your repos, not a federation of isolated ones.
+    Built for teams running many services as one system.
+  </p>
+  <button
+    type="button"
+    class="bp-cta__cli"
+    data-copy-command="brew install thedoublejay/tap/gather-step"
+    aria-label="Copy install command"
+  >
     <span class="arrow">▶</span>
     <span>brew install thedoublejay/tap/gather-step</span>
-  </div>
+    <span class="stamp-inline" aria-live="polite">INSTALL</span>
+  </button>
   <div class="bp-cta__actions">
     <a class="primary" href="/guides/getting-started/">Getting started guide</a>
     <a href="https://github.com/thedoublejay/gather-step">Star on GitHub</a>
   </div>
 </section>
+
+<script>
+  const ctaCopyButtons = document.querySelectorAll('.bp-cta [data-copy-command]');
+
+  ctaCopyButtons.forEach((button) => {
+    const feedback = button.querySelector('.stamp-inline');
+    const defaultLabel = feedback?.textContent ?? '';
+
+    button.addEventListener('click', async () => {
+      const command = button.getAttribute('data-copy-command');
+      if (!command || !feedback) return;
+
+      try {
+        await navigator.clipboard.writeText(command);
+        button.classList.add('is-copied');
+        feedback.textContent = 'COPIED';
+      } catch {
+        feedback.textContent = 'COPY FAILED';
+      }
+
+      window.setTimeout(() => {
+        button.classList.remove('is-copied');
+        feedback.textContent = defaultLabel;
+      }, 1600);
+    });
+  });
+</script>

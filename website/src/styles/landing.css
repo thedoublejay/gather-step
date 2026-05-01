@@ -1110,11 +1110,37 @@ a {
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: 15px;
+  cursor: pointer;
+  appearance: none;
+  text-align: left;
+}
+
+.bp-cta__cli:hover,
+.bp-cta__cli:focus-visible {
+  border-color: var(--amber);
+}
+
+.bp-cta__cli:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
 }
 
 .bp-cta__cli .arrow {
   color: var(--amber);
   font-weight: 700;
+}
+
+.bp-cta__cli .stamp-inline {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  white-space: nowrap;
+}
+
+.bp-cta__cli.is-copied .stamp-inline {
+  color: var(--amber);
 }
 
 .bp-cta__actions {
