@@ -1455,7 +1455,7 @@ metadata:
     #[test]
     fn kustomize_parser_handles_application_and_generators_without_values() {
         let output = parse_deployment_artifact(
-            "platform-gitops",
+            "gitops-repo",
             "kustomize/apps/api/overlays/prod/kustomization.yaml",
             r#"
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -1479,7 +1479,7 @@ secretGenerator:
         assert_eq!(output.artifact_kind, DeploymentArtifactKind::Kustomize);
         assert!(output.nodes.iter().any(|node| {
             node.kind == NodeKind::Deployment
-                && node.qualified_name == "__deployment__platform-gitops__api"
+                && node.qualified_name == "__deployment__gitops-repo__api"
         }));
         assert!(output.nodes.iter().any(|node| {
             node.kind == NodeKind::ConfigMap && node.qualified_name == "__config_map__api-config"

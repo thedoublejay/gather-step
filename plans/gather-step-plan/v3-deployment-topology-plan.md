@@ -6,7 +6,7 @@
 
 Build deployment topology as a graph-backed evidence layer that answers: "Which code services are actually deployed, how are they deployed, and which environment or shared infrastructure do they depend on?"
 
-This work is intentionally separate from projection impact. Projection impact traces static code/data-shape relationships; deployment topology uses a different evidence class: Dockerfiles, Compose files, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions, env files, platform-gitops layouts, repo profiles, and Braingent advisory learnings.
+This work is intentionally separate from projection impact. Projection impact traces static code/data-shape relationships; deployment topology uses a different evidence class: Dockerfiles, Compose files, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions, env files, GitOps repository layouts, repo profiles, and Braingent advisory learnings.
 
 **ELI5:** Projection impact says "this field change touches these code paths." Deployment topology says "this code path is shipped as this service in this environment, with these env vars and shared dependencies." Both are graph facts, but they come from different files and should not be mixed silently.
 
@@ -26,7 +26,7 @@ This work is intentionally separate from projection impact. Projection impact tr
   - The key gap is that plan refreshes do not force deployed-source verification. A deployment-topology index should make that check explicit.
 - External plan corpus:
   - Personal gather-step task corpus.
-  - Carry forward the deploy graph scope into v3: Dockerfile, Compose, Kubernetes, Kustomize, explicit Helm chart artifacts, GitHub Actions, env files, and platform-gitops layouts.
+  - Carry forward the deploy graph scope into v3: Dockerfile, Compose, Kubernetes, Kustomize, explicit Helm chart artifacts, GitHub Actions, env files, and GitOps repository layouts.
 
 ## Goals
 
@@ -74,7 +74,7 @@ This work is intentionally separate from projection impact. Projection impact tr
 
 3. Add deployment config.
    - `deployment.include` for explicit artifact globs.
-   - `deployment.gitops_roots` for configured platform-gitops layouts.
+   - `deployment.gitops_roots` for configured GitOps repository layouts.
    - `deployment.env_files` for opt-in env parsing.
    - Defaults must be cheap and deterministic.
    - `→ verify: config parser accepts deployment config and still rejects unknown fields`
