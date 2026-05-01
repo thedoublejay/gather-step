@@ -257,9 +257,20 @@ fn add_db_collection_edges(parsed: &ParsedFile, augmentation: &mut MongooseAugme
 }
 
 fn add_migration_collection_edges(parsed: &ParsedFile, augmentation: &mut MongooseAugmentation) {
-    let Some(migration) = mongoose_migration::detect_migration(parsed) else {
+    let migrations = mongoose_migration::detect_migrations(parsed);
+    if migrations.is_empty() {
         return;
-    };
+    }
+    for migration in migrations {
+        add_migration_collection_edge(parsed, augmentation, migration);
+    }
+}
+
+fn add_migration_collection_edge(
+    parsed: &ParsedFile,
+    augmentation: &mut MongooseAugmentation,
+    migration: mongoose_migration::MongooseMigration,
+) {
     let qualified_name = format!("__migration_collection__{}", migration.collection_name);
     let span = parsed
         .call_sites
@@ -932,5 +943,69 @@ async function helper(db: Connection): Promise<void> {
         assert!(filter_metadata.contains("{ workflow: { $type: 'object' } }"));
         assert!(!filter_metadata.contains("{ migrated: true }"));
         assert!(!filter_metadata.contains("{ helperOnly: true }"));
+    }
+
+    #[test]
+    fn mongoose_migration_produces_edges_for_multiple_collections() {
+        let temp_dir = TestDir::new("migration-multi-collection-edge");
+        fs::create_dir_all(temp_dir.path().join("migrations")).expect("fixture dir should write");
+        fs::write(
+            temp_dir.path().join("migrations/20260430-alerts.ts"),
+            r#"
+import type { Connection } from 'mongoose';
+
+export async function up(db: Connection): Promise<void> {
+  await db.collection('alerts').updateMany(
+    { workflow: { $type: 'object' } },
+    { $set: { migrated: true } }
+  );
+  await db.collection('users').deleteMany(
+    { stale: true },
+  );
+}
+
+export async function down(db: Connection): Promise<void> {}
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "migrations/20260430-alerts.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        for (collection, filter) in [
+            ("alerts", "{ workflow: { $type: 'object' } }"),
+            ("users", "{ stale: true }"),
+        ] {
+            let external_id = format!("__migration_collection__{collection}");
+            let collection_node = parsed
+                .nodes
+                .iter()
+                .find(|node| node.external_id.as_deref() == Some(external_id.as_str()))
+                .expect("expected migration collection node");
+            let edge = parsed
+                .edges
+                .iter()
+                .find(|edge| {
+                    edge.kind == gather_step_core::EdgeKind::MigratesCollection
+                        && edge.target == collection_node.id
+                })
+                .expect("expected MigratesCollection edge");
+            let filter_metadata = edge
+                .metadata
+                .drift_kind
+                .as_deref()
+                .expect("filter metadata should be stored");
+            assert!(filter_metadata.contains(filter));
+        }
     }
 }

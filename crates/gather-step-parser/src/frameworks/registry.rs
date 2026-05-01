@@ -27,7 +27,7 @@ use gather_step_core::{EdgeData, NodeData};
 use crate::{
     frameworks::{
         azure, detect, drizzle, frontend_hooks, frontend_react, frontend_router, gateway_proxy,
-        mongoose, nestjs, nextjs, prisma, storybook, tailwind,
+        mongoose, nestjs, nextjs, prisma, storybook, tailwind, typeorm,
     },
     traverse::Language,
     tree_sitter::ParsedFile,
@@ -55,6 +55,8 @@ pub enum PackId {
     Prisma,
     /// Drizzle schema and query extraction.
     Drizzle,
+    /// `TypeORM` migration table extraction.
+    TypeOrm,
     /// React hooks and service-wrapper extraction.
     React,
     /// React Router route tree extraction.
@@ -103,6 +105,7 @@ pub(crate) enum AugGroup {
     Tailwind,
     Prisma,
     Drizzle,
+    TypeOrm,
     React,
     FrontendRouter,
     Storybook,
@@ -126,6 +129,7 @@ impl PackId {
             Self::Tailwind => AugGroup::Tailwind,
             Self::Prisma => AugGroup::Prisma,
             Self::Drizzle => AugGroup::Drizzle,
+            Self::TypeOrm => AugGroup::TypeOrm,
             Self::React => AugGroup::React,
             Self::ReactRouter | Self::Redux | Self::Zustand | Self::ReactHookForm => {
                 AugGroup::FrontendRouter
@@ -203,6 +207,10 @@ impl PackRegistry {
                 PackEntry {
                     id: PackId::Drizzle,
                     detect: Some(detect::is_drizzle),
+                },
+                PackEntry {
+                    id: PackId::TypeOrm,
+                    detect: Some(detect::is_typeorm),
                 },
                 PackEntry {
                     id: PackId::React,
@@ -340,6 +348,13 @@ impl PackRegistry {
             }
             AugGroup::Drizzle => {
                 let aug = drizzle::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
+            }
+            AugGroup::TypeOrm => {
+                let aug = typeorm::augment(parsed);
                 AugmentationOutput {
                     nodes: aug.nodes,
                     edges: aug.edges,
@@ -562,7 +577,8 @@ mod tests {
     "next": "^15.0.0",
     "tailwindcss": "^4.0.0",
     "@prisma/client": "^6.0.0",
-    "drizzle-orm": "^0.40.0"
+    "drizzle-orm": "^0.40.0",
+    "typeorm": "^0.3.24"
   }
 }
 "#,
@@ -573,6 +589,7 @@ mod tests {
         assert!(active.contains(&PackId::Tailwind));
         assert!(active.contains(&PackId::Prisma));
         assert!(active.contains(&PackId::Drizzle));
+        assert!(active.contains(&PackId::TypeOrm));
         assert!(active.contains(&PackId::SharedLib));
     }
 

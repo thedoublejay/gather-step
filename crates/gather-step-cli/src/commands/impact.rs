@@ -5,11 +5,14 @@ use clap::Args;
 use gather_step_analysis::{
     CandidateKey, EvidenceBand, ProjectionEvidence, ProjectionEvidenceVerbosity, ProjectionField,
     ProjectionImpactReport, ProjectionImpactRequest, QueryShape, anchor::rank_anchors,
-    classify_query_shape, projection_impact, resolve_event_targets, resolve_route_target,
-    shared_contract::shared_contract_candidate_ids, shared_contract_impact, trace_across_repos,
+    classify_query_shape, projection_impact_with_payload_contracts, resolve_event_targets,
+    resolve_route_target, shared_contract::shared_contract_candidate_ids, shared_contract_impact,
+    trace_across_repos,
 };
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, SearchStore, StorageCoordinator};
+use gather_step_storage::{
+    GraphStore, MetadataStore, PayloadContractQuery, SearchStore, StorageCoordinator,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -101,7 +104,17 @@ pub fn execute(
     args: ImpactArgs,
 ) -> Result<RenderedCommand> {
     if args.symbol.contains('.') {
-        let field_report = projection_impact(
+        let payload_contracts = storage
+            .metadata()
+            .payload_contracts_for_query(PayloadContractQuery {
+                repo: repo_filter.map(ToOwned::to_owned),
+                min_confidence: Some(750),
+                ..PayloadContractQuery::default()
+            })?
+            .into_iter()
+            .map(|record| record.record)
+            .collect::<Vec<_>>();
+        let field_report = projection_impact_with_payload_contracts(
             storage.graph(),
             ProjectionImpactRequest {
                 target: args.symbol.clone(),
@@ -109,6 +122,7 @@ pub fn execute(
                 max_results: args.limit,
                 evidence_verbosity: ProjectionEvidenceVerbosity::Full,
             },
+            &payload_contracts,
         )?;
         if field_report.resolved
             && field_report.candidates.iter().any(|candidate| {
@@ -436,7 +450,16 @@ fn format_projection_fields(fields: &[ProjectionField]) -> String {
 fn format_projection_evidence(evidence: &[ProjectionEvidence]) -> String {
     evidence
         .iter()
-        .map(|item| format!("{}:{} ({})", item.repo, item.file_path, item.field_path))
+        .map(|item| {
+            let source = item
+                .evidence_source
+                .as_deref()
+                .map_or(String::new(), |source| format!(", {source}"));
+            format!(
+                "{}:{} ({}{source})",
+                item.repo, item.file_path, item.field_path
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

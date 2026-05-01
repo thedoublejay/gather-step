@@ -5,6 +5,37 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
 
+## v2.3.0 (2026-05-01)
+
+Release status: **released**.
+
+Data-shape research carry-forward release for alias-aware field evidence, optional payload filter risk, generated migration probe plans, and broader migration sibling detection.
+
+### Highlights
+
+- Labeled field evidence as `direct_field_access` or `local_alias_field_access` when `projection-impact` / `projection_impact` can explain the origin.
+- Followed same-scope TypeScript aliases and object destructuring aliases for typed field-access evidence.
+- Promoted optional payload filter mismatch into `projection_impact`, dotted `impact`, MCP `projection_impact`, and planning-pack gap summaries.
+- Added generated Mongo `$type` probe plans to migration sibling bands, with copy-paste-safe `db.getCollection(<name>)` commands.
+- Extended Mongoose migration detection to imported local model declarations, multiple static collections in one migration, and additional static write methods.
+- Added conservative TypeORM migration sibling detection for static `queryRunner.query(...)` SQL table names and static `queryRunner` table-method targets.
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.3.0`.
+- Refreshed Cargo lock metadata and updated the website dependency set from Astro `6.2.0` to `6.2.1`.
+
+### Data-Shape Research
+
+- Optional payload mismatch stays a static review signal. It adds `optional_payload_filter_mismatch` and `runtime_shape_probe` instead of claiming production data distribution.
+- Planning packs now surface optional payload evidence on migration probe plans when an indexed payload contract marks the filtered field optional.
+- TypeORM support indexes table siblings only. SQL WHERE-field extraction remains intentionally out of scope, so SQL migrations do not produce Mongo-specific field probe guidance.
+- Generated probe plans remain static. Gather Step still does not connect to MongoDB or execute runtime probes.
+
+### Verification Coverage
+
+- Added store-backed planning oracle coverage for field evidence, optional payload contracts, and migration filters.
+- Added parser coverage for alias/destructuring field evidence and TypeORM migration table detection.
+- Added MCP coverage for optionality mismatch summaries, migration sibling probe plans, response-shape stability, and payload-contract lookup warnings.
+- Verified format, clippy, cargo check, targeted parser/analysis/MCP tests, and website build during release preparation.
+
 ## v2.2.0 (2026-04-30)
 
 Release status: **released**.

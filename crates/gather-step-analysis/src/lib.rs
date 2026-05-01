@@ -57,6 +57,7 @@ pub use pack_assembly::{
 pub use projection_impact::{
     ProjectionDerivation, ProjectionEvidence, ProjectionEvidenceVerbosity, ProjectionField,
     ProjectionImpactError, ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
+    projection_impact_with_payload_contracts,
 };
 pub use proofs::{
     MAX_PROOFS_PER_REPO, ProofCaller, ProofEngineError, ProofEngineOptions, ProofEngineOutput,

@@ -11,13 +11,15 @@ use gather_step_analysis::proofs::{
 use gather_step_analysis::shared_contract_impact;
 use gather_step_analysis::transport::{TransportLink, transport_links_for};
 use gather_step_analysis::{
-    ProjectionEvidenceVerbosity, ProjectionImpactReport, ProjectionImpactRequest, projection_impact,
+    ProjectionEvidenceVerbosity, ProjectionImpactReport, ProjectionImpactRequest,
+    projection_impact_with_payload_contracts,
 };
 use gather_step_core::{
-    EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeId, NodeKind, PlanningProof, node_id,
+    EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeId, NodeKind, PayloadContractRecord,
+    PayloadSide, PlanningProof, node_id,
 };
 use gather_step_output::evidence::render_evidence_chain;
-use gather_step_storage::{GraphStore, MetadataStore};
+use gather_step_storage::{GraphStore, MetadataStore, PayloadContractQuery};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,7 @@ const DEFAULT_PACK_LIMIT: usize = 6;
 const MAX_CONTEXT_PACK_CACHE_BYTES: i64 = 64 * 1024 * 1024;
 const CONTEXT_PACK_CACHE_KEY_VERSION: &str = "v2";
 const MIGRATION_COLLECTION_PREFIX: &str = "__migration_collection__";
+const OPTIONALITY_MIN_CONFIDENCE: u16 = 750;
 const PACK_CONFIDENCE_MODEL_VERSION: &str = "v1.0";
 const PACK_CONFIDENCE_HIGH_MARGIN: i32 = 125;
 const PACK_CONFIDENCE_MEDIUM_MARGIN: i32 = 75;
@@ -233,6 +236,8 @@ pub struct MigrationSiblingBand {
     pub collection_name: String,
     pub coverage_note: String,
     pub verification_hint: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probe_plans: Vec<MigrationProbePlan>,
     pub siblings: Vec<MigrationSiblingEntry>,
     /// True when more migration siblings touched this collection than the band
     /// can include. Consumers should treat the list as a sample, not a full
@@ -249,6 +254,28 @@ pub struct MigrationSiblingBand {
 )]
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MigrationProbePlan {
+    pub field_path: String,
+    pub command: String,
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter_literals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_payload_evidence: Vec<MigrationOptionalPayloadEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MigrationOptionalPayloadEvidence {
+    pub repo: String,
+    pub file_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type_name: Option<String>,
+    pub side: String,
+    pub field_name: String,
+    pub confidence: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1070,6 +1097,11 @@ fn assemble_context_pack_for_symbol(
         semantic_bridges.retain(|bridge| bridge.repo == repo);
     }
     let migration_siblings = migration_sibling_band_for_pack(ctx, symbol_id, mode)?;
+    let has_optional_migration_filter = migration_siblings.as_ref().is_some_and(|band| {
+        band.probe_plans
+            .iter()
+            .any(|plan| !plan.optional_payload_evidence.is_empty())
+    });
 
     let mut next_steps = suggested_next_steps(mode);
     if !semantic_bridges.is_empty() {
@@ -1087,6 +1119,11 @@ fn assemble_context_pack_for_symbol(
         Some(NodeKind::Route)
     ) {
         next_steps.push("crud_trace".to_owned());
+    }
+    if has_optional_migration_filter {
+        next_steps.push(
+            "run generated Mongo probe plans for optional payload fields before trusting migration filters".to_owned(),
+        );
     }
     next_steps.sort();
     next_steps.dedup();
@@ -1174,7 +1211,7 @@ fn assemble_context_pack_for_symbol(
         (!values.is_empty()).then_some(values)
     });
 
-    let unresolved_gaps = compute_unresolved_gaps(
+    let mut unresolved_gaps = compute_unresolved_gaps(
         mode,
         symbol.kind.as_deref().and_then(parse_symbol_kind),
         semantic_bridges.is_empty(),
@@ -1184,6 +1221,11 @@ fn assemble_context_pack_for_symbol(
             .as_ref()
             .is_some_and(|response| response.data.dependencies.is_empty()),
     );
+    if has_optional_migration_filter {
+        unresolved_gaps.push("migration_optional_payload_filter_probe_required".to_owned());
+        unresolved_gaps.sort();
+        unresolved_gaps.dedup();
+    }
     warnings.extend(gap_warnings(&unresolved_gaps));
 
     let mut response = ContextPackResponse {
@@ -1269,8 +1311,24 @@ fn apply_projection_impact_summary(
     response: &mut ContextPackResponse,
 ) {
     let targets = projection_impact_targets(ctx, request, repo_filter, response);
+    let payload_contracts = match ctx
+        .metadata()
+        .payload_contracts_for_query(PayloadContractQuery {
+            repo: repo_filter.map(str::to_owned),
+            min_confidence: Some(OPTIONALITY_MIN_CONFIDENCE),
+            ..PayloadContractQuery::default()
+        }) {
+        Ok(records) => records
+            .into_iter()
+            .map(|record| record.record)
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            push_payload_contract_lookup_warning(response, error);
+            Vec::new()
+        }
+    };
     let Some(report) = targets.into_iter().find_map(|target| {
-        let report = projection_impact(
+        let report = projection_impact_with_payload_contracts(
             ctx.graph(),
             ProjectionImpactRequest {
                 target,
@@ -1278,6 +1336,7 @@ fn apply_projection_impact_summary(
                 max_results: 10,
                 evidence_verbosity: ProjectionEvidenceVerbosity::Summary,
             },
+            &payload_contracts,
         )
         .ok()?;
         (report.resolved && report.ambiguity.is_none() && report_has_field_summary(&report))
@@ -1354,6 +1413,17 @@ fn apply_projection_impact_summary(
     if let Some(meta) = &mut response.meta {
         meta.warnings
             .push("projection impact evidence is available for this target".to_owned());
+    }
+}
+
+fn push_payload_contract_lookup_warning(
+    response: &mut ContextPackResponse,
+    error: impl std::fmt::Display,
+) {
+    if let Some(meta) = &mut response.meta {
+        meta.warnings.push(format!(
+            "payload contract lookup failed; optional payload mismatch evidence may be incomplete: {error}"
+        ));
     }
 }
 
@@ -1751,12 +1821,15 @@ fn migration_sibling_band_for_pack(
         return Ok(None);
     }
     let anchor_id = decode_node_id(symbol_id).map_err(McpServerError::InvalidInput)?;
+    let anchor_repo = ctx.graph().get_node(anchor_id)?.map(|node| node.repo);
     let mut band = migration_sibling_band_for_anchor(ctx.graph(), anchor_id)?;
     if let Some(band) = band.as_mut() {
         for sibling in &mut band.siblings {
             sibling.commit_short_sha =
                 latest_commit_short_sha(ctx, &sibling.repo, &sibling.file_path)?;
         }
+        let contracts = payload_contracts_for_migration_band(ctx, band, anchor_repo.as_deref())?;
+        annotate_probe_plans_with_optional_payload_evidence(band, &contracts);
     }
     Ok(band)
 }
@@ -1822,11 +1895,13 @@ fn migration_sibling_band_for_anchor(
     if truncated {
         siblings.truncate(MIGRATION_SIBLING_LIMIT);
     }
+    let probe_plans = migration_probe_plans(&collection_name, &siblings);
 
     Ok(Some(MigrationSiblingBand {
         coverage_note: migration_coverage_note().to_owned(),
         verification_hint: migration_verification_hint(&collection_name),
         collection_name,
+        probe_plans,
         siblings,
         truncated,
     }))
@@ -1881,14 +1956,220 @@ fn decode_migration_filters(value: Option<&str>) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
-fn migration_verification_hint(collection_name: &str) -> String {
+fn migration_probe_plans(
+    collection_name: &str,
+    siblings: &[MigrationSiblingEntry],
+) -> Vec<MigrationProbePlan> {
+    let mut filters_by_field = BTreeMap::<String, BTreeSet<String>>::new();
+    for sibling in siblings {
+        for filter in &sibling.filter_literals {
+            for field_path in field_paths_from_migration_filter(filter) {
+                filters_by_field
+                    .entry(field_path)
+                    .or_default()
+                    .insert(filter.clone());
+            }
+        }
+    }
+
+    filters_by_field
+        .into_iter()
+        .map(|(field_path, filters)| MigrationProbePlan {
+            command: mongo_type_probe_command(collection_name, &field_path),
+            rationale: format!(
+                "Count live Mongo BSON types for `{field_path}` before relying on migration filters that scope by field type."
+            ),
+            field_path,
+            filter_literals: filters.into_iter().collect(),
+            optional_payload_evidence: Vec::new(),
+        })
+        .collect()
+}
+
+fn payload_contracts_for_migration_band(
+    ctx: &McpContext,
+    band: &MigrationSiblingBand,
+    anchor_repo: Option<&str>,
+) -> Result<Vec<PayloadContractRecord>, McpServerError> {
+    let mut repos = band
+        .siblings
+        .iter()
+        .map(|sibling| sibling.repo.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(repo) = anchor_repo {
+        repos.insert(repo);
+    }
+
+    let mut records = Vec::new();
+    for repo in repos {
+        let repo_records = ctx
+            .metadata()
+            .payload_contracts_for_query(PayloadContractQuery {
+                repo: Some(repo.to_owned()),
+                min_confidence: Some(OPTIONALITY_MIN_CONFIDENCE),
+                ..PayloadContractQuery::default()
+            })?;
+        records.extend(repo_records.into_iter().map(|record| record.record));
+    }
+    Ok(records)
+}
+
+fn annotate_probe_plans_with_optional_payload_evidence(
+    band: &mut MigrationSiblingBand,
+    records: &[PayloadContractRecord],
+) {
+    for plan in &mut band.probe_plans {
+        let mut evidence = BTreeSet::new();
+        for record in records {
+            for field in &record.contract.fields {
+                if field.optional
+                    && optional_payload_field_matches_filter(&field.name, &plan.field_path)
+                {
+                    evidence.insert(MigrationOptionalPayloadEvidence {
+                        repo: record.repo.clone(),
+                        file_path: record.file_path.clone(),
+                        source_type_name: record.source_type_name.clone(),
+                        side: payload_side_label(record.side).to_owned(),
+                        field_name: field.name.clone(),
+                        confidence: field.confidence.min(record.confidence),
+                    });
+                }
+            }
+        }
+        plan.optional_payload_evidence = evidence.into_iter().collect();
+    }
+}
+
+fn optional_payload_field_matches_filter(payload_field: &str, filter_field: &str) -> bool {
+    payload_field == filter_field
+        || filter_field.starts_with(&format!("{payload_field}."))
+        || payload_field.starts_with(&format!("{filter_field}."))
+}
+
+fn payload_side_label(side: PayloadSide) -> &'static str {
+    match side {
+        PayloadSide::Producer => "producer",
+        PayloadSide::Consumer => "consumer",
+    }
+}
+
+fn field_paths_from_migration_filter(filter: &str) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    let bytes = filter.as_bytes();
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        cursor = skip_non_filter_key(bytes, cursor);
+        if cursor >= bytes.len() {
+            break;
+        }
+
+        let (raw_key, next_cursor) = if bytes[cursor] == b'\'' || bytes[cursor] == b'"' {
+            quoted_filter_key(filter, cursor).unwrap_or_else(|| (String::new(), cursor + 1))
+        } else {
+            unquoted_filter_key(filter, cursor).unwrap_or_else(|| (String::new(), cursor + 1))
+        };
+        cursor = next_cursor;
+
+        let after_key = skip_ascii_ws_bytes(bytes, cursor);
+        if after_key >= bytes.len() || bytes[after_key] != b':' {
+            continue;
+        }
+        if let Some(field) = normalize_filter_field_path(&raw_key) {
+            fields.insert(field);
+        }
+    }
+
+    fields
+}
+
+fn skip_non_filter_key(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len()
+        && bytes[cursor] != b'\''
+        && bytes[cursor] != b'"'
+        && !is_filter_key_start(bytes[cursor])
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn quoted_filter_key(filter: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = filter.as_bytes();
+    let quote = *bytes.get(cursor)?;
+    let mut end = cursor + 1;
+    while end < bytes.len() && bytes[end] != quote {
+        end += 1;
+    }
+    if end >= bytes.len() {
+        return None;
+    }
+    Some((filter[cursor + 1..end].to_owned(), end + 1))
+}
+
+fn unquoted_filter_key(filter: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = filter.as_bytes();
+    if !is_filter_key_start(*bytes.get(cursor)?) {
+        return None;
+    }
+    let mut end = cursor + 1;
+    while end < bytes.len() && is_filter_key_continue(bytes[end]) {
+        end += 1;
+    }
+    Some((filter[cursor..end].to_owned(), end))
+}
+
+fn normalize_filter_field_path(raw_key: &str) -> Option<String> {
+    let key = raw_key.trim();
+    if key.is_empty() || key.starts_with('$') {
+        return None;
+    }
+    if !key
+        .bytes()
+        .all(|byte| is_filter_key_continue(byte) && byte != b'$')
+    {
+        return None;
+    }
+    Some(key.to_owned())
+}
+
+fn mongo_type_probe_command(collection_name: &str, field_path: &str) -> String {
+    let collection = mongo_collection_accessor(collection_name);
     format!(
-        "Run db.{collection_name}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
+        "{collection}.aggregate([{{ $group: {{ _id: {{ $type: '${field_path}' }}, count: {{ $sum: 1 }} }} }}, {{ $sort: {{ count: -1 }} }}])"
+    )
+}
+
+fn mongo_collection_accessor(collection_name: &str) -> String {
+    let encoded =
+        serde_json::to_string(collection_name).expect("Mongo collection names should serialize");
+    format!("db.getCollection({encoded})")
+}
+
+fn skip_ascii_ws_bytes(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn is_filter_key_start(byte: u8) -> bool {
+    byte == b'$' || byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_filter_key_continue(byte: u8) -> bool {
+    byte == b'$' || byte == b'_' || byte == b'.' || byte.is_ascii_alphanumeric()
+}
+
+fn migration_verification_hint(collection_name: &str) -> String {
+    let collection = mongo_collection_accessor(collection_name);
+    format!(
+        "Run {collection}.aggregate([{{ $group: {{ _id: {{ $type: '$<field>' }}, count: {{ $sum: 1 }} }} }}]) against a representative environment before trusting any filter that scopes by field type. Source code cannot prove schema-to-data drift."
     )
 }
 
 fn migration_coverage_note() -> &'static str {
-    "Best-effort v2.2 coverage: Mongoose migrations using db.collection(...).updateMany(...) or same-file mongoose.model(..., ..., 'collection') Model.updateMany(...). TypeORM, Knex, Prisma, Atlas, dynamic collection names, imported model resolution, and multi-collection migrations are not detected."
+    "Best-effort v2.3 coverage: Mongoose migrations using db.collection(...) writes or statically resolved mongoose.model(..., ..., 'collection') model writes, including imported local model declarations and multi-collection migration files. TypeORM migrations are detected for static queryRunner SQL/table method table names. Dynamic collection/table names, Knex, Prisma, Atlas, TypeORM entity metadata, and SQL WHERE-field extraction remain conservative coverage gaps."
 }
 
 fn latest_commit_short_sha(
@@ -1925,10 +2206,13 @@ fn trim_context_pack(response: &mut ContextPackResponse) -> bool {
     {
         return true;
     }
-    if let Some(band) = response.data.migration_siblings.as_mut()
-        && band.siblings.pop().is_some()
-    {
-        return true;
+    if let Some(band) = response.data.migration_siblings.as_mut() {
+        if band.siblings.pop().is_some() {
+            return true;
+        }
+        if band.probe_plans.pop().is_some() {
+            return true;
+        }
     }
     response.data.migration_siblings.take().is_some()
         || response
@@ -3875,17 +4159,17 @@ fn gap_warnings(unresolved_gaps: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         ChangeImpactSummary, ContextPackData, ContextPackMeta, ContextPackResponse,
-        CrossRepoCaller, MigrationSiblingBand, MigrationSiblingEntry, PackItem,
-        PackResolutionDetails, PlanningRescue, RankedPackCandidate, RescueAnchor,
-        ResolvedPackTarget, TruncatedRepos, apply_planning_evidence_ranking,
-        build_ranked_alternate_anchors, build_resolution_details, cap_change_impact_repos,
-        clamp_margin_u16, compute_unresolved_gaps, file_path_packability_bonus,
-        merge_probable_downstream_repos, pack_candidate_query_penalty, pack_is_structurally_weak,
-        pack_recovery_score, pack_resolution_rationale, pack_resolution_strategy,
-        parse_route_target, planning_cross_repo_callers, query_alignment_bonus,
-        query_alignment_tokens, query_shape_match_bonus, scaled_search_match_score,
-        should_rank_global_pack_candidates, symbol_kind_packability_bonus,
-        symbol_kind_packability_bonus_for_query,
+        CrossRepoCaller, MigrationOptionalPayloadEvidence, MigrationProbePlan,
+        MigrationSiblingBand, MigrationSiblingEntry, PackItem, PackResolutionDetails,
+        PlanningRescue, RankedPackCandidate, RescueAnchor, ResolvedPackTarget, TruncatedRepos,
+        apply_planning_evidence_ranking, build_ranked_alternate_anchors, build_resolution_details,
+        cap_change_impact_repos, clamp_margin_u16, compute_unresolved_gaps,
+        file_path_packability_bonus, merge_probable_downstream_repos, pack_candidate_query_penalty,
+        pack_is_structurally_weak, pack_recovery_score, pack_resolution_rationale,
+        pack_resolution_strategy, parse_route_target, planning_cross_repo_callers,
+        query_alignment_bonus, query_alignment_tokens, query_shape_match_bonus,
+        scaled_search_match_score, should_rank_global_pack_candidates,
+        symbol_kind_packability_bonus, symbol_kind_packability_bonus_for_query,
     };
     use crate::{
         config::{McpContext, McpServerConfig},
@@ -3897,9 +4181,12 @@ mod tests {
     };
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId,
-        NodeKind, PlanningProof, ProofHop, ProofKind, Visibility, node_id, ref_node_id,
+        NodeKind, PayloadContractDoc, PayloadContractRecord, PayloadField, PayloadInferenceKind,
+        PayloadSide, PlanningProof, ProofHop, ProofKind, Visibility, node_id, ref_node_id,
     };
-    use gather_step_storage::{GraphStore, GraphStoreDb, WorkspaceStores};
+    use gather_step_storage::{
+        GraphStore, GraphStoreDb, MetadataStore, PayloadContractStoreRecord, WorkspaceStores,
+    };
     use smallvec::smallvec;
     use std::{
         collections::BTreeMap,
@@ -4313,6 +4600,51 @@ mod tests {
         }
     }
 
+    fn payload_contract_record(
+        repo: &str,
+        file_path: &str,
+        source_type_name: &str,
+        field_name: &str,
+        optional: bool,
+    ) -> PayloadContractRecord {
+        let target_id = node_id(repo, file_path, NodeKind::Event, "alert.updated");
+        let source_symbol_id = node_id(repo, file_path, NodeKind::Function, source_type_name);
+        let contract = PayloadContractDoc {
+            content_type: "application/json".to_owned(),
+            schema_format: "normalized_object".to_owned(),
+            side: PayloadSide::Consumer,
+            inference_kind: PayloadInferenceKind::TypedParameter,
+            confidence: 900,
+            fields: vec![PayloadField {
+                name: field_name.to_owned(),
+                type_name: "object".to_owned(),
+                optional,
+                confidence: 900,
+            }],
+            source_type_name: Some(source_type_name.to_owned()),
+        };
+        PayloadContractRecord {
+            payload_contract_node_id: node_id(
+                repo,
+                file_path,
+                NodeKind::PayloadContract,
+                source_type_name,
+            ),
+            contract_target_node_id: target_id,
+            contract_target_kind: NodeKind::Event,
+            contract_target_qualified_name: Some("__event__kafka__alert.updated".to_owned()),
+            repo: repo.to_owned(),
+            file_path: file_path.to_owned(),
+            source_symbol_node_id: source_symbol_id,
+            line_start: Some(1),
+            side: PayloadSide::Consumer,
+            inference_kind: PayloadInferenceKind::TypedParameter,
+            confidence: 900,
+            source_type_name: Some(source_type_name.to_owned()),
+            contract,
+        }
+    }
+
     #[test]
     fn migration_sibling_band_collects_prior_filters() {
         let temp = TempDb::new("migration-sibling-band");
@@ -4400,12 +4732,225 @@ mod tests {
         assert_eq!(band.collection_name, "alerts");
         assert!(band.coverage_note.contains("Mongoose migrations"));
         assert!(band.coverage_note.contains("TypeORM"));
-        assert!(band.verification_hint.contains("db.alerts.aggregate"));
+        assert!(
+            band.verification_hint
+                .contains("db.getCollection(\"alerts\").aggregate")
+        );
         assert_eq!(band.siblings.len(), 1);
         assert_eq!(band.siblings[0].file_path, "migrations/20260401-alerts.ts");
         assert_eq!(
             band.siblings[0].filter_literals,
             vec!["{ workflow: { $type: 'object' } }".to_owned()]
+        );
+        assert_eq!(band.probe_plans.len(), 1);
+        assert_eq!(band.probe_plans[0].field_path, "workflow");
+        assert!(
+            band.probe_plans[0]
+                .command
+                .contains("db.getCollection(\"alerts\").aggregate")
+        );
+        assert!(band.probe_plans[0].command.contains("$type: '$workflow'"));
+    }
+
+    #[test]
+    fn migration_probe_commands_use_safe_collection_accessors() {
+        assert_eq!(
+            super::mongo_type_probe_command("audit-log", "workflow"),
+            "db.getCollection(\"audit-log\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
+        );
+        assert_eq!(
+            super::mongo_type_probe_command("foo.bar", "workflow"),
+            "db.getCollection(\"foo.bar\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
+        );
+        assert!(
+            super::migration_verification_hint("audit-log")
+                .contains("db.getCollection(\"audit-log\").aggregate")
+        );
+    }
+
+    #[test]
+    fn migration_probe_plan_marks_optional_payload_filter_evidence() {
+        let mut band = MigrationSiblingBand {
+            collection_name: "alerts".to_owned(),
+            coverage_note: super::migration_coverage_note().to_owned(),
+            verification_hint: super::migration_verification_hint("alerts"),
+            probe_plans: vec![MigrationProbePlan {
+                field_path: "workflow.taskIds".to_owned(),
+                command: super::mongo_type_probe_command("alerts", "workflow.taskIds"),
+                rationale: "probe nested workflow shape".to_owned(),
+                filter_literals: vec!["{ 'workflow.taskIds': { $exists: true } }".to_owned()],
+                optional_payload_evidence: Vec::new(),
+            }],
+            siblings: Vec::new(),
+            truncated: false,
+        };
+        let records = vec![payload_contract_record(
+            "api",
+            "src/contracts/alert.ts",
+            "AlertPayload",
+            "workflow",
+            true,
+        )];
+
+        super::annotate_probe_plans_with_optional_payload_evidence(&mut band, &records);
+
+        assert_eq!(band.probe_plans[0].optional_payload_evidence.len(), 1);
+        let evidence = &band.probe_plans[0].optional_payload_evidence[0];
+        assert_eq!(evidence.field_name, "workflow");
+        assert_eq!(evidence.source_type_name.as_deref(), Some("AlertPayload"));
+        assert_eq!(evidence.side, "consumer");
+    }
+
+    #[test]
+    fn migration_probe_payload_matcher_is_bidirectional_for_nested_fields() {
+        assert!(super::optional_payload_field_matches_filter(
+            "workflow",
+            "workflow.taskIds"
+        ));
+        assert!(super::optional_payload_field_matches_filter(
+            "workflow.taskIds.detail",
+            "workflow.taskIds"
+        ));
+    }
+
+    #[test]
+    fn projection_summary_warns_when_payload_contract_lookup_fails() {
+        let mut response = make_pack_response(0, 0, 0, 0);
+        response.meta = Some(ContextPackMeta {
+            response_schema_version: crate::budget::response_schema_version(),
+            generation: 0,
+            ambiguity: None,
+            budget: crate::budget::ResponseBudget::not_truncated(
+                crate::budget::BudgetedTool::ContextPack,
+                0,
+                0,
+            ),
+            candidate_count: 1,
+            completeness: "complete".to_owned(),
+            confidence_model_version: Some(super::PACK_CONFIDENCE_MODEL_VERSION.to_owned()),
+            resolution: "symbol_id".to_owned(),
+            resolution_details: None,
+            resolution_confidence: Some("high".to_owned()),
+            resolved_symbol_id: Some("symbol".to_owned()),
+            winner_margin: None,
+            warnings: Vec::new(),
+        });
+
+        super::push_payload_contract_lookup_warning(&mut response, "metadata unavailable");
+
+        let warnings = &response.meta.as_ref().expect("meta should exist").warnings;
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("payload contract lookup failed"));
+        assert!(warnings[0].contains("metadata unavailable"));
+    }
+
+    #[test]
+    fn planning_projection_summary_surfaces_optionality_mismatch_oracle() {
+        let (ctx, _storage_dir) = empty_test_context();
+        let source_file = file("backend_standard", "src/alerts.ts");
+        let migration_file = file("backend_standard", "migrations/20260430-alerts.ts");
+        let workflow = node(
+            "backend_standard",
+            "src/alerts.ts",
+            NodeKind::DataField,
+            "Alert.workflow",
+            0,
+        );
+        let collection_external_id = "__migration_collection__alerts";
+        let collection = NodeData {
+            id: ref_node_id(NodeKind::Entity, collection_external_id),
+            kind: NodeKind::Entity,
+            repo: "backend_standard".to_owned(),
+            file_path: "migrations/20260430-alerts.ts".to_owned(),
+            name: "alerts".to_owned(),
+            qualified_name: Some(collection_external_id.to_owned()),
+            external_id: Some(collection_external_id.to_owned()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+        };
+        let filter = serde_json::to_string(&["{ workflow: { $type: 'object' } }"])
+            .expect("filters should serialize");
+        ctx.graph()
+            .bulk_insert(
+                &[
+                    source_file.clone(),
+                    migration_file.clone(),
+                    workflow.clone(),
+                    collection.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: source_file.id,
+                        target: workflow.id,
+                        kind: EdgeKind::ReadsField,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            resolver: Some("field_direct".to_owned()),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: source_file.id,
+                        is_cross_file: false,
+                    },
+                    EdgeData {
+                        source: migration_file.id,
+                        target: collection.id,
+                        kind: EdgeKind::MigratesCollection,
+                        metadata: EdgeMetadata {
+                            drift_kind: Some(format!(
+                                "{MIGRATION_FILTERS_METADATA_PREFIX}{filter}"
+                            )),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: migration_file.id,
+                        is_cross_file: false,
+                    },
+                ],
+            )
+            .expect("oracle graph should seed");
+        let record = payload_contract_record(
+            "backend_standard",
+            "src/contracts/alert.ts",
+            "AlertPayload",
+            "workflow",
+            true,
+        );
+        ctx.metadata()
+            .replace_payload_contracts_for_files(
+                "backend_standard",
+                &["src/contracts/alert.ts".to_owned()],
+                &[PayloadContractStoreRecord { record }],
+            )
+            .expect("payload contract should seed");
+
+        let request = super::ContextPackRequest {
+            budget_bytes: None,
+            depth: None,
+            limit: None,
+            repo: Some("backend_standard".to_owned()),
+            mode: "planning".to_owned(),
+            target: "Alert.workflow".to_owned(),
+        };
+        let mut response = make_pack_response(0, 0, 0, 0);
+        response.data.items[0].repo = "backend_standard".to_owned();
+        response.data.items[0].file_path = "src/alerts.ts".to_owned();
+
+        super::apply_projection_impact_summary(
+            &ctx,
+            &request,
+            Some("backend_standard"),
+            &mut response,
+        );
+
+        assert!(response.data.next_steps.iter().any(|step| {
+            step.contains("Review field impact") && step.contains("Alert.workflow")
+        }));
+        assert!(
+            response
+                .data
+                .unresolved_gaps
+                .contains(&"projection_impact:optional_payload_filter_mismatch".to_owned())
         );
     }
 
@@ -5200,6 +5745,20 @@ mod tests {
             collection_name: "alerts".to_owned(),
             coverage_note: super::migration_coverage_note().to_owned(),
             verification_hint: super::migration_verification_hint("alerts"),
+            probe_plans: vec![MigrationProbePlan {
+                field_path: "workflow".to_owned(),
+                command: super::mongo_type_probe_command("alerts", "workflow"),
+                rationale: "Count live Mongo BSON types for `workflow` before relying on migration filters that scope by field type.".to_owned(),
+                filter_literals: vec!["{ workflow: { $type: 'object' } }".to_owned()],
+                optional_payload_evidence: vec![MigrationOptionalPayloadEvidence {
+                    repo: "backend_standard".to_owned(),
+                    file_path: "src/contracts/alert.ts".to_owned(),
+                    source_type_name: Some("AlertPayload".to_owned()),
+                    side: "consumer".to_owned(),
+                    field_name: "workflow".to_owned(),
+                    confidence: 900,
+                }],
+            }],
             siblings: vec![MigrationSiblingEntry {
                 repo: "backend_standard".to_owned(),
                 file_path: "migrations/20260401-alerts.ts".to_owned(),
@@ -5328,6 +5887,26 @@ mod tests {
             "migration_siblings": {
               "collection_name": "string",
               "coverage_note": "string",
+              "probe_plans": [
+                {
+                  "command": "string",
+                  "field_path": "string",
+                  "filter_literals": [
+                    "string"
+                  ],
+                  "optional_payload_evidence": [
+                    {
+                      "confidence": "number",
+                      "field_name": "string",
+                      "file_path": "string",
+                      "repo": "string",
+                      "side": "string",
+                      "source_type_name": "string"
+                    }
+                  ],
+                  "rationale": "string"
+                }
+              ],
               "siblings": [
                 {
                   "commit_short_sha": "string",

@@ -227,7 +227,7 @@ Reference:
 - [CLI reference](website/src/content/docs/reference/cli.md)
 - [Configuration reference](website/src/content/docs/reference/configuration.md)
 - [MCP tools reference](website/src/content/docs/reference/mcp-tools.md)
-- [Projection impact](docs/projection-impact.md)
+- [Projection impact](website/src/content/docs/reference/cli.md#projection-impact)
 
 Concepts:
 - [Polyrepo graph](website/src/content/docs/concepts/polyrepo-graph.md)

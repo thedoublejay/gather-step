@@ -2672,7 +2672,8 @@ fn resolve_import_path(
     {
         return Some(absolute);
     } else if language == Language::Python
-        && let Some(absolute) = resolve_python_sibling_package_import(repo_root, source)
+        && let Some(absolute) =
+            resolve_python_sibling_package_import(repo_root, current_file, source)
     {
         return Some(absolute);
     } else if let Some(absolute) = resolve_workspace_or_sibling_package_cached(repo_root, source) {
@@ -2946,7 +2947,11 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
 ///
 /// The current repo itself is filtered out — see
 /// [`resolve_python_current_package_import`] for in-repo resolution.
-fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+fn resolve_python_sibling_package_import(
+    repo_root: &Path,
+    current_file: &Path,
+    source: &str,
+) -> Option<PathBuf> {
     let (package_name, tail) = python_package_root_and_tail(source)?;
     let canonical_repo_root = match fs::canonicalize(repo_root) {
         Ok(path) => Some(path),
@@ -2959,6 +2964,7 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
             None
         }
     };
+    let absolute_current_file = absolute_current_file_path(repo_root, current_file);
 
     for root in repo_root
         .ancestors()
@@ -3008,6 +3014,9 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
             if let Some(resolved) =
                 resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
             {
+                if absolute_current_file.starts_with(&package_dir) {
+                    return Some(resolved);
+                }
                 if let Some((first_package_dir, first_resolved)) = first_match.as_ref() {
                     tracing::warn!(
                         package = package_name,
@@ -3027,6 +3036,15 @@ fn resolve_python_sibling_package_import(repo_root: &Path, source: &str) -> Opti
     }
 
     None
+}
+
+fn absolute_current_file_path(repo_root: &Path, current_file: &Path) -> PathBuf {
+    let absolute = if current_file.is_absolute() {
+        current_file.to_path_buf()
+    } else {
+        repo_root.join(current_file)
+    };
+    fs::canonicalize(&absolute).unwrap_or(absolute)
 }
 
 /// Resolve an absolute Python import (`my_pkg.submodule`) against the current
@@ -4127,6 +4145,7 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Tailwind => &[PackId::Tailwind],
         Framework::Prisma => &[PackId::Prisma],
         Framework::Drizzle => &[PackId::Drizzle],
+        Framework::TypeOrm => &[PackId::TypeOrm],
         Framework::React => &[PackId::React],
         Framework::ReactRouter => &[PackId::ReactRouter],
         Framework::ReactHookForm => &[PackId::ReactHookForm],
@@ -5500,7 +5519,11 @@ class Outer:
 
         let mut resolved = None;
         let logs = capture_warnings(|| {
-            resolved = resolve_python_sibling_package_import(&app_root, "shared_models.records");
+            resolved = resolve_python_sibling_package_import(
+                &app_root,
+                Path::new("src/api_service/app.py"),
+                "shared_models.records",
+            );
         });
 
         assert_eq!(
@@ -5510,6 +5533,58 @@ class Outer:
         assert!(
             logs.contains("multiple sibling Python packages matched import"),
             "expected duplicate warning, got {logs}"
+        );
+    }
+
+    #[test]
+    fn python_sibling_package_import_prefers_project_containing_current_file() {
+        let temp_dir = TestDir::new("python-sibling-current-project");
+        let workspace_root = temp_dir.path();
+        let content_pipeline_root = workspace_root.join("content-pipeline");
+        let web_scraper_root = workspace_root.join("web-scraper");
+        let package_root = web_scraper_root.join("app");
+
+        for root in [&content_pipeline_root, &web_scraper_root] {
+            fs::create_dir_all(root.join("app/repositories"))
+                .expect("app repository package should exist");
+            fs::write(
+                root.join("pyproject.toml"),
+                "[project]\nname = \"service\"\n",
+            )
+            .expect("pyproject should write");
+            fs::write(
+                root.join("app/repositories/article_content_repository.py"),
+                "class ArticleContentRepository: ...\n",
+            )
+            .expect("repository module should write");
+        }
+        fs::write(
+            package_root.join("consumer.py"),
+            "from app.repositories.article_content_repository import ArticleContentRepository\n",
+        )
+        .expect("consumer should write");
+
+        let mut resolved = None;
+        let logs = capture_warnings(|| {
+            resolved = resolve_import_path(
+                &package_root,
+                Path::new("consumer.py"),
+                "app.repositories.article_content_repository",
+                Language::Python,
+                &PathAliases::empty(),
+            );
+        });
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(
+                canonical(web_scraper_root.join("app/repositories/article_content_repository.py"))
+                    .as_path()
+            )
+        );
+        assert!(
+            !logs.contains("multiple sibling Python packages matched import"),
+            "current project should disambiguate sibling matches, got {logs}"
         );
     }
 

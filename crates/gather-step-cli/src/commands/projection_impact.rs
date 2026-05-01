@@ -2,9 +2,10 @@ use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
 use gather_step_analysis::{
     ProjectionEvidenceVerbosity, ProjectionField, ProjectionImpactReport, ProjectionImpactRequest,
-    projection_impact,
+    projection_impact_with_payload_contracts,
 };
-use gather_step_storage::StorageCoordinator;
+use gather_step_core::PayloadSide;
+use gather_step_storage::{MetadataStore, PayloadContractQuery, StorageCoordinator};
 
 use crate::app::AppContext;
 use crate::command_render::RenderedCommand;
@@ -69,7 +70,19 @@ pub fn execute(
         bail!("projection-impact --target must not be empty");
     }
 
-    let report = projection_impact(
+    let payload_contracts = storage
+        .metadata()
+        .payload_contracts_for_query(PayloadContractQuery {
+            repo: repo_filter.map(ToOwned::to_owned),
+            min_confidence: Some(750),
+            side: None::<PayloadSide>,
+            ..PayloadContractQuery::default()
+        })?
+        .into_iter()
+        .map(|record| record.record)
+        .collect::<Vec<_>>();
+
+    let report = projection_impact_with_payload_contracts(
         storage.graph(),
         ProjectionImpactRequest {
             target: args.target,
@@ -77,6 +90,7 @@ pub fn execute(
             max_results: args.limit,
             evidence_verbosity: args.evidence_verbosity.into(),
         },
+        &payload_contracts,
     )?;
 
     let lines = render_text_lines(&report);
@@ -186,7 +200,16 @@ fn format_field(field: &ProjectionField) -> String {
 fn format_evidence(evidence: &[gather_step_analysis::ProjectionEvidence]) -> String {
     evidence
         .iter()
-        .map(|item| format!("{}:{} ({})", item.repo, item.file_path, item.field_path))
+        .map(|item| {
+            let source = item
+                .evidence_source
+                .as_deref()
+                .map_or(String::new(), |source| format!(", {source}"));
+            format!(
+                "{}:{} ({}{source})",
+                item.repo, item.file_path, item.field_path
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

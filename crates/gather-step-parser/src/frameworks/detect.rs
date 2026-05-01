@@ -21,6 +21,7 @@ pub enum Framework {
     Tailwind,
     Prisma,
     Drizzle,
+    TypeOrm,
     React,
     ReactRouter,
     ReactHookForm,
@@ -94,6 +95,9 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
         )
     {
         frameworks.insert(Framework::Drizzle);
+    }
+    if has_dependency_in_manifest(manifest.as_ref(), &["typeorm"]) {
+        frameworks.insert(Framework::TypeOrm);
     }
     if has_dependency_in_manifest(manifest.as_ref(), &["react"]) {
         frameworks.insert(Framework::React);
@@ -218,6 +222,12 @@ pub fn is_drizzle(repo_root: &Path) -> bool {
                 "drizzle.config.cjs",
             ],
         )
+}
+
+/// Returns `true` when `TypeORM` is present by dependency.
+#[must_use]
+pub fn is_typeorm(repo_root: &Path) -> bool {
+    has_any_dependency(repo_root, &["typeorm"])
 }
 
 /// Returns `true` when `repo_root/package.json` lists `react` in any
@@ -476,7 +486,7 @@ mod tests {
 
     use super::{
         Framework, detect_frameworks, is_drizzle, is_fastapi, is_mongoose, is_nestjs, is_nextjs,
-        is_prisma, is_react, is_tailwind,
+        is_prisma, is_react, is_tailwind, is_typeorm,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -696,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn nextjs_tailwind_prisma_and_drizzle_are_detected() {
+    fn nextjs_tailwind_prisma_drizzle_and_typeorm_are_detected() {
         let dir = TempDir::new("modern-web");
         dir.write(
             "package.json",
@@ -706,7 +716,8 @@ mod tests {
     "next": "^15.0.0",
     "tailwindcss": "^4.0.0",
     "@prisma/client": "^6.0.0",
-    "drizzle-orm": "^0.40.0"
+    "drizzle-orm": "^0.40.0",
+    "typeorm": "^0.3.24"
   },
   "devDependencies": {
     "prisma": "^6.0.0",
@@ -720,12 +731,14 @@ mod tests {
         assert!(is_tailwind(&dir.path));
         assert!(is_prisma(&dir.path));
         assert!(is_drizzle(&dir.path));
+        assert!(is_typeorm(&dir.path));
 
         let detected = detect_frameworks(&dir.path);
         assert!(detected.contains(&Framework::NextJs));
         assert!(detected.contains(&Framework::Tailwind));
         assert!(detected.contains(&Framework::Prisma));
         assert!(detected.contains(&Framework::Drizzle));
+        assert!(detected.contains(&Framework::TypeOrm));
     }
 
     #[test]
