@@ -5,6 +5,7 @@
 //! safety-guarded handoff to [`StorageContext`].
 
 pub mod artifact_root;
+pub mod cache;
 pub mod cleanup;
 pub mod delta_report;
 pub mod extract;

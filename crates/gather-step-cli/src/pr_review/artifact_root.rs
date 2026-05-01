@@ -20,6 +20,7 @@
 //! removing any directory.
 //!
 //! Phase 1 Task 3 of the PR review mode plan.
+//! Phase 4 Task 1 adds [`CacheKey`] and bumps the schema to v2.
 
 use std::path::{Path, PathBuf};
 
@@ -32,17 +33,70 @@ use crate::storage_context::{ReviewSafetyError, StorageContext};
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Schema version for the marker file.  Bump on incompatible changes.
-pub const MARKER_SCHEMA_VERSION: u32 = 1;
+///
+/// v1 — original schema (no `cache_key` field).
+/// v2 — added `cache_key` field for branch-scoped cache reuse (Phase 4 Task 1).
+pub const MARKER_SCHEMA_VERSION: u32 = 2;
 
 /// Filename of the review marker written at the root of every artifact tree.
 pub const MARKER_FILENAME: &str = "review-marker.json";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
+/// Content-addressed cache key for branch-scoped cache reuse.
+///
+/// Two runs with identical [`CacheKey::fingerprint`] values are semantically
+/// equivalent — the same workspace, same commits, same config, same schema
+/// version, and same binary version.  A run's artifact root can be reused
+/// without re-indexing when the key matches.
+///
+/// # Stability
+///
+/// The fingerprint is computed from a fixed-order canonical JSON serialization
+/// (sorted keys) via blake3.  Any field change invalidates all prior caches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheKey {
+    /// First 16 hex chars of blake3(canonical workspace path bytes).
+    pub workspace_hash: String,
+    /// 40-char hex SHA of the resolved base commit.
+    pub base_sha: String,
+    /// 40-char hex SHA of the resolved head commit.
+    pub head_sha: String,
+    /// First 16 hex chars of blake3(`gather-step.config.yaml` bytes).
+    /// Empty string when the config file is absent.
+    pub config_hash: String,
+    /// Marker schema version at time of caching (currently 2).
+    pub schema_version: u32,
+    /// `CARGO_PKG_VERSION` at build time.
+    pub gather_step_version: String,
+}
+
+impl CacheKey {
+    /// Stable canonical fingerprint: blake3 over deterministically serialized
+    /// key fields (sorted JSON object keys, no whitespace).
+    pub fn fingerprint(&self) -> String {
+        // Build a fixed-order JSON string manually so it is stable across
+        // serde_json versions and does not depend on struct field order.
+        let canonical = format!(
+            r#"{{"base_sha":{},"config_hash":{},"gather_step_version":{},"head_sha":{},"schema_version":{},"workspace_hash":{}}}"#,
+            serde_json::to_string(&self.base_sha).unwrap_or_default(),
+            serde_json::to_string(&self.config_hash).unwrap_or_default(),
+            serde_json::to_string(&self.gather_step_version).unwrap_or_default(),
+            serde_json::to_string(&self.head_sha).unwrap_or_default(),
+            self.schema_version,
+            serde_json::to_string(&self.workspace_hash).unwrap_or_default(),
+        );
+        let hash = blake3::hash(canonical.as_bytes());
+        let hex = hash.to_hex();
+        hex[..16].to_owned()
+    }
+}
+
 /// Contents of `review-marker.json`.
 ///
-/// Every field is required; the marker is only valid when all fields are
-/// present.  [`read_marker`] rejects files that do not deserialize cleanly.
+/// Every field is required in v2 markers; [`read_marker`] accepts both v1 and
+/// v2 markers (back-compat shim).  V1 markers have no `cache_key` and are not
+/// eligible for cache reuse, but remain valid for `pr-review clean` purposes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewMarker {
     pub schema_version: u32,
@@ -60,6 +114,10 @@ pub struct ReviewMarker {
     /// RFC 3339 UTC timestamp of when the artifact root was created.
     pub created_at: String,
     pub status: ReviewStatus,
+    /// Cache key for branch-scoped reuse (v2+).  `None` for v1 markers read
+    /// via the back-compat shim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<CacheKey>,
 }
 
 /// Lifecycle state of a review artifact root.
@@ -202,10 +260,14 @@ pub fn plan_artifact_root(
 }
 
 /// Materialize a previously planned artifact root and write its initial marker.
+///
+/// The `cache_key` parameter is `Some` for v2+ markers (branch-scoped cache)
+/// and `None` only in tests that pre-date the cache feature.
 pub fn materialize_artifact_root(
     artifact: &ReviewArtifactRoot,
     base_sha: &str,
     head_sha: &str,
+    cache_key: Option<CacheKey>,
 ) -> Result<(), ArtifactRootError> {
     if artifact.root.exists() {
         return Err(ArtifactRootError::RootExists {
@@ -240,6 +302,7 @@ pub fn materialize_artifact_root(
         gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         created_at: Utc::now().to_rfc3339(),
         status: ReviewStatus::InProgress,
+        cache_key,
     };
     write_marker_to_path(&marker, &artifact.marker_path)?;
 
@@ -267,7 +330,7 @@ pub fn create_artifact_root(
     run_id: &str,
 ) -> Result<ReviewArtifactRoot, ArtifactRootError> {
     let root = plan_artifact_root(cache_root, workspace_root, run_id)?;
-    materialize_artifact_root(&root, base_sha, head_sha)?;
+    materialize_artifact_root(&root, base_sha, head_sha, None)?;
     Ok(root)
 }
 

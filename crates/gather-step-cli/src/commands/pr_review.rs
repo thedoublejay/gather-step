@@ -32,6 +32,7 @@ use crate::{
             default_cache_root, generate_run_id, materialize_artifact_root, plan_artifact_root,
             read_marker, workspace_hash, write_marker_completed, write_marker_quarantined,
         },
+        cache::{compute_cache_key, is_cache_key_active, try_reuse_cache},
         delta_report::{
             CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
             PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
@@ -123,8 +124,19 @@ pub struct CleanArgs {
 
     /// Delete completed/failed/quarantined artifacts older than this duration.
     /// Format: `<n><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`.
+    ///
+    /// By default, artifacts whose cache key is still active (both base and
+    /// head SHAs resolvable in the current workspace) are skipped.  Use
+    /// `--include-active` to override this protection.
     #[arg(long, value_name = "DURATION")]
     pub older_than: Option<String>,
+
+    /// When combined with `--older-than`, also delete artifacts whose cache
+    /// key is currently active (i.e. both SHAs are still reachable in this
+    /// workspace).  Without this flag, active artifacts are skipped so they
+    /// remain available for the next review run.
+    #[arg(long, requires = "older_than")]
+    pub include_active: bool,
 
     /// Delete ALL review artifacts for this workspace.
     #[arg(long)]
@@ -202,6 +214,17 @@ pub struct PrReviewRunArgs {
     pub strict: bool,
 }
 
+/// Internal result type for the cache-hit-or-cold-run branch in [`run_inner`].
+enum RunOutcome {
+    CacheHit(ReviewArtifactRoot),
+    ColdRun {
+        artifact_root: ReviewArtifactRoot,
+        worktree: gather_step_git::worktrees::ReviewWorktree,
+        elapsed_ms: u64,
+        total_repos: usize,
+    },
+}
+
 /// Core implementation — returns `(rendered_string, has_high_risk)`.
 ///
 /// `has_high_risk` is `true` when `args.strict` is set and at least one
@@ -244,87 +267,133 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         .cloned()
         .collect();
 
+    // ── 3b. Cache key ──────────────────────────────────────────────────────
+    // Read the workspace config file to compute a stable config_hash.
+    // If the file is absent or unreadable, treat as empty bytes.
+    let config_file_path = app.workspace_path.join("gather-step.config.yaml");
+    let config_bytes: Vec<u8> = std::fs::read(&config_file_path).unwrap_or_default();
+    let cache_key_struct =
+        compute_cache_key(&app.workspace_path, &base_sha, &head_sha, &config_bytes);
+
     // ── 4. Artifact root ───────────────────────────────────────────────────
     let cache_root = args
         .cache_root
         .clone()
         .unwrap_or_else(|| default_cache_root(&app.workspace_path));
 
-    let run_id = generate_run_id();
+    // Try to reuse a prior completed artifact with the same cache key.
+    // Cache reuse is independent of `keep_cache` — `keep_cache` controls
+    // whether the CURRENT run's artifact is preserved after delta extraction.
+    let outcome: RunOutcome =
+        if let Some(hit_root) = try_reuse_cache(&cache_root, &cache_key_struct).unwrap_or_else(
+            |e| {
+                tracing::debug!(error = %e, "cache lookup failed; falling back to cold run");
+                None
+            },
+        ) {
+            // Cache hit: skip worktree creation and indexing.
+            RunOutcome::CacheHit(hit_root)
+        } else {
+            // Cache miss: create a fresh artifact root, worktree, and index.
+            let run_id = generate_run_id();
 
-    let artifact_root = plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
-        .with_context(|| format!("planning artifact root for run `{run_id}`"))?;
+            let artifact_root =
+                plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
+                    .with_context(|| format!("planning artifact root for run `{run_id}`"))?;
 
-    // Safety guard: construct both contexts and verify no path overlap before
-    // creating review directories, writing the marker, or opening any review
-    // storage.
-    let workspace_ctx = StorageContext::workspace_read_only(app);
-    let _review_ctx = StorageContext::review_checked(
-        &workspace_ctx,
-        artifact_root.root.clone(),
-        artifact_root.registry_path.clone(),
-        artifact_root.storage_root.clone(),
-        run_id.clone(),
-    )
-    .map_err(ArtifactRootError::Safety)
-    .with_context(|| "review safety guard rejected the proposed artifact paths")?;
-
-    materialize_artifact_root(&artifact_root, &base_sha, &head_sha)
-        .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
-
-    // ── 5. Materialize worktree ────────────────────────────────────────────
-    // `materialize_artifact_root` pre-creates the worktree directory; git worktree
-    // add refuses to clobber an existing directory, so remove it first.
-    if artifact_root.worktree_root.exists() {
-        std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
-            format!(
-                "removing pre-created worktree placeholder at `{}`",
-                artifact_root.worktree_root.display()
+            // Safety guard: construct both contexts and verify no path overlap before
+            // creating review directories, writing the marker, or opening any review
+            // storage.
+            let workspace_ctx = StorageContext::workspace_read_only(app);
+            let _review_ctx = StorageContext::review_checked(
+                &workspace_ctx,
+                artifact_root.root.clone(),
+                artifact_root.registry_path.clone(),
+                artifact_root.storage_root.clone(),
+                run_id.clone(),
             )
-        })?;
-    }
+            .map_err(ArtifactRootError::Safety)
+            .with_context(|| "review safety guard rejected the proposed artifact paths")?;
 
-    let worktree = match create_detached_worktree(
-        &app.workspace_path,
-        &artifact_root.worktree_root,
-        &head_sha,
-    ) {
-        Ok(wt) => wt,
-        Err(e) => {
-            quarantine_on_error(&artifact_root);
-            return Err(e).with_context(|| {
-                format!(
-                    "creating detached worktree at `{}`",
-                    artifact_root.worktree_root.display()
-                )
-            });
-        }
-    };
+            materialize_artifact_root(
+                &artifact_root,
+                &base_sha,
+                &head_sha,
+                Some(cache_key_struct.clone()),
+            )
+            .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
 
-    // ── 6. Index ───────────────────────────────────────────────────────────
-    let index_start = Instant::now();
-    let stats = match run_review_index(&artifact_root, IndexingOptions::default()) {
-        Ok(s) => s,
-        Err(e) => {
-            quarantine_on_error(&artifact_root);
-            return Err(e).with_context(|| "review indexer failed");
-        }
+            // ── 5. Materialize worktree ────────────────────────────────────────
+            // `materialize_artifact_root` pre-creates the worktree directory; git worktree
+            // add refuses to clobber an existing directory, so remove it first.
+            if artifact_root.worktree_root.exists() {
+                std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
+                    format!(
+                        "removing pre-created worktree placeholder at `{}`",
+                        artifact_root.worktree_root.display()
+                    )
+                })?;
+            }
+
+            let worktree = match create_detached_worktree(
+                &app.workspace_path,
+                &artifact_root.worktree_root,
+                &head_sha,
+            ) {
+                Ok(wt) => wt,
+                Err(e) => {
+                    quarantine_on_error(&artifact_root);
+                    return Err(e).with_context(|| {
+                        format!(
+                            "creating detached worktree at `{}`",
+                            artifact_root.worktree_root.display()
+                        )
+                    });
+                }
+            };
+
+            // ── 6. Index ───────────────────────────────────────────────────────
+            let index_start = Instant::now();
+            let stats = match run_review_index(&artifact_root, IndexingOptions::default()) {
+                Ok(s) => s,
+                Err(e) => {
+                    quarantine_on_error(&artifact_root);
+                    return Err(e).with_context(|| "review indexer failed");
+                }
+            };
+            // Truncation is intentional: no real indexing run takes > 584 million years.
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "elapsed_ms will never overflow u64 in practice"
+            )]
+            let elapsed_ms = index_start.elapsed().as_millis() as u64;
+
+            RunOutcome::ColdRun {
+                artifact_root,
+                worktree,
+                elapsed_ms,
+                total_repos: stats.total_repos,
+            }
+        };
+
+    // Destructure the outcome for the remainder of the function.
+    let (artifact_root, worktree_opt, elapsed_ms, total_repos_hint) = match outcome {
+        RunOutcome::CacheHit(root) => (root, None, 0u64, None),
+        RunOutcome::ColdRun {
+            artifact_root,
+            worktree,
+            elapsed_ms,
+            total_repos,
+        } => (artifact_root, Some(worktree), elapsed_ms, Some(total_repos)),
     };
-    // Truncation is intentional: no real indexing run takes > 584 million years.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "elapsed_ms will never overflow u64 in practice"
-    )]
-    let elapsed_ms = index_start.elapsed().as_millis() as u64;
 
     // ── 7. Head config-derived repo names ─────────────────────────────────
     let config_path = artifact_root.worktree_root.join("gather-step.config.yaml");
     let head_config = GatherStepConfig::from_yaml_file(&config_path).ok();
     let indexed_repos: Vec<String> = head_config.as_ref().map_or_else(
         || {
-            (0..stats.total_repos)
-                .map(|i| format!("repo-{i}"))
-                .collect()
+            let n = total_repos_hint.unwrap_or(0);
+            (0..n).map(|i| format!("repo-{i}")).collect()
         },
         |config| config.repos.iter().map(|r| r.name.clone()).collect(),
     );
@@ -627,7 +696,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             review_registry_path: artifact_root.registry_path.clone(),
             review_storage_path: artifact_root.storage_root.clone(),
             review_root: artifact_root.root.clone(),
-            run_id: run_id.clone(),
+            run_id: artifact_root.run_id.clone(),
             cleanup_policy,
             cache_key,
         },
@@ -652,7 +721,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     if !args.keep_cache {
         // Best-effort: remove the worktree then the artifact root.  Errors are
         // logged but do not fail the command — the marker is already Completed.
-        let _ = remove_worktree(&worktree);
+        // For cache-hit runs, worktree_opt is None — the worktree was created
+        // by a prior run and must not be removed (the artifact may still be
+        // in use by other commands).  For cold runs, remove the worktree.
+        if let Some(wt) = worktree_opt {
+            let _ = remove_worktree(&wt);
+        }
         let _ = std::fs::remove_dir_all(&artifact_root.root);
     }
 
@@ -1064,6 +1138,21 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                 if matches!(a.marker.status, ReviewStatus::InProgress) {
                     return false;
                 }
+                // Unless --include-active is set, skip artifacts whose cache
+                // key is still active (both SHAs resolvable in this workspace).
+                // The user might need this artifact for the next review run.
+                if !args.include_active
+                    && a.marker
+                        .cache_key
+                        .as_ref()
+                        .is_some_and(|key| is_cache_key_active(&app.workspace_path, key))
+                {
+                    tracing::debug!(
+                        run_id = %a.marker.run_id,
+                        "skipping active cache key (use --include-active to override)"
+                    );
+                    return false;
+                }
                 // Parse RFC 3339 created_at to compare age.
                 chrono::DateTime::parse_from_rfc3339(&a.marker.created_at)
                     .ok()
@@ -1424,6 +1513,7 @@ mod tests {
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at,
             status,
+            cache_key: None, // v1 marker — not eligible for cache reuse
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -1479,6 +1569,7 @@ mod tests {
             base: None,
             head: None,
             older_than: None,
+            include_active: false,
             all: true,
         };
 
@@ -1536,6 +1627,7 @@ mod tests {
             base: None,
             head: None,
             older_than: None,
+            include_active: false,
             all: false,
         };
 
@@ -1598,6 +1690,7 @@ mod tests {
             base: Some(sha_base.to_owned()),
             head: Some(sha_head.to_owned()),
             older_than: None,
+            include_active: false,
             all: false,
         };
 
@@ -1657,6 +1750,7 @@ mod tests {
             base: None,
             head: None,
             older_than: Some("1d".to_owned()),
+            include_active: false,
             all: false,
         };
 
@@ -1713,6 +1807,7 @@ mod tests {
             base: None,
             head: None,
             older_than: None,
+            include_active: false,
             all: true,
         };
 
@@ -1761,6 +1856,7 @@ mod tests {
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
+            cache_key: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -1812,6 +1908,7 @@ mod tests {
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
+            cache_key: None,
         };
 
         // Write the marker INTO the baseline storage path so re-read works.
@@ -2232,6 +2329,7 @@ mod tests {
             base: None,
             head: None,
             older_than: Some("1s".to_owned()),
+            include_active: false,
             all: false,
         };
 
@@ -2253,6 +2351,7 @@ mod tests {
             base: None,
             head: None,
             older_than: None,
+            include_active: false,
             all: true,
         };
         run_clean(&app, &top, &clean_all).expect("clean --all should succeed");
@@ -2291,6 +2390,7 @@ mod tests {
             base: Some("typo-branch".to_owned()),
             head: Some("main".to_owned()),
             older_than: None,
+            include_active: false,
             all: false,
         };
 
@@ -2344,6 +2444,7 @@ mod tests {
             base: Some(sha_base.to_owned()),
             head: Some(sha_head.to_owned()),
             older_than: None,
+            include_active: false,
             all: false,
         };
 
@@ -2353,6 +2454,561 @@ mod tests {
         assert!(
             !root.exists(),
             "artifact matching literal SHAs should be deleted"
+        );
+    }
+
+    // =========================================================================
+    // Phase 4 Task 2: cold-vs-cached parity tests
+    // =========================================================================
+
+    // ── Helper: strip volatile fields before JSON comparison ─────────────────
+
+    /// Zero out `metadata.elapsed_ms` and normalise `metadata.indexed_repos`
+    /// order so two JSON values from different runs can be byte-compared.
+    fn normalize_report_json(v: &mut serde_json::Value) {
+        if let Some(Some(obj)) = v.get_mut("metadata").map(serde_json::Value::as_object_mut) {
+            obj.insert(
+                "elapsed_ms".to_owned(),
+                serde_json::Value::Number(0.into()),
+            );
+            // Sort indexed_repos so order differences are invisible.
+            if let Some(Some(arr)) = obj
+                .get_mut("indexed_repos")
+                .map(serde_json::Value::as_array_mut)
+            {
+                arr.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
+            }
+        }
+        // Zero run-specific paths in safety to avoid diff noise.
+        if let Some(Some(obj)) = v.get_mut("safety").map(serde_json::Value::as_object_mut) {
+            obj.insert("run_id".to_owned(), serde_json::Value::String(String::new()));
+            obj.insert(
+                "review_root".to_owned(),
+                serde_json::Value::String(String::new()),
+            );
+            obj.insert(
+                "review_registry_path".to_owned(),
+                serde_json::Value::String(String::new()),
+            );
+            obj.insert(
+                "review_storage_path".to_owned(),
+                serde_json::Value::String(String::new()),
+            );
+            // Remove cache_key (contains run-specific fingerprint).
+            obj.remove("cache_key");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parity Test 1: cached run produces identical JSON to cold run
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cached_run_produces_identical_json_to_cold_run() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("parity-ws");
+        let cache_tmp = TempDir::new("parity-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+
+        // First run (cold): keep_cache = true so the artifact persists.
+        let args = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+        };
+        let (cold_rendered, _) = run_inner(&app, &args).expect("cold run must succeed");
+        let mut cold: serde_json::Value =
+            serde_json::from_str(&cold_rendered).expect("cold JSON must parse");
+        normalize_report_json(&mut cold);
+
+        // Second run (cache hit): same args.
+        let (cached_rendered, _) = run_inner(&app, &args).expect("cached run must succeed");
+        let mut cached: serde_json::Value =
+            serde_json::from_str(&cached_rendered).expect("cached JSON must parse");
+        normalize_report_json(&mut cached);
+
+        assert_eq!(
+            cold, cached,
+            "normalized cold and cached JSON must be identical"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parity Test 2: cache invalidates on config_hash change
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_invalidates_on_config_hash_change() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("cfg-inval-ws");
+        let cache_tmp = TempDir::new("cfg-inval-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+
+        // First run: keep_cache.
+        let args = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+        };
+        let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
+        let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
+        let first_run_id = first["safety"]["run_id"].as_str().unwrap().to_owned();
+
+        // Modify the config file (different bytes → different config_hash).
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: changed\n    path: changed\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+
+        // Second run: same base/head, but config changed → cache miss.
+        let (second_rendered, _) = run_inner(&app, &args).expect("second run must succeed");
+        let second: serde_json::Value = serde_json::from_str(&second_rendered).unwrap();
+        let second_run_id = second["safety"]["run_id"].as_str().unwrap().to_owned();
+
+        assert_ne!(
+            first_run_id, second_run_id,
+            "config change must cause cache miss (different run_id)"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parity Test 3: cache invalidates on head SHA change
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_invalidates_on_head_sha_change() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("sha-inval-ws");
+        let cache_tmp = TempDir::new("sha-inval-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+
+        // First run on original head_sha.
+        let args = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+        };
+        let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
+        let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
+        let first_run_id = first["safety"]["run_id"].as_str().unwrap().to_owned();
+
+        // Add a new commit on the feature branch → new head SHA.
+        git_run(&ws, &["checkout", "feature/add-file"]);
+        fs::write(
+            ws.join("myrepo/src/another.ts"),
+            "export function another(): string { return 'another'; }\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "head: add another.ts"]);
+        let new_head_sha = git_head_sha(&ws);
+        git_run(&ws, &["checkout", "main"]);
+
+        // Second run with new head SHA → cache miss.
+        let args2 = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: new_head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+        };
+        let (second_rendered, _) = run_inner(&app, &args2).expect("second run must succeed");
+        let second: serde_json::Value = serde_json::from_str(&second_rendered).unwrap();
+        let second_run_id = second["safety"]["run_id"].as_str().unwrap().to_owned();
+
+        assert_ne!(
+            first_run_id, second_run_id,
+            "changed head SHA must cause cache miss (different run_id)"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Parity Test 4: cache invalidates on gather_step_version change (v1 marker)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cache_invalidates_on_v1_marker_without_cache_key() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("v1-ws");
+        let cache_tmp = TempDir::new("v1-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        // Manually plant a v1 marker (no cache_key) in the expected cache dir.
+        let ws_hash = workspace_hash(&ws);
+        let v1_run_id = "review-v1-legacy-run";
+        let v1_root = cache_tmp.path().join(&ws_hash).join(v1_run_id);
+        fs::create_dir_all(v1_root.join("storage")).unwrap();
+        fs::create_dir_all(v1_root.join("worktree")).unwrap();
+        fs::write(v1_root.join("registry.json"), b"{}").unwrap();
+
+        let v1_marker = ReviewMarker {
+            schema_version: 1,
+            workspace_hash: ws_hash.clone(),
+            workspace_root: ws.clone(),
+            base_sha: base_sha.clone(),
+            head_sha: head_sha.clone(),
+            run_id: v1_run_id.to_owned(),
+            storage_path: v1_root.join("storage"),
+            registry_path: v1_root.join("registry.json"),
+            gather_step_version: "0.0.0".to_owned(), // old version
+            created_at: chrono::Utc::now().to_rfc3339(),
+            status: ReviewStatus::Completed,
+            cache_key: None, // v1: no cache key
+        };
+        let v1_json = serde_json::to_vec_pretty(&v1_marker).unwrap();
+        fs::write(v1_root.join(MARKER_FILENAME), v1_json).unwrap();
+
+        // Run with current binary version → must NOT reuse v1 artifact.
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+        };
+        let (rendered, _) = run_inner(&app, &args).expect("run must succeed");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let run_id = report["safety"]["run_id"].as_str().unwrap();
+
+        // The run_id must differ from v1_run_id — a fresh artifact was created.
+        assert_ne!(
+            run_id, v1_run_id,
+            "v1 marker without cache_key must not be reused; got run_id={run_id}"
+        );
+
+        // v1 artifact root still exists (was not deleted by the fresh run).
+        assert!(v1_root.exists(), "v1 artifact must remain on disk after fresh run");
+    }
+
+    // =========================================================================
+    // Phase 4 Task 5: cache pruning policy tests
+    // =========================================================================
+
+    // Helper: write a fake artifact with a valid cache_key
+    fn write_fake_artifact_with_key(
+        cache_root: &Path,
+        workspace_root: &Path,
+        run_id: &str,
+        base_sha: &str,
+        head_sha: &str,
+        status: ReviewStatus,
+        created_at_override: Option<&str>,
+        cache_key: Option<crate::pr_review::artifact_root::CacheKey>,
+    ) -> PathBuf {
+        let hash = workspace_hash(workspace_root);
+        let root = cache_root.join(&hash).join(run_id);
+        fs::create_dir_all(&root).expect("create artifact root");
+
+        let marker_path = root.join(MARKER_FILENAME);
+        let storage_path = root.join("storage");
+        let registry_path = root.join("registry.json");
+        fs::create_dir_all(&storage_path).unwrap();
+        fs::write(storage_path.join("dummy.txt"), b"data").unwrap();
+
+        let created_at =
+            created_at_override.map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
+
+        let marker = ReviewMarker {
+            schema_version: 2,
+            workspace_hash: hash,
+            workspace_root: workspace_root.to_path_buf(),
+            base_sha: base_sha.to_owned(),
+            head_sha: head_sha.to_owned(),
+            run_id: run_id.to_owned(),
+            storage_path,
+            registry_path,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+            created_at,
+            status,
+            cache_key,
+        };
+
+        let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
+        fs::write(&marker_path, json).expect("write marker");
+
+        root
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pruning Test 1: older-than skips artifacts with currently active keys
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_older_than_skips_currently_active_keys() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("prune-active-ws");
+        let cache_tmp = TempDir::new("prune-active-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let cache = cache_tmp.path();
+
+        // Artifact 1: has a cache key with SHAs that resolve in this workspace.
+        // Its cache_key.base_sha/head_sha are real commits → is_cache_key_active returns true.
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let active_key = crate::pr_review::artifact_root::CacheKey {
+            workspace_hash: workspace_hash(&ws),
+            base_sha: base_sha.clone(),
+            head_sha: head_sha.clone(),
+            config_hash: "cfg".to_owned(),
+            schema_version: 2,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let root_active = write_fake_artifact_with_key(
+            cache,
+            &ws,
+            "review-active-key",
+            &base_sha,
+            &head_sha,
+            ReviewStatus::Completed,
+            Some(&old_ts),
+            Some(active_key),
+        );
+
+        // Artifact 2: has a cache key with SHAs that do NOT resolve in this
+        // workspace (dead SHAs → force-push scenario).
+        let inactive_key = crate::pr_review::artifact_root::CacheKey {
+            workspace_hash: workspace_hash(&ws),
+            base_sha: "deadbeef".repeat(5),
+            head_sha: "cafebabe".repeat(5),
+            config_hash: "cfg".to_owned(),
+            schema_version: 2,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let root_inactive = write_fake_artifact_with_key(
+            cache,
+            &ws,
+            "review-inactive-key",
+            "deadbeef00000000000000000000000000000000",
+            "cafebabe00000000000000000000000000000000",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+            Some(inactive_key),
+        );
+
+        let app = make_app(&ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+            strict: false,
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: Some("1s".to_owned()),
+            include_active: false, // active keys should be skipped
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+
+        assert!(
+            root_active.exists(),
+            "active-key artifact must be skipped (SHAs still resolvable)"
+        );
+        assert!(
+            !root_inactive.exists(),
+            "inactive-key artifact must be deleted (SHAs not resolvable)"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pruning Test 2: --include-active deletes both active and inactive
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_older_than_with_include_active_deletes_both() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("prune-incl-ws");
+        let cache_tmp = TempDir::new("prune-incl-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let cache = cache_tmp.path();
+
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+
+        // Artifact with active key.
+        let active_key = crate::pr_review::artifact_root::CacheKey {
+            workspace_hash: workspace_hash(&ws),
+            base_sha: base_sha.clone(),
+            head_sha: head_sha.clone(),
+            config_hash: "cfg".to_owned(),
+            schema_version: 2,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let root_active = write_fake_artifact_with_key(
+            cache,
+            &ws,
+            "review-incl-active",
+            &base_sha,
+            &head_sha,
+            ReviewStatus::Completed,
+            Some(&old_ts),
+            Some(active_key),
+        );
+
+        // Artifact with inactive key.
+        let inactive_key = crate::pr_review::artifact_root::CacheKey {
+            workspace_hash: workspace_hash(&ws),
+            base_sha: "deadbeef".repeat(5),
+            head_sha: "cafebabe".repeat(5),
+            config_hash: "cfg".to_owned(),
+            schema_version: 2,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let root_inactive = write_fake_artifact_with_key(
+            cache,
+            &ws,
+            "review-incl-inactive",
+            "deadbeef00000000000000000000000000000000",
+            "cafebabe00000000000000000000000000000000",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+            Some(inactive_key),
+        );
+
+        let app = make_app(&ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+            strict: false,
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: Some("1s".to_owned()),
+            include_active: true, // override the active-skip protection
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean --older-than --include-active should succeed");
+
+        assert!(
+            !root_active.exists(),
+            "--include-active must delete active-key artifact"
+        );
+        assert!(
+            !root_inactive.exists(),
+            "--include-active must delete inactive-key artifact"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pruning Test 3: --all is unconditional (ignores active keys)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_all_still_deletes_active_artifacts() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("prune-all-ws");
+        let cache_tmp = TempDir::new("prune-all-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let cache = cache_tmp.path();
+
+        let active_key = crate::pr_review::artifact_root::CacheKey {
+            workspace_hash: workspace_hash(&ws),
+            base_sha: base_sha.clone(),
+            head_sha: head_sha.clone(),
+            config_hash: "cfg".to_owned(),
+            schema_version: 2,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let root_active = write_fake_artifact_with_key(
+            cache,
+            &ws,
+            "review-all-active",
+            &base_sha,
+            &head_sha,
+            ReviewStatus::Completed,
+            None,
+            Some(active_key),
+        );
+
+        let app = make_app(&ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+            strict: false,
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: None,
+            include_active: false,
+            all: true, // --all is unconditional
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean --all should succeed");
+
+        assert!(
+            !root_active.exists(),
+            "--all must delete active-key artifact unconditionally"
         );
     }
 }
