@@ -83,12 +83,35 @@ pub fn apply_response_budget<T>(
 where
     T: Serialize,
 {
+    // Drop in exponentially-growing batches so a deeply over-budget pack with
+    // L items needs O(log L) serialize-to-budget checks instead of O(L). The
+    // serializer short-circuits at `budget_bytes`, so each check is bounded
+    // by the budget — the win is fewer checks, not cheaper checks. The
+    // doubling cap keeps us from over-dropping wildly when the first
+    // boundary check trips.
+    const MAX_BATCH: usize = 64;
+
     let budget_bytes = requested_budget_bytes(tool, requested_budget)?;
-    let mut exceeds_budget = serialized_len_exceeds(response, budget_bytes)?;
     let mut omitted_items = 0;
-    while exceeds_budget && remove_lowest_ranked(response) {
-        omitted_items += 1;
-        exceeds_budget = serialized_len_exceeds(response, budget_bytes)?;
+    let mut batch = 1;
+    loop {
+        if !serialized_len_exceeds(response, budget_bytes)? {
+            break;
+        }
+        let mut dropped_this_round = 0;
+        while dropped_this_round < batch {
+            if !remove_lowest_ranked(response) {
+                break;
+            }
+            dropped_this_round += 1;
+            omitted_items += 1;
+        }
+        if dropped_this_round == 0 {
+            // Trimmer is exhausted — nothing more we can do; accept the
+            // current response.
+            break;
+        }
+        batch = (batch * 2).min(MAX_BATCH);
     }
 
     let used_bytes = serialized_len(response)?;

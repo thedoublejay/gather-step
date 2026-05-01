@@ -152,14 +152,27 @@ fn exports_up_down(source: &str) -> bool {
 }
 
 fn has_exported_member(source: &str, name: &str) -> bool {
-    let function_form = format!("export async function {name}");
-    let sync_function_form = format!("export function {name}");
-    let const_form = format!("export const {name}");
-    let named_export_form = format!("export {{ {name}");
-    source.contains(&function_form)
-        || source.contains(&sync_function_form)
-        || source.contains(&const_form)
-        || source.contains(&named_export_form)
+    const PREFIXES: &[&str] = &[
+        "export async function ",
+        "export function ",
+        "export const ",
+        "export { ",
+    ];
+    PREFIXES
+        .iter()
+        .any(|prefix| contains_after_prefix(source, prefix, name))
+}
+
+fn contains_after_prefix(source: &str, prefix: &str, suffix: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = source[start..].find(prefix) {
+        let after_prefix = start + offset + prefix.len();
+        if source[after_prefix..].starts_with(suffix) {
+            return true;
+        }
+        start = after_prefix;
+    }
+    false
 }
 
 fn first_argument(raw_arguments: &str) -> Option<&str> {

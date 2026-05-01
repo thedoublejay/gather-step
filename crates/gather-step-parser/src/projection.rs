@@ -3,6 +3,8 @@ use std::{
     sync::OnceLock,
 };
 
+use rustc_hash::FxHashSet;
+
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, virtual_node,
 };
@@ -86,6 +88,7 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
         }
     }
 
+    let mut dedup = ProjectionDedup::from_existing(parsed);
     for field in known_fields
         .iter()
         .chain(facts.reads.iter())
@@ -94,16 +97,17 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
         .chain(facts.indexes.iter())
         .chain(facts.backfills.iter())
     {
-        push_node(parsed, data_field_node(parsed, field));
+        push_node(parsed, &mut dedup, data_field_node(parsed, field));
     }
     for edge in &direct_edges {
-        push_node(parsed, data_field_node(parsed, &edge.field));
+        push_node(parsed, &mut dedup, data_field_node(parsed, &edge.field));
     }
     for (source_field, target_field) in &facts.derives {
-        push_node(parsed, data_field_node(parsed, source_field));
-        push_node(parsed, data_field_node(parsed, target_field));
+        push_node(parsed, &mut dedup, data_field_node(parsed, source_field));
+        push_node(parsed, &mut dedup, data_field_node(parsed, target_field));
         push_edge(
             parsed,
+            &mut dedup,
             field_id(parsed, source_field),
             field_id(parsed, target_field),
             EdgeKind::DerivesFieldFrom,
@@ -111,22 +115,73 @@ pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
         );
     }
     for field in facts.reads {
-        push_field_edge(parsed, &field, EdgeKind::ReadsField, CONFIDENCE_MEDIUM);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::ReadsField,
+            CONFIDENCE_MEDIUM,
+        );
     }
     for field in facts.writes {
-        push_field_edge(parsed, &field, EdgeKind::WritesField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::WritesField,
+            CONFIDENCE_HIGH,
+        );
     }
     for field in facts.filters {
-        push_field_edge(parsed, &field, EdgeKind::FiltersOnField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::FiltersOnField,
+            CONFIDENCE_HIGH,
+        );
     }
     for field in facts.indexes {
-        push_field_edge(parsed, &field, EdgeKind::IndexesField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::IndexesField,
+            CONFIDENCE_HIGH,
+        );
     }
     for field in facts.backfills {
-        push_field_edge(parsed, &field, EdgeKind::BackfillsField, CONFIDENCE_HIGH);
+        push_field_edge(
+            parsed,
+            &mut dedup,
+            &field,
+            EdgeKind::BackfillsField,
+            CONFIDENCE_HIGH,
+        );
     }
     for edge in &direct_edges {
-        push_direct_field_edge(parsed, edge);
+        push_direct_field_edge(parsed, &mut dedup, edge);
+    }
+}
+
+/// Tracks node and edge identities already present in the parsed file so
+/// repeated `push_*` calls during projection augmentation are O(1) instead of
+/// linear scans of `parsed.nodes` / `parsed.edges`.
+struct ProjectionDedup {
+    nodes: FxHashSet<NodeId>,
+    edges: FxHashSet<(NodeId, NodeId, EdgeKind, NodeId)>,
+}
+
+impl ProjectionDedup {
+    fn from_existing(parsed: &ParsedFile) -> Self {
+        Self {
+            nodes: parsed.nodes.iter().map(|node| node.id).collect(),
+            edges: parsed
+                .edges
+                .iter()
+                .map(|edge| (edge.source, edge.target, edge.kind, edge.owner_file))
+                .collect(),
+        }
     }
 }
 
@@ -156,6 +211,14 @@ enum FieldAccessMode {
 }
 
 fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFieldAccessEdge> {
+    // Defensive cap: typed field-access scanning is O(lines * bindings) in the
+    // worst case. Skip pathologically large inputs (minified bundles,
+    // generated code, malicious input) before doing per-line regex work. The
+    // 1 MiB threshold leaves real hand-written sources untouched.
+    if source.len() > MAX_DIRECT_FIELD_SOURCE_LEN {
+        return Vec::new();
+    }
+
     let bindings = typed_field_bindings(source);
     if bindings.is_empty() {
         return Vec::new();
@@ -176,6 +239,8 @@ fn direct_field_access_edges(parsed: &ParsedFile, source: &str) -> Vec<DirectFie
 
     edges.into_iter().collect()
 }
+
+const MAX_DIRECT_FIELD_SOURCE_LEN: usize = 1024 * 1024;
 
 fn typed_field_bindings(source: &str) -> BTreeMap<String, String> {
     let mut bindings = BTreeMap::new();
@@ -883,16 +948,23 @@ fn data_field_qn(repo: &str, file_path: &str, field: &str) -> String {
     format!("data-field::{repo}::{file_path}::{field}")
 }
 
-fn push_node(parsed: &mut ParsedFile, node: NodeData) {
-    if !parsed.nodes.iter().any(|existing| existing.id == node.id) {
+fn push_node(parsed: &mut ParsedFile, dedup: &mut ProjectionDedup, node: NodeData) {
+    if dedup.nodes.insert(node.id) {
         parsed.nodes.push(node);
     }
 }
 
-fn push_field_edge(parsed: &mut ParsedFile, field: &str, kind: EdgeKind, confidence: u16) {
-    push_node(parsed, data_field_node(parsed, field));
+fn push_field_edge(
+    parsed: &mut ParsedFile,
+    dedup: &mut ProjectionDedup,
+    field: &str,
+    kind: EdgeKind,
+    confidence: u16,
+) {
+    push_node(parsed, dedup, data_field_node(parsed, field));
     push_edge(
         parsed,
+        dedup,
         parsed.file_node.id,
         field_id(parsed, field),
         kind,
@@ -900,10 +972,15 @@ fn push_field_edge(parsed: &mut ParsedFile, field: &str, kind: EdgeKind, confide
     );
 }
 
-fn push_direct_field_edge(parsed: &mut ParsedFile, edge: &DirectFieldAccessEdge) {
-    push_node(parsed, data_field_node(parsed, &edge.field));
+fn push_direct_field_edge(
+    parsed: &mut ParsedFile,
+    dedup: &mut ProjectionDedup,
+    edge: &DirectFieldAccessEdge,
+) {
+    push_node(parsed, dedup, data_field_node(parsed, &edge.field));
     push_edge(
         parsed,
+        dedup,
         edge.owner,
         field_id(parsed, &edge.field),
         edge.kind,
@@ -913,12 +990,17 @@ fn push_direct_field_edge(parsed: &mut ParsedFile, edge: &DirectFieldAccessEdge)
 
 fn push_edge(
     parsed: &mut ParsedFile,
+    dedup: &mut ProjectionDedup,
     source: gather_step_core::NodeId,
     target: gather_step_core::NodeId,
     kind: EdgeKind,
     confidence: u16,
 ) {
-    let edge = EdgeData {
+    let owner_file = parsed.file_node.id;
+    if !dedup.edges.insert((source, target, kind, owner_file)) {
+        return;
+    }
+    parsed.edges.push(EdgeData {
         source,
         target,
         kind,
@@ -926,17 +1008,9 @@ fn push_edge(
             confidence: Some(confidence),
             ..EdgeMetadata::default()
         },
-        owner_file: parsed.file_node.id,
+        owner_file,
         is_cross_file: false,
-    };
-    if !parsed.edges.iter().any(|existing| {
-        existing.source == edge.source
-            && existing.target == edge.target
-            && existing.kind == edge.kind
-            && existing.owner_file == edge.owner_file
-    }) {
-        parsed.edges.push(edge);
-    }
+    });
 }
 
 fn property_re() -> &'static Regex {
