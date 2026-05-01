@@ -3,6 +3,11 @@
 //!
 //! Phase 1 Task 5 of the PR review mode plan.
 //!
+//! # Sub-commands
+//!
+//! - `pr-review` (no subcommand): run a review.  Requires `--base` and `--head`.
+//! - `pr-review clean ...`: clean up stale review artifacts (Phase 1 Task 6).
+//!
 //! # Deferred to Phase 2
 //!
 //! - `added_routes`, `added_symbols`, `added_payload_contracts` are all empty
@@ -16,21 +21,23 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, Result};
-use clap::{Args, ValueEnum};
+use anyhow::{Context, Result, bail};
+use clap::{Args, Subcommand, ValueEnum};
 use gather_step_core::GatherStepConfig;
 use gather_step_git::{
     refs::{ChangedFile, resolve_range},
-    worktrees::{create_detached_worktree, remove_worktree},
+    worktrees::{ReviewWorktree, create_detached_worktree, remove_worktree},
 };
 use gather_step_storage::IndexingOptions;
+use serde::Serialize;
 
 use crate::{
     app::AppContext,
     pr_review::{
         artifact_root::{
             ArtifactRootError, ReviewArtifactRoot, create_artifact_root, default_cache_root,
-            generate_run_id, write_marker_completed, write_marker_quarantined, workspace_hash,
+            generate_run_id, read_marker, write_marker_completed, write_marker_quarantined,
+            workspace_hash, MARKER_FILENAME,
         },
         delta_report::{
             CleanupPolicy, DeltaReport, ReviewMetadata, SafetyMetadata,
@@ -48,13 +55,18 @@ const MAX_CHANGED_FILES: usize = 200;
 
 #[derive(Args, Debug, Clone)]
 pub struct PrReviewArgs {
+    #[command(subcommand)]
+    pub command: Option<PrReviewSubcommand>,
+
     /// Base ref (branch, tag, SHA, or any git rev).
+    /// Required when no subcommand is given (i.e., when running a review).
     #[arg(long, value_name = "REF")]
-    pub base: String,
+    pub base: Option<String>,
 
     /// Head ref (branch, tag, SHA, "HEAD", …).
+    /// Required when no subcommand is given (i.e., when running a review).
     #[arg(long, value_name = "REF")]
-    pub head: String,
+    pub head: Option<String>,
 
     /// Engine to use for the review.  Only `temp-index` is supported in this MVP.
     #[arg(long, value_enum, default_value_t = ReviewEngine::TempIndex)]
@@ -76,6 +88,40 @@ pub struct PrReviewArgs {
     pub cache_root: Option<PathBuf>,
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum PrReviewSubcommand {
+    /// Clean up stale review artifact roots for this workspace.
+    Clean(CleanArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CleanArgs {
+    /// Dry-run — list artifacts that would be deleted; delete nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Delete the artifact root for one explicit run id.
+    #[arg(long, value_name = "ID")]
+    pub run_id: Option<String>,
+
+    /// Delete artifacts whose marker base ref resolves to this ref.
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
+
+    /// Delete artifacts whose marker head ref resolves to this ref.
+    #[arg(long, value_name = "REF")]
+    pub head: Option<String>,
+
+    /// Delete completed/failed/quarantined artifacts older than this duration.
+    /// Format: `<n><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`.
+    #[arg(long, value_name = "DURATION")]
+    pub older_than: Option<String>,
+
+    /// Delete ALL review artifacts for this workspace.
+    #[arg(long)]
+    pub all: bool,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ReviewEngine {
     TempIndex,
@@ -83,26 +129,64 @@ pub enum ReviewEngine {
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "matches dispatch signature: clap passes PrReviewArgs by value"
-)]
 pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
-    let report = run_inner(app, &args)?;
-    // Print to stdout.
-    #[expect(
-        clippy::print_stdout,
-        reason = "pr-review is the sole caller of this path; structured output goes here"
-    )]
-    {
-        println!("{report}");
+    match args.command {
+        Some(PrReviewSubcommand::Clean(ref clean_args)) => run_clean(app, &args, clean_args),
+        None => {
+            // Default path: run a review. --base and --head are required here.
+            let base = args
+                .base
+                .as_deref()
+                .context("--base is required when running a review (no subcommand given)")?
+                .to_owned();
+            let head = args
+                .head
+                .as_deref()
+                .context("--head is required when running a review (no subcommand given)")?
+                .to_owned();
+
+            // Reconstruct typed args with the validated required fields.
+            let review_args = PrReviewRunArgs {
+                base,
+                head,
+                engine: args.engine,
+                keep_cache: args.keep_cache,
+                json: args.json,
+                cache_root: args.cache_root,
+            };
+
+            let report = run_inner(app, &review_args)?;
+            // Print to stdout.
+            #[expect(
+                clippy::print_stdout,
+                reason = "pr-review is the sole caller of this path; structured output goes here"
+            )]
+            {
+                println!("{report}");
+            }
+            Ok(())
+        }
     }
-    Ok(())
+}
+
+// ─── Validated run-review args ─────────────────────────────────────────────
+
+/// Validated args for the "run a review" path (no subcommand).
+///
+/// Extracted from `PrReviewArgs` after confirming `--base` and `--head` are
+/// present.  Used internally so `run_inner` can still take typed fields.
+pub struct PrReviewRunArgs {
+    pub base: String,
+    pub head: String,
+    pub engine: ReviewEngine,
+    pub keep_cache: bool,
+    pub json: bool,
+    pub cache_root: Option<PathBuf>,
 }
 
 /// Core implementation — returns the rendered string so tests can assert on it
 /// without capturing stdout.
-pub fn run_inner(app: &AppContext, args: &PrReviewArgs) -> Result<String> {
+pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
     let emit_json = args.json || app.json_output;
 
     // ── 1. Resolve refs ────────────────────────────────────────────────────
@@ -344,6 +428,399 @@ fn quarantine_on_error(artifact_root: &ReviewArtifactRoot) {
     let _ = write_marker_quarantined(artifact_root);
 }
 
+// ─── pr-review clean ──────────────────────────────────────────────────────────
+
+/// A review artifact discovered in the cache root.
+#[derive(Debug, Clone)]
+pub struct DiscoveredArtifact {
+    pub root: PathBuf,
+    pub marker: crate::pr_review::artifact_root::ReviewMarker,
+    pub size_bytes: u64,
+}
+
+/// Scan `default_cache_root(workspace_root)` for subdirectories that contain a
+/// valid `review-marker.json` whose `workspace_hash` matches the current
+/// workspace.  Returns one entry per discovered artifact root.
+pub fn list_review_artifacts(
+    workspace_root: &Path,
+    cache_root: &Path,
+) -> Result<Vec<DiscoveredArtifact>> {
+    let current_hash = workspace_hash(workspace_root);
+    let hash_dir = cache_root.join(&current_hash);
+
+    if !hash_dir.is_dir() {
+        return Ok(vec![]);
+    }
+
+    let mut artifacts = Vec::new();
+
+    let entries = std::fs::read_dir(&hash_dir).with_context(|| {
+        format!("reading review cache directory `{}`", hash_dir.display())
+    })?;
+
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!("reading entry in `{}`", hash_dir.display())
+        })?;
+        let root = entry.path();
+
+        if !root.is_dir() {
+            continue;
+        }
+
+        let marker_path = root.join(MARKER_FILENAME);
+        match read_marker(&marker_path) {
+            Ok(marker) => {
+                if marker.workspace_hash != current_hash {
+                    tracing::warn!(
+                        "skipping `{}`: workspace_hash mismatch (expected `{}`, got `{}`)",
+                        root.display(),
+                        current_hash,
+                        marker.workspace_hash,
+                    );
+                    continue;
+                }
+                let size_bytes = dir_size_bytes(&root);
+                artifacts.push(DiscoveredArtifact {
+                    root,
+                    marker,
+                    size_bytes,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "skipping `{}`: could not read marker: {e}",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    Ok(artifacts)
+}
+
+/// Recursively sum the sizes of all files under `dir`.  Ignores I/O errors
+/// (treats unreadable entries as zero bytes).
+fn dir_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                total += dir_size_bytes(&path);
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// Parse a duration string like `7d`, `1w`, `12h`, `30m`, `60s` into a
+/// `std::time::Duration`.
+pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("empty duration string");
+    }
+
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let n: u64 = num_str
+        .parse()
+        .with_context(|| format!("invalid duration `{s}`: expected `<n><unit>` where unit is s/m/h/d/w"))?;
+
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        "w" => n * 7 * 86_400,
+        other => bail!(
+            "invalid duration unit `{other}` in `{s}`: use s, m, h, d, or w"
+        ),
+    };
+
+    Ok(std::time::Duration::from_secs(secs))
+}
+
+// ─── JSON output schema ────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct CleanOutput {
+    operation: &'static str,
+    dry_run: bool,
+    selected_artifacts: Vec<CleanArtifactEntry>,
+    skipped_baseline_paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanArtifactEntry {
+    run_id: String,
+    root: String,
+    size_bytes: u64,
+    deleted: bool,
+}
+
+// ─── Safety guard ─────────────────────────────────────────────────────────────
+
+/// Verify that `artifact_root` does not overlap the baseline `.gather-step`
+/// storage or registry paths.
+///
+/// Returns `Ok(())` when safe, `Err` with a descriptive message when the
+/// artifact root could clobber baseline state.
+fn assert_not_baseline_overlap(
+    artifact_root: &Path,
+    workspace_root: &Path,
+) -> Result<()> {
+    let baseline_storage = workspace_root.join(".gather-step").join("storage");
+    let baseline_registry = workspace_root.join(".gather-step").join("registry.json");
+
+    // Check if artifact_root equals or is an ancestor of baseline paths, or
+    // vice-versa (baseline path inside artifact_root).
+    for baseline in [&baseline_storage, &baseline_registry] {
+        if artifact_root == *baseline
+            || baseline.starts_with(artifact_root)
+            || artifact_root.starts_with(baseline)
+        {
+            bail!(
+                "artifact root `{}` overlaps baseline path `{}`; refusing deletion",
+                artifact_root.display(),
+                baseline.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Delete a single artifact root, enforcing all safety guards.
+///
+/// 1. Re-reads the marker (refuses if missing/unparseable).
+/// 2. Checks `workspace_hash` matches.
+/// 3. Checks no overlap with baseline storage/registry.
+/// 4. Attempts worktree removal, then `remove_dir_all`.
+///
+/// In dry-run mode, logs what would be removed but performs no deletion.
+fn delete_artifact(
+    artifact: &DiscoveredArtifact,
+    workspace_root: &Path,
+    dry_run: bool,
+) -> Result<()> {
+    // Step 1: re-read the marker.
+    let marker_path = artifact.root.join(MARKER_FILENAME);
+    let marker = read_marker(&marker_path).with_context(|| {
+        format!(
+            "re-reading marker for artifact at `{}`",
+            artifact.root.display()
+        )
+    })?;
+
+    // Step 2: workspace hash check.
+    let current_hash = workspace_hash(workspace_root);
+    if marker.workspace_hash != current_hash {
+        bail!(
+            "refusing to delete `{}`: workspace_hash in marker (`{}`) does not match \
+             current workspace hash (`{}`)",
+            artifact.root.display(),
+            marker.workspace_hash,
+            current_hash,
+        );
+    }
+
+    // Step 3: no overlap with baseline paths.
+    assert_not_baseline_overlap(&artifact.root, workspace_root)
+        .with_context(|| format!("safety check for `{}`", artifact.root.display()))?;
+
+    if dry_run {
+        #[expect(clippy::print_stdout, reason = "clean command progress output")]
+        {
+            println!(
+                "would remove {} ({} bytes)",
+                artifact.root.display(),
+                artifact.size_bytes,
+            );
+        }
+        return Ok(());
+    }
+
+    // Step 4: remove worktree (best-effort), then remove the artifact dir.
+    let worktree_root = artifact.root.join("worktree");
+    if worktree_root.is_dir() {
+        let wt = ReviewWorktree {
+            repo: workspace_root.to_path_buf(),
+            root: worktree_root,
+            sha: marker.head_sha.clone(),
+        };
+        // Best-effort: if removal fails, continue and let remove_dir_all clean up.
+        let _ = remove_worktree(&wt);
+    }
+
+    std::fs::remove_dir_all(&artifact.root).with_context(|| {
+        format!("removing artifact root `{}`", artifact.root.display())
+    })?;
+
+    #[expect(clippy::print_stdout, reason = "clean command progress output")]
+    {
+        println!(
+            "removed {} ({} bytes)",
+            artifact.root.display(),
+            artifact.size_bytes,
+        );
+    }
+
+    Ok(())
+}
+
+/// Handle `gather-step pr-review clean ...`.
+fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<()> {
+    // Exactly one selector must be given.
+    let selectors = [
+        args.run_id.is_some(),
+        args.base.is_some() || args.head.is_some(),
+        args.older_than.is_some(),
+        args.all,
+    ];
+    let selector_count = selectors.iter().filter(|&&v| v).count();
+
+    if selector_count == 0 {
+        bail!(
+            "pr-review clean requires exactly one selector: \
+             --run-id <ID>, --base <REF> --head <REF>, --older-than <DURATION>, or --all"
+        );
+    }
+    if selector_count > 1 {
+        bail!(
+            "pr-review clean: only one selector may be given at a time; \
+             combine --dry-run with any selector to preview"
+        );
+    }
+
+    // Validate --base/--head: both or neither.
+    match (&args.base, &args.head) {
+        (Some(_), None) | (None, Some(_)) => {
+            bail!("--base and --head must be specified together");
+        }
+        _ => {}
+    }
+
+    let cache_root = top
+        .cache_root
+        .clone()
+        .unwrap_or_else(|| default_cache_root(&app.workspace_path));
+
+    let emit_json = top.json || app.json_output;
+
+    // Discover all review artifacts for this workspace.
+    let all_artifacts = list_review_artifacts(&app.workspace_path, &cache_root)
+        .context("discovering review artifacts")?;
+
+    // Baseline paths we will never touch.
+    let ws_paths = app.workspace_paths();
+    let baseline_paths = vec![
+        ws_paths.registry_path.display().to_string(),
+        ws_paths.storage_root.display().to_string(),
+    ];
+
+    // Select artifacts according to the chosen selector.
+    let selected: Vec<DiscoveredArtifact> = if args.all {
+        // Print baseline banner before any deletions.
+        if !emit_json {
+            #[expect(clippy::print_stdout, reason = "clean --all baseline safety banner")]
+            {
+                println!("Will not touch baseline paths:");
+                println!("  registry: {}", ws_paths.registry_path.display());
+                println!("  storage:  {}", ws_paths.storage_root.display());
+            }
+        }
+        all_artifacts
+    } else if let Some(ref run_id) = args.run_id {
+        all_artifacts
+            .into_iter()
+            .filter(|a| &a.marker.run_id == run_id)
+            .collect()
+    } else if let (Some(base_ref), Some(head_ref)) = (&args.base, &args.head) {
+        // Resolve refs against the real workspace so we can compare to stored SHAs.
+        // For test paths, literal SHAs are also accepted (resolve_range is a no-op
+        // for full 40-char SHAs that already appear as-is in the marker).
+        let (base_sha, head_sha) = match resolve_range(&app.workspace_path, base_ref, head_ref) {
+            Ok(resolved) => (resolved.base.sha, resolved.head.sha),
+            Err(_) => {
+                // Fallback: treat the inputs as literal SHAs (useful in tests and
+                // when the workspace is not a git repo).
+                (base_ref.clone(), head_ref.clone())
+            }
+        };
+        all_artifacts
+            .into_iter()
+            .filter(|a| a.marker.base_sha == base_sha && a.marker.head_sha == head_sha)
+            .collect()
+    } else if let Some(ref duration_str) = args.older_than {
+        let max_age = parse_duration(duration_str)
+            .with_context(|| format!("parsing --older-than `{duration_str}`"))?;
+        let now = std::time::SystemTime::now();
+        all_artifacts
+            .into_iter()
+            .filter(|a| {
+                // Parse RFC 3339 created_at to compare age.
+                chrono::DateTime::parse_from_rfc3339(&a.marker.created_at)
+                    .ok()
+                    .is_some_and(|dt| {
+                        let artifact_time = std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_secs(
+                                dt.timestamp().max(0).cast_unsigned(),
+                            );
+                        now.duration_since(artifact_time)
+                            .is_ok_and(|age| age >= max_age)
+                    })
+            })
+            .collect()
+    } else {
+        unreachable!("selector_count == 1 guarantees one branch is taken")
+    };
+
+    // Execute or preview deletions.
+    let mut entries: Vec<CleanArtifactEntry> = Vec::with_capacity(selected.len());
+    let mut had_error = false;
+
+    for artifact in &selected {
+        let was_dry = args.dry_run;
+        match delete_artifact(artifact, &app.workspace_path, args.dry_run) {
+            Ok(()) => {
+                entries.push(CleanArtifactEntry {
+                    run_id: artifact.marker.run_id.clone(),
+                    root: artifact.root.display().to_string(),
+                    size_bytes: artifact.size_bytes,
+                    deleted: !was_dry,
+                });
+            }
+            Err(e) => {
+                tracing::error!("failed to process `{}`: {e:#}", artifact.root.display());
+                had_error = true;
+            }
+        }
+    }
+
+    if emit_json {
+        let output = CleanOutput {
+            operation: "clean",
+            dry_run: args.dry_run,
+            selected_artifacts: entries,
+            skipped_baseline_paths: baseline_paths,
+        };
+        let json = serde_json::to_string_pretty(&output)
+            .context("serializing clean output to JSON")?;
+        #[expect(clippy::print_stdout, reason = "clean JSON output goes to stdout")]
+        {
+            println!("{json}");
+        }
+    }
+
+    if had_error {
+        bail!("one or more artifacts could not be cleaned; see errors above");
+    }
+
+    Ok(())
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -356,7 +833,13 @@ mod tests {
     };
 
     use super::*;
-    use crate::app::AppContext;
+    use crate::{
+        app::AppContext,
+        pr_review::artifact_root::{
+            ReviewMarker, ReviewStatus,
+            workspace_hash, MARKER_FILENAME,
+        },
+    };
 
     // ── temp-dir helper ───────────────────────────────────────────────────────
 
@@ -483,7 +966,418 @@ mod tests {
         }
     }
 
-    // ── Test 1: metadata fields ───────────────────────────────────────────────
+    // ── Helper: write a fake artifact root with a given marker ────────────────
+
+    fn write_fake_artifact(
+        cache_root: &Path,
+        workspace_root: &Path,
+        run_id: &str,
+        base_sha: &str,
+        head_sha: &str,
+        status: ReviewStatus,
+        created_at_override: Option<&str>,
+    ) -> PathBuf {
+        let hash = workspace_hash(workspace_root);
+        let root = cache_root.join(&hash).join(run_id);
+        fs::create_dir_all(&root).expect("create fake artifact root");
+
+        let marker_path = root.join(MARKER_FILENAME);
+        let storage_path = root.join("storage");
+        let registry_path = root.join("registry.json");
+        fs::create_dir_all(&storage_path).unwrap();
+        // Write a small file so size_bytes > 0.
+        fs::write(storage_path.join("dummy.txt"), b"data").unwrap();
+
+        let created_at = created_at_override
+            .map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
+
+        let marker = ReviewMarker {
+            schema_version: 1,
+            workspace_hash: hash,
+            workspace_root: workspace_root.to_path_buf(),
+            base_sha: base_sha.to_owned(),
+            head_sha: head_sha.to_owned(),
+            run_id: run_id.to_owned(),
+            storage_path,
+            registry_path,
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+            created_at,
+            status,
+        };
+
+        let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
+        fs::write(&marker_path, json).expect("write marker");
+
+        root
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 1: dry_run_lists_artifacts_and_deletes_nothing
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn dry_run_lists_artifacts_and_deletes_nothing() {
+        let ws_tmp = TempDir::new("dry-ws");
+        let cache_tmp = TempDir::new("dry-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let root1 = write_fake_artifact(
+            cache, ws, "review-dry-run-1", "base000", "head000",
+            ReviewStatus::Completed, None,
+        );
+        let root2 = write_fake_artifact(
+            cache, ws, "review-dry-run-2", "base111", "head111",
+            ReviewStatus::Completed, None,
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: true,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: None,
+            all: true,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("dry-run clean should succeed");
+
+        // Both artifact roots must still exist.
+        assert!(root1.exists(), "root1 must not be deleted in dry-run");
+        assert!(root2.exists(), "root2 must not be deleted in dry-run");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 2: run_id_deletes_only_matching_run
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_id_deletes_only_matching_run() {
+        let ws_tmp = TempDir::new("runid-ws");
+        let cache_tmp = TempDir::new("runid-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let root1 = write_fake_artifact(
+            cache, ws, "review-target-run", "baseA", "headA",
+            ReviewStatus::Completed, None,
+        );
+        let root2 = write_fake_artifact(
+            cache, ws, "review-other-run", "baseB", "headB",
+            ReviewStatus::Completed, None,
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: Some("review-target-run".to_owned()),
+            base: None,
+            head: None,
+            older_than: None,
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean by run_id should succeed");
+
+        assert!(!root1.exists(), "matching artifact should be deleted");
+        assert!(root2.exists(), "non-matching artifact must remain");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 3: base_head_deletes_matching_pair
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn base_head_deletes_matching_pair() {
+        let ws_tmp = TempDir::new("bh-ws");
+        let cache_tmp = TempDir::new("bh-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let sha_base = "aaaa1111bbbb2222cccc3333dddd4444eeee5555";
+        let sha_head = "ffff6666aaaa7777bbbb8888cccc9999dddd0000";
+        let sha_base2 = "1111aaaa2222bbbb3333cccc4444dddd5555eeee";
+        let sha_head2 = "6666ffff7777aaaa8888bbbb9999cccc0000dddd";
+
+        let root1 = write_fake_artifact(
+            cache, ws, "review-bh-match", sha_base, sha_head,
+            ReviewStatus::Completed, None,
+        );
+        let root2 = write_fake_artifact(
+            cache, ws, "review-bh-other", sha_base2, sha_head2,
+            ReviewStatus::Completed, None,
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            // Pass literal SHAs so no git resolution is needed.
+            base: Some(sha_base.to_owned()),
+            head: Some(sha_head.to_owned()),
+            older_than: None,
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean by base/head should succeed");
+
+        assert!(!root1.exists(), "matching artifact should be deleted");
+        assert!(root2.exists(), "non-matching artifact must remain");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 4: older_than_deletes_only_old_artifacts
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn older_than_deletes_only_old_artifacts() {
+        let ws_tmp = TempDir::new("age-ws");
+        let cache_tmp = TempDir::new("age-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        // Old artifact: backdated 2 days ago.
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        let root_old = write_fake_artifact(
+            cache, ws, "review-old-run", "baseOLD", "headOLD",
+            ReviewStatus::Completed, Some(&old_ts),
+        );
+        // Fresh artifact: created now.
+        let root_fresh = write_fake_artifact(
+            cache, ws, "review-fresh-run", "baseFRESH", "headFRESH",
+            ReviewStatus::Completed, None,
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: Some("1d".to_owned()),
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+
+        assert!(!root_old.exists(), "old artifact should be deleted");
+        assert!(root_fresh.exists(), "fresh artifact must remain");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 5: all_deletes_every_artifact_for_workspace
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn all_deletes_every_artifact_for_workspace() {
+        let ws_tmp = TempDir::new("all-ws");
+        let cache_tmp = TempDir::new("all-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let root1 = write_fake_artifact(
+            cache, ws, "review-all-1", "baseX", "headX",
+            ReviewStatus::Completed, None,
+        );
+        let root2 = write_fake_artifact(
+            cache, ws, "review-all-2", "baseY", "headY",
+            ReviewStatus::Quarantined, None,
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: None,
+            all: true,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean --all should succeed");
+
+        assert!(!root1.exists(), "artifact 1 should be deleted");
+        assert!(!root2.exists(), "artifact 2 should be deleted");
+
+        // The workspace-hash subdirectory should now be empty.
+        let hash = workspace_hash(ws);
+        let hash_dir = cache.join(hash);
+        let remaining: Vec<_> = fs::read_dir(&hash_dir)
+            .expect("hash dir should still exist")
+            .flatten()
+            .collect();
+        assert!(remaining.is_empty(), "hash_dir should be empty after --all");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 6: refuses_to_delete_when_workspace_hash_mismatch
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn refuses_to_delete_when_workspace_hash_mismatch() {
+        let ws_tmp = TempDir::new("mismatch-ws");
+        let cache_tmp = TempDir::new("mismatch-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        // Write a marker under the real workspace_hash directory but with a
+        // *different* workspace_hash value inside the JSON — simulates an
+        // artifact from another workspace that somehow landed in this tree.
+        let real_hash = workspace_hash(ws);
+        let run_id = "review-mismatch-run";
+        let root = cache.join(&real_hash).join(run_id);
+        fs::create_dir_all(&root).unwrap();
+        let marker = ReviewMarker {
+            schema_version: 1,
+            workspace_hash: "deadbeefdeadbeef".to_owned(), // wrong hash
+            workspace_root: ws.to_path_buf(),
+            base_sha: "base".to_owned(),
+            head_sha: "head".to_owned(),
+            run_id: run_id.to_owned(),
+            storage_path: root.join("storage"),
+            registry_path: root.join("registry.json"),
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            status: ReviewStatus::Completed,
+        };
+        let json = serde_json::to_vec_pretty(&marker).unwrap();
+        fs::write(root.join(MARKER_FILENAME), json).unwrap();
+
+        // list_review_artifacts should skip it (hash mismatch in discovery).
+        let artifacts = list_review_artifacts(ws, cache).expect("list should succeed");
+        assert!(
+            artifacts.is_empty(),
+            "mismatch artifact should be skipped during discovery"
+        );
+
+        // Even if we manually try delete_artifact it should fail.
+        let fake = DiscoveredArtifact {
+            root: root.clone(),
+            marker,
+            size_bytes: 0,
+        };
+        let result = delete_artifact(&fake, ws, false);
+        assert!(result.is_err(), "delete must fail on workspace_hash mismatch");
+        // Root still exists.
+        assert!(root.exists(), "mismatch artifact must not be deleted");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 7: refuses_to_delete_paths_overlapping_baseline
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn refuses_to_delete_paths_overlapping_baseline() {
+        let ws_tmp = TempDir::new("overlap-ws");
+        let ws = ws_tmp.path();
+
+        // Construct a fake artifact whose root IS the baseline storage path.
+        let baseline_storage = ws.join(".gather-step").join("storage");
+        fs::create_dir_all(&baseline_storage).unwrap();
+
+        let marker = ReviewMarker {
+            schema_version: 1,
+            workspace_hash: workspace_hash(ws),
+            workspace_root: ws.to_path_buf(),
+            base_sha: "b".to_owned(),
+            head_sha: "h".to_owned(),
+            run_id: "review-overlap".to_owned(),
+            storage_path: baseline_storage.clone(),
+            registry_path: ws.join(".gather-step").join("registry.json"),
+            gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            status: ReviewStatus::Completed,
+        };
+
+        // Write the marker INTO the baseline storage path so re-read works.
+        let marker_path = baseline_storage.join(MARKER_FILENAME);
+        let json = serde_json::to_vec_pretty(&marker).unwrap();
+        fs::write(&marker_path, json).unwrap();
+
+        let fake = DiscoveredArtifact {
+            root: baseline_storage.clone(),
+            marker,
+            size_bytes: 0,
+        };
+
+        let result = delete_artifact(&fake, ws, false);
+        assert!(result.is_err(), "must refuse to delete overlapping baseline path");
+        assert!(
+            baseline_storage.exists(),
+            "baseline storage must not be removed"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Test 8: older_than_parses_common_units
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn older_than_parses_common_units() {
+        assert_eq!(parse_duration("60s").unwrap().as_secs(), 60);
+        assert_eq!(parse_duration("30m").unwrap().as_secs(), 1800);
+        assert_eq!(parse_duration("12h").unwrap().as_secs(), 43_200);
+        assert_eq!(parse_duration("7d").unwrap().as_secs(), 7 * 86_400);
+        assert_eq!(parse_duration("1w").unwrap().as_secs(), 7 * 86_400);
+
+        // Malformed inputs must fail.
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("7x").is_err());
+        assert!(parse_duration("nope").is_err());
+        assert!(parse_duration("7").is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Existing pr-review run tests (retained)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Test: metadata fields ─────────────────────────────────────────────────
 
     #[test]
     fn pr_review_emits_metadata_for_simple_pr() {
@@ -496,7 +1390,7 @@ mod tests {
         let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
 
         let app = make_app(&ws);
-        let args = PrReviewArgs {
+        let args = PrReviewRunArgs {
             base: base_sha.clone(),
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
@@ -541,7 +1435,7 @@ mod tests {
         assert!(followups.len() >= 3, "expected >= 3 followups");
     }
 
-    // ── Test 2: keep_cache leaves artifact root ───────────────────────────────
+    // ── Test: keep_cache leaves artifact root ─────────────────────────────────
 
     #[test]
     fn pr_review_keeps_cache_when_flag_set() {
@@ -554,7 +1448,7 @@ mod tests {
         let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
 
         let app = make_app(&ws);
-        let args = PrReviewArgs {
+        let args = PrReviewRunArgs {
             base: base_sha,
             head: head_sha,
             engine: ReviewEngine::TempIndex,
@@ -574,7 +1468,7 @@ mod tests {
         );
     }
 
-    // ── Test 3: cleanup removes artifact root ─────────────────────────────────
+    // ── Test: cleanup removes artifact root ───────────────────────────────────
 
     #[test]
     fn pr_review_cleans_up_when_flag_unset() {
@@ -587,7 +1481,7 @@ mod tests {
         let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
 
         let app = make_app(&ws);
-        let args = PrReviewArgs {
+        let args = PrReviewRunArgs {
             base: base_sha,
             head: head_sha,
             engine: ReviewEngine::TempIndex,
@@ -607,7 +1501,7 @@ mod tests {
         );
     }
 
-    // ── Test 4: baseline storage is not touched ───────────────────────────────
+    // ── Test: baseline storage is not touched ─────────────────────────────────
 
     #[test]
     fn pr_review_does_not_touch_baseline_storage() {
@@ -625,7 +1519,7 @@ mod tests {
         let existed_before = baseline_gather_step.exists();
 
         let app = make_app(&ws);
-        let args = PrReviewArgs {
+        let args = PrReviewRunArgs {
             base: base_sha,
             head: head_sha,
             engine: ReviewEngine::TempIndex,
