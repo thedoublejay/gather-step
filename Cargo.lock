@@ -1280,6 +1280,7 @@ dependencies = [
  "blake3",
  "crossbeam-channel",
  "gather-step-core",
+ "gather-step-deploy",
  "gather-step-parser",
  "gather-step-storage",
  "ignore",

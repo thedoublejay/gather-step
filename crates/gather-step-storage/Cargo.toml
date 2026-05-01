@@ -10,6 +10,7 @@ description = "Storage backends for Gather Step"
 
 [dependencies]
 gather-step-core.workspace = true
+gather-step-deploy.workspace = true
 gather-step-parser.workspace = true
 bitcode.workspace = true
 blake3.workspace = true
