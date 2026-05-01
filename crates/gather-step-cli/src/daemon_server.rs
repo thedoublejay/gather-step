@@ -23,6 +23,7 @@ use crate::{
         trace::{self, CrudArgs, TraceCommand},
     },
     daemon_protocol::{DaemonPidFile, DaemonRequest, DaemonResponse},
+    storage_context::StorageContext,
 };
 
 #[derive(Clone)]
@@ -81,7 +82,11 @@ pub fn dispatch_request_with_runtime(
                     SearchArgs { query, limit, kind },
                 )
             } else {
-                search::run_rendered(&app, SearchArgs { query, limit, kind })
+                search::run_rendered(
+                    &app,
+                    &StorageContext::workspace_read_only(&app),
+                    SearchArgs { query, limit, kind },
+                )
             }
         }
         DaemonRequest::Status { repo_filter } => {
@@ -99,7 +104,7 @@ pub fn dispatch_request_with_runtime(
                     app.repo_filter.as_deref(),
                 )
             } else {
-                status::run_rendered(&app)
+                status::run_rendered(&app, &StorageContext::workspace_read_only(&app))
             }
         }
         DaemonRequest::TraceCrud {
@@ -121,6 +126,7 @@ pub fn dispatch_request_with_runtime(
             } else {
                 trace::run_rendered(
                     &app,
+                    &StorageContext::workspace_read_only(&app),
                     trace::TraceArgs {
                         command: TraceCommand::Crud(args),
                     },
@@ -135,7 +141,7 @@ pub fn dispatch_request_with_runtime(
                 let storage = runtime.storage();
                 doctor::execute(&registry, &storage, app.repo_filter.as_deref())
             } else {
-                doctor::run_rendered(&app)
+                doctor::run_rendered(&app, &StorageContext::workspace_read_only(&app))
             }
         }
         DaemonRequest::Conventions { repo_filter } => {
@@ -149,7 +155,7 @@ pub fn dispatch_request_with_runtime(
                     app.repo_filter.as_deref(),
                 )
             } else {
-                conventions::run_rendered(&app)
+                conventions::run_rendered(&app, &StorageContext::workspace_read_only(&app))
             }
         }
         DaemonRequest::EventsTrace {
@@ -165,6 +171,7 @@ pub fn dispatch_request_with_runtime(
             } else {
                 events::run_rendered(
                     &app,
+                    &StorageContext::workspace_read_only(&app),
                     EventsArgs {
                         command: EventsCommand::Trace(args),
                     },
@@ -189,6 +196,7 @@ pub fn dispatch_request_with_runtime(
             } else {
                 events::run_rendered(
                     &app,
+                    &StorageContext::workspace_read_only(&app),
                     EventsArgs {
                         command: EventsCommand::BlastRadius(args),
                     },
@@ -204,6 +212,7 @@ pub fn dispatch_request_with_runtime(
             } else {
                 events::run_rendered(
                     &app,
+                    &StorageContext::workspace_read_only(&app),
                     EventsArgs {
                         command: EventsCommand::Orphans(args),
                     },
@@ -224,7 +233,11 @@ pub fn dispatch_request_with_runtime(
                     ImpactArgs { symbol, limit },
                 )
             } else {
-                impact::run_rendered(&app, ImpactArgs { symbol, limit })
+                impact::run_rendered(
+                    &app,
+                    &StorageContext::workspace_read_only(&app),
+                    ImpactArgs { symbol, limit },
+                )
             }
         }
         DaemonRequest::Pack {
@@ -254,7 +267,7 @@ pub fn dispatch_request_with_runtime(
             if let Some(runtime) = runtime {
                 pack::execute(runtime.mcp.as_ref(), app.repo_filter.clone(), &args)
             } else {
-                pack::run_rendered(&app, &args)
+                pack::run_rendered(&app, &StorageContext::workspace_read_only(&app), &args)
             }
         }
     }

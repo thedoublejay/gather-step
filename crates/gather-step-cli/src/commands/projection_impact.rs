@@ -9,6 +9,7 @@ use gather_step_storage::{MetadataStore, PayloadContractQuery, StorageCoordinato
 
 use crate::app::AppContext;
 use crate::command_render::RenderedCommand;
+use crate::storage_context::StorageContext;
 
 #[derive(Debug, Args)]
 pub struct ProjectionImpactArgs {
@@ -50,14 +51,15 @@ impl From<EvidenceVerbosityArg> for ProjectionEvidenceVerbosity {
 }
 
 pub fn run(app: &AppContext, args: ProjectionImpactArgs) -> Result<()> {
-    run_rendered(app, args)?.emit(&app.output())
+    run_rendered(app, &StorageContext::workspace_read_only(app), args)?.emit(&app.output())
 }
 
 pub(crate) fn run_rendered(
     app: &AppContext,
+    ctx: &StorageContext,
     args: ProjectionImpactArgs,
 ) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+    let storage = ctx.open_storage_coordinator()?;
     execute(&storage, app.repo_filter.as_deref(), args)
 }
 

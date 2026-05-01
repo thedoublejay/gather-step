@@ -8,6 +8,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -83,16 +84,17 @@ pub fn run(app: &AppContext, args: &PackArgs) -> Result<()> {
             budget_bytes: args.budget_bytes,
             repo_filter: app.repo_filter.clone(),
         },
-        |app| run_rendered(app, args),
+        |app| run_rendered(app, &StorageContext::workspace_read_only(app), args),
     )
 }
 
-pub(crate) fn run_rendered(app: &AppContext, args: &PackArgs) -> Result<RenderedCommand> {
-    let ctx = gather_step_mcp::McpContext::open(gather_step_mcp::McpServerConfig::new(
-        app.workspace_paths().registry_path,
-        app.workspace_paths().graph_path,
-    ))?;
-    execute(&ctx, app.repo_filter.clone(), args)
+pub(crate) fn run_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: &PackArgs,
+) -> Result<RenderedCommand> {
+    let mcp = gather_step_mcp::McpContext::open(ctx.mcp_server_config())?;
+    execute(&mcp, app.repo_filter.clone(), args)
 }
 
 pub(crate) fn execute(

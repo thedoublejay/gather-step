@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args, Default)]
@@ -55,16 +56,16 @@ pub fn run(app: &AppContext, _args: DoctorArgs) -> Result<()> {
         &DaemonRequest::Doctor {
             repo_filter: app.repo_filter.clone(),
         },
-        run_rendered,
+        |app| run_rendered(app, &StorageContext::workspace_read_only(app)),
     )
 }
 
-pub(crate) fn run_rendered(app: &AppContext) -> Result<RenderedCommand> {
-    let paths = app.workspace_paths();
-    let registry = RegistryStore::open(&paths.registry_path)
-        .with_context(|| format!("opening {}", paths.registry_path.display()))?;
-    let storage = StorageCoordinator::open(&paths.storage_root)
-        .with_context(|| format!("opening {}", paths.storage_root.display()))?;
+pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<RenderedCommand> {
+    let registry = RegistryStore::open(ctx.registry_path())
+        .with_context(|| format!("opening {}", ctx.registry_path().display()))?;
+    let storage = ctx
+        .open_storage_coordinator()
+        .with_context(|| format!("opening {}", ctx.storage_root().display()))?;
     execute(&registry, &storage, app.repo_filter.as_deref())
 }
 

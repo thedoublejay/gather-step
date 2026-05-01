@@ -18,6 +18,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
@@ -89,12 +90,16 @@ pub fn run(app: &AppContext, args: ImpactArgs) -> Result<()> {
             limit: args.limit,
             repo_filter: app.repo_filter.clone(),
         },
-        move |app| run_rendered(app, args),
+        move |app| run_rendered(app, &StorageContext::workspace_read_only(app), args),
     )
 }
 
-pub(crate) fn run_rendered(app: &AppContext, args: ImpactArgs) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+pub(crate) fn run_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: ImpactArgs,
+) -> Result<RenderedCommand> {
+    let storage = ctx.open_storage_coordinator()?;
     execute(&storage, app.repo_filter.as_deref(), args)
 }
 
