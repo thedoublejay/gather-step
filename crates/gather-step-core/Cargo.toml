@@ -10,7 +10,7 @@ description = "Core types and schema for Gather Step"
 
 [dependencies]
 serde.workspace = true
-serde_yaml_ng.workspace = true
+serde_norway.workspace = true
 bitcode.workspace = true
 blake3.workspace = true
 thiserror.workspace = true

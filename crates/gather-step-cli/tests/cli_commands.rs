@@ -189,7 +189,11 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     let temp = TempDir::new("cli-commands");
     write_fixture_workspace(temp.path());
 
-    run_ok(temp.path(), &["init"]);
+    let init = run_ok(temp.path(), &["init"]);
+    let init_stdout = String::from_utf8_lossy(&init.stdout);
+    assert!(init_stdout.contains("2 configured repositories"));
+    assert!(!init_stdout.contains("backend_standard"));
+    assert!(!init_stdout.contains("frontend_ui"));
     assert!(temp.path().join("gather-step.config.yaml").exists());
 
     let index = run_ok(temp.path(), &["--json", "index"]);

@@ -1,13 +1,21 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use console::style;
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    event::{self, Event, KeyCode, KeyEventKind},
+    execute, queue,
+    style::Print,
+    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
 use gather_step_core::{GatherStepConfig, IndexingConfig, RepoConfig};
 use serde::Serialize;
 
@@ -254,7 +262,7 @@ fn write_default_config_with_repos(
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    fs::write(&config_path, serde_yaml_ng::to_string(&config)?)
+    fs::write(&config_path, serde_norway::to_string(&config)?)
         .with_context(|| format!("writing {}", config_path.display()))?;
 
     emit_config_summary(app, &config_path, &summary_repos, "Wrote config")?;
@@ -344,21 +352,18 @@ fn emit_config_summary(
         style(payload.repo_count).cyan().bold(),
         style(repository_count_label(payload.repo_count)).dim()
     ));
-    for repo in payload.repos {
-        output.line(format!(
-            "  {} {}",
-            style("✓").green().bold(),
-            style(format!("{}  ({})", repo.name, repo.path)).cyan()
-        ));
-    }
 
     Ok(())
 }
 
 fn emit_setup_complete(output: &crate::app::Output) {
     output.line(format!(
-        "\n  {} Gather Step is ready. Start planning with your agent. Example: {}. Docs: {}",
+        "\n  {} {}",
         style("✓ Setup complete.").green().bold(),
+        style("Gather Step is ready.").green().bold(),
+    ));
+    output.line(format!(
+        "  Start planning with your agent. Example: {}. Docs: {}",
         style("\"Start planning your next task with gather-step\"").cyan(),
         style("https://gatherstep.dev/reference/mcp-tools/").underlined()
     ));
@@ -485,6 +490,18 @@ fn prompt_repo_selection(
         selected.extend(0..repos.len());
     }
 
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return prompt_repo_selection_interactive(step, repos, selected);
+    }
+
+    prompt_repo_selection_text(step, repos, selected)
+}
+
+fn prompt_repo_selection_text(
+    step: usize,
+    repos: &[DiscoveredRepo],
+    mut selected: BTreeSet<usize>,
+) -> Result<Vec<DiscoveredRepo>> {
     loop {
         let mut stdout = io::stdout().lock();
         writeln!(
@@ -550,6 +567,189 @@ fn prompt_repo_selection(
         .into_iter()
         .filter_map(|idx| repos.get(idx).cloned())
         .collect())
+}
+
+struct RepoPickerTerminalGuard;
+
+impl RepoPickerTerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("enabling raw terminal mode")?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide)
+            .context("entering repository picker screen")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RepoPickerTerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    }
+}
+
+fn prompt_repo_selection_interactive(
+    step: usize,
+    repos: &[DiscoveredRepo],
+    mut selected: BTreeSet<usize>,
+) -> Result<Vec<DiscoveredRepo>> {
+    let _guard = RepoPickerTerminalGuard::enter()?;
+    let mut cursor = 0usize;
+    let mut scroll = 0usize;
+    let mut message = String::new();
+
+    loop {
+        draw_repo_picker(step, repos, &selected, cursor, scroll, &message)?;
+        let Event::Key(key) = event::read().context("reading repository picker input")? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        message.clear();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                cursor = cursor.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                cursor = (cursor + 1).min(repos.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                cursor = cursor.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                cursor = (cursor + 10).min(repos.len().saturating_sub(1));
+            }
+            KeyCode::Home => cursor = 0,
+            KeyCode::End => cursor = repos.len().saturating_sub(1),
+            KeyCode::Char(' ') => toggle_selection_index(cursor, &mut selected),
+            KeyCode::Char('a' | 'A') => {
+                selected.clear();
+                selected.extend(0..repos.len());
+            }
+            KeyCode::Char('n' | 'N') => {
+                selected.clear();
+            }
+            KeyCode::Enter => {
+                if selected.is_empty() {
+                    "Select at least one repository before continuing.".clone_into(&mut message);
+                } else {
+                    break;
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
+                bail!("repository selection cancelled");
+            }
+            _ => {}
+        }
+        scroll = repo_picker_scroll(cursor, scroll);
+    }
+
+    Ok(selected
+        .into_iter()
+        .filter_map(|idx| repos.get(idx).cloned())
+        .collect())
+}
+
+fn repo_picker_scroll(cursor: usize, current_scroll: usize) -> usize {
+    let (_, terminal_height) = terminal::size().unwrap_or((80, 24));
+    let visible_rows = repo_picker_visible_rows(terminal_height);
+    if cursor < current_scroll {
+        cursor
+    } else if cursor >= current_scroll + visible_rows {
+        cursor.saturating_sub(visible_rows.saturating_sub(1))
+    } else {
+        current_scroll
+    }
+}
+
+fn repo_picker_visible_rows(terminal_height: u16) -> usize {
+    usize::from(terminal_height).saturating_sub(7).max(1)
+}
+
+fn draw_repo_picker(
+    step: usize,
+    repos: &[DiscoveredRepo],
+    selected: &BTreeSet<usize>,
+    cursor: usize,
+    scroll: usize,
+    message: &str,
+) -> Result<()> {
+    let (terminal_width, terminal_height) = terminal::size().unwrap_or((80, 24));
+    let visible_rows = repo_picker_visible_rows(terminal_height);
+    let mut stdout = io::stdout().lock();
+    queue!(
+        stdout,
+        MoveTo(0, 0),
+        Clear(ClearType::All),
+        Print(format!(
+            "{} {}\r\n",
+            style(format!("{step})")).cyan().bold(),
+            style("Select repositories to include").white().bold()
+        )),
+        Print(format!(
+            "   {}\r\n",
+            style("↑/↓ move  Space toggle  Enter confirm  a all  n none  q cancel").dim()
+        )),
+        Print(format!(
+            "   {} {} selected\r\n\r\n",
+            style(selected.len()).cyan().bold(),
+            style("repositories").dim()
+        )),
+    )?;
+
+    for (idx, repo) in repos.iter().enumerate().skip(scroll).take(visible_rows) {
+        let pointer = if idx == cursor {
+            style(">").blue().bold()
+        } else {
+            style(" ")
+        };
+        let marker = if selected.contains(&idx) {
+            style("[x]").green().bold()
+        } else {
+            style("[ ]").yellow()
+        };
+        let label_width = usize::from(terminal_width).saturating_sub(14);
+        let label = truncate_chars(
+            &format!("{}  ({})", repo.name, repo.relative_path),
+            label_width,
+        );
+        queue!(
+            stdout,
+            Print(format!(
+                "   {} {} {} {}\r\n",
+                pointer,
+                marker,
+                style(format!("{:>2}.", idx + 1)).cyan(),
+                style(label).white()
+            ))
+        )?;
+    }
+
+    if !message.is_empty() {
+        queue!(
+            stdout,
+            Print("\r\n"),
+            Print(format!("   {}\r\n", style(message).yellow().bold()))
+        )?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    if max_chars <= 1 {
+        return "…".to_owned();
+    }
+    let mut truncated = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn toggle_selection_token(

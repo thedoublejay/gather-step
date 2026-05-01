@@ -76,7 +76,7 @@ pub enum PackRef {
         /// Arbitrary per-pack options.  Currently unused by built-in packs
         /// but preserved for forward compatibility.
         #[serde(default)]
-        options: serde_yaml_ng::Value,
+        options: serde_norway::Value,
     },
 }
 
@@ -85,7 +85,7 @@ pub enum PackRef {
 pub struct ResolvedPack {
     pub id: PackId,
     #[serde(default)]
-    pub options: serde_yaml_ng::Value,
+    pub options: serde_norway::Value,
 }
 
 impl PackRef {
@@ -110,7 +110,7 @@ impl PackRef {
         match self {
             Self::Simple(id) => ResolvedPack {
                 id: *id,
-                options: serde_yaml_ng::Value::Null,
+                options: serde_norway::Value::Null,
             },
             Self::WithOptions { id, options } => ResolvedPack {
                 id: *id,
@@ -235,7 +235,7 @@ mod tests {
     fn with_options_pack_ref_extracts_id() {
         let pack_ref = PackRef::WithOptions {
             id: PackId::React,
-            options: serde_yaml_ng::Value::Null,
+            options: serde_norway::Value::Null,
         };
         assert_eq!(
             pack_ref.pack_id(),
@@ -297,11 +297,11 @@ mod tests {
             vec![
                 ResolvedPack {
                     id: PackId::Nestjs,
-                    options: serde_yaml_ng::Value::Null,
+                    options: serde_norway::Value::Null,
                 },
                 ResolvedPack {
                     id: PackId::Mongoose,
-                    options: serde_yaml_ng::Value::Null,
+                    options: serde_norway::Value::Null,
                 },
             ],
             "duplicate pack IDs should be deduplicated during resolution"
@@ -334,15 +334,15 @@ mod tests {
             vec![
                 ResolvedPack {
                     id: PackId::Nestjs,
-                    options: serde_yaml_ng::Value::Null,
+                    options: serde_norway::Value::Null,
                 },
                 ResolvedPack {
                     id: PackId::Mongoose,
-                    options: serde_yaml_ng::Value::Null,
+                    options: serde_norway::Value::Null,
                 },
                 ResolvedPack {
                     id: PackId::React,
-                    options: serde_yaml_ng::Value::Null,
+                    options: serde_norway::Value::Null,
                 },
             ]
         );
@@ -356,7 +356,7 @@ mod tests {
                 extends: vec![],
                 packs: vec![PackRef::WithOptions {
                     id: PackId::React,
-                    options: serde_yaml_ng::from_str::<serde_yaml_ng::Value>("strict: true")
+                    options: serde_norway::from_str::<serde_norway::Value>("strict: true")
                         .expect("valid yaml"),
                 }],
             },
@@ -374,7 +374,7 @@ mod tests {
             .expect("react pack should resolve");
         assert_eq!(
             react_pack.options,
-            serde_yaml_ng::from_str::<serde_yaml_ng::Value>("strict: true").expect("valid yaml")
+            serde_norway::from_str::<serde_norway::Value>("strict: true").expect("valid yaml")
         );
     }
 
@@ -386,7 +386,7 @@ mod tests {
                 extends: vec![],
                 packs: vec![PackRef::WithOptions {
                     id: PackId::React,
-                    options: serde_yaml_ng::from_str::<serde_yaml_ng::Value>("strict: false")
+                    options: serde_norway::from_str::<serde_norway::Value>("strict: false")
                         .expect("valid yaml"),
                 }],
             },
@@ -395,7 +395,7 @@ mod tests {
                 extends: vec!["base".to_owned()],
                 packs: vec![PackRef::WithOptions {
                     id: PackId::React,
-                    options: serde_yaml_ng::from_str::<serde_yaml_ng::Value>("strict: true")
+                    options: serde_norway::from_str::<serde_norway::Value>("strict: true")
                         .expect("valid yaml"),
                 }],
             },
@@ -406,7 +406,7 @@ mod tests {
             resolved,
             vec![ResolvedPack {
                 id: PackId::React,
-                options: serde_yaml_ng::from_str::<serde_yaml_ng::Value>("strict: true")
+                options: serde_norway::from_str::<serde_norway::Value>("strict: true")
                     .expect("valid yaml"),
             }]
         );

@@ -104,7 +104,7 @@ impl Thresholds {
     /// malformed.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)?;
-        let parsed = serde_yaml_ng::from_str(&raw)?;
+        let parsed = serde_norway::from_str(&raw)?;
         Ok(parsed)
     }
 

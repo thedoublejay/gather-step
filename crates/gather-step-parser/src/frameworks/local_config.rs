@@ -94,7 +94,7 @@ impl LocalConfig {
             }
         };
 
-        match serde_yaml_ng::from_str::<Self>(&raw) {
+        match serde_norway::from_str::<Self>(&raw) {
             Ok(config) => Some(config),
             Err(err) => {
                 tracing::warn!(

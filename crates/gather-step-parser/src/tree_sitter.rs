@@ -177,7 +177,7 @@ pub fn parse_file_with_context(
         .copied()
         .map(|id| crate::frameworks::profile::ResolvedPack {
             id,
-            options: serde_yaml_ng::Value::Null,
+            options: serde_norway::Value::Null,
         })
         .collect();
     parse_file_core(repo, repo_root, file, &packs, path_aliases)
@@ -349,7 +349,7 @@ fn parse_file_core(
         {
             active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
                 id: crate::frameworks::registry::PackId::SharedLib,
-                options: serde_yaml_ng::Value::Null,
+                options: serde_norway::Value::Null,
             });
         }
         if !active_pack_refs
@@ -358,7 +358,7 @@ fn parse_file_core(
         {
             active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
                 id: crate::frameworks::registry::PackId::FrontendHooks,
-                options: serde_yaml_ng::Value::Null,
+                options: serde_norway::Value::Null,
             });
         }
 
@@ -512,7 +512,7 @@ fn parse_file_core(
         {
             active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
                 id: PackId::SharedLib,
-                options: serde_yaml_ng::Value::Null,
+                options: serde_norway::Value::Null,
             });
         }
         if !active_pack_refs
@@ -521,7 +521,7 @@ fn parse_file_core(
         {
             active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
                 id: PackId::FrontendHooks,
-                options: serde_yaml_ng::Value::Null,
+                options: serde_norway::Value::Null,
             });
         }
     }
@@ -3194,10 +3194,10 @@ fn workspace_package_dirs(workspace_root: &Path) -> Vec<PathBuf> {
     let pnpm_manifest = workspace_root.join("pnpm-workspace.yaml");
     if let Some(pnpm_manifest) = canonicalize_existing_file_under(&pnpm_manifest, workspace_root)
         && let Ok(raw) = fs::read_to_string(pnpm_manifest)
-        && let Ok(document) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&raw)
+        && let Ok(document) = serde_norway::from_str::<serde_norway::Value>(&raw)
         && let Some(entries) = document
             .get("packages")
-            .and_then(serde_yaml_ng::Value::as_sequence)
+            .and_then(serde_norway::Value::as_sequence)
     {
         patterns.extend(
             entries
