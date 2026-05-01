@@ -3,8 +3,8 @@
 //! Phase 2 Task 1 formalises the schema: placeholder `Vec<serde_json::Value>`
 //! fields are replaced with typed structs.  `schema_version` is bumped to 2.
 //!
-//! Tasks 3+4 populate symbols and `payload_contracts`.
-//! Events and removed-surface risks remain placeholder for the next batch.
+//! Phase 3 Tasks 3+4+5 add contract alignments, decorator deltas, and review
+//! pack synthesis.  `schema_version` is bumped to 3.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -29,6 +29,10 @@ pub struct DeltaReport {
     pub payload_contracts: PayloadContractDeltas,
     pub events: EventDeltas,
     pub removed_surface_risks: Vec<RemovedSurfaceRisk>,
+
+    // ── Phase 3 additions ────────────────────────────────────────────────────
+    pub contract_alignments: ContractAlignments,
+    pub decorators: DecoratorDeltas,
 
     pub suggested_followups: Vec<SuggestedCommand>,
 }
@@ -279,6 +283,81 @@ pub enum RiskSeverity {
     High,
 }
 
+// ─── Contract alignments (Phase 3 Task 3) ────────────────────────────────────
+
+/// Cross-repo payload-contract alignment findings.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ContractAlignments {
+    pub findings: Vec<ContractAlignmentFinding>,
+}
+
+/// A cluster of related contracts that share the same canonical identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContractAlignmentFinding {
+    /// Identity of the cluster (e.g. `"UpdateLabelProject"`).
+    pub identity: String,
+    /// Members of the alignment cluster: frontend payload, backend DTO,
+    /// gateway mapping, route, shared symbol.
+    pub members: Vec<ContractAlignmentMember>,
+    pub confidence: AlignmentConfidence,
+    /// `true` if any member is in the changed-payload-contracts set for this PR.
+    pub touched_by_pr: bool,
+}
+
+/// One participant in a contract alignment cluster.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContractAlignmentMember {
+    /// `"frontend_payload"` | `"backend_dto"` | `"gateway_mapping"` |
+    /// `"route"` | `"shared_symbol"` | `"unknown"`.
+    pub role: String,
+    pub repo: String,
+    pub qualified_name: String,
+    pub file: Option<String>,
+}
+
+/// Confidence that two contract records represent the same logical contract.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignmentConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+// ─── Decorator deltas (Phase 3 Task 4) ────────────────────────────────────────
+
+/// Added / removed / changed decorator annotations (RBAC, audit, auth guards).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DecoratorDeltas {
+    pub added: Vec<DecoratorDelta>,
+    pub removed: Vec<DecoratorDelta>,
+    pub changed: Vec<DecoratorDeltaChange>,
+}
+
+/// A single decorator annotation as observed in one index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecoratorDelta {
+    pub repo: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Decorator name, e.g. `"Audit"`, `"Permission"`, `"Authenticated"`.
+    pub decorator_name: String,
+    /// The symbol this decorator is attached to (when available).
+    pub target_qualified_name: Option<String>,
+    /// Raw argument signature, e.g. `"'read:labels'"` (when available).
+    pub args: Option<String>,
+}
+
+/// A decorator whose arguments or position changed between baseline and review.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecoratorDeltaChange {
+    pub repo: String,
+    pub target_qualified_name: String,
+    pub before: DecoratorDelta,
+    pub after: DecoratorDelta,
+    pub args_changed: bool,
+}
+
 // ─── Other shared types ───────────────────────────────────────────────────────
 
 /// Review run metadata emitted in every delta report.
@@ -457,6 +536,14 @@ impl DeltaReport {
 
         // ── Removed-surface risks ─────────────────────────────────────────────
         render_risks_section(&mut buf, &self.removed_surface_risks);
+
+        // ── Contract alignments ───────────────────────────────────────────────
+        render_contract_alignments_section(&mut buf, &self.contract_alignments);
+
+        // ── Decorator deltas ──────────────────────────────────────────────────
+        render_decorator_section(&mut buf, "New decorators", &self.decorators.added);
+        render_decorator_section(&mut buf, "Removed decorators", &self.decorators.removed);
+        render_decorator_changed_section(&mut buf, &self.decorators.changed);
 
         buf.push_str("\n## Suggested follow-up commands\n\n");
         buf.push_str("> **Note:** These commands require `--keep-cache` to have been used.\n\n");
@@ -729,6 +816,72 @@ fn render_risks_section(buf: &mut String, risks: &[RemovedSurfaceRisk]) {
     }
 }
 
+fn render_contract_alignments_section(buf: &mut String, alignments: &ContractAlignments) {
+    let _ = writeln!(buf, "\n## Contract alignments\n");
+    if alignments.findings.is_empty() {
+        buf.push_str("_no alignment findings_\n");
+        return;
+    }
+    for f in &alignments.findings {
+        let confidence_badge = match f.confidence {
+            AlignmentConfidence::High => "HIGH",
+            AlignmentConfidence::Medium => "MEDIUM",
+            AlignmentConfidence::Low => "LOW",
+        };
+        let touched = if f.touched_by_pr { " *(touched by PR)*" } else { "" };
+        let _ = writeln!(buf, "### `{}` — confidence: {}{}\n", f.identity, confidence_badge, touched);
+        buf.push_str("| Role | Repo | Qualified name | File |\n");
+        buf.push_str("|------|------|----------------|------|\n");
+        for m in &f.members {
+            let file = m.file.as_deref().unwrap_or("—");
+            let _ = writeln!(buf, "| {} | {} | `{}` | {} |", m.role, m.repo, m.qualified_name, file);
+        }
+        buf.push('\n');
+    }
+}
+
+fn render_decorator_section(buf: &mut String, heading: &str, decorators: &[DecoratorDelta]) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    if decorators.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Decorator | Repo | Target | File | Line | Args |\n");
+    buf.push_str("|-----------|------|--------|------|------|------|\n");
+    for d in decorators {
+        let target = d.target_qualified_name.as_deref().unwrap_or("—");
+        let file = d.file.as_deref().unwrap_or("—");
+        let line = d.line.map_or_else(|| "—".to_owned(), |l| l.to_string());
+        let args = d.args.as_deref().unwrap_or("—");
+        let _ = writeln!(
+            buf,
+            "| `{}` | {} | {} | {} | {} | {} |",
+            d.decorator_name, d.repo, target, file, line, args
+        );
+    }
+}
+
+fn render_decorator_changed_section(buf: &mut String, changes: &[DecoratorDeltaChange]) {
+    let _ = writeln!(buf, "\n## Changed decorators\n");
+    if changes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    for c in changes {
+        let args_note = if c.args_changed { " *(args changed)*" } else { "" };
+        let _ = writeln!(
+            buf,
+            "### `{}` on `{}`{}\n",
+            c.before.decorator_name, c.target_qualified_name, args_note
+        );
+        let before_args = c.before.args.as_deref().unwrap_or("—");
+        let after_args = c.after.args.as_deref().unwrap_or("—");
+        let _ = writeln!(buf, "- **before args:** `{before_args}`");
+        let _ = writeln!(buf, "- **after args:** `{after_args}`");
+        buf.push('\n');
+    }
+}
+
 fn format_loc(file: Option<&str>, line: Option<u32>) -> String {
     match (file, line) {
         (Some(f), Some(l)) => format!(" ({f}:{l})"),
@@ -794,6 +947,95 @@ pub fn build_suggested_followups(
     ]
 }
 
+/// Maximum number of suggested follow-up commands emitted by the pack synthesizer.
+const MAX_SYNTHESIZED_FOLLOWUPS: usize = 10;
+
+/// Synthesize targeted `pack` / `trace` commands for the highest-impact deltas
+/// found in a PR review run.
+///
+/// Emits at most [`MAX_SYNTHESIZED_FOLLOWUPS`] commands, pruning the least
+/// impactful ones first if the cap is exceeded.  All emitted commands set
+/// `requires_keep_cache = true` because they reference the review artifact root.
+pub fn synthesize_review_pack_commands(
+    workspace: &std::path::Path,
+    review_registry: &std::path::Path,
+    review_storage: &std::path::Path,
+    routes: &RouteDeltas,
+    _symbols: &SymbolDeltas,
+    payloads: &PayloadContractDeltas,
+    risks: &[RemovedSurfaceRisk],
+) -> Vec<SuggestedCommand> {
+    let ws = shell_quote(workspace);
+    let reg = shell_quote(review_registry);
+    let stor = shell_quote(review_storage);
+
+    let mut cmds: Vec<SuggestedCommand> = Vec::new();
+
+    // ── High-severity removed-surface risks → pack the symbol ────────────────
+    for risk in risks {
+        if cmds.len() >= MAX_SYNTHESIZED_FOLLOWUPS {
+            break;
+        }
+        if risk.severity == RiskSeverity::High {
+            let identity = &risk.identity;
+            cmds.push(SuggestedCommand {
+                label: format!("trace caller graph for removed {identity}"),
+                command: format!(
+                    "gather-step --workspace {ws} pack {identity} \
+                     --registry {reg} --storage {stor}"
+                ),
+                requires_keep_cache: true,
+            });
+        }
+    }
+
+    // ── Changed payload contracts with ≥3 field changes → pack the contract ──
+    for change in &payloads.changed {
+        if cmds.len() >= MAX_SYNTHESIZED_FOLLOWUPS {
+            break;
+        }
+        let total_field_changes = change.fields_added.len()
+            + change.fields_removed.len()
+            + change.fields_optional_to_required.len()
+            + change.fields_required_to_optional.len()
+            + change.fields_type_changed.len();
+        if total_field_changes >= 3 {
+            let qn = &change.target_qualified_name;
+            cmds.push(SuggestedCommand {
+                label: format!("inspect field changes in {qn}"),
+                command: format!(
+                    "gather-step --workspace {ws} pack {qn} \
+                     --registry {reg} --storage {stor}"
+                ),
+                requires_keep_cache: true,
+            });
+        }
+    }
+
+    // ── Changed routes with handler change → trace route ─────────────────────
+    for change in &routes.changed {
+        if cmds.len() >= MAX_SYNTHESIZED_FOLLOWUPS {
+            break;
+        }
+        if change.handler_changed {
+            let method = &change.method;
+            let path = &change.path;
+            cmds.push(SuggestedCommand {
+                label: format!("trace handler change for {method} {path}"),
+                command: format!(
+                    "gather-step --workspace {ws} trace crud \
+                     --method {method} --path {path} \
+                     --registry {reg} --storage {stor}"
+                ),
+                requires_keep_cache: true,
+            });
+        }
+    }
+
+    cmds.truncate(MAX_SYNTHESIZED_FOLLOWUPS);
+    cmds
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -803,11 +1045,9 @@ mod tests {
 
     // ── schema snapshot ───────────────────────────────────────────────────────
 
-    /// Assert the JSON top-level keys are stable across refactors.
-    #[test]
-    fn snapshot_top_level_keys() {
-        let report = DeltaReport {
-            schema_version: 2,
+    fn make_empty_report(schema_version: u32) -> DeltaReport {
+        DeltaReport {
+            schema_version,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -836,8 +1076,16 @@ mod tests {
             payload_contracts: PayloadContractDeltas::default(),
             events: EventDeltas::default(),
             removed_surface_risks: vec![],
+            contract_alignments: ContractAlignments::default(),
+            decorators: DecoratorDeltas::default(),
             suggested_followups: vec![],
-        };
+        }
+    }
+
+    /// Assert the JSON top-level keys are stable across refactors.
+    #[test]
+    fn snapshot_top_level_keys() {
+        let report = make_empty_report(3);
 
         let json = serde_json::to_value(&report).unwrap();
         let keys: Vec<&str> = json
@@ -853,6 +1101,8 @@ mod tests {
             [
                 "changed_files",
                 "changed_files_truncated",
+                "contract_alignments",
+                "decorators",
                 "events",
                 "metadata",
                 "payload_contracts",
@@ -869,41 +1119,10 @@ mod tests {
     // ── schema_version ────────────────────────────────────────────────────────
 
     #[test]
-    fn schema_version_is_2() {
-        let report = DeltaReport {
-            schema_version: 2,
-            metadata: ReviewMetadata {
-                workspace: std::path::PathBuf::from("/tmp/ws"),
-                base_input: "main".to_owned(),
-                base_sha: "a".repeat(40),
-                head_input: "HEAD".to_owned(),
-                head_sha: "b".repeat(40),
-                checkout_mode: "head".to_owned(),
-                changed_repos: vec![],
-                indexed_repos: vec![],
-                elapsed_ms: 0,
-            },
-            safety: SafetyMetadata {
-                baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
-                baseline_storage_path: std::path::PathBuf::from("/tmp/storage"),
-                review_registry_path: std::path::PathBuf::from("/tmp/rev/reg.json"),
-                review_storage_path: std::path::PathBuf::from("/tmp/rev/storage"),
-                review_root: std::path::PathBuf::from("/tmp/rev"),
-                run_id: "test-run".to_owned(),
-                cleanup_policy: CleanupPolicy::RemoveOnExit,
-                cache_key: "hash:aaa:bbb".to_owned(),
-            },
-            changed_files: vec![],
-            changed_files_truncated: false,
-            routes: RouteDeltas::default(),
-            symbols: SymbolDeltas::default(),
-            payload_contracts: PayloadContractDeltas::default(),
-            events: EventDeltas::default(),
-            removed_surface_risks: vec![],
-            suggested_followups: vec![],
-        };
+    fn schema_version_is_3() {
+        let report = make_empty_report(3);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
     }
 
     // ── follow-up command helpers ─────────────────────────────────────────────
@@ -984,5 +1203,88 @@ mod tests {
                 cmd.command
             );
         }
+    }
+
+    // ── Task 5: review pack synthesis ────────────────────────────────────────
+
+    fn make_risk(identity: &str, severity: RiskSeverity) -> RemovedSurfaceRisk {
+        RemovedSurfaceRisk {
+            kind: "shared_symbol".to_owned(),
+            identity: identity.to_owned(),
+            repo: Some("backend".to_owned()),
+            surviving_consumers: vec![],
+            severity,
+        }
+    }
+
+    fn make_payload_change(qn: &str, field_count: usize) -> PayloadContractDeltaChange {
+        PayloadContractDeltaChange {
+            repo: "backend".to_owned(),
+            file: "src/dto.ts".to_owned(),
+            target_qualified_name: qn.to_owned(),
+            side: "producer".to_owned(),
+            fields_added: (0..field_count)
+                .map(|i| PayloadFieldSummary { name: format!("field{i}"), type_name: Some("string".to_owned()), optional: false })
+                .collect(),
+            fields_removed: vec![],
+            fields_optional_to_required: vec![],
+            fields_required_to_optional: vec![],
+            fields_type_changed: vec![],
+        }
+    }
+
+    /// High-severity risk emits a `pack` command targeting the risk identity.
+    #[test]
+    fn high_severity_risk_emits_pack_command() {
+        let risks = vec![make_risk("UpdateLabelProjectInput", RiskSeverity::High)];
+        let cmds = synthesize_review_pack_commands(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/reg.json"),
+            std::path::Path::new("/tmp/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+            &PayloadContractDeltas::default(),
+            &risks,
+        );
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].command.contains("pack UpdateLabelProjectInput"), "command should pack the identity: {}", cmds[0].command);
+        assert!(cmds[0].requires_keep_cache);
+    }
+
+    /// Changed payload with ≥3 field changes emits a `pack` command.
+    #[test]
+    fn changed_payload_with_three_field_changes_emits_pack() {
+        let mut payloads = PayloadContractDeltas::default();
+        payloads.changed.push(make_payload_change("UpdateLabelProjectDto", 3));
+        let cmds = synthesize_review_pack_commands(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/reg.json"),
+            std::path::Path::new("/tmp/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+            &payloads,
+            &[],
+        );
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].command.contains("pack UpdateLabelProjectDto"), "command should pack the contract: {}", cmds[0].command);
+        assert!(cmds[0].requires_keep_cache);
+    }
+
+    /// Cap at 10: with 20 high-severity risks only 10 commands are emitted.
+    #[test]
+    fn followups_capped_at_ten() {
+        let risks: Vec<RemovedSurfaceRisk> = (0..20)
+            .map(|i| make_risk(&format!("Symbol{i}"), RiskSeverity::High))
+            .collect();
+        let cmds = synthesize_review_pack_commands(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/reg.json"),
+            std::path::Path::new("/tmp/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+            &PayloadContractDeltas::default(),
+            &risks,
+        );
+        assert_eq!(cmds.len(), 10, "followups must be capped at 10");
     }
 }

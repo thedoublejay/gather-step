@@ -33,10 +33,13 @@ use crate::{
             read_marker, workspace_hash, write_marker_completed, write_marker_quarantined,
         },
         delta_report::{
-            CleanupPolicy, DeltaReport, EventDeltas, PayloadContractDeltas, ReviewMetadata,
-            RiskSeverity, RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
+            PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
+            SymbolDeltas, build_suggested_followups, synthesize_review_pack_commands,
         },
         extract::{
+            contract_alignment::extract_contract_alignments,
+            decorators::extract_decorator_deltas,
             events::extract_event_deltas,
             impact_attach::impact_for_node,
             payload_contracts::extract_payload_contract_deltas,
@@ -338,18 +341,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         CleanupPolicy::RemoveOnExit
     };
 
-    let suggested_followups = build_suggested_followups(
-        &app.workspace_path,
-        &artifact_root.registry_path,
-        &artifact_root.storage_root,
-    );
-
     // ── 8a. Open storage coordinators for diff extraction ─────────────────────
     // Fail-soft: if the workspace has never been indexed, emit empty deltas and
     // log a warning rather than aborting the entire review run.
     // We check for directory existence first so we never create the baseline
     // storage path as a side effect of opening the coordinator.
-    let (route_deltas, symbol_deltas, payload_contract_deltas, event_deltas, surface_risks) = {
+    let (route_deltas, symbol_deltas, payload_contract_deltas, event_deltas, surface_risks, contract_alignments, decorator_deltas) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
         if baseline_graph_exists {
             let review_coord = gather_step_storage::StorageCoordinator::open_read_only(
@@ -531,7 +528,39 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             }
 
-                            (routes, symbols, payload_contracts, events, risks)
+                            // ── Phase 3 Task 3: contract alignment ───────────
+                            let contract_alignments = match extract_contract_alignments(
+                                review_coord.metadata(),
+                                &payload_contracts,
+                            ) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "contract alignment extraction failed; \
+                                         emitting empty alignments"
+                                    );
+                                    ContractAlignments::default()
+                                }
+                            };
+
+                            // ── Phase 3 Task 4: decorator deltas ──────────────
+                            let decorator_deltas = match extract_decorator_deltas(
+                                baseline_coord.graph(),
+                                review_coord.graph(),
+                            ) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "decorator delta extraction failed; \
+                                         emitting empty decorator deltas"
+                                    );
+                                    DecoratorDeltas::default()
+                                }
+                            };
+
+                            (routes, symbols, payload_contracts, events, risks, contract_alignments, decorator_deltas)
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -539,7 +568,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 "baseline storage could not be opened; \
                                  emitting empty deltas"
                             );
-                            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![])
+                            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![], ContractAlignments::default(), DecoratorDeltas::default())
                         }
                     }
                 }
@@ -549,7 +578,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         "review storage could not be opened for diff extraction; \
                          emitting empty deltas"
                     );
-                    (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![])
+                    (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![], ContractAlignments::default(), DecoratorDeltas::default())
                 }
             }
         } else {
@@ -558,12 +587,29 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 "baseline index not found; run `gather-step index` first \
                  to enable PR-review deltas"
             );
-            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![])
+            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![], ContractAlignments::default(), DecoratorDeltas::default())
         }
     };
 
+    // ── Phase 3 Task 5: synthesize targeted pack commands ──────────────────
+    let mut suggested_followups = build_suggested_followups(
+        &app.workspace_path,
+        &artifact_root.registry_path,
+        &artifact_root.storage_root,
+    );
+    let pack_cmds = synthesize_review_pack_commands(
+        &app.workspace_path,
+        &artifact_root.registry_path,
+        &artifact_root.storage_root,
+        &route_deltas,
+        &symbol_deltas,
+        &payload_contract_deltas,
+        &surface_risks,
+    );
+    suggested_followups.extend(pack_cmds);
+
     let report = DeltaReport {
-        schema_version: 2,
+        schema_version: 3,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -592,6 +638,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         payload_contracts: payload_contract_deltas,
         events: event_deltas,
         removed_surface_risks: surface_risks,
+        contract_alignments,
+        decorators: decorator_deltas,
         suggested_followups,
     };
 
