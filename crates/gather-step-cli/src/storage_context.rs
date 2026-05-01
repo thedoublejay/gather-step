@@ -233,18 +233,29 @@ impl StorageContext {
     /// # Note
     ///
     /// This constructor does **not** validate path overlap with the standing
-    /// workspace.  It is intended for unit tests where the caller already knows
-    /// the paths are safe (e.g. temp-dir tests).  Production callers should use
-    /// [`StorageContext::review_checked`] instead.
-    #[doc(hidden)]
+    /// workspace.  It is reserved for unit tests where the caller has already
+    /// established that the paths are safe (e.g. temp-dir tests).  Production
+    /// review-mode callers must use [`StorageContext::review_checked`] instead.
     #[must_use]
-    pub fn review(
+    pub(crate) fn review(
         workspace_root: PathBuf,
         registry_path: PathBuf,
         storage_root: PathBuf,
         run_id: impl Into<String>,
     ) -> Self {
-        Self::review_unchecked(workspace_root, registry_path, storage_root, run_id)
+        let graph_path = storage_root.join("graph.redb");
+        let config_path = workspace_root.join("gather-step.config.yaml");
+        Self {
+            workspace_root,
+            config_path,
+            registry_path,
+            graph_path,
+            storage_root,
+            tantivy_mode: TantivyOpenMode::ReadOnly,
+            label: ContextLabel::Review {
+                run_id: run_id.into(),
+            },
+        }
     }
 
     /// Construct a review context, validating that none of its paths overlap
@@ -288,6 +299,10 @@ impl StorageContext {
         let c_ws_reg = canonicalize_for_guard(&workspace.registry_path)?;
         let c_ws_stor = canonicalize_for_guard(&workspace.storage_root)?;
 
+        // Validation order (first match wins):
+        //   1. StorageOverlap        2. RegistryEqualsWorkspace
+        //   3. GeneratedStateCollision 4. WorkspaceRootCollision
+
         // 1. Storage overlap (bidirectional containment).
         if c_rev_stor == c_ws_stor
             || c_rev_stor.starts_with(&c_ws_stor)
@@ -330,37 +345,12 @@ impl StorageContext {
             });
         }
 
-        Ok(Self::review_unchecked(
+        Ok(Self::review(
             review_workspace_root,
             review_registry_path,
             review_storage_root,
             run_id,
         ))
-    }
-
-    // ── Private helpers ───────────────────────────────────────────────────────
-
-    /// Inner constructor shared by [`StorageContext::review`] and
-    /// [`StorageContext::review_checked`].
-    fn review_unchecked(
-        workspace_root: PathBuf,
-        registry_path: PathBuf,
-        storage_root: PathBuf,
-        run_id: impl Into<String>,
-    ) -> Self {
-        let graph_path = storage_root.join("graph.redb");
-        let config_path = workspace_root.join("gather-step.config.yaml");
-        Self {
-            workspace_root,
-            config_path,
-            registry_path,
-            graph_path,
-            storage_root,
-            tantivy_mode: TantivyOpenMode::ReadOnly,
-            label: ContextLabel::Review {
-                run_id: run_id.into(),
-            },
-        }
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -698,6 +688,60 @@ mod tests {
         assert!(
             matches!(err, ReviewSafetyError::RegistryEqualsWorkspace { .. }),
             "expected RegistryEqualsWorkspace, got {err}"
+        );
+    }
+
+    /// Cross-collision direction A: review storage path == workspace registry path
+    /// → `GeneratedStateCollision`.
+    #[test]
+    fn review_checked_rejects_generated_state_cross_collision_direction_a() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws_ctx = test_workspace_ctx(&tmp);
+
+        // Set review storage to the same path as the workspace registry.
+        let rev_root = tmp.path().join("review-root");
+        let rev_storage = ws_ctx.registry_path().to_path_buf(); // cross-collision
+        let rev_registry = rev_root.join("registry.json");
+
+        let err = StorageContext::review_checked(
+            &ws_ctx,
+            rev_root,
+            rev_registry,
+            rev_storage,
+            "pr-cross-a".into(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ReviewSafetyError::GeneratedStateCollision { .. }),
+            "expected GeneratedStateCollision, got {err}"
+        );
+    }
+
+    /// Cross-collision direction B: review registry path == workspace storage path
+    /// → `GeneratedStateCollision`.
+    #[test]
+    fn review_checked_rejects_generated_state_cross_collision_direction_b() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws_ctx = test_workspace_ctx(&tmp);
+
+        // Set review registry to the same path as the workspace storage root.
+        let rev_root = tmp.path().join("review-root");
+        let rev_storage = rev_root.join("storage");
+        let rev_registry = ws_ctx.storage_root().to_path_buf(); // cross-collision
+
+        let err = StorageContext::review_checked(
+            &ws_ctx,
+            rev_root,
+            rev_registry,
+            rev_storage,
+            "pr-cross-b".into(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ReviewSafetyError::GeneratedStateCollision { .. }),
+            "expected GeneratedStateCollision, got {err}"
         );
     }
 
