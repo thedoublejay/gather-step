@@ -204,7 +204,7 @@ pub fn canonicalize_inside_workspace(
 ///   (the root cannot be escaped by lexical normalization alone).
 ///   A `..` with no preceding `Normal` component — or preceded by another `..`
 ///   — is kept in place (relative paths that legitimately start with `..`).
-fn lexically_normalize(p: &Path) -> PathBuf {
+pub(crate) fn lexically_normalize(p: &Path) -> PathBuf {
     use std::path::Component;
     let mut out: Vec<Component<'_>> = Vec::with_capacity(p.components().count());
     for comp in p.components() {
