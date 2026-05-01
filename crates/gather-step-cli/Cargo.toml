@@ -19,7 +19,11 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
+chrono.workspace = true
 clap.workspace = true
+dirs.workspace = true
+rand.workspace = true
 comfy-table.workspace = true
 console.workspace = true
 crossbeam-channel.workspace = true
@@ -46,6 +50,7 @@ ratatui = { version = "0.30.0", default-features = false, features = ["crossterm
 [dev-dependencies]
 criterion.workspace = true
 pretty_assertions.workspace = true
+rustc-hash.workspace = true
 rusqlite.workspace = true
 tempfile = "3.27.0"
 toml.workspace = true

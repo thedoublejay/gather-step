@@ -10,6 +10,7 @@ pub mod errors;
 pub mod path_safety;
 
 pub mod app;
+pub mod pr_review;
 pub mod storage_context;
 
 #[cfg(test)]
