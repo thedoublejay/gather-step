@@ -204,6 +204,10 @@ fn parse_imported_file(parsed: &ParsedFile, path: &Path) -> Option<ParsedFile> {
     if metadata.len() > crate::TraverseConfig::default().max_file_size_bytes() {
         return None;
     }
+    let source_bytes: std::sync::Arc<[u8]> = fs::read(&safe_path).ok()?.into();
+    if !contains_mongoose_model_marker(&source_bytes) {
+        return None;
+    }
     crate::tree_sitter::parse_file(
         parsed.file_node.repo.as_str(),
         &repo_root,
@@ -212,10 +216,16 @@ fn parse_imported_file(parsed: &ParsedFile, path: &Path) -> Option<ParsedFile> {
             language,
             size_bytes: metadata.len(),
             content_hash: [0; 32],
-            source_bytes: None,
+            source_bytes: Some(source_bytes),
         },
     )
     .ok()
+}
+
+fn contains_mongoose_model_marker(source: &[u8]) -> bool {
+    source
+        .windows(b"mongoose.model".len())
+        .any(|window| window == b"mongoose.model")
 }
 
 fn repo_root_for(parsed: &ParsedFile) -> PathBuf {
@@ -637,6 +647,16 @@ export async function down(): Promise<void> {}
         .expect("fixture should parse");
 
         assert_eq!(detect_migration(&parsed), None);
+    }
+
+    #[test]
+    fn imported_model_prefilter_skips_non_model_sources() {
+        assert!(super::contains_mongoose_model_marker(
+            b"export const AlertModel = mongoose.model('Alert', schema, 'alerts');"
+        ));
+        assert!(!super::contains_mongoose_model_marker(
+            b"export const buildAlert = () => ({ workflow: true });"
+        ));
     }
 
     #[test]

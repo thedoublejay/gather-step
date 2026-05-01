@@ -579,14 +579,6 @@ fn report_filter_fields<S: GraphStore>(
         }
     }
 
-    if fields.is_empty() && !report.filters.is_empty() {
-        fields.extend(
-            report
-                .filters
-                .iter()
-                .map(|evidence| evidence.field_path.clone()),
-        );
-    }
     Ok(fields)
 }
 

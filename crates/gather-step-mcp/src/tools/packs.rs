@@ -1311,20 +1311,22 @@ fn apply_projection_impact_summary(
     response: &mut ContextPackResponse,
 ) {
     let targets = projection_impact_targets(ctx, request, repo_filter, response);
-    let payload_contracts = ctx
+    let payload_contracts = match ctx
         .metadata()
         .payload_contracts_for_query(PayloadContractQuery {
             repo: repo_filter.map(str::to_owned),
             min_confidence: Some(OPTIONALITY_MIN_CONFIDENCE),
             ..PayloadContractQuery::default()
-        })
-        .map(|records| {
-            records
-                .into_iter()
-                .map(|record| record.record)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        }) {
+        Ok(records) => records
+            .into_iter()
+            .map(|record| record.record)
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            push_payload_contract_lookup_warning(response, error);
+            Vec::new()
+        }
+    };
     let Some(report) = targets.into_iter().find_map(|target| {
         let report = projection_impact_with_payload_contracts(
             ctx.graph(),
@@ -1411,6 +1413,17 @@ fn apply_projection_impact_summary(
     if let Some(meta) = &mut response.meta {
         meta.warnings
             .push("projection impact evidence is available for this target".to_owned());
+    }
+}
+
+fn push_payload_contract_lookup_warning(
+    response: &mut ContextPackResponse,
+    error: impl std::fmt::Display,
+) {
+    if let Some(meta) = &mut response.meta {
+        meta.warnings.push(format!(
+            "payload contract lookup failed; optional payload mismatch evidence may be incomplete: {error}"
+        ));
     }
 }
 
@@ -2028,7 +2041,9 @@ fn annotate_probe_plans_with_optional_payload_evidence(
 }
 
 fn optional_payload_field_matches_filter(payload_field: &str, filter_field: &str) -> bool {
-    payload_field == filter_field || filter_field.starts_with(&format!("{payload_field}."))
+    payload_field == filter_field
+        || filter_field.starts_with(&format!("{payload_field}."))
+        || payload_field.starts_with(&format!("{filter_field}."))
 }
 
 fn payload_side_label(side: PayloadSide) -> &'static str {
@@ -4784,6 +4799,49 @@ mod tests {
         assert_eq!(evidence.field_name, "workflow");
         assert_eq!(evidence.source_type_name.as_deref(), Some("AlertPayload"));
         assert_eq!(evidence.side, "consumer");
+    }
+
+    #[test]
+    fn migration_probe_payload_matcher_is_bidirectional_for_nested_fields() {
+        assert!(super::optional_payload_field_matches_filter(
+            "workflow",
+            "workflow.taskIds"
+        ));
+        assert!(super::optional_payload_field_matches_filter(
+            "workflow.taskIds.detail",
+            "workflow.taskIds"
+        ));
+    }
+
+    #[test]
+    fn projection_summary_warns_when_payload_contract_lookup_fails() {
+        let mut response = make_pack_response(0, 0, 0, 0);
+        response.meta = Some(ContextPackMeta {
+            response_schema_version: crate::budget::response_schema_version(),
+            generation: 0,
+            ambiguity: None,
+            budget: crate::budget::ResponseBudget::not_truncated(
+                crate::budget::BudgetedTool::ContextPack,
+                0,
+                0,
+            ),
+            candidate_count: 1,
+            completeness: "complete".to_owned(),
+            confidence_model_version: Some(super::PACK_CONFIDENCE_MODEL_VERSION.to_owned()),
+            resolution: "symbol_id".to_owned(),
+            resolution_details: None,
+            resolution_confidence: Some("high".to_owned()),
+            resolved_symbol_id: Some("symbol".to_owned()),
+            winner_margin: None,
+            warnings: Vec::new(),
+        });
+
+        super::push_payload_contract_lookup_warning(&mut response, "metadata unavailable");
+
+        let warnings = &response.meta.as_ref().expect("meta should exist").warnings;
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("payload contract lookup failed"));
+        assert!(warnings[0].contains("metadata unavailable"));
     }
 
     #[test]
