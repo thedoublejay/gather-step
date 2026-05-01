@@ -1163,6 +1163,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gather-step-deploy"
+version = "2.2.0"
+dependencies = [
+ "gather-step-core",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror",
+]
+
+[[package]]
 name = "gather-step-git"
 version = "2.4.0"
 dependencies = [
