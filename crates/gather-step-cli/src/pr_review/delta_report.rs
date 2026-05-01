@@ -200,6 +200,25 @@ impl DeltaReport {
 
 // ─── Builder helpers ──────────────────────────────────────────────────────────
 
+/// Shell-quote a path so it is safe to embed in a suggested shell command.
+///
+/// Paths that consist entirely of "safe" shell characters are returned as-is.
+/// Everything else is wrapped in single quotes, with any embedded single quote
+/// escaped via the standard `'\''` idiom.
+fn shell_quote(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    if s.is_empty() {
+        return "''".to_owned();
+    }
+    // Characters safe without quoting in POSIX shells.
+    if s.bytes()
+        .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'=' | b':'))
+    {
+        return s.into_owned();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Build the list of suggested follow-up commands parameterized with the
 /// review artifact root paths.
 pub fn build_suggested_followups(
@@ -207,9 +226,9 @@ pub fn build_suggested_followups(
     review_registry_path: &std::path::Path,
     review_storage_path: &std::path::Path,
 ) -> Vec<SuggestedCommand> {
-    let ws = workspace.display();
-    let reg = review_registry_path.display();
-    let stor = review_storage_path.display();
+    let ws = shell_quote(workspace);
+    let reg = shell_quote(review_registry_path);
+    let stor = shell_quote(review_storage_path);
 
     vec![
         SuggestedCommand {
@@ -265,6 +284,57 @@ mod tests {
             Cli::try_parse_from(command.command.split_whitespace()).unwrap_or_else(|err| {
                 panic!("suggested command must parse: {err}\n{}", command.command)
             });
+        }
+    }
+
+    // Finding 4: followup_command_shell_quotes_paths_with_spaces
+    #[test]
+    fn followup_command_shell_quotes_paths_with_spaces() {
+        let workspace = std::path::Path::new("/Users/foo/My Projects/gather-step");
+        let registry = std::path::Path::new("/Users/foo/My Projects/.cache/registry.json");
+        let storage = std::path::Path::new("/Users/foo/My Projects/.cache/storage");
+
+        let commands = build_suggested_followups(workspace, registry, storage);
+
+        for cmd in &commands {
+            // Each path component with spaces must be single-quoted in the command.
+            assert!(
+                cmd.command.contains("'/Users/foo/My Projects/gather-step'"),
+                "workspace path with spaces must be single-quoted: {}",
+                cmd.command
+            );
+            assert!(
+                cmd.command.contains("'/Users/foo/My Projects/.cache/registry.json'"),
+                "registry path with spaces must be single-quoted: {}",
+                cmd.command
+            );
+            assert!(
+                cmd.command.contains("'/Users/foo/My Projects/.cache/storage'"),
+                "storage path with spaces must be single-quoted: {}",
+                cmd.command
+            );
+            // Verify the original path round-trips: single-quoted value between the
+            // surrounding quotes equals the original path string.
+            let ws_expected = "/Users/foo/My Projects/gather-step";
+            assert!(
+                cmd.command.contains(&format!("'{ws_expected}'")),
+                "round-trip of workspace path must match: {}",
+                cmd.command
+            );
+        }
+
+        // Paths without spaces must NOT get quoted.
+        let commands_plain = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/registry.json"),
+            std::path::Path::new("/tmp/storage"),
+        );
+        for cmd in &commands_plain {
+            assert!(
+                !cmd.command.contains('\''),
+                "plain paths must not be quoted: {}",
+                cmd.command
+            );
         }
     }
 }

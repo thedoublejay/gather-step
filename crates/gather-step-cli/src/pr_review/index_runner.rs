@@ -180,6 +180,8 @@ mod tests {
         run(&["init", "--initial-branch=main"]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        run(&["config", "tag.gpgsign", "false"]);
         run(&["add", "."]);
         run(&["commit", "--message", "initial"]);
 

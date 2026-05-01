@@ -30,9 +30,9 @@ use crate::{
     app::AppContext,
     pr_review::{
         artifact_root::{
-            ArtifactRootError, MARKER_FILENAME, ReviewArtifactRoot, default_cache_root,
-            generate_run_id, materialize_artifact_root, plan_artifact_root, read_marker,
-            workspace_hash, write_marker_completed, write_marker_quarantined,
+            ArtifactRootError, MARKER_FILENAME, ReviewArtifactRoot, ReviewStatus,
+            default_cache_root, generate_run_id, materialize_artifact_root, plan_artifact_root,
+            read_marker, workspace_hash, write_marker_completed, write_marker_quarantined,
         },
         delta_report::{
             CleanupPolicy, DeltaReport, ReviewMetadata, SafetyMetadata, build_suggested_followups,
@@ -576,6 +576,15 @@ fn assert_not_baseline_overlap(artifact_root: &Path, workspace_root: &Path) -> R
     Ok(())
 }
 
+/// Returns `true` when `s` looks like a full 40-character lowercase hex SHA-1.
+///
+/// Used to decide whether an unresolved `--base`/`--head` input should be
+/// silently treated as a literal SHA (safe bypass) or surfaced as an error
+/// (likely a typo'd ref name).
+fn is_full_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Delete a single artifact root, enforcing all safety guards.
 ///
 /// 1. Re-reads the marker (refuses if missing/unparseable).
@@ -722,14 +731,22 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
             .collect()
     } else if let (Some(base_ref), Some(head_ref)) = (&args.base, &args.head) {
         // Resolve refs against the real workspace so we can compare to stored SHAs.
-        // For test paths, literal SHAs are also accepted (resolve_range is a no-op
-        // for full 40-char SHAs that already appear as-is in the marker).
+        // For test paths, literal full SHAs are also accepted when resolution fails.
         let (base_sha, head_sha) = match resolve_range(&app.workspace_path, base_ref, head_ref) {
             Ok(resolved) => (resolved.base.sha, resolved.head.sha),
-            Err(_) => {
-                // Fallback: treat the inputs as literal SHAs (useful in tests and
-                // when the workspace is not a git repo).
-                (base_ref.clone(), head_ref.clone())
+            Err(e) => {
+                // Only allow fallback when both inputs look like full 40-char SHAs.
+                // Any other shape means the user likely typo'd a ref name, so surface
+                // the error rather than silently matching nothing.
+                if is_full_sha(base_ref) && is_full_sha(head_ref) {
+                    (base_ref.clone(), head_ref.clone())
+                } else {
+                    return Err(e).context(format!(
+                        "could not resolve --base {base_ref:?} or --head {head_ref:?} \
+                         against workspace at {}; pass full 40-char SHAs to bypass resolution",
+                        app.workspace_path.display()
+                    ));
+                }
             }
         };
         all_artifacts
@@ -743,6 +760,10 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
         all_artifacts
             .into_iter()
             .filter(|a| {
+                // Never delete an active run — it may still be indexing.
+                if matches!(a.marker.status, ReviewStatus::InProgress) {
+                    return false;
+                }
                 // Parse RFC 3339 created_at to compare age.
                 chrono::DateTime::parse_from_rfc3339(&a.marker.created_at)
                     .ok()
@@ -910,6 +931,8 @@ mod tests {
         git_run(&ws, &["init", "--initial-branch=main"]);
         git_run(&ws, &["config", "user.email", "test@example.com"]);
         git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
         git_run(&ws, &["add", "."]);
         git_run(&ws, &["commit", "--message", "base"]);
         let base_sha = git_head_sha(&ws);
@@ -958,6 +981,8 @@ mod tests {
         git_run(&ws, &["init", "--initial-branch=main"]);
         git_run(&ws, &["config", "user.email", "test@example.com"]);
         git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
         git_run(&ws, &["add", "."]);
         git_run(&ws, &["commit", "--message", "base"]);
 
@@ -1010,6 +1035,8 @@ mod tests {
         git_run(&ws, &["init", "--initial-branch=main"]);
         git_run(&ws, &["config", "user.email", "test@example.com"]);
         git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
         git_run(&ws, &["add", "."]);
         git_run(&ws, &["commit", "--message", "base"]);
         let base_sha = git_head_sha(&ws);
@@ -1837,6 +1864,180 @@ mod tests {
         assert_eq!(
             map_changed_repos_from_config(Some(&config), &changed),
             vec!["api"]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Finding 1: clean_older_than_skips_in_progress
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_older_than_skips_in_progress() {
+        let ws_tmp = TempDir::new("skip-ip-ws");
+        let cache_tmp = TempDir::new("skip-ip-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        // Both artifacts are backdated well past the threshold.
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
+
+        // InProgress: must NOT be deleted by --older-than.
+        let root_in_progress = write_fake_artifact(
+            cache,
+            ws,
+            "review-in-progress",
+            "baseIP",
+            "headIP",
+            ReviewStatus::InProgress,
+            Some(&old_ts),
+        );
+
+        // Completed: must be deleted by --older-than.
+        let root_completed = write_fake_artifact(
+            cache,
+            ws,
+            "review-completed",
+            "baseCO",
+            "headCO",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: Some("1s".to_owned()),
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+
+        assert!(
+            root_in_progress.exists(),
+            "InProgress artifact must not be deleted by --older-than"
+        );
+        assert!(
+            !root_completed.exists(),
+            "Completed artifact should be deleted by --older-than"
+        );
+
+        // Confirm --all still reaches InProgress.
+        let clean_all = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: None,
+            all: true,
+        };
+        run_clean(&app, &top, &clean_all).expect("clean --all should succeed");
+        assert!(
+            !root_in_progress.exists(),
+            "InProgress artifact should be deleted when user passes --all"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Finding 3a: clean_base_head_errors_on_unresolved_ref
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_base_head_errors_on_unresolved_ref() {
+        let ws_tmp = TempDir::new("err-ref-ws");
+        let cache_tmp = TempDir::new("err-ref-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        // Non-repo workspace so resolve_range will fail.
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: Some("typo-branch".to_owned()),
+            head: Some("main".to_owned()),
+            older_than: None,
+            all: false,
+        };
+
+        let result = run_clean(&app, &top, &clean_args);
+        assert!(
+            result.is_err(),
+            "clean --base <non-sha> --head <non-sha> must return Err on unresolved ref"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Finding 3b: clean_base_head_accepts_literal_full_shas
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_base_head_accepts_literal_full_shas() {
+        let ws_tmp = TempDir::new("lit-sha-ws");
+        let cache_tmp = TempDir::new("lit-sha-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let sha_base = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let sha_head = "cafebabecafebabecafebabecafebabecafebabe";
+
+        let root = write_fake_artifact(
+            cache,
+            ws,
+            "review-lit-sha",
+            sha_base,
+            sha_head,
+            ReviewStatus::Completed,
+            None,
+        );
+
+        // Non-repo workspace — resolve_range will fail, but inputs are full SHAs
+        // so the fallback path must kick in and match the marker.
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: Some(sha_base.to_owned()),
+            head: Some(sha_head.to_owned()),
+            older_than: None,
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args)
+            .expect("clean with literal full SHAs should succeed even without a git repo");
+
+        assert!(
+            !root.exists(),
+            "artifact matching literal SHAs should be deleted"
         );
     }
 }
