@@ -466,7 +466,7 @@ JSON/YAML index mapping extraction is intentionally limited to filenames contain
 
 ### `deployment-topology`
 
-Queries deployment artifacts indexed from Dockerfiles, Docker Compose, Kubernetes manifests, Helm-like templates, GitHub Actions workflows, and configured env files. Values from env files are not stored; only env var names are indexed.
+Queries deployment artifacts indexed from Dockerfiles, Docker Compose, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions workflows, and configured env files. Values from env files are not stored; only env var names are indexed.
 
 ```bash
 gather-step [GLOBAL FLAGS] deployment-topology [--limit <N>] <SUBCOMMAND>

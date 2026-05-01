@@ -122,7 +122,7 @@ Used automatically before env var changes or deployment-sensitive implementation
 
 > "Which services consume `DATABASE_URL`?"
 
-Used automatically to find deployment-level env var consumers across indexed Docker, Compose, Kubernetes, Helm-like, GitHub Actions, and configured env-file artifacts.
+Used automatically to find deployment-level env var consumers across indexed Docker, Compose, Kubernetes, Kustomize, explicit Helm chart, GitHub Actions, and configured env-file artifacts.
 
 ### `undeployed_services`
 

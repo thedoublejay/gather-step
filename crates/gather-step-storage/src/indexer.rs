@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeSet,
     fs,
     fs::OpenOptions,
-    path::Path,
+    path::{Component, Path, PathBuf},
     sync::Arc,
     thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -16,7 +17,8 @@ use gather_step_core::{
     node_id, normalize_path_separators, ref_node_id,
 };
 use gather_step_deploy::{
-    DeploymentArtifactKind, DeploymentParseOutput, detect_artifact_kind, parse_deployment_artifact,
+    DeploymentArtifactKind, DeploymentEdge, DeploymentNode, DeploymentParseOutput,
+    compose_env_file_refs, deployment_service_qn, detect_artifact_kind, parse_deployment_artifact,
     parse_deployment_artifact_with_kind,
 };
 use gather_step_parser::{
@@ -511,18 +513,7 @@ impl RepoIndexer {
             progress,
         )?;
         let deployment_stats = self.index_deployment_artifacts(repo, &repo_root, progress)?;
-        stats.files_parsed = stats
-            .files_parsed
-            .saturating_add(deployment_stats.files_parsed);
-        stats.nodes_created = stats
-            .nodes_created
-            .saturating_add(deployment_stats.nodes_created);
-        stats.edges_created = stats
-            .edges_created
-            .saturating_add(deployment_stats.edges_created);
-        stats.duration_ms = stats
-            .duration_ms
-            .saturating_add(deployment_stats.duration_ms);
+        merge_indexing_stats(&mut stats, deployment_stats);
         Ok(stats)
     }
 
@@ -579,7 +570,7 @@ impl RepoIndexer {
                 .options
                 .deployment
                 .forced_artifact_kind_for_path(&file_path);
-            let output = match forced_artifact_kind.map_or_else(
+            let mut output = match forced_artifact_kind.map_or_else(
                 || parse_deployment_artifact(repo, &file_path, &content),
                 |artifact_kind| {
                     parse_deployment_artifact_with_kind(repo, &file_path, &content, artifact_kind)
@@ -593,6 +584,9 @@ impl RepoIndexer {
             };
             if output.artifact_kind == DeploymentArtifactKind::Unknown {
                 continue;
+            }
+            if output.artifact_kind == DeploymentArtifactKind::Compose {
+                append_compose_env_file_edges(repo, repo_root, &file_path, &content, &mut output)?;
             }
 
             let batch = deployment_output_to_batch(
@@ -690,13 +684,13 @@ impl RepoIndexer {
             }))
             .collect::<Vec<_>>();
         if changed_paths.is_empty() {
-            return Ok((
-                changed,
-                IndexingStats {
-                    duration_ms: started_at.elapsed().as_millis(),
-                    ..IndexingStats::default()
-                },
-            ));
+            let mut stats = IndexingStats {
+                duration_ms: started_at.elapsed().as_millis(),
+                ..IndexingStats::default()
+            };
+            let deployment_stats = self.index_deployment_artifacts(repo, &repo_root, progress)?;
+            merge_indexing_stats(&mut stats, deployment_stats);
+            return Ok((changed, stats));
         }
 
         let affected_paths = compute_affected_set(self.storage.metadata(), repo, &changed_paths)?;
@@ -749,7 +743,7 @@ impl RepoIndexer {
         let detected_frameworks = detect_frameworks(&repo_root)
             .into_iter()
             .collect::<Vec<_>>();
-        let stats = self.index_repo_files(
+        let mut stats = self.index_repo_files(
             repo,
             &repo_root,
             &files_to_index,
@@ -760,6 +754,9 @@ impl RepoIndexer {
             cancel,
             progress,
         )?;
+        Self::check_cancel(cancel)?;
+        let deployment_stats = self.index_deployment_artifacts(repo, &repo_root, progress)?;
+        merge_indexing_stats(&mut stats, deployment_stats);
         Ok((changed, stats))
     }
 
@@ -1707,6 +1704,175 @@ fn collect_deployment_artifact_paths(
     Ok(paths)
 }
 
+fn merge_indexing_stats(stats: &mut IndexingStats, extra: IndexingStats) {
+    stats.files_parsed = stats.files_parsed.saturating_add(extra.files_parsed);
+    stats.nodes_created = stats.nodes_created.saturating_add(extra.nodes_created);
+    stats.edges_created = stats.edges_created.saturating_add(extra.edges_created);
+    stats.duration_ms = stats.duration_ms.saturating_add(extra.duration_ms);
+}
+
+fn append_compose_env_file_edges(
+    repo: &str,
+    repo_root: &Path,
+    compose_file_path: &str,
+    compose_content: &str,
+    output: &mut DeploymentParseOutput,
+) -> Result<(), RepoIndexerError> {
+    let env_file_refs = match compose_env_file_refs(compose_content, compose_file_path) {
+        Ok(refs) => refs,
+        Err(error) => {
+            warn!(repo, path = %compose_file_path, error = %error, "skipping compose env_file expansion");
+            return Ok(());
+        }
+    };
+    if env_file_refs.is_empty() {
+        return Ok(());
+    }
+
+    let mut existing_nodes = output
+        .nodes
+        .iter()
+        .map(|node| (node.kind, node.qualified_name.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut existing_edges = output
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.source_kind,
+                edge.source_qualified_name.clone(),
+                edge.target_kind,
+                edge.target_qualified_name.clone(),
+                edge.kind,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    for env_file_ref in env_file_refs {
+        let Some(relative_env_path) =
+            resolve_compose_env_file_path(compose_file_path, &env_file_ref.path)
+        else {
+            warn!(
+                repo,
+                path = %compose_file_path,
+                env_file = %env_file_ref.path,
+                "skipping compose env_file outside repo-relative paths"
+            );
+            continue;
+        };
+        let full_path = repo_root.join(&relative_env_path);
+        let Ok(metadata) = fs::symlink_metadata(&full_path) else {
+            warn!(
+                repo,
+                path = %compose_file_path,
+                env_file = %env_file_ref.path,
+                "skipping missing compose env_file"
+            );
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > MAX_DEPLOYMENT_ARTIFACT_BYTES {
+            warn!(
+                repo,
+                path = %compose_file_path,
+                env_file = %env_file_ref.path,
+                size_bytes = metadata.len(),
+                "skipping oversized compose env_file"
+            );
+            continue;
+        }
+
+        let bytes = fs::read(&full_path)?;
+        let content = String::from_utf8_lossy(&bytes);
+        let env_file_path =
+            normalize_path_separators(&relative_env_path.to_string_lossy()).into_owned();
+        let env_output = match parse_deployment_artifact_with_kind(
+            repo,
+            &env_file_path,
+            &content,
+            DeploymentArtifactKind::EnvFile,
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                warn!(repo, path = %env_file_path, error = %error, "skipping malformed compose env_file");
+                continue;
+            }
+        };
+
+        for node in env_output
+            .nodes
+            .into_iter()
+            .filter(|node| node.kind == NodeKind::EnvVar)
+        {
+            let target_qualified_name = node.qualified_name.clone();
+            insert_deployment_node(output, &mut existing_nodes, node);
+            let source_qualified_name = deployment_service_qn(repo, &env_file_ref.service);
+            let edge_key = (
+                NodeKind::Service,
+                source_qualified_name.clone(),
+                NodeKind::EnvVar,
+                target_qualified_name.clone(),
+                EdgeKind::ReadsEnv,
+            );
+            if existing_edges.insert(edge_key) {
+                output.edges.push(DeploymentEdge {
+                    source_kind: NodeKind::Service,
+                    source_qualified_name,
+                    target_kind: NodeKind::EnvVar,
+                    target_qualified_name,
+                    kind: EdgeKind::ReadsEnv,
+                    confidence: 850,
+                    evidence: format!("compose env_file {}", env_file_ref.path),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn insert_deployment_node(
+    output: &mut DeploymentParseOutput,
+    existing_nodes: &mut BTreeSet<(NodeKind, String)>,
+    node: DeploymentNode,
+) {
+    if existing_nodes.insert((node.kind, node.qualified_name.clone())) {
+        output.nodes.push(node);
+    }
+}
+
+fn resolve_compose_env_file_path(compose_file_path: &str, env_file_path: &str) -> Option<PathBuf> {
+    let env_file_path = Path::new(env_file_path.trim());
+    if env_file_path.is_absolute() {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    if let Some(parent) = Path::new(compose_file_path).parent() {
+        relative.push(parent);
+    }
+    relative.push(env_file_path);
+    normalize_relative_path(&relative)
+}
+
+fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    Some(normalized)
+}
+
 impl DeploymentIndexingOptions {
     fn include_globs(&self) -> Result<GlobSet, RepoIndexerError> {
         let mut builder = GlobSetBuilder::new();
@@ -2092,12 +2258,16 @@ export class EventController {
             "export function run() { return true; }\n",
         )
         .expect("source fixture should write");
+        fs::write(repo_root.path().join(".env.api"), "API_TOKEN=redacted\n")
+            .expect("env file fixture should write");
         fs::write(
             repo_root.path().join("compose.yaml"),
             r#"
 services:
   api:
     image: sample-api
+    env_file:
+      - .env.api
     environment:
       DATABASE_URL: postgres://redacted
     depends_on:
@@ -2151,6 +2321,11 @@ jobs:
                 .iter()
                 .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url"))
         );
+        assert!(
+            env_vars
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+        );
         assert!(workflow_jobs.iter().any(|node| node.name == "deploy"));
         assert!(databases.iter().any(|node| node.kind == NodeKind::Database));
 
@@ -2168,10 +2343,90 @@ jobs:
                 .iter()
                 .any(|edge| edge.kind == EdgeKind::ReadsEnv)
         );
+        let api_token = env_vars
+            .iter()
+            .find(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+            .expect("api token env var should exist");
+        assert!(
+            compose_edges
+                .iter()
+                .any(|edge| { edge.kind == EdgeKind::ReadsEnv && edge.target == api_token.id })
+        );
         assert!(
             compose_edges
                 .iter()
                 .any(|edge| edge.kind == EdgeKind::UsesDatabase)
+        );
+    }
+
+    #[test]
+    fn incremental_index_refreshes_deployment_artifacts() {
+        let repo_root = TestDir::new("deployment-incremental-repo");
+        let storage_root = TestDir::new("deployment-incremental-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("src/app.ts"),
+            "export function run() { return true; }\n",
+        )
+        .expect("source fixture should write");
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            r#"
+services:
+  api:
+    environment:
+      DATABASE_URL: postgres://redacted
+"#,
+        )
+        .expect("compose fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("initial indexing should succeed");
+
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            r#"
+services:
+  api:
+    environment:
+      API_TOKEN: redacted
+"#,
+        )
+        .expect("compose update should write");
+
+        let hint = vec!["compose.yaml".to_owned()];
+        let (_changed, stats) = indexer
+            .index_repo_incremental_with_hint("sample-service", repo_root.path(), Some(&hint), None)
+            .expect("incremental indexing should succeed");
+        assert!(
+            stats.files_parsed >= 1,
+            "deployment artifact should be reparsed during incremental indexing"
+        );
+
+        let graph = indexer.storage().graph();
+        let env_vars = graph
+            .nodes_by_type(NodeKind::EnvVar)
+            .expect("env var nodes should load");
+        let api_token = env_vars
+            .iter()
+            .find(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+            .expect("updated compose env var should exist");
+        let compose_file = graph
+            .nodes_by_file("sample-service", "compose.yaml")
+            .expect("compose file nodes should load")
+            .into_iter()
+            .find(|node| node.kind == NodeKind::File)
+            .expect("compose file node should exist");
+        let compose_edges = graph
+            .edges_by_owner(compose_file.id)
+            .expect("compose edges should load");
+        assert!(
+            compose_edges
+                .iter()
+                .any(|edge| { edge.kind == EdgeKind::ReadsEnv && edge.target == api_token.id })
         );
     }
 

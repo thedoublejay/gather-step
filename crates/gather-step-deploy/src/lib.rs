@@ -6,7 +6,6 @@ use std::path::Path;
 use gather_step_core::{
     EdgeKind, NodeKind, broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, secret_qn,
 };
-use regex::Regex;
 use serde::Deserialize;
 use serde_yaml_ng::Value;
 use thiserror::Error;
@@ -17,6 +16,7 @@ pub enum DeploymentArtifactKind {
     Dockerfile,
     Compose,
     Kubernetes,
+    Kustomize,
     Helm,
     GithubActions,
     EnvFile,
@@ -57,6 +57,12 @@ pub struct DeploymentEdge {
 pub struct DeploymentDiagnostic {
     pub severity: DeploymentDiagnosticSeverity,
     pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComposeEnvFileRef {
+    pub service: String,
+    pub path: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,8 +106,11 @@ pub fn detect_artifact_kind(path: &str, content: &str) -> DeploymentArtifactKind
     {
         return DeploymentArtifactKind::Compose;
     }
-    if normalized.contains("/charts/")
-        || normalized.contains("/templates/")
+    if file_name == "kustomization.yaml" || file_name == "kustomization.yml" {
+        return DeploymentArtifactKind::Kustomize;
+    }
+    if normalized.starts_with("charts/")
+        || normalized.contains("/charts/")
         || file_name == "chart.yaml"
         || file_name == "values.yaml"
     {
@@ -150,6 +159,7 @@ pub fn parse_deployment_artifact_with_kind(
         DeploymentArtifactKind::Dockerfile => parse_dockerfile(&mut builder, content),
         DeploymentArtifactKind::Compose => parse_compose(&mut builder, content, 900)?,
         DeploymentArtifactKind::Kubernetes => parse_kubernetes(&mut builder, content, 900)?,
+        DeploymentArtifactKind::Kustomize => parse_kustomize(&mut builder, content)?,
         DeploymentArtifactKind::Helm => parse_helm(&mut builder, content),
         DeploymentArtifactKind::GithubActions => parse_github_actions(&mut builder, content)?,
         DeploymentArtifactKind::EnvFile => parse_env_file(&mut builder, content),
@@ -382,8 +392,94 @@ fn parse_kubernetes(
 fn parse_helm(builder: &mut OutputBuilder<'_>, content: &str) {
     builder.info("helm parsing uses offline heuristics; template control flow is not rendered");
     if parse_kubernetes(builder, content, 650).is_err() {
-        parse_helm_template_env(builder, content);
+        let name = deployment_name_from_path(builder.repo, builder.path);
+        let service_qn = builder.service(&name, 600, "helm chart heuristic");
+        let deployment_qn = builder.deployment(&name, 600, "helm chart heuristic");
+        builder.edge(
+            NodeRef::new(NodeKind::Service, service_qn),
+            NodeRef::new(NodeKind::Deployment, deployment_qn),
+            EdgeKind::DeployedAs,
+            600,
+            "helm chart heuristic",
+        );
+        builder.info("helm template YAML could not be parsed; env names were not inferred");
     }
+}
+
+fn parse_kustomize(
+    builder: &mut OutputBuilder<'_>,
+    content: &str,
+) -> Result<(), DeploymentParseError> {
+    let root = parse_yaml(content, builder.path)?;
+    let kind = mapping_get(&root, "kind")
+        .and_then(Value::as_str)
+        .unwrap_or("Kustomization");
+    if !kind.is_empty() && kind != "Kustomization" {
+        builder.info(format!("unsupported kustomize kind `{kind}`"));
+    }
+
+    let name = kustomize_name_from_path(builder.repo, builder.path);
+    let service_qn = builder.service(&name, 750, "kustomize application");
+    let deployment_qn = builder.deployment(&name, 750, "kustomize application");
+    builder.edge(
+        NodeRef::new(NodeKind::Service, service_qn.clone()),
+        NodeRef::new(NodeKind::Deployment, deployment_qn),
+        EdgeKind::DeployedAs,
+        750,
+        "kustomize application",
+    );
+
+    for image in kustomize_images(&root) {
+        add_infra_from_image(
+            builder,
+            &service_qn,
+            &name,
+            Some(&image),
+            700,
+            "kustomize image",
+        );
+    }
+
+    for generator in kustomize_generators(&root, "configMapGenerator") {
+        let qn = config_map_qn(&generator.name);
+        builder.node(
+            NodeKind::ConfigMap,
+            &generator.name,
+            qn.clone(),
+            750,
+            "kustomize configMapGenerator",
+        );
+        builder.edge(
+            NodeRef::new(NodeKind::Service, service_qn.clone()),
+            NodeRef::new(NodeKind::ConfigMap, qn),
+            EdgeKind::BackedBy,
+            750,
+            "kustomize configMapGenerator",
+        );
+        for literal in generator.literals {
+            add_env_edge(builder, &service_qn, &literal, 700, "kustomize literal");
+        }
+    }
+
+    for generator in kustomize_generators(&root, "secretGenerator") {
+        let qn = secret_qn(&generator.name);
+        builder.node(
+            NodeKind::Secret,
+            &generator.name,
+            qn.clone(),
+            750,
+            "kustomize secretGenerator",
+        );
+        builder.edge(
+            NodeRef::new(NodeKind::Service, service_qn.clone()),
+            NodeRef::new(NodeKind::Secret, qn),
+            EdgeKind::BackedBy,
+            750,
+            "kustomize secretGenerator",
+        );
+    }
+
+    Ok(())
 }
 
 fn parse_kubernetes_document(builder: &mut OutputBuilder<'_>, value: &Value, confidence: u16) {
@@ -470,32 +566,6 @@ fn parse_kubernetes_document(builder: &mut OutputBuilder<'_>, value: &Value, con
         }
         _ if !kind.is_empty() => builder.info(format!("unsupported kubernetes kind `{kind}`")),
         _ => {}
-    }
-}
-
-fn parse_helm_template_env(builder: &mut OutputBuilder<'_>, content: &str) {
-    let name = deployment_name_from_path(builder.repo, builder.path);
-    let service_qn = builder.service(&name, 600, "helm template heuristic");
-    let deployment_qn = builder.deployment(&name, 600, "helm template heuristic");
-    builder.edge(
-        NodeRef::new(NodeKind::Service, service_qn.clone()),
-        NodeRef::new(NodeKind::Deployment, deployment_qn),
-        EdgeKind::DeployedAs,
-        600,
-        "helm template heuristic",
-    );
-
-    let re = Regex::new(r"(?m)name:\s*([A-Za-z_][A-Za-z0-9_]*)").expect("regex compiles");
-    for capture in re.captures_iter(content) {
-        if let Some(env_name) = capture.get(1).map(|m| m.as_str()) {
-            add_env_edge(
-                builder,
-                &service_qn,
-                env_name,
-                600,
-                "helm template env heuristic",
-            );
-        }
     }
 }
 
@@ -669,6 +739,64 @@ fn collect_compose_env(service_value: &Value) -> BTreeSet<String> {
     names
 }
 
+pub fn compose_env_file_refs(
+    content: &str,
+    path: &str,
+) -> Result<Vec<ComposeEnvFileRef>, DeploymentParseError> {
+    let root = parse_yaml(content, path)?;
+    let Some(services) = mapping_get(&root, "services").and_then(Value::as_mapping) else {
+        return Ok(Vec::new());
+    };
+
+    let mut refs = Vec::new();
+    for (service_key, service_value) in services {
+        let Some(service_name) = service_key.as_str() else {
+            continue;
+        };
+        for path in collect_compose_env_files(service_value) {
+            refs.push(ComposeEnvFileRef {
+                service: service_name.to_owned(),
+                path,
+            });
+        }
+    }
+    Ok(refs)
+}
+
+fn collect_compose_env_files(service_value: &Value) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    let Some(env_file) = mapping_get(service_value, "env_file") else {
+        return paths;
+    };
+    match env_file {
+        Value::String(path) => {
+            insert_env_file_path(&mut paths, path);
+        }
+        Value::Sequence(sequence) => {
+            for item in sequence {
+                match item {
+                    Value::String(path) => insert_env_file_path(&mut paths, path),
+                    Value::Mapping(_) => {
+                        if let Some(path) = mapping_get(item, "path").and_then(Value::as_str) {
+                            insert_env_file_path(&mut paths, path);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    paths
+}
+
+fn insert_env_file_path(paths: &mut BTreeSet<String>, path: &str) {
+    let path = path.trim();
+    if !path.is_empty() {
+        paths.insert(path.to_owned());
+    }
+}
+
 fn compose_depends_on(service_value: &Value) -> BTreeSet<String> {
     let mut dependencies = BTreeSet::new();
     let Some(depends_on) = mapping_get(service_value, "depends_on") else {
@@ -759,6 +887,8 @@ fn docker_env_names(rest: &str) -> BTreeSet<String> {
             && is_env_name(name)
         {
             names.insert(name.to_owned());
+        } else if is_env_name(parts[0]) {
+            names.insert(parts[0].to_owned());
         }
         return names;
     }
@@ -823,6 +953,72 @@ fn mapping_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     value.as_mapping()?.get(Value::String(key.to_owned()))
 }
 
+struct KustomizeGenerator {
+    name: String,
+    literals: BTreeSet<String>,
+}
+
+fn kustomize_images(value: &Value) -> BTreeSet<String> {
+    let mut images = BTreeSet::new();
+    let Some(sequence) = mapping_get(value, "images").and_then(Value::as_sequence) else {
+        return images;
+    };
+    for item in sequence {
+        match item {
+            Value::String(image) => {
+                if !image.trim().is_empty() {
+                    images.insert(image.trim().to_owned());
+                }
+            }
+            Value::Mapping(_) => {
+                let Some(name) = mapping_get(item, "newName")
+                    .or_else(|| mapping_get(item, "name"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let image = mapping_get(item, "newTag")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| name.to_owned(), |tag| format!("{name}:{tag}"));
+                images.insert(image);
+            }
+            _ => {}
+        }
+    }
+    images
+}
+
+fn kustomize_generators(value: &Value, key: &str) -> Vec<KustomizeGenerator> {
+    let Some(sequence) = mapping_get(value, key).and_then(Value::as_sequence) else {
+        return Vec::new();
+    };
+    sequence
+        .iter()
+        .filter_map(|item| {
+            let name = mapping_get(item, "name")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_owned();
+            if name.is_empty() {
+                return None;
+            }
+            let literals = mapping_get(item, "literals")
+                .and_then(Value::as_sequence)
+                .map(|sequence| {
+                    sequence
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|literal| literal.split_once('=').map(|(name, _)| name.trim()))
+                        .filter(|name| is_env_name(name))
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(KustomizeGenerator { name, literals })
+        })
+        .collect()
+}
+
 fn deployment_name_from_path(repo: &str, path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let mut parts = normalized.split('/').filter(|part| !part.is_empty());
@@ -834,6 +1030,8 @@ fn deployment_name_from_path(repo: &str, path: &str) -> String {
                 || file.eq_ignore_ascii_case("docker-compose.yaml")
                 || file.eq_ignore_ascii_case("compose.yml")
                 || file.eq_ignore_ascii_case("compose.yaml")
+                || file.eq_ignore_ascii_case("kustomization.yaml")
+                || file.eq_ignore_ascii_case("kustomization.yml")
             {
                 parts.next_back()
             } else {
@@ -845,6 +1043,30 @@ fn deployment_name_from_path(repo: &str, path: &str) -> String {
         .to_owned()
 }
 
+fn kustomize_name_from_path(repo: &str, path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.last().is_some_and(|file| {
+        file.eq_ignore_ascii_case("kustomization.yaml")
+            || file.eq_ignore_ascii_case("kustomization.yml")
+    }) {
+        parts.pop();
+    }
+    for marker in ["overlays", "overlay", "base", "bases"] {
+        if let Some(index) = parts
+            .iter()
+            .position(|part| part.eq_ignore_ascii_case(marker))
+            && index > 0
+        {
+            return parts[index - 1].to_owned();
+        }
+    }
+    parts.last().copied().unwrap_or(repo).to_owned()
+}
+
 fn workflow_job_qn(repo: &str, path: &str, job: &str) -> String {
     format!(
         "__workflow_job__{}__{}__{}",
@@ -854,12 +1076,16 @@ fn workflow_job_qn(repo: &str, path: &str, job: &str) -> String {
     )
 }
 
-fn service_qn(repo: &str, name: &str) -> String {
+pub fn deployment_service_qn(repo: &str, name: &str) -> String {
     format!(
         "__service__{}__{}",
         canonical_part(repo, "repo"),
         canonical_part(name, "service")
     )
+}
+
+fn service_qn(repo: &str, name: &str) -> String {
+    deployment_service_qn(repo, name)
 }
 
 fn canonical_part(value: &str, fallback: &str) -> String {
@@ -902,14 +1128,17 @@ mod tests {
     use gather_step_core::{EdgeKind, NodeKind};
     use pretty_assertions::assert_eq;
 
-    use super::{DeploymentArtifactKind, detect_artifact_kind, parse_deployment_artifact};
+    use super::{
+        DeploymentArtifactKind, compose_env_file_refs, detect_artifact_kind,
+        parse_deployment_artifact,
+    };
 
     #[test]
     fn dockerfile_parser_extracts_env_names_without_values() {
         let output = parse_deployment_artifact(
             "backend",
             "services/api/Dockerfile",
-            "FROM node:22\nENV DATABASE_URL=postgres://secret\nENV API_TOKEN value\n",
+            "FROM node:22\nENV DATABASE_URL=postgres://secret\nENV API_TOKEN value\nENV FEATURE_FLAG\n",
         )
         .expect("dockerfile should parse");
 
@@ -921,6 +1150,9 @@ mod tests {
             output.nodes.iter().any(|node| node.kind == NodeKind::EnvVar
                 && node.qualified_name == "__env_var__api_token")
         );
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::EnvVar && node.qualified_name == "__env_var__feature_flag"
+        }));
         let serialized = serde_json::to_string(&output).expect("serialize output");
         assert!(!serialized.contains("postgres://secret"));
     }
@@ -967,6 +1199,38 @@ services:
         );
         let serialized = serde_json::to_string(&output).expect("serialize output");
         assert!(!serialized.contains("postgres://secret"));
+    }
+
+    #[test]
+    fn compose_env_file_refs_are_structural_and_service_scoped() {
+        let refs = compose_env_file_refs(
+            r#"
+services:
+  api:
+    env_file:
+      - .env
+      - path: config/api.env
+        required: false
+  worker:
+    env_file: worker.env
+"#,
+            "compose.yaml",
+        )
+        .expect("compose should parse");
+
+        assert_eq!(refs.len(), 3);
+        assert!(
+            refs.iter()
+                .any(|item| item.service == "api" && item.path == ".env")
+        );
+        assert!(
+            refs.iter()
+                .any(|item| item.service == "api" && item.path == "config/api.env")
+        );
+        assert!(
+            refs.iter()
+                .any(|item| item.service == "worker" && item.path == "worker.env")
+        );
     }
 
     #[test]
@@ -1022,6 +1286,50 @@ metadata:
     }
 
     #[test]
+    fn kustomize_parser_handles_application_and_generators_without_values() {
+        let output = parse_deployment_artifact(
+            "platform-gitops",
+            "kustomize/apps/api/overlays/prod/kustomization.yaml",
+            r#"
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+  - name: postgres
+    newName: postgres
+    newTag: "16"
+configMapGenerator:
+  - name: api-config
+    literals:
+      - DATABASE_URL=postgres://secret
+secretGenerator:
+  - name: api-secret
+    literals:
+      - API_TOKEN=secret
+"#,
+        )
+        .expect("kustomization should parse");
+
+        assert_eq!(output.artifact_kind, DeploymentArtifactKind::Kustomize);
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::Deployment
+                && node.qualified_name == "__deployment__platform-gitops__api"
+        }));
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::ConfigMap && node.qualified_name == "__config_map__api-config"
+        }));
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::Secret && node.qualified_name == "__secret__api-secret"
+        }));
+        assert!(output.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::ReadsEnv
+                && edge.target_qualified_name == "__env_var__database_url"
+        }));
+        let serialized = serde_json::to_string(&output).expect("serialize output");
+        assert!(!serialized.contains("postgres://secret"));
+        assert!(!serialized.contains("API_TOKEN=secret"));
+    }
+
+    #[test]
     fn helm_template_parser_downgrades_confidence() {
         let output = parse_deployment_artifact(
             "backend",
@@ -1046,6 +1354,34 @@ spec:
         assert_eq!(output.artifact_kind, DeploymentArtifactKind::Helm);
         assert!(output.nodes.iter().any(|node| node.confidence <= 650));
         assert!(!output.diagnostics.is_empty());
+        assert!(
+            !output
+                .nodes
+                .iter()
+                .any(|node| node.qualified_name == "__env_var__api")
+        );
+    }
+
+    #[test]
+    fn helm_template_fallback_does_not_treat_every_yaml_name_as_env() {
+        let output = parse_deployment_artifact(
+            "backend",
+            "charts/api/templates/service.yaml",
+            r#"
+{{ if .Values.enabled }}
+name: nginx
+{{ end }}
+"#,
+        )
+        .expect("helm template fallback should not fail parsing");
+
+        assert_eq!(output.artifact_kind, DeploymentArtifactKind::Helm);
+        assert!(
+            !output
+                .nodes
+                .iter()
+                .any(|node| node.qualified_name == "__env_var__nginx")
+        );
     }
 
     #[test]
@@ -1121,6 +1457,21 @@ jobs:
         );
         assert_eq!(
             detect_artifact_kind("src/app.yaml", "name: not deploy"),
+            DeploymentArtifactKind::Unknown
+        );
+        assert_eq!(
+            detect_artifact_kind(
+                "platform/templates/deployment.yaml",
+                "apiVersion: apps/v1\nkind: Deployment\n"
+            ),
+            DeploymentArtifactKind::Kubernetes
+        );
+        assert_eq!(
+            detect_artifact_kind("kustomize/apps/api/kustomization.yaml", ""),
+            DeploymentArtifactKind::Kustomize
+        );
+        assert_eq!(
+            detect_artifact_kind("platform/templates/name.yaml", "name: nginx"),
             DeploymentArtifactKind::Unknown
         );
     }

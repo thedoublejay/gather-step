@@ -133,15 +133,15 @@ pub fn deployment_topology<S: GraphStore>(
         }
         DeploymentTopologyQuery::UndeployedServices => {
             for service_node in filtered_nodes(store, NodeKind::Service, repo)? {
+                if report.services.len() >= limit {
+                    break;
+                }
                 let has_deployment = store
                     .get_outgoing(service_node.id)?
                     .iter()
                     .any(|edge| edge.kind == EdgeKind::DeployedAs);
                 if !has_deployment {
                     report.services.push(node_item(&service_node));
-                }
-                if report.services.len() >= limit {
-                    break;
                 }
             }
             if report.services.is_empty() {
@@ -152,15 +152,15 @@ pub fn deployment_topology<S: GraphStore>(
         }
         DeploymentTopologyQuery::DeployedButNoCode => {
             for deployment in filtered_nodes(store, NodeKind::Deployment, repo)? {
+                if report.deployments.len() >= limit {
+                    break;
+                }
                 let has_service = store
                     .get_incoming(deployment.id)?
                     .iter()
                     .any(|edge| edge.kind == EdgeKind::DeployedAs);
                 if !has_service {
                     report.deployments.push(node_item(&deployment));
-                }
-                if report.deployments.len() >= limit {
-                    break;
                 }
             }
             if report.deployments.is_empty() {

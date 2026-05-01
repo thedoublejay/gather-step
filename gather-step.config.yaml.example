@@ -8,6 +8,9 @@ repos:
 indexing:
   workspace_concurrency: 4
 deployment:
+  include:
+    - kustomize/**/*.yaml
+    - platform/**/*.yaml
   gitops_roots:
     - platform/apps
   env_files:

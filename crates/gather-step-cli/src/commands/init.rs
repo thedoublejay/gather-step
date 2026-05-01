@@ -248,6 +248,7 @@ fn write_default_config_with_repos(
             github: existing.github.clone(),
             jira: existing.jira.clone(),
             indexing: existing.indexing.clone(),
+            deployment: existing.deployment.clone(),
         },
         None => GatherStepConfig {
             allow_listed_repos: Vec::new(),
@@ -255,6 +256,7 @@ fn write_default_config_with_repos(
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
+            deployment: Default::default(),
         },
     };
     let summary_repos = discovered_repos_from_config(&config);

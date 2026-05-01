@@ -201,7 +201,7 @@ Controls the number of repos indexed concurrently at the workspace level. When o
 | `gitops_roots` | `string[]` | `[]` | Repo-relative directories that contain GitOps or platform deployment manifests. |
 | `env_files` | `string[]` | `[]` | Repo-relative env files to scan for variable names. Values are redacted and not persisted. |
 
-The built-in scanner recognizes common Dockerfiles, Docker Compose files, Kubernetes manifests, Helm-like YAML templates, and GitHub Actions workflow YAML. Configured paths must stay inside the repo; paths that escape with `..` are rejected.
+The built-in scanner recognizes common Dockerfiles, Docker Compose files, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, and GitHub Actions workflow YAML. Configured paths must stay inside the repo; paths that escape with `..` are rejected.
 
 ## Validation rules
 

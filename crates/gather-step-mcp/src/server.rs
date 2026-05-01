@@ -628,7 +628,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "where_deployed",
-        description = "Return deployments linked to an indexed service.",
+        description = "Return deployment nodes and deployment evidence linked to an indexed service, scoped by repo when provided.",
         annotations(read_only_hint = true)
     )]
     pub async fn where_deployed_tool(

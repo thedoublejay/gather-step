@@ -6,7 +6,7 @@
 
 Build deployment topology as a graph-backed evidence layer that answers: "Which code services are actually deployed, how are they deployed, and which environment or shared infrastructure do they depend on?"
 
-This work is intentionally separate from projection impact. Projection impact traces static code/data-shape relationships; deployment topology uses a different evidence class: Dockerfiles, Compose files, Kubernetes manifests, Helm templates/values, GitHub Actions, env files, platform-gitops layouts, repo profiles, and Braingent advisory learnings.
+This work is intentionally separate from projection impact. Projection impact traces static code/data-shape relationships; deployment topology uses a different evidence class: Dockerfiles, Compose files, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions, env files, platform-gitops layouts, repo profiles, and Braingent advisory learnings.
 
 **ELI5:** Projection impact says "this field change touches these code paths." Deployment topology says "this code path is shipped as this service in this environment, with these env vars and shared dependencies." Both are graph facts, but they come from different files and should not be mixed silently.
 
@@ -25,8 +25,8 @@ This work is intentionally separate from projection impact. Projection impact tr
   - `topics/topic--ai-agent-memory/records/2026-04-28--learning--verify-deployed-source-before-editing-same-name-service-repo.md`
   - The key gap is that plan refreshes do not force deployed-source verification. A deployment-topology index should make that check explicit.
 - External plan corpus:
-  - `/Users/jjadonis/Documents/repos/plans/personal/gather-step-plans/plans/tasks-v2.md`
-  - Carry forward the deploy graph scope into v3: Dockerfile, Compose, Kubernetes, Helm, GitHub Actions, env files, and platform-gitops layouts.
+  - Personal gather-step task corpus.
+  - Carry forward the deploy graph scope into v3: Dockerfile, Compose, Kubernetes, Kustomize, explicit Helm chart artifacts, GitHub Actions, env files, and platform-gitops layouts.
 
 ## Goals
 
@@ -114,7 +114,7 @@ This work is intentionally separate from projection impact. Projection impact tr
    - Read container env names and `envFrom` references.
    - `→ verify: multi-document fixture emits deployments, env vars, config maps, secrets, and stable diagnostics`
 
-5. Parse Helm templates and values heuristically.
+5. Parse explicit Helm chart artifacts heuristically without treating every `templates/` path as Helm.
    - Use regex/YAML heuristics only.
    - No subprocess rendering.
    - `→ verify: Helm fixture emits lower-confidence facts and diagnostics for template uncertainty`
@@ -210,7 +210,7 @@ This work is intentionally separate from projection impact. Projection impact tr
 ## Implementation Notes
 
 - Phase A landed graph vocabulary, virtual-node helpers, and parsed `deployment` config.
-- Phase B added `gather-step-deploy` with redacted parsers for Dockerfile, Compose, Kubernetes, Helm-like YAML/templates, GitHub Actions, and env files.
+- Phase B added `gather-step-deploy` with redacted parsers for Dockerfile, Compose, Kubernetes, Kustomize, explicit Helm chart artifacts, GitHub Actions, and env files.
 - Phase C indexes deployment artifacts into graph-owned file batches and wires `deployment.include`, `deployment.gitops_roots`, and `deployment.env_files` into index/watch/serve paths.
 - Phase D added the `deployment-topology` CLI command and six MCP tools: `where_deployed`, `service_env`, `env_var_consumers`, `undeployed_services`, `deployed_but_no_code`, and `shared_infra`.
 - Phase E updates projection-impact planning risk: concrete deployment topology replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed`; missing topology remains explicit evidence debt.
