@@ -82,6 +82,10 @@ pub fn deployment_topology<S: GraphStore>(
                     .push(format!("no indexed service matched `{service}`"));
             }
             for service_node in services.into_iter().take(limit) {
+                if report.edges.len() >= limit {
+                    break;
+                }
+                let edge_count = report.edges.len();
                 collect_outgoing(
                     store,
                     &mut report,
@@ -90,6 +94,12 @@ pub fn deployment_topology<S: GraphStore>(
                     Some(NodeKind::Deployment),
                     limit,
                 )?;
+                if report.edges.len() == edge_count {
+                    report.missing_evidence.push(format!(
+                        "service `{}` has no indexed deployment edge",
+                        service_node.name
+                    ));
+                }
                 report.services.push(node_item(&service_node));
             }
         }
@@ -101,6 +111,10 @@ pub fn deployment_topology<S: GraphStore>(
                     .push(format!("no indexed service matched `{service}`"));
             }
             for service_node in services.into_iter().take(limit) {
+                if report.edges.len() >= limit {
+                    break;
+                }
+                let edge_count = report.edges.len();
                 collect_outgoing(
                     store,
                     &mut report,
@@ -109,6 +123,12 @@ pub fn deployment_topology<S: GraphStore>(
                     Some(NodeKind::EnvVar),
                     limit,
                 )?;
+                if report.edges.len() == edge_count {
+                    report.missing_evidence.push(format!(
+                        "service `{}` has no indexed env var edge",
+                        service_node.name
+                    ));
+                }
                 report.services.push(node_item(&service_node));
             }
         }
@@ -120,6 +140,10 @@ pub fn deployment_topology<S: GraphStore>(
                     .push(format!("no indexed env var matched `{env_var}`"));
             }
             for env_node in env_vars.into_iter().take(limit) {
+                if report.edges.len() >= limit {
+                    break;
+                }
+                let edge_count = report.edges.len();
                 collect_incoming(
                     store,
                     &mut report,
@@ -128,6 +152,12 @@ pub fn deployment_topology<S: GraphStore>(
                     Some(NodeKind::Service),
                     limit,
                 )?;
+                if report.edges.len() == edge_count {
+                    report.missing_evidence.push(format!(
+                        "env var `{}` has no indexed service consumers",
+                        env_node.name
+                    ));
+                }
                 report.env_vars.push(node_item(&env_node));
             }
         }
@@ -174,6 +204,9 @@ pub fn deployment_topology<S: GraphStore>(
             let mut infra = filtered_nodes(store, NodeKind::Database, repo)?;
             infra.extend(filtered_nodes(store, NodeKind::Broker, repo)?);
             for infra_node in infra.into_iter().take(limit) {
+                if report.edges.len() >= limit {
+                    break;
+                }
                 collect_incoming(
                     store,
                     &mut report,
@@ -205,6 +238,9 @@ fn collect_outgoing<S: GraphStore>(
     limit: usize,
 ) -> Result<(), DeploymentTopologyError> {
     for edge in store.get_outgoing(source.id)? {
+        if report.edges.len() >= limit {
+            break;
+        }
         if !edge_kinds.contains(&edge.kind) {
             continue;
         }
@@ -215,9 +251,6 @@ fn collect_outgoing<S: GraphStore>(
             continue;
         }
         push_edge(report, source, &target, &edge);
-        if report.edges.len() >= limit {
-            break;
-        }
     }
     Ok(())
 }
@@ -231,6 +264,9 @@ fn collect_incoming<S: GraphStore>(
     limit: usize,
 ) -> Result<(), DeploymentTopologyError> {
     for edge in store.get_incoming(target.id)? {
+        if report.edges.len() >= limit {
+            break;
+        }
         if !edge_kinds.contains(&edge.kind) {
             continue;
         }
@@ -241,9 +277,6 @@ fn collect_incoming<S: GraphStore>(
             continue;
         }
         push_edge(report, &source, target, &edge);
-        if report.edges.len() >= limit {
-            break;
-        }
     }
     Ok(())
 }
@@ -278,23 +311,33 @@ fn find_named_nodes<S: GraphStore>(
     target: &str,
     repo: Option<&str>,
 ) -> Result<Vec<NodeData>, DeploymentTopologyError> {
-    let needle = target.trim().to_ascii_lowercase();
+    let target = target.trim();
+    let canonical_target = canonical_topology_part(target);
     Ok(filtered_nodes(store, kind, repo)?
         .into_iter()
-        .filter(|node| {
-            node.name.eq_ignore_ascii_case(target)
-                || node
-                    .qualified_name
-                    .as_deref()
-                    .is_some_and(|qualified_name| {
-                        qualified_name.to_ascii_lowercase().contains(&needle)
-                    })
-                || node
-                    .external_id
-                    .as_deref()
-                    .is_some_and(|external_id| external_id.to_ascii_lowercase().contains(&needle))
-        })
+        .filter(|node| node_matches_target(node, target, &canonical_target))
         .collect())
+}
+
+fn node_matches_target(node: &NodeData, target: &str, canonical_target: &str) -> bool {
+    node.name.eq_ignore_ascii_case(target)
+        || node
+            .qualified_name
+            .as_deref()
+            .is_some_and(|qualified_name| {
+                identifier_matches_target(qualified_name, target, canonical_target)
+            })
+        || node.external_id.as_deref().is_some_and(|external_id| {
+            identifier_matches_target(external_id, target, canonical_target)
+        })
+}
+
+fn identifier_matches_target(value: &str, target: &str, canonical_target: &str) -> bool {
+    value.eq_ignore_ascii_case(target)
+        || value
+            .rsplit("__")
+            .next()
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(canonical_target))
 }
 
 fn filtered_nodes<S: GraphStore>(
@@ -446,10 +489,51 @@ mod tests {
             "DATABASE_URL",
             "__env_var__database_url",
         );
+        let worker = node(
+            NodeKind::Service,
+            "backend",
+            "api-worker",
+            "__service__backend__api-worker",
+        );
+        let worker_deployment = node(
+            NodeKind::Deployment,
+            "backend",
+            "api-worker",
+            "__deployment__backend__api-worker",
+        );
+        let orphan = node(
+            NodeKind::Service,
+            "backend",
+            "orphan",
+            "__service__backend__orphan",
+        );
+        let unused_env = node(
+            NodeKind::EnvVar,
+            "backend",
+            "UNUSED_PORT",
+            "__env_var__unused_port",
+        );
+        let other_service = node(NodeKind::Service, "worker", "api", "__service__worker__api");
+        let other_deployment = node(
+            NodeKind::Deployment,
+            "worker",
+            "api",
+            "__deployment__worker__api",
+        );
         graph.insert_node(&file).expect("file");
         graph.insert_node(&service).expect("service");
         graph.insert_node(&deployment).expect("deployment");
         graph.insert_node(&env).expect("env");
+        graph.insert_node(&worker).expect("worker service");
+        graph
+            .insert_node(&worker_deployment)
+            .expect("worker deployment");
+        graph.insert_node(&orphan).expect("orphan service");
+        graph.insert_node(&unused_env).expect("unused env");
+        graph.insert_node(&other_service).expect("other service");
+        graph
+            .insert_node(&other_deployment)
+            .expect("other deployment");
         graph
             .insert_edge(&EdgeData {
                 source: service.id,
@@ -463,6 +547,32 @@ mod tests {
                 is_cross_file: false,
             })
             .expect("deploy edge");
+        graph
+            .insert_edge(&EdgeData {
+                source: worker.id,
+                target: worker_deployment.id,
+                kind: EdgeKind::DeployedAs,
+                metadata: EdgeMetadata {
+                    confidence: Some(900),
+                    ..EdgeMetadata::default()
+                },
+                owner_file: file.id,
+                is_cross_file: false,
+            })
+            .expect("worker deploy edge");
+        graph
+            .insert_edge(&EdgeData {
+                source: other_service.id,
+                target: other_deployment.id,
+                kind: EdgeKind::DeployedAs,
+                metadata: EdgeMetadata {
+                    confidence: Some(900),
+                    ..EdgeMetadata::default()
+                },
+                owner_file: file.id,
+                is_cross_file: false,
+            })
+            .expect("other deploy edge");
         graph
             .insert_edge(&EdgeData {
                 source: service.id,
@@ -488,6 +598,14 @@ mod tests {
         assert_eq!(report.deployments.len(), 1);
         assert_eq!(report.env_vars.len(), 0);
         assert_eq!(report.edges[0].kind, EdgeKind::DeployedAs);
+        assert_eq!(
+            report
+                .services
+                .iter()
+                .map(|service| service.qualified_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("__service__backend__api")]
+        );
 
         let report = deployment_topology(
             &graph,
@@ -500,6 +618,51 @@ mod tests {
         .expect("service env");
         assert_eq!(report.env_vars.len(), 1);
         assert_eq!(report.edges[0].kind, EdgeKind::ReadsEnv);
+
+        let report = deployment_topology(
+            &graph,
+            DeploymentTopologyQuery::WhereDeployed {
+                service: "orphan".to_owned(),
+            },
+            Some("backend"),
+            20,
+        )
+        .expect("orphan service");
+        assert!(report.deployments.is_empty());
+        assert!(
+            report
+                .missing_evidence
+                .iter()
+                .any(|message| message.contains("no indexed deployment edge"))
+        );
+
+        let report = deployment_topology(
+            &graph,
+            DeploymentTopologyQuery::EnvVarConsumers {
+                env_var: "UNUSED_PORT".to_owned(),
+            },
+            Some("backend"),
+            20,
+        )
+        .expect("unused env");
+        assert!(report.services.is_empty());
+        assert!(
+            report
+                .missing_evidence
+                .iter()
+                .any(|message| message.contains("no indexed service consumers"))
+        );
+
+        let report = deployment_topology(
+            &graph,
+            DeploymentTopologyQuery::WhereDeployed {
+                service: "api".to_owned(),
+            },
+            None,
+            1,
+        )
+        .expect("limited where deployed");
+        assert_eq!(report.edges.len(), 1);
 
         drop(graph);
         let _ = std::fs::remove_file(graph_path);

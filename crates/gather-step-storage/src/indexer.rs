@@ -2431,6 +2431,68 @@ services:
     }
 
     #[test]
+    fn incremental_index_adds_and_deletes_deployment_artifacts() {
+        let repo_root = TestDir::new("deployment-incremental-add-delete-repo");
+        let storage_root = TestDir::new("deployment-incremental-add-delete-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("src/app.ts"),
+            "export function run() { return true; }\n",
+        )
+        .expect("source fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("initial indexing should succeed");
+
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            r#"
+services:
+  api:
+    environment:
+      DATABASE_URL: redacted
+"#,
+        )
+        .expect("compose fixture should write");
+        let hint = vec!["compose.yaml".to_owned()];
+        indexer
+            .index_repo_incremental_with_hint("sample-service", repo_root.path(), Some(&hint), None)
+            .expect("incremental add should succeed");
+
+        let graph = indexer.storage().graph();
+        assert!(
+            graph
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url"))
+        );
+
+        fs::remove_file(repo_root.path().join("compose.yaml"))
+            .expect("compose fixture should delete");
+        indexer
+            .index_repo_incremental_with_hint("sample-service", repo_root.path(), Some(&hint), None)
+            .expect("incremental delete should succeed");
+
+        assert!(
+            !graph
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url"))
+        );
+        assert!(
+            graph
+                .nodes_by_file("sample-service", "compose.yaml")
+                .expect("compose file nodes should load")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn configured_env_files_are_indexed_as_deployment_artifacts() {
         let repo_root = TestDir::new("deployment-configured-env-repo");
         let storage_root = TestDir::new("deployment-configured-env-storage");
@@ -2467,6 +2529,35 @@ services:
             env_vars
                 .iter()
                 .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+        );
+    }
+
+    #[test]
+    fn unconfigured_env_files_are_not_indexed_by_default() {
+        let repo_root = TestDir::new("deployment-unconfigured-env-repo");
+        let storage_root = TestDir::new("deployment-unconfigured-env-storage");
+        fs::write(
+            repo_root.path().join(".env.production"),
+            "AWS_SECRET_ACCESS_KEY=redacted\n",
+        )
+        .expect("env fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let env_vars = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::EnvVar)
+            .expect("env var nodes should load");
+        assert!(
+            !env_vars.iter().any(|node| {
+                node.qualified_name.as_deref() == Some("__env_var__aws_secret_access_key")
+            }),
+            "standalone env files require explicit deployment.env_files config"
         );
     }
 

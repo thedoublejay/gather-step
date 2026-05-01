@@ -11,7 +11,7 @@ Deployment-topology indexing and query surfaces for v3.
 
 ### Highlights
 
-- Added deployment topology indexing for Dockerfiles, Docker Compose, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions deploy jobs, and configured env files.
+- Added deployment topology indexing for Dockerfiles, Docker Compose, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions deploy jobs, configured env files, and Compose `env_file` references.
 - Added graph nodes and edges for deployments, env vars, secrets, config maps, workflow jobs, brokers, and databases.
 - Added `gather-step deployment-topology` plus MCP tools for `where_deployed`, `service_env`, `env_var_consumers`, `undeployed_services`, `deployed_but_no_code`, and `shared_infra`.
 - Projection impact now replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed` when indexed deployment evidence exists for the affected repo.

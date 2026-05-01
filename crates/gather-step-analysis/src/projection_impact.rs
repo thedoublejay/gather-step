@@ -847,7 +847,7 @@ fn apply_deployment_topology_risk<S: GraphStore>(
         return Ok(());
     }
 
-    if has_deployment_topology_for_report_repos(store, &report_repos(report))? {
+    if has_deployment_topology_for_report(store, report)? {
         report
             .risk_hints
             .retain(|hint| hint != "deployed_owner_unchecked");
@@ -867,10 +867,11 @@ fn apply_deployment_topology_risk<S: GraphStore>(
     Ok(())
 }
 
-fn has_deployment_topology_for_report_repos<S: GraphStore>(
+fn has_deployment_topology_for_report<S: GraphStore>(
     store: &S,
-    repos: &BTreeSet<String>,
+    report: &ProjectionImpactReport,
 ) -> Result<bool, ProjectionImpactError> {
+    let repos = report_repos(report);
     if repos.is_empty() {
         return Ok(false);
     }
@@ -883,16 +884,51 @@ fn has_deployment_topology_for_report_repos<S: GraphStore>(
             if edge.kind != EdgeKind::DeployedAs {
                 continue;
             }
-            if store
-                .get_node(edge.source)?
-                .is_some_and(|source| source.kind == NodeKind::Service)
-            {
+            if store.get_node(edge.source)?.is_some_and(|source| {
+                source.kind == NodeKind::Service && service_matches_report_repo(&source, &repos)
+            }) {
                 return Ok(true);
             }
         }
     }
 
     Ok(false)
+}
+
+fn service_matches_report_repo(service: &NodeData, repos: &BTreeSet<String>) -> bool {
+    let service_name = canonical_projection_part(&service.name);
+    repos.iter().any(|repo| {
+        let repo_name = canonical_projection_part(repo);
+        service_name == repo_name
+            || [
+                service.qualified_name.as_deref(),
+                service.external_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|identifier| identifier.contains(&format!("__{repo_name}__{repo_name}")))
+    })
+}
+
+fn canonical_projection_part(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_separator = false;
+    for ch in value.trim().chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            previous_was_separator = false;
+            ch.to_ascii_lowercase()
+        } else if matches!(ch, '.' | '-' | ':') {
+            previous_was_separator = false;
+            ch
+        } else if !previous_was_separator {
+            previous_was_separator = true;
+            '_'
+        } else {
+            continue;
+        };
+        normalized.push(next);
+    }
+    normalized.trim_matches('_').replace("__", "_")
 }
 
 fn apply_evidence_verbosity(
@@ -1116,15 +1152,15 @@ mod tests {
             NodeKind::Service,
             "svc",
             "compose.yaml",
-            "api",
-            "__service__svc__api",
+            "svc",
+            "__service__svc__svc",
         );
         let deployment = virtual_node(
             NodeKind::Deployment,
             "svc",
             "compose.yaml",
-            "api",
-            "__deployment__svc__api",
+            "svc",
+            "__deployment__svc__svc",
         );
         store
             .bulk_insert(
@@ -1153,6 +1189,56 @@ mod tests {
         );
         assert!(
             !report
+                .missing_evidence
+                .contains(&"deployment_topology".to_owned())
+        );
+    }
+
+    #[test]
+    fn unrelated_deployment_topology_keeps_unchecked_deployment_risk() {
+        let store = store_with_projection();
+        let deployment_file = file_node("svc", "compose.yaml");
+        let service = virtual_node(
+            NodeKind::Service,
+            "svc",
+            "compose.yaml",
+            "worker",
+            "__service__svc__worker",
+        );
+        let deployment = virtual_node(
+            NodeKind::Deployment,
+            "svc",
+            "compose.yaml",
+            "worker",
+            "__deployment__svc__worker",
+        );
+        store
+            .bulk_insert(
+                &[deployment_file.clone(), service.clone(), deployment.clone()],
+                &[edge(
+                    service.id,
+                    deployment.id,
+                    deployment_file.id,
+                    EdgeKind::DeployedAs,
+                )],
+            )
+            .expect("deployment topology graph should write");
+
+        let report = projection_impact(&store, request("subtaskIds"))
+            .expect("projection impact should load");
+
+        assert!(
+            !report
+                .risk_hints
+                .contains(&"deployed_owner_topology_observed".to_owned())
+        );
+        assert!(
+            report
+                .risk_hints
+                .contains(&"deployed_owner_unchecked".to_owned())
+        );
+        assert!(
+            report
                 .missing_evidence
                 .contains(&"deployment_topology".to_owned())
         );

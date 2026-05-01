@@ -96,9 +96,6 @@ pub fn detect_artifact_kind(path: &str, content: &str) -> DeploymentArtifactKind
     if file_name == "dockerfile" || file_name.starts_with("dockerfile.") {
         return DeploymentArtifactKind::Dockerfile;
     }
-    if file_name == ".env" || file_name.starts_with(".env.") || file_name.ends_with(".env") {
-        return DeploymentArtifactKind::EnvFile;
-    }
     if file_name == "docker-compose.yml"
         || file_name == "docker-compose.yaml"
         || file_name == "compose.yml"
@@ -332,6 +329,18 @@ fn parse_compose(
         return Ok(());
     };
 
+    let service_images = services
+        .iter()
+        .filter_map(|(service_key, service_value)| {
+            Some((
+                service_key.as_str()?.to_owned(),
+                mapping_get(service_value, "image")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+
     for (service_key, service_value) in services {
         let Some(service_name) = service_key.as_str() else {
             continue;
@@ -346,18 +355,43 @@ fn parse_compose(
             "compose service",
         );
 
-        let image = mapping_get(service_value, "image").and_then(Value::as_str);
-        add_infra_from_image(
-            builder,
-            &service_qn,
-            service_name,
-            image,
-            confidence,
-            "compose image",
-        );
         collect_compose_env(service_value)
             .iter()
             .for_each(|name| add_env_edge(builder, &service_qn, name, confidence, "compose env"));
+        for config_name in collect_compose_resource_refs(service_value, "configs") {
+            let qn = config_map_qn(&config_name);
+            builder.node(
+                NodeKind::ConfigMap,
+                &config_name,
+                qn.clone(),
+                confidence,
+                "compose config",
+            );
+            builder.edge(
+                NodeRef::new(NodeKind::Service, service_qn.clone()),
+                NodeRef::new(NodeKind::ConfigMap, qn),
+                EdgeKind::BackedBy,
+                confidence,
+                "compose config",
+            );
+        }
+        for secret_name in collect_compose_resource_refs(service_value, "secrets") {
+            let qn = secret_qn(&secret_name);
+            builder.node(
+                NodeKind::Secret,
+                &secret_name,
+                qn.clone(),
+                confidence,
+                "compose secret",
+            );
+            builder.edge(
+                NodeRef::new(NodeKind::Service, service_qn.clone()),
+                NodeRef::new(NodeKind::Secret, qn),
+                EdgeKind::BackedBy,
+                confidence,
+                "compose secret",
+            );
+        }
 
         for dependency in compose_depends_on(service_value) {
             let dependency_qn = builder.service(&dependency, confidence, "compose dependency");
@@ -368,6 +402,19 @@ fn parse_compose(
                 confidence,
                 "compose depends_on",
             );
+            if let Some(image) = service_images
+                .get(&dependency)
+                .and_then(std::option::Option::as_deref)
+            {
+                add_infra_from_image(
+                    builder,
+                    &service_qn,
+                    &dependency,
+                    Some(image),
+                    confidence,
+                    "compose depends_on image",
+                );
+            }
         }
     }
 
@@ -529,6 +576,23 @@ fn parse_kubernetes_document(builder: &mut OutputBuilder<'_>, value: &Value, con
                     "kubernetes envFrom configMapRef",
                 );
             }
+            for config_name in kubernetes_value_from_refs(value, "configMapKeyRef") {
+                let qn = config_map_qn(&config_name);
+                builder.node(
+                    NodeKind::ConfigMap,
+                    &config_name,
+                    qn.clone(),
+                    confidence,
+                    "kubernetes valueFrom configMapKeyRef",
+                );
+                builder.edge(
+                    NodeRef::new(NodeKind::Service, service_qn.clone()),
+                    NodeRef::new(NodeKind::ConfigMap, qn),
+                    EdgeKind::BackedBy,
+                    confidence,
+                    "kubernetes valueFrom configMapKeyRef",
+                );
+            }
             for secret_name in kubernetes_env_from_refs(value, "secretRef") {
                 let qn = secret_qn(&secret_name);
                 builder.node(
@@ -544,6 +608,23 @@ fn parse_kubernetes_document(builder: &mut OutputBuilder<'_>, value: &Value, con
                     EdgeKind::BackedBy,
                     confidence,
                     "kubernetes envFrom secretRef",
+                );
+            }
+            for secret_name in kubernetes_value_from_refs(value, "secretKeyRef") {
+                let qn = secret_qn(&secret_name);
+                builder.node(
+                    NodeKind::Secret,
+                    &secret_name,
+                    qn.clone(),
+                    confidence,
+                    "kubernetes valueFrom secretKeyRef",
+                );
+                builder.edge(
+                    NodeRef::new(NodeKind::Service, service_qn.clone()),
+                    NodeRef::new(NodeKind::Secret, qn),
+                    EdgeKind::BackedBy,
+                    confidence,
+                    "kubernetes valueFrom secretKeyRef",
                 );
             }
         }
@@ -797,6 +878,45 @@ fn insert_env_file_path(paths: &mut BTreeSet<String>, path: &str) {
     }
 }
 
+fn collect_compose_resource_refs(service_value: &Value, key: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Some(resource_refs) = mapping_get(service_value, key) else {
+        return names;
+    };
+    match resource_refs {
+        Value::Sequence(sequence) => {
+            for item in sequence {
+                match item {
+                    Value::String(name) => insert_resource_ref_name(&mut names, name),
+                    Value::Mapping(_) => {
+                        if let Some(name) = mapping_get(item, "source")
+                            .or_else(|| mapping_get(item, "target"))
+                            .and_then(Value::as_str)
+                        {
+                            insert_resource_ref_name(&mut names, name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Value::Mapping(map) => {
+            for key in map.keys().filter_map(Value::as_str) {
+                insert_resource_ref_name(&mut names, key);
+            }
+        }
+        _ => {}
+    }
+    names
+}
+
+fn insert_resource_ref_name(names: &mut BTreeSet<String>, name: &str) {
+    let name = name.trim();
+    if !name.is_empty() {
+        names.insert(name.to_owned());
+    }
+}
+
 fn compose_depends_on(service_value: &Value) -> BTreeSet<String> {
     let mut dependencies = BTreeSet::new();
     let Some(depends_on) = mapping_get(service_value, "depends_on") else {
@@ -849,6 +969,28 @@ fn kubernetes_env_from_refs(value: &Value, ref_key: &str) -> BTreeSet<String> {
         };
         for item in env_from {
             if let Some(name) = mapping_get(item, ref_key)
+                .and_then(|reference| mapping_get(reference, "name"))
+                .and_then(Value::as_str)
+            {
+                names.insert(name.to_owned());
+            }
+        }
+    });
+    names
+}
+
+fn kubernetes_value_from_refs(value: &Value, ref_key: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    visit_mappings(value, &mut |mapping| {
+        let Some(env) = mapping
+            .get(Value::String("env".to_owned()))
+            .and_then(Value::as_sequence)
+        else {
+            return;
+        };
+        for item in env {
+            if let Some(name) = mapping_get(item, "valueFrom")
+                .and_then(|value_from| mapping_get(value_from, ref_key))
                 .and_then(|reference| mapping_get(reference, "name"))
                 .and_then(Value::as_str)
             {
@@ -912,15 +1054,9 @@ fn workflow_job_is_deployish(value: &Value) -> bool {
     let text = serde_json::to_string(value)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    [
-        "deploy",
-        "kubectl",
-        "helm",
-        "docker build",
-        "docker/build-push-action",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
+    ["deploy", "kubectl", "helm"]
+        .iter()
+        .any(|needle| text.contains(needle))
 }
 
 fn workflow_needs(value: &Value) -> BTreeSet<String> {
@@ -1172,6 +1308,10 @@ services:
     depends_on:
       - postgres
       - redis
+    configs:
+      - api-config
+    secrets:
+      - source: api-secret
   postgres:
     image: postgres:16
   redis:
@@ -1189,13 +1329,28 @@ services:
             output
                 .edges
                 .iter()
-                .any(|edge| edge.kind == EdgeKind::UsesDatabase)
+                .any(|edge| edge.kind == EdgeKind::UsesDatabase
+                    && edge.source_qualified_name == "__service__platform__api")
         );
         assert!(
             output
                 .edges
                 .iter()
-                .any(|edge| edge.kind == EdgeKind::UsesBroker)
+                .any(|edge| edge.kind == EdgeKind::UsesBroker
+                    && edge.source_qualified_name == "__service__platform__api")
+        );
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::ConfigMap && node.qualified_name == "__config_map__api-config"
+        }));
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::Secret && node.qualified_name == "__secret__api-secret"
+        }));
+        assert!(
+            !output
+                .edges
+                .iter()
+                .any(|edge| edge.kind == EdgeKind::UsesDatabase
+                    && edge.source_qualified_name == "__service__platform__postgres")
         );
         let serialized = serde_json::to_string(&output).expect("serialize output");
         assert!(!serialized.contains("postgres://secret"));
@@ -1254,6 +1409,11 @@ spec:
                 secretKeyRef:
                   name: db-secret
                   key: url
+            - name: API_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: api-key-config
+                  key: url
           envFrom:
             - configMapRef:
                 name: api-config
@@ -1282,6 +1442,13 @@ metadata:
         }));
         assert!(output.nodes.iter().any(|node| {
             node.kind == NodeKind::Secret && node.qualified_name == "__secret__api-secret"
+        }));
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::Secret && node.qualified_name == "__secret__db-secret"
+        }));
+        assert!(output.nodes.iter().any(|node| {
+            node.kind == NodeKind::ConfigMap
+                && node.qualified_name == "__config_map__api-key-config"
         }));
     }
 
@@ -1427,11 +1594,38 @@ jobs:
     }
 
     #[test]
-    fn env_file_parser_records_names_only() {
+    fn github_actions_parser_does_not_treat_build_only_jobs_as_deployments() {
         let output = parse_deployment_artifact(
+            "backend",
+            ".github/workflows/build.yml",
+            r#"
+name: Build
+on:
+  push:
+jobs:
+  build:
+    steps:
+      - run: docker build .
+"#,
+        )
+        .expect("workflow should parse");
+
+        assert_eq!(output.artifact_kind, DeploymentArtifactKind::GithubActions);
+        assert!(
+            !output
+                .edges
+                .iter()
+                .any(|edge| edge.kind == EdgeKind::BuiltBy)
+        );
+    }
+
+    #[test]
+    fn env_file_parser_records_names_only() {
+        let output = super::parse_deployment_artifact_with_kind(
             "backend",
             ".env.production",
             "DATABASE_URL=postgres://secret\n# ignored\nexport BAD=ignored\nAPI_TOKEN=value\n",
+            DeploymentArtifactKind::EnvFile,
         )
         .expect("env file should parse");
 
@@ -1454,6 +1648,10 @@ jobs:
         assert_eq!(
             detect_artifact_kind(".github/workflows/ci.yml", ""),
             DeploymentArtifactKind::GithubActions
+        );
+        assert_eq!(
+            detect_artifact_kind(".env.production", ""),
+            DeploymentArtifactKind::Unknown
         );
         assert_eq!(
             detect_artifact_kind("src/app.yaml", "name: not deploy"),
