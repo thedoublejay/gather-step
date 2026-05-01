@@ -14,6 +14,7 @@ pub mod history;
 pub mod intelligence;
 pub mod ownership;
 pub mod refs;
+pub mod worktrees;
 
 pub use analytics::{
     AnalyticsOptions, AnalyticsReport, CoChangeRecord, HotspotRecord, analyze_history,
@@ -38,6 +39,7 @@ pub use refs::{
     ChangeKind, ChangedFile, RefResolveError, ResolvedRange, ResolvedRef, changed_files,
     merge_base, resolve_range, resolve_ref,
 };
+pub use worktrees::{ReviewWorktree, WorktreeError, create_detached_worktree, remove_worktree};
 
 #[cfg(test)]
 mod tests {
