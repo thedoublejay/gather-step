@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -23,6 +24,10 @@ use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
 pub struct ImpactArgs {
+    #[arg(long, help = "Read symbol registry JSON from this path")]
+    pub registry: Option<PathBuf>,
+    #[arg(long, help = "Read storage artifacts from this directory")]
+    pub storage: Option<PathBuf>,
     #[arg(help = "Symbol name to inspect")]
     pub symbol: String,
     #[arg(
@@ -83,6 +88,15 @@ struct ImpactedFileOutput {
 }
 
 pub fn run(app: &AppContext, args: ImpactArgs) -> Result<()> {
+    if args.registry.is_some() || args.storage.is_some() {
+        let ctx = StorageContext::workspace_read_only_with_overrides(
+            app,
+            args.registry.clone(),
+            args.storage.clone(),
+        );
+        return run_rendered(app, &ctx, args)?.emit(&app.output());
+    }
+
     daemon_proxy::run_read_only_command(
         app,
         &DaemonRequest::Impact {

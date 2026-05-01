@@ -8,13 +8,8 @@
 //! - `pr-review` (no subcommand): run a review.  Requires `--base` and `--head`.
 //! - `pr-review clean ...`: clean up stale review artifacts (Phase 1 Task 6).
 //!
-//! # Deferred to Phase 2
-//!
-//! - `added_routes`, `added_symbols`, `added_payload_contracts` are all empty
-//!   arrays in this MVP.  Phase 2 owns diff extraction against the review index.
-//! - `--registry`/`--storage` overrides on `trace`, `impact`, and `pack` are
-//!   not yet exposed as top-level CLI flags; the suggested commands include them
-//!   for documentation purposes and are flagged with `requires_keep_cache: true`.
+//! `added_routes`, `added_symbols`, and `added_payload_contracts` are all empty
+//! arrays in this MVP. Phase 2 owns diff extraction against the review index.
 
 use std::{
     path::{Path, PathBuf},
@@ -25,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use gather_step_core::GatherStepConfig;
 use gather_step_git::{
-    refs::{ChangedFile, resolve_range},
+    refs::{ChangedFile, changed_files, merge_base, resolve_range},
     worktrees::{ReviewWorktree, create_detached_worktree, remove_worktree},
 };
 use gather_step_storage::IndexingOptions;
@@ -35,13 +30,12 @@ use crate::{
     app::AppContext,
     pr_review::{
         artifact_root::{
-            ArtifactRootError, ReviewArtifactRoot, create_artifact_root, default_cache_root,
-            generate_run_id, read_marker, write_marker_completed, write_marker_quarantined,
-            workspace_hash, MARKER_FILENAME,
+            ArtifactRootError, MARKER_FILENAME, ReviewArtifactRoot, default_cache_root,
+            generate_run_id, materialize_artifact_root, plan_artifact_root, read_marker,
+            workspace_hash, write_marker_completed, write_marker_quarantined,
         },
         delta_report::{
-            CleanupPolicy, DeltaReport, ReviewMetadata, SafetyMetadata,
-            build_suggested_followups,
+            CleanupPolicy, DeltaReport, ReviewMetadata, SafetyMetadata, build_suggested_followups,
         },
         index_runner::run_review_index,
     },
@@ -190,17 +184,25 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
     let emit_json = args.json || app.json_output;
 
     // ── 1. Resolve refs ────────────────────────────────────────────────────
-    let resolved = resolve_range(&app.workspace_path, &args.base, &args.head).with_context(
-        || format!("resolving refs `{}..{}` in `{}`", args.base, args.head, app.workspace_path.display()),
-    )?;
+    let resolved =
+        resolve_range(&app.workspace_path, &args.base, &args.head).with_context(|| {
+            format!(
+                "resolving refs `{}..{}` in `{}`",
+                args.base,
+                args.head,
+                app.workspace_path.display()
+            )
+        })?;
 
     let base_sha = resolved.base.sha.clone();
     let head_sha = resolved.head.sha.clone();
 
     // ── 2. Changed files ───────────────────────────────────────────────────
-    let changed = gather_step_git::refs::changed_files(&app.workspace_path, &base_sha, &head_sha)
-        .with_context(|| {
-            format!("listing changed files between `{base_sha}` and `{head_sha}`")
+    let diff_base_sha = merge_base(&app.workspace_path, &base_sha, &head_sha)
+        .with_context(|| format!("finding merge-base for `{base_sha}` and `{head_sha}`"))?;
+    let changed =
+        changed_files(&app.workspace_path, &diff_base_sha, &head_sha).with_context(|| {
+            format!("listing changed files between merge-base `{diff_base_sha}` and `{head_sha}`")
         })?;
 
     let all_changed_paths: Vec<String> = changed
@@ -215,10 +217,6 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
         .cloned()
         .collect();
 
-    // ── 3. Changed-repo mapping ────────────────────────────────────────────
-    let changed_repos =
-        map_changed_repos(&app.workspace_path, &all_changed_paths);
-
     // ── 4. Artifact root ───────────────────────────────────────────────────
     let cache_root = args
         .cache_root
@@ -227,17 +225,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
 
     let run_id = generate_run_id();
 
-    let artifact_root = create_artifact_root(
-        &cache_root,
-        &app.workspace_path,
-        &base_sha,
-        &head_sha,
-        &run_id,
-    )
-    .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
+    let artifact_root = plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
+        .with_context(|| format!("planning artifact root for run `{run_id}`"))?;
 
     // Safety guard: construct both contexts and verify no path overlap before
-    // opening any review storage.
+    // creating review directories, writing the marker, or opening any review
+    // storage.
     let workspace_ctx = StorageContext::workspace_read_only(app);
     let _review_ctx = StorageContext::review_checked(
         &workspace_ctx,
@@ -249,8 +242,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
     .map_err(ArtifactRootError::Safety)
     .with_context(|| "review safety guard rejected the proposed artifact paths")?;
 
+    materialize_artifact_root(&artifact_root, &base_sha, &head_sha)
+        .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
+
     // ── 5. Materialize worktree ────────────────────────────────────────────
-    // `create_artifact_root` pre-creates the worktree directory; git worktree
+    // `materialize_artifact_root` pre-creates the worktree directory; git worktree
     // add refuses to clobber an existing directory, so remove it first.
     if artifact_root.worktree_root.exists() {
         std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
@@ -294,18 +290,18 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
     )]
     let elapsed_ms = index_start.elapsed().as_millis() as u64;
 
-    // ── 7. Indexed-repo names ──────────────────────────────────────────────
-    let indexed_repos: Vec<String> = {
-        let config_path = artifact_root.worktree_root.join("gather-step.config.yaml");
-        if let Ok(config) = GatherStepConfig::from_yaml_file(&config_path) {
-            config.repos.iter().map(|r| r.name.clone()).collect()
-        } else {
-            // Fallback: use the WorkspaceStats count if available.
+    // ── 7. Head config-derived repo names ─────────────────────────────────
+    let config_path = artifact_root.worktree_root.join("gather-step.config.yaml");
+    let head_config = GatherStepConfig::from_yaml_file(&config_path).ok();
+    let indexed_repos: Vec<String> = head_config.as_ref().map_or_else(
+        || {
             (0..stats.total_repos)
                 .map(|i| format!("repo-{i}"))
                 .collect()
-        }
-    };
+        },
+        |config| config.repos.iter().map(|r| r.name.clone()).collect(),
+    );
+    let changed_repos = map_changed_repos_from_config(head_config.as_ref(), &all_changed_paths);
 
     // ── 8. Build report ────────────────────────────────────────────────────
     let ws_paths = app.workspace_paths();
@@ -370,7 +366,9 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
 
     // ── 11. Render ─────────────────────────────────────────────────────────
     if emit_json {
-        report.render_json().context("serializing delta report to JSON")
+        report
+            .render_json()
+            .context("serializing delta report to JSON")
     } else {
         Ok(report.render_markdown())
     }
@@ -378,35 +376,32 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<String> {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Map changed file paths to the configured repo names that own them.
-///
-/// Uses longest-prefix matching against `config.repos[*].path`.  Files that
-/// do not match any configured repo are grouped under the synthetic
-/// `"<workspace>"` entry.
-fn map_changed_repos(workspace_root: &Path, changed_paths: &[String]) -> Vec<String> {
-    // Try to load the config; if unavailable, everything maps to <workspace>.
-    let config_path = workspace_root.join("gather-step.config.yaml");
-    let repos: Vec<(String, String)> = if let Ok(cfg) =
-        GatherStepConfig::from_yaml_file(&config_path)
-    {
+/// Map changed file paths to configured repo names using longest-prefix
+/// matching against the supplied head-worktree config. Files that do not match
+/// any configured repo are grouped under the synthetic `"<workspace>"` entry.
+fn map_changed_repos_from_config(
+    config: Option<&GatherStepConfig>,
+    changed_paths: &[String],
+) -> Vec<String> {
+    let repos: Vec<(String, String)> = config.map_or_else(Vec::new, |cfg| {
         cfg.repos
-            .into_iter()
-            .map(|r| (r.name, r.path))
+            .iter()
+            .map(|repo| (repo.name.clone(), repo.path.clone()))
             .collect()
-    } else {
-        vec![]
-    };
+    });
 
     let mut result_set = std::collections::BTreeSet::new();
 
     for file_path in changed_paths {
-        let matched = repos.iter().find(|(_, repo_path)| {
-            // Match if the file path starts with the repo path prefix
-            // (with a directory separator boundary).
-            let prefix = repo_path.trim_end_matches('/');
-            file_path == prefix
-                || file_path.starts_with(&format!("{prefix}/"))
-        });
+        let matched = repos
+            .iter()
+            .filter(|(_, repo_path)| {
+                // Match if the file path starts with the repo path prefix
+                // (with a directory separator boundary).
+                let prefix = repo_path.trim_end_matches('/');
+                file_path == prefix || file_path.starts_with(&format!("{prefix}/"))
+            })
+            .max_by_key(|(_, repo_path)| repo_path.trim_end_matches('/').len());
 
         match matched {
             Some((name, _)) => {
@@ -454,14 +449,11 @@ pub fn list_review_artifacts(
 
     let mut artifacts = Vec::new();
 
-    let entries = std::fs::read_dir(&hash_dir).with_context(|| {
-        format!("reading review cache directory `{}`", hash_dir.display())
-    })?;
+    let entries = std::fs::read_dir(&hash_dir)
+        .with_context(|| format!("reading review cache directory `{}`", hash_dir.display()))?;
 
     for entry in entries {
-        let entry = entry.with_context(|| {
-            format!("reading entry in `{}`", hash_dir.display())
-        })?;
+        let entry = entry.with_context(|| format!("reading entry in `{}`", hash_dir.display()))?;
         let root = entry.path();
 
         if !root.is_dir() {
@@ -488,10 +480,7 @@ pub fn list_review_artifacts(
                 });
             }
             Err(e) => {
-                tracing::warn!(
-                    "skipping `{}`: could not read marker: {e}",
-                    root.display()
-                );
+                tracing::warn!("skipping `{}`: could not read marker: {e}", root.display());
             }
         }
     }
@@ -525,9 +514,9 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     }
 
     let (num_str, unit) = s.split_at(s.len() - 1);
-    let n: u64 = num_str
-        .parse()
-        .with_context(|| format!("invalid duration `{s}`: expected `<n><unit>` where unit is s/m/h/d/w"))?;
+    let n: u64 = num_str.parse().with_context(|| {
+        format!("invalid duration `{s}`: expected `<n><unit>` where unit is s/m/h/d/w")
+    })?;
 
     let secs = match unit {
         "s" => n,
@@ -535,9 +524,7 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
         "h" => n * 3600,
         "d" => n * 86_400,
         "w" => n * 7 * 86_400,
-        other => bail!(
-            "invalid duration unit `{other}` in `{s}`: use s, m, h, d, or w"
-        ),
+        other => bail!("invalid duration unit `{other}` in `{s}`: use s, m, h, d, or w"),
     };
 
     Ok(std::time::Duration::from_secs(secs))
@@ -568,10 +555,7 @@ struct CleanArtifactEntry {
 ///
 /// Returns `Ok(())` when safe, `Err` with a descriptive message when the
 /// artifact root could clobber baseline state.
-fn assert_not_baseline_overlap(
-    artifact_root: &Path,
-    workspace_root: &Path,
-) -> Result<()> {
+fn assert_not_baseline_overlap(artifact_root: &Path, workspace_root: &Path) -> Result<()> {
     let baseline_storage = workspace_root.join(".gather-step").join("storage");
     let baseline_registry = workspace_root.join(".gather-step").join("registry.json");
 
@@ -654,9 +638,8 @@ fn delete_artifact(
         let _ = remove_worktree(&wt);
     }
 
-    std::fs::remove_dir_all(&artifact.root).with_context(|| {
-        format!("removing artifact root `{}`", artifact.root.display())
-    })?;
+    std::fs::remove_dir_all(&artifact.root)
+        .with_context(|| format!("removing artifact root `{}`", artifact.root.display()))?;
 
     #[expect(clippy::print_stdout, reason = "clean command progress output")]
     {
@@ -765,9 +748,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                     .ok()
                     .is_some_and(|dt| {
                         let artifact_time = std::time::SystemTime::UNIX_EPOCH
-                            + std::time::Duration::from_secs(
-                                dt.timestamp().max(0).cast_unsigned(),
-                            );
+                            + std::time::Duration::from_secs(dt.timestamp().max(0).cast_unsigned());
                         now.duration_since(artifact_time)
                             .is_ok_and(|age| age >= max_age)
                     })
@@ -806,8 +787,8 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
             selected_artifacts: entries,
             skipped_baseline_paths: baseline_paths,
         };
-        let json = serde_json::to_string_pretty(&output)
-            .context("serializing clean output to JSON")?;
+        let json =
+            serde_json::to_string_pretty(&output).context("serializing clean output to JSON")?;
         #[expect(clippy::print_stdout, reason = "clean JSON output goes to stdout")]
         {
             println!("{json}");
@@ -835,10 +816,7 @@ mod tests {
     use super::*;
     use crate::{
         app::AppContext,
-        pr_review::artifact_root::{
-            ReviewMarker, ReviewStatus,
-            workspace_hash, MARKER_FILENAME,
-        },
+        pr_review::artifact_root::{MARKER_FILENAME, ReviewMarker, ReviewStatus, workspace_hash},
     };
 
     // ── temp-dir helper ───────────────────────────────────────────────────────
@@ -852,8 +830,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path =
-                env::temp_dir().join(format!("gs-pr-review-test-{label}-{id}"));
+            let path = env::temp_dir().join(format!("gs-pr-review-test-{label}-{id}"));
             fs::create_dir_all(&path).expect("temp dir");
             Self { path }
         }
@@ -918,7 +895,11 @@ mod tests {
         // Initial repo content
         let src = ws.join("myrepo/src");
         fs::create_dir_all(&src).unwrap();
-        fs::write(ws.join("myrepo/package.json"), r#"{"name":"myrepo","version":"0.0.1"}"#).unwrap();
+        fs::write(
+            ws.join("myrepo/package.json"),
+            r#"{"name":"myrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
         fs::write(
             src.join("hello.ts"),
             "export function greet(): string { return 'hello'; }\n",
@@ -945,6 +926,119 @@ mod tests {
         let head_sha = git_head_sha(&ws);
 
         // Go back to main so we can run worktree-based review
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, base_sha, head_sha)
+    }
+
+    /// Returns `(workspace_path, advanced_base_sha, feature_head_sha)` where
+    /// `base` and `head` have diverged from their merge-base.
+    fn build_diverged_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: myrepo\n    path: myrepo\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+
+        let src = ws.join("myrepo/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            ws.join("myrepo/package.json"),
+            r#"{"name":"myrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            src.join("hello.ts"),
+            "export function greet(): string { return 'hello'; }\n",
+        )
+        .unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base"]);
+
+        git_run(&ws, &["checkout", "-b", "feature/diverged"]);
+        fs::write(
+            src.join("feature_only.ts"),
+            "export function featureOnly(): string { return 'feature'; }\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "head: add feature file"]);
+        let head_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "main"]);
+        fs::write(
+            src.join("main_only.ts"),
+            "export function mainOnly(): string { return 'main'; }\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base: add main file"]);
+        let base_sha = git_head_sha(&ws);
+
+        (ws, base_sha, head_sha)
+    }
+
+    /// Returns a fixture whose PR changes `gather-step.config.yaml` so the
+    /// head-only repo config must drive report metadata.
+    fn build_head_config_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: oldrepo\n    path: oldrepo\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+        let old_src = ws.join("oldrepo/src");
+        fs::create_dir_all(&old_src).unwrap();
+        fs::write(
+            ws.join("oldrepo/package.json"),
+            r#"{"name":"oldrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            old_src.join("hello.ts"),
+            "export function oldHello(): string { return 'old'; }\n",
+        )
+        .unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base"]);
+        let base_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "-b", "feature/head-config"]);
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: newrepo\n    path: newrepo\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+        let new_src = ws.join("newrepo/src");
+        fs::create_dir_all(&new_src).unwrap();
+        fs::write(
+            ws.join("newrepo/package.json"),
+            r#"{"name":"newrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            new_src.join("added.ts"),
+            "export function newAdded(): string { return 'new'; }\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(
+            &ws,
+            &["commit", "--message", "head: switch configured repo"],
+        );
+        let head_sha = git_head_sha(&ws);
+
         git_run(&ws, &["checkout", "main"]);
 
         (ws, base_sha, head_sha)
@@ -988,8 +1082,8 @@ mod tests {
         // Write a small file so size_bytes > 0.
         fs::write(storage_path.join("dummy.txt"), b"data").unwrap();
 
-        let created_at = created_at_override
-            .map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
+        let created_at =
+            created_at_override.map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
 
         let marker = ReviewMarker {
             schema_version: 1,
@@ -1023,12 +1117,22 @@ mod tests {
         let cache = cache_tmp.path();
 
         let root1 = write_fake_artifact(
-            cache, ws, "review-dry-run-1", "base000", "head000",
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-dry-run-1",
+            "base000",
+            "head000",
+            ReviewStatus::Completed,
+            None,
         );
         let root2 = write_fake_artifact(
-            cache, ws, "review-dry-run-2", "base111", "head111",
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-dry-run-2",
+            "base111",
+            "head111",
+            ReviewStatus::Completed,
+            None,
         );
 
         let app = make_app(ws);
@@ -1069,12 +1173,22 @@ mod tests {
         let cache = cache_tmp.path();
 
         let root1 = write_fake_artifact(
-            cache, ws, "review-target-run", "baseA", "headA",
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-target-run",
+            "baseA",
+            "headA",
+            ReviewStatus::Completed,
+            None,
         );
         let root2 = write_fake_artifact(
-            cache, ws, "review-other-run", "baseB", "headB",
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-other-run",
+            "baseB",
+            "headB",
+            ReviewStatus::Completed,
+            None,
         );
 
         let app = make_app(ws);
@@ -1119,12 +1233,22 @@ mod tests {
         let sha_head2 = "6666ffff7777aaaa8888bbbb9999cccc0000dddd";
 
         let root1 = write_fake_artifact(
-            cache, ws, "review-bh-match", sha_base, sha_head,
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-bh-match",
+            sha_base,
+            sha_head,
+            ReviewStatus::Completed,
+            None,
         );
         let root2 = write_fake_artifact(
-            cache, ws, "review-bh-other", sha_base2, sha_head2,
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-bh-other",
+            sha_base2,
+            sha_head2,
+            ReviewStatus::Completed,
+            None,
         );
 
         let app = make_app(ws);
@@ -1167,13 +1291,23 @@ mod tests {
         // Old artifact: backdated 2 days ago.
         let old_ts = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
         let root_old = write_fake_artifact(
-            cache, ws, "review-old-run", "baseOLD", "headOLD",
-            ReviewStatus::Completed, Some(&old_ts),
+            cache,
+            ws,
+            "review-old-run",
+            "baseOLD",
+            "headOLD",
+            ReviewStatus::Completed,
+            Some(&old_ts),
         );
         // Fresh artifact: created now.
         let root_fresh = write_fake_artifact(
-            cache, ws, "review-fresh-run", "baseFRESH", "headFRESH",
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-fresh-run",
+            "baseFRESH",
+            "headFRESH",
+            ReviewStatus::Completed,
+            None,
         );
 
         let app = make_app(ws);
@@ -1213,12 +1347,22 @@ mod tests {
         let cache = cache_tmp.path();
 
         let root1 = write_fake_artifact(
-            cache, ws, "review-all-1", "baseX", "headX",
-            ReviewStatus::Completed, None,
+            cache,
+            ws,
+            "review-all-1",
+            "baseX",
+            "headX",
+            ReviewStatus::Completed,
+            None,
         );
         let root2 = write_fake_artifact(
-            cache, ws, "review-all-2", "baseY", "headY",
-            ReviewStatus::Quarantined, None,
+            cache,
+            ws,
+            "review-all-2",
+            "baseY",
+            "headY",
+            ReviewStatus::Quarantined,
+            None,
         );
 
         let app = make_app(ws);
@@ -1303,7 +1447,10 @@ mod tests {
             size_bytes: 0,
         };
         let result = delete_artifact(&fake, ws, false);
-        assert!(result.is_err(), "delete must fail on workspace_hash mismatch");
+        assert!(
+            result.is_err(),
+            "delete must fail on workspace_hash mismatch"
+        );
         // Root still exists.
         assert!(root.exists(), "mismatch artifact must not be deleted");
     }
@@ -1347,7 +1494,10 @@ mod tests {
         };
 
         let result = delete_artifact(&fake, ws, false);
-        assert!(result.is_err(), "must refuse to delete overlapping baseline path");
+        assert!(
+            result.is_err(),
+            "must refuse to delete overlapping baseline path"
+        );
         assert!(
             baseline_storage.exists(),
             "baseline storage must not be removed"
@@ -1536,6 +1686,157 @@ mod tests {
             existed_before, existed_after,
             ".gather-step baseline state should not change; \
              was {existed_before} before, {existed_after} after"
+        );
+    }
+
+    #[test]
+    fn pr_review_rejects_overlapping_cache_root_before_writing_marker() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("unsafe-cache-ws");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+        let baseline_storage = ws.join(".gather-step/storage");
+        fs::create_dir_all(&baseline_storage).unwrap();
+        let cache_root = baseline_storage.join("pr-review-cache");
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_root.clone()),
+        };
+
+        let err = run_inner(&app, &args).expect_err("overlapping cache root must be rejected");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("review safety guard rejected"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !cache_root.exists(),
+            "unsafe cache root must not be created before safety validation"
+        );
+    }
+
+    #[test]
+    fn pr_review_changed_files_use_merge_base_for_diverged_branch() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("diverged-ws");
+        let cache_tmp = TempDir::new("diverged-cache");
+        let (ws, base_sha, head_sha) = build_diverged_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+        };
+
+        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let changed_files: Vec<&str> = report["changed_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+
+        assert!(
+            changed_files
+                .iter()
+                .any(|path| path.ends_with("myrepo/src/feature_only.ts")),
+            "feature-owned file must be reported: {changed_files:?}"
+        );
+        assert!(
+            !changed_files
+                .iter()
+                .any(|path| path.ends_with("myrepo/src/main_only.ts")),
+            "base-only file must not be reported as PR-owned: {changed_files:?}"
+        );
+    }
+
+    #[test]
+    fn pr_review_changed_repos_use_head_worktree_config() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("head-config-ws");
+        let cache_tmp = TempDir::new("head-config-cache");
+        let (ws, base_sha, head_sha) = build_head_config_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+        };
+
+        let rendered = run_inner(&app, &args).expect("run_inner should succeed");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let changed_repos: Vec<&str> = report["metadata"]["changed_repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        let indexed_repos: Vec<&str> = report["metadata"]["indexed_repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+
+        assert!(
+            changed_repos.contains(&"newrepo"),
+            "head-only configured repo must be used for changed_repos: {changed_repos:?}"
+        );
+        assert!(
+            !changed_repos.contains(&"oldrepo"),
+            "base workspace config must not classify changed_repos: {changed_repos:?}"
+        );
+        assert_eq!(indexed_repos, vec!["newrepo"]);
+    }
+
+    #[test]
+    fn map_changed_repos_uses_longest_prefix_match() {
+        let config = GatherStepConfig {
+            allow_listed_repos: vec![],
+            repos: vec![
+                gather_step_core::RepoConfig {
+                    name: "parent".to_owned(),
+                    path: "services".to_owned(),
+                    depth: None,
+                },
+                gather_step_core::RepoConfig {
+                    name: "api".to_owned(),
+                    path: "services/api".to_owned(),
+                    depth: None,
+                },
+            ],
+            github: None,
+            jira: None,
+            indexing: gather_step_core::IndexingConfig::default(),
+        };
+
+        let changed = vec!["services/api/src/lib.ts".to_owned()];
+        assert_eq!(
+            map_changed_repos_from_config(Some(&config), &changed),
+            vec!["api"]
         );
     }
 }

@@ -310,8 +310,8 @@ gather-step --workspace /path/to/workspace --repo backend_standard search OrderS
 Traces a route-backed CRUD flow by resolving the route entry point and walking the graph to surface frontend callers, backend handlers, continuation nodes, entities, and database hints. Accepts either a `(method, path)` pair or a direct `symbol_id`. Both cannot be provided at the same time.
 
 ```bash
-gather-step [GLOBAL FLAGS] trace crud --method <METHOD> --path <ROUTE_PATH> [--limit <N>]
-gather-step [GLOBAL FLAGS] trace crud --symbol-id <SYMBOL_ID> [--limit <N>]
+gather-step [GLOBAL FLAGS] trace [--registry <PATH>] [--storage <PATH>] crud --method <METHOD> --path <ROUTE_PATH> [--limit <N>]
+gather-step [GLOBAL FLAGS] trace [--registry <PATH>] [--storage <PATH>] crud --symbol-id <SYMBOL_ID> [--limit <N>]
 ```
 
 | Flag | Type | Default | Description |
@@ -320,6 +320,8 @@ gather-step [GLOBAL FLAGS] trace crud --symbol-id <SYMBOL_ID> [--limit <N>]
 | `--path <ROUTE_PATH>` | string | — | Route path, e.g. `/orders`. Required when `--method` is provided. |
 | `--symbol-id <SYMBOL_ID>` | string | — | Stable hex symbol ID as the trace entry point. Mutually exclusive with `--method`/`--path`. |
 | `--limit <N>` | usize | 25 | Maximum matches per result section (callers, handlers, continuation, entities, database hints). |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. Used by `pr-review --keep-cache` follow-up commands. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. Used by `pr-review --keep-cache` follow-up commands. |
 
 **Example**
 
@@ -415,13 +417,15 @@ gather-step --workspace /path/to/workspace events orphans --limit 50
 Searches for symbols matching a name, then for each matching symbol follows its outgoing edges to find virtual nodes (routes, topics, shared symbols). For each virtual node it traces which repos are reachable, producing a cross-repo impact summary.
 
 ```bash
-gather-step [GLOBAL FLAGS] impact <SYMBOL> [--limit <N>]
+gather-step [GLOBAL FLAGS] impact [--registry <PATH>] [--storage <PATH>] <SYMBOL> [--limit <N>]
 ```
 
 | Argument/Flag | Type | Default | Description |
 |---|---|---|---|
 | `<SYMBOL>` | string (positional) | required | Symbol name to inspect. Used as a search query. |
 | `--limit <N>` | usize | 20 | Maximum search candidates to inspect. |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. Used by `pr-review --keep-cache` follow-up commands. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. Used by `pr-review --keep-cache` follow-up commands. |
 
 **Example**
 
@@ -504,7 +508,7 @@ gather-step --workspace /path/to/workspace deployment-topology env-var-consumers
 Returns a bounded context pack for a target symbol. A pack is a ranked, budget-capped bundle of the most relevant symbols, semantic bridges, suggested next steps, and unresolved gaps for a specific task mode. Context packs are precomputed for the top two symbols per repo during `index`, so pack retrieval is fast.
 
 ```bash
-gather-step [GLOBAL FLAGS] pack <TARGET> [--mode <MODE>] [--limit <N>] [--depth <N>] [--budget-bytes <N>]
+gather-step [GLOBAL FLAGS] pack [--registry <PATH>] [--storage <PATH>] <TARGET> [--mode <MODE>] [--limit <N>] [--depth <N>] [--budget-bytes <N>]
 ```
 
 | Argument/Flag | Type | Default | Description |
@@ -514,6 +518,8 @@ gather-step [GLOBAL FLAGS] pack <TARGET> [--mode <MODE>] [--limit <N>] [--depth 
 | `--limit <N>` | usize | 6 | Maximum ranked items to include in the pack. |
 | `--depth <N>` | usize | 2 | Traversal depth for caller and callee context. |
 | `--budget-bytes <N>` | usize | — | Optional response byte budget override. When the pack exceeds this limit, items are trimmed from the tail. |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. Used by `pr-review --keep-cache` follow-up commands. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. Used by `pr-review --keep-cache` follow-up commands. |
 
 **Example**
 

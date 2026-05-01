@@ -128,6 +128,8 @@ pub fn dispatch_request_with_runtime(
                     &app,
                     &StorageContext::workspace_read_only(&app),
                     trace::TraceArgs {
+                        registry: None,
+                        storage: None,
                         command: TraceCommand::Crud(args),
                     },
                 )
@@ -230,13 +232,23 @@ pub fn dispatch_request_with_runtime(
                 impact::execute(
                     &storage,
                     app.repo_filter.as_deref(),
-                    ImpactArgs { symbol, limit },
+                    ImpactArgs {
+                        registry: None,
+                        storage: None,
+                        symbol,
+                        limit,
+                    },
                 )
             } else {
                 impact::run_rendered(
                     &app,
                     &StorageContext::workspace_read_only(&app),
-                    ImpactArgs { symbol, limit },
+                    ImpactArgs {
+                        registry: None,
+                        storage: None,
+                        symbol,
+                        limit,
+                    },
                 )
             }
         }
@@ -254,6 +266,8 @@ pub fn dispatch_request_with_runtime(
         } => {
             let app = app_with_repo_filter(app, repo_filter);
             let args = PackArgs {
+                registry: None,
+                storage: None,
                 target,
                 symbol,
                 route_method,

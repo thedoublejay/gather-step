@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
 use gather_step_mcp::tools::{
@@ -37,6 +39,10 @@ impl PackModeArg {
 
 #[derive(Debug, Args)]
 pub struct PackArgs {
+    #[arg(long, help = "Read symbol registry JSON from this path")]
+    pub registry: Option<PathBuf>,
+    #[arg(long, help = "Read storage artifacts from this directory")]
+    pub storage: Option<PathBuf>,
     #[arg(help = "Target symbol name or symbol_id")]
     pub target: Option<String>,
     #[arg(
@@ -70,6 +76,15 @@ pub struct PackArgs {
 }
 
 pub fn run(app: &AppContext, args: &PackArgs) -> Result<()> {
+    if args.registry.is_some() || args.storage.is_some() {
+        let ctx = StorageContext::workspace_read_only_with_overrides(
+            app,
+            args.registry.clone(),
+            args.storage.clone(),
+        );
+        return run_rendered(app, &ctx, args)?.emit(&app.output());
+    }
+
     daemon_proxy::run_read_only_command(
         app,
         &DaemonRequest::Pack {

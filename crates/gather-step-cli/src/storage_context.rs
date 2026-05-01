@@ -44,22 +44,16 @@ use crate::path_safety;
 pub enum ReviewSafetyError {
     /// Review storage equals or contains the workspace storage path (or vice
     /// versa).
-    #[error(
-        "review storage path {review} overlaps the workspace storage path {workspace}"
-    )]
+    #[error("review storage path {review} overlaps the workspace storage path {workspace}")]
     StorageOverlap { review: PathBuf, workspace: PathBuf },
 
     /// Review registry equals the workspace registry path.
-    #[error(
-        "review registry path {review} equals the workspace registry path {workspace}"
-    )]
+    #[error("review registry path {review} equals the workspace registry path {workspace}")]
     RegistryEqualsWorkspace { review: PathBuf, workspace: PathBuf },
 
     /// Review storage equals the workspace registry path, or review registry
     /// equals the workspace storage path (cross-collision paranoia check).
-    #[error(
-        "review path {review} collides with workspace generated state at {workspace}"
-    )]
+    #[error("review path {review} collides with workspace generated state at {workspace}")]
     GeneratedStateCollision { review: PathBuf, workspace: PathBuf },
 
     /// Review `workspace_root` equals or contains the standing workspace root.
@@ -100,7 +94,7 @@ fn canonicalize_for_guard(p: &Path) -> Result<PathBuf, ReviewSafetyError> {
             return Err(ReviewSafetyError::Canonicalize {
                 path: p.to_path_buf(),
                 source,
-            })
+            });
         }
     }
 
@@ -195,6 +189,34 @@ impl StorageContext {
     #[must_use]
     pub fn workspace_read_only(app: &AppContext) -> Self {
         Self::from_workspace_paths(app, TantivyOpenMode::ReadOnly)
+    }
+
+    /// Same workspace config root as [`StorageContext::workspace_read_only`],
+    /// but with optional registry/storage overrides for isolated review
+    /// artifacts.
+    #[must_use]
+    pub fn workspace_read_only_with_overrides(
+        app: &AppContext,
+        registry_path: Option<PathBuf>,
+        storage_root: Option<PathBuf>,
+    ) -> Self {
+        let WorkspacePaths {
+            config_path,
+            registry_path: default_registry_path,
+            storage_root: default_storage_root,
+            ..
+        } = app.workspace_paths();
+        let storage_root = storage_root.unwrap_or(default_storage_root);
+        let graph_path = storage_root.join("graph.redb");
+        Self {
+            workspace_root: app.workspace_path.clone(),
+            config_path,
+            registry_path: registry_path.unwrap_or(default_registry_path),
+            storage_root,
+            graph_path,
+            tantivy_mode: TantivyOpenMode::ReadOnly,
+            label: ContextLabel::Workspace,
+        }
     }
 
     fn from_workspace_paths(app: &AppContext, tantivy_mode: TantivyOpenMode) -> Self {

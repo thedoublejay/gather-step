@@ -162,6 +162,90 @@ pub fn generate_run_id() -> String {
 
 // ─── Artifact root creation ───────────────────────────────────────────────────
 
+/// Build the artifact root path set without touching the filesystem.
+///
+/// Callers use this before the review safety guard so unsafe `--cache-root`
+/// values can be rejected before any generated-state directory or marker is
+/// written.
+pub fn plan_artifact_root(
+    cache_root: &Path,
+    workspace_root: &Path,
+    run_id: &str,
+) -> Result<ReviewArtifactRoot, ArtifactRootError> {
+    let hash = workspace_hash(workspace_root);
+    let root = cache_root.join(&hash).join(run_id);
+
+    if root.exists() {
+        return Err(ArtifactRootError::RootExists { path: root });
+    }
+
+    // Derive all child paths.
+    let worktree_root = root.join("worktree");
+    let registry_path = root.join("registry.json");
+    let storage_root = root.join("storage");
+    let reports_dir = root.join("reports");
+    let logs_dir = root.join("logs");
+    let marker_path = root.join(MARKER_FILENAME);
+
+    Ok(ReviewArtifactRoot {
+        root,
+        workspace_root: workspace_root.to_path_buf(),
+        worktree_root,
+        registry_path,
+        storage_root,
+        reports_dir,
+        logs_dir,
+        marker_path,
+        run_id: run_id.to_owned(),
+        workspace_hash: hash,
+    })
+}
+
+/// Materialize a previously planned artifact root and write its initial marker.
+pub fn materialize_artifact_root(
+    artifact: &ReviewArtifactRoot,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<(), ArtifactRootError> {
+    if artifact.root.exists() {
+        return Err(ArtifactRootError::RootExists {
+            path: artifact.root.clone(),
+        });
+    }
+
+    // Create all directories.
+    for dir in [
+        &artifact.root,
+        &artifact.worktree_root,
+        &artifact.storage_root,
+        &artifact.reports_dir,
+        &artifact.logs_dir,
+    ] {
+        std::fs::create_dir_all(dir).map_err(|source| ArtifactRootError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+    }
+
+    // Write the initial marker.
+    let marker = ReviewMarker {
+        schema_version: MARKER_SCHEMA_VERSION,
+        workspace_hash: artifact.workspace_hash.clone(),
+        workspace_root: artifact.workspace_root.clone(),
+        base_sha: base_sha.to_owned(),
+        head_sha: head_sha.to_owned(),
+        run_id: artifact.run_id.clone(),
+        storage_path: artifact.storage_root.clone(),
+        registry_path: artifact.registry_path.clone(),
+        gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
+        created_at: Utc::now().to_rfc3339(),
+        status: ReviewStatus::InProgress,
+    };
+    write_marker_to_path(&marker, &artifact.marker_path)?;
+
+    Ok(())
+}
+
 /// Create the artifact root directory tree on disk and write the initial marker
 /// file with `status = InProgress`.
 ///
@@ -182,57 +266,9 @@ pub fn create_artifact_root(
     head_sha: &str,
     run_id: &str,
 ) -> Result<ReviewArtifactRoot, ArtifactRootError> {
-    let hash = workspace_hash(workspace_root);
-    let root = cache_root.join(&hash).join(run_id);
-
-    if root.exists() {
-        return Err(ArtifactRootError::RootExists { path: root });
-    }
-
-    // Derive all child paths.
-    let worktree_root = root.join("worktree");
-    let registry_path = root.join("registry.json");
-    let storage_root = root.join("storage");
-    let reports_dir = root.join("reports");
-    let logs_dir = root.join("logs");
-    let marker_path = root.join(MARKER_FILENAME);
-
-    // Create all directories.
-    for dir in [&root, &worktree_root, &storage_root, &reports_dir, &logs_dir] {
-        std::fs::create_dir_all(dir).map_err(|source| ArtifactRootError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-    }
-
-    // Write the initial marker.
-    let marker = ReviewMarker {
-        schema_version: MARKER_SCHEMA_VERSION,
-        workspace_hash: hash.clone(),
-        workspace_root: workspace_root.to_path_buf(),
-        base_sha: base_sha.to_owned(),
-        head_sha: head_sha.to_owned(),
-        run_id: run_id.to_owned(),
-        storage_path: storage_root.clone(),
-        registry_path: registry_path.clone(),
-        gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-        created_at: Utc::now().to_rfc3339(),
-        status: ReviewStatus::InProgress,
-    };
-    write_marker_to_path(&marker, &marker_path)?;
-
-    Ok(ReviewArtifactRoot {
-        root,
-        workspace_root: workspace_root.to_path_buf(),
-        worktree_root,
-        registry_path,
-        storage_root,
-        reports_dir,
-        logs_dir,
-        marker_path,
-        run_id: run_id.to_owned(),
-        workspace_hash: hash,
-    })
+    let root = plan_artifact_root(cache_root, workspace_root, run_id)?;
+    materialize_artifact_root(&root, base_sha, head_sha)?;
+    Ok(root)
 }
 
 // ─── Marker update helpers ────────────────────────────────────────────────────
@@ -280,8 +316,8 @@ pub fn read_marker(marker_path: &Path) -> Result<ReviewMarker, ArtifactRootError
 }
 
 fn write_marker_to_path(marker: &ReviewMarker, path: &Path) -> Result<(), ArtifactRootError> {
-    let json =
-        serde_json::to_vec_pretty(marker).map_err(|source| ArtifactRootError::Serialize { source })?;
+    let json = serde_json::to_vec_pretty(marker)
+        .map_err(|source| ArtifactRootError::Serialize { source })?;
     std::fs::write(path, json).map_err(|source| ArtifactRootError::Io {
         path: path.to_path_buf(),
         source,
@@ -585,8 +621,8 @@ mod tests {
         // Override storage_root to collide with workspace storage.
         artifact.storage_root = ws_ctx.storage_root().to_path_buf();
 
-        let err = to_storage_context(&artifact, &ws_ctx)
-            .expect_err("should fail with storage overlap");
+        let err =
+            to_storage_context(&artifact, &ws_ctx).expect_err("should fail with storage overlap");
 
         assert!(
             matches!(

@@ -189,19 +189,9 @@ impl DeltaReport {
         );
 
         buf.push_str("\n## Suggested follow-up commands\n\n");
-        buf.push_str(
-            "> **Note:** `--registry` and `--storage` overrides on `trace`, `impact`, \
-             and `pack` are not yet exposed as top-level CLI flags.  These commands \
-             are shown for documentation purposes.  A follow-up CLI patch (Phase 1 \
-             follow-up) will surface `StorageContext` overrides as CLI flags.  \
-             All suggested commands require `--keep-cache` to have been used.\n\n",
-        );
+        buf.push_str("> **Note:** These commands require `--keep-cache` to have been used.\n\n");
         for cmd in &self.suggested_followups {
-            let _ = writeln!(
-                buf,
-                "### {}\n\n```bash\n{}\n```\n",
-                cmd.label, cmd.command
-            );
+            let _ = writeln!(buf, "### {}\n\n```bash\n{}\n```\n", cmd.label, cmd.command);
         }
 
         buf
@@ -221,33 +211,60 @@ pub fn build_suggested_followups(
     let reg = review_registry_path.display();
     let stor = review_storage_path.display();
 
-    // TODO(Phase 1 follow-up): --registry and --storage overrides on trace,
-    // impact, and pack are not yet surfaced as CLI flags.  These commands show
-    // the intended invocation; the flags will be wired in a follow-up patch.
     vec![
         SuggestedCommand {
             label: "Trace a CRUD route in the PR branch".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} trace crud --method GET --path /<example> \\\n  \
-                 --registry {reg} --storage {stor}"
+                "gather-step --workspace {ws} trace --registry {reg} --storage {stor} crud --method GET --path /example"
             ),
             requires_keep_cache: true,
         },
         SuggestedCommand {
             label: "Impact analysis for a symbol in the PR branch".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} impact <SymbolName> \\\n  \
-                 --registry {reg} --storage {stor}"
+                "gather-step --workspace {ws} impact --registry {reg} --storage {stor} ExampleSymbol"
             ),
             requires_keep_cache: true,
         },
         SuggestedCommand {
             label: "Pack review changes into an AI context bundle".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} pack --topic review-changes \\\n  \
-                 --registry {reg} --storage {stor}"
+                "gather-step --workspace {ws} pack --registry {reg} --storage {stor} --mode review ExampleSymbol"
             ),
             requires_keep_cache: true,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+    use crate::commands::Cli;
+
+    #[test]
+    fn suggested_followups_parse_against_real_cli_surface() {
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+        );
+
+        assert_eq!(commands.len(), 3);
+        for command in commands {
+            assert!(
+                command.requires_keep_cache,
+                "follow-up commands must require kept artifacts"
+            );
+            assert!(
+                !command.command.contains("--topic"),
+                "pack suggestion must not use the removed --topic flag: {}",
+                command.command
+            );
+            Cli::try_parse_from(command.command.split_whitespace()).unwrap_or_else(|err| {
+                panic!("suggested command must parse: {err}\n{}", command.command)
+            });
+        }
+    }
 }
