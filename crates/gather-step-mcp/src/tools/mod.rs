@@ -4,6 +4,7 @@ pub mod context_pack;
 pub mod contract;
 pub mod cross_repo;
 pub mod crud_trace;
+pub mod deployment_topology;
 pub mod events;
 pub mod labels;
 pub mod orientation;

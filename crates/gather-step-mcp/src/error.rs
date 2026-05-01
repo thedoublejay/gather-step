@@ -25,6 +25,8 @@ pub enum McpServerError {
     #[error(transparent)]
     ProjectionImpact(#[from] gather_step_analysis::ProjectionImpactError),
     #[error(transparent)]
+    DeploymentTopology(#[from] gather_step_analysis::DeploymentTopologyError),
+    #[error(transparent)]
     Registry(#[from] gather_step_core::RegistryError),
     #[error(transparent)]
     Metadata(#[from] gather_step_storage::MetadataStoreError),
