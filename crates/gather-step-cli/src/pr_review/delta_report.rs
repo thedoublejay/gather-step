@@ -33,6 +33,36 @@ pub struct DeltaReport {
     pub suggested_followups: Vec<SuggestedCommand>,
 }
 
+// ─── Impact summary (Phase 3 Tasks 1+2) ──────────────────────────────────────
+
+/// Downstream impact summary attached to removed / changed surfaces.
+///
+/// Populated by `extract/impact_attach.rs` for any surface present in the
+/// baseline graph.  Added surfaces always have `impact = None` because they
+/// have no baseline node to walk.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ImpactSummary {
+    /// Repos that contain at least one consumer.
+    pub consumer_repos: Vec<String>,
+    /// Total number of consuming symbols across all repos.
+    pub consumer_count: u32,
+    /// Per-repo classified counts, sorted by `total` descending.
+    pub by_repo: Vec<RepoImpact>,
+    /// `true` if the BFS hit its cap and the result was truncated.
+    pub truncated: bool,
+}
+
+/// Per-repo breakdown of consumer classifications.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoImpact {
+    pub repo: String,
+    pub total: u32,
+    pub read_only: u32,
+    pub write_mutate: u32,
+    pub construct_payload: u32,
+    pub unknown: u32,
+}
+
 // ─── Route deltas ─────────────────────────────────────────────────────────────
 
 /// Added / removed / changed HTTP routes.
@@ -55,6 +85,10 @@ pub struct RouteDelta {
     pub file: Option<String>,
     pub line: Option<u32>,
     pub handler_qualified_name: Option<String>,
+    /// Downstream impact summary.  `None` for `added` routes (no baseline
+    /// node).  Populated for `removed` and `changed` routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<ImpactSummary>,
 }
 
 /// A route present in both baseline and review whose handler details changed.
@@ -93,6 +127,10 @@ pub struct SymbolDelta {
     /// `"public"`, `"private"`, `"protected"`, `"package"`, or `"internal"`.
     pub visibility: Option<String>,
     pub is_virtual: bool,
+    /// Downstream impact summary.  `None` for `added` symbols.
+    /// Populated for `removed` and `changed` symbols.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<ImpactSummary>,
 }
 
 /// Same `(repo, qualified_name)` key in both snapshots but signature or

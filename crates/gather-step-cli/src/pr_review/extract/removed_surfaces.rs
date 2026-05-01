@@ -450,6 +450,7 @@ mod tests {
             file: None,
             line: None,
             handler_qualified_name: None,
+            impact: None,
         };
 
         let risks = extract_removed_surface_risks(
@@ -487,6 +488,7 @@ mod tests {
             signature: None,
             visibility: None,
             is_virtual: true,
+            impact: None,
         };
 
         let risks = extract_removed_surface_risks(
@@ -574,6 +576,7 @@ mod tests {
             signature: None,
             visibility: None,
             is_virtual: true,
+            impact: None,
         };
 
         let risks = extract_removed_surface_risks(

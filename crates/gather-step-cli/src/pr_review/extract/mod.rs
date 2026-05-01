@@ -8,6 +8,7 @@
 //! `removed_surfaces`.
 
 pub mod events;
+pub mod impact_attach;
 pub mod payload_contracts;
 pub mod removed_surfaces;
 pub mod routes;

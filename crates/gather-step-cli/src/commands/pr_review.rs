@@ -38,10 +38,11 @@ use crate::{
         },
         extract::{
             events::extract_event_deltas,
+            impact_attach::impact_for_node,
             payload_contracts::extract_payload_contract_deltas,
             removed_surfaces::extract_removed_surface_risks,
-            routes::extract_route_deltas,
-            symbols::extract_symbol_deltas,
+            routes::{extract_route_deltas, find_route_node_id},
+            symbols::{extract_symbol_deltas, find_symbol_node_id},
         },
         index_runner::run_review_index,
     },
@@ -426,6 +427,110 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     vec![]
                                 }
                             };
+
+                            // ── Phase 3: attach impact to removed/changed routes ──
+                            let mut routes = routes;
+                            for r in &mut routes.removed {
+                                match find_route_node_id(baseline_coord.graph(), &r.method, &r.path) {
+                                    Ok(Some(node_id)) => {
+                                        match impact_for_node(baseline_coord.graph(), node_id, r.repo.as_deref()) {
+                                            Ok(summary) => r.impact = Some(summary),
+                                            Err(e) => tracing::warn!(
+                                                error = %e,
+                                                method = %r.method,
+                                                path = %r.path,
+                                                "impact attachment failed for removed route"
+                                            ),
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => tracing::warn!(
+                                        error = %e,
+                                        method = %r.method,
+                                        path = %r.path,
+                                        "route node lookup failed"
+                                    ),
+                                }
+                            }
+                            for c in &mut routes.changed {
+                                // Impact is computed against the BASELINE node.
+                                let (method, path) = (&c.method.clone(), &c.path.clone());
+                                match find_route_node_id(baseline_coord.graph(), method, path) {
+                                    Ok(Some(node_id)) => {
+                                        let repo = c.before.as_ref().and_then(|b| b.repo.as_deref());
+                                        match impact_for_node(baseline_coord.graph(), node_id, repo) {
+                                            Ok(summary) => {
+                                                if let Some(before) = c.before.as_mut() {
+                                                    before.impact = Some(summary);
+                                                }
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                error = %e,
+                                                method = %method,
+                                                path = %path,
+                                                "impact attachment failed for changed route"
+                                            ),
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => tracing::warn!(
+                                        error = %e,
+                                        method = %method,
+                                        path = %path,
+                                        "route node lookup failed for changed"
+                                    ),
+                                }
+                            }
+
+                            // ── Phase 3: attach impact to removed/changed symbols ─
+                            let mut symbols = symbols;
+                            for s in &mut symbols.removed {
+                                match find_symbol_node_id(baseline_coord.graph(), &s.repo, &s.qualified_name) {
+                                    Ok(Some(node_id)) => {
+                                        match impact_for_node(baseline_coord.graph(), node_id, Some(&s.repo)) {
+                                            Ok(summary) => s.impact = Some(summary),
+                                            Err(e) => tracing::warn!(
+                                                error = %e,
+                                                repo = %s.repo,
+                                                qn = %s.qualified_name,
+                                                "impact attachment failed for removed symbol"
+                                            ),
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => tracing::warn!(
+                                        error = %e,
+                                        repo = %s.repo,
+                                        qn = %s.qualified_name,
+                                        "symbol node lookup failed"
+                                    ),
+                                }
+                            }
+                            for c in &mut symbols.changed {
+                                // Impact on the BASELINE node.
+                                let (repo, qn) = (c.repo.clone(), c.qualified_name.clone());
+                                match find_symbol_node_id(baseline_coord.graph(), &repo, &qn) {
+                                    Ok(Some(node_id)) => {
+                                        match impact_for_node(baseline_coord.graph(), node_id, Some(&repo)) {
+                                            Ok(summary) => c.before.impact = Some(summary),
+                                            Err(e) => tracing::warn!(
+                                                error = %e,
+                                                repo = %repo,
+                                                qn = %qn,
+                                                "impact attachment failed for changed symbol"
+                                            ),
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => tracing::warn!(
+                                        error = %e,
+                                        repo = %repo,
+                                        qn = %qn,
+                                        "symbol node lookup failed for changed"
+                                    ),
+                                }
+                            }
+
                             (routes, symbols, payload_contracts, events, risks)
                         }
                         Err(e) => {

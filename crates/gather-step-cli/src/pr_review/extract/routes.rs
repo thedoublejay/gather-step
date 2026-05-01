@@ -83,6 +83,38 @@ pub fn extract_route_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<R
     })
 }
 
+// ── Public helpers ────────────────────────────────────────────────────────────
+
+/// Find the [`NodeId`] of the virtual Route node that matches `(method, path)`
+/// in `store`.  Returns `None` when the route is not present.
+///
+/// Used by the impact-attachment wiring in `commands/pr_review.rs` to look up
+/// the baseline node ID for removed / changed routes so impact can be computed.
+pub fn find_route_node_id<S: GraphStore>(
+    store: &S,
+    method: &str,
+    path: &str,
+) -> Result<Option<NodeId>> {
+    let nodes = store.nodes_by_type(NodeKind::Route)?;
+    let want_key = (method.to_ascii_uppercase(), path.to_owned());
+
+    for node in nodes {
+        if !node.is_virtual {
+            continue;
+        }
+        let qn = node
+            .external_id
+            .as_deref()
+            .or(node.qualified_name.as_deref());
+        if let Some(key) = qn.and_then(decode_route_qn)
+            && key == want_key
+        {
+            return Ok(Some(node.id));
+        }
+    }
+    Ok(None)
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 /// Build `(method, path) → RouteDelta` for all virtual Route nodes in `store`.
@@ -123,6 +155,7 @@ fn build_route_map<S: GraphStore>(store: &S) -> Result<RouteMap> {
                 file,
                 line,
                 handler_qualified_name: handler_qn,
+                impact: None,
             },
         );
     }

@@ -85,6 +85,51 @@ pub fn extract_symbol_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<
     })
 }
 
+// ── Public helpers ────────────────────────────────────────────────────────────
+
+/// Find the [`NodeId`] of the node that matches `(repo, qualified_name)` in
+/// `store`.
+///
+/// Searches `SharedSymbol` virtual stubs first, then concrete public
+/// `Function | Class | Type` nodes.  Returns `None` when no match is found.
+///
+/// Used by the impact-attachment wiring in `commands/pr_review.rs`.
+pub fn find_symbol_node_id<S: GraphStore>(
+    store: &S,
+    repo: &str,
+    qualified_name: &str,
+) -> Result<Option<gather_step_core::NodeId>> {
+    // ── SharedSymbol virtual stubs ────────────────────────────────────────────
+    for node in store.nodes_by_type(NodeKind::SharedSymbol)? {
+        if !node.is_virtual {
+            continue;
+        }
+        if node.repo == repo
+            && node.qualified_name.as_deref() == Some(qualified_name)
+        {
+            return Ok(Some(node.id));
+        }
+    }
+
+    // ── Concrete public symbols ───────────────────────────────────────────────
+    for node in store.nodes_by_repo(repo)? {
+        if node.is_virtual {
+            continue;
+        }
+        if !matches!(node.kind, NodeKind::Function | NodeKind::Class | NodeKind::Type) {
+            continue;
+        }
+        if node.visibility != Some(Visibility::Public) {
+            continue;
+        }
+        if node.qualified_name.as_deref() == Some(qualified_name) {
+            return Ok(Some(node.id));
+        }
+    }
+
+    Ok(None)
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 /// Build `(repo, qualified_name) → SymbolDelta` for all relevant nodes in `store`.
@@ -184,6 +229,7 @@ fn node_to_delta(node: &NodeData, kind_str: &str) -> SymbolDelta {
         signature: node.signature.clone(),
         visibility: visibility.map(str::to_owned),
         is_virtual: node.is_virtual,
+        impact: None,
     }
 }
 
