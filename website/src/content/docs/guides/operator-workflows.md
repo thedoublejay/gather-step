@@ -346,8 +346,76 @@ Three flags apply broadly across all commands:
 The `--repo <NAME>` flag is also accepted by most commands to scope output to
 a single configured repo.
 
+## Review a PR
+
+`pr-review` builds a disposable review index for any two refs and returns a structured delta report covering the changed surfaces across every affected repo.
+
+### Basic usage
+
+```bash
+gather-step pr-review --base main --head feat/my-change
+```
+
+The command:
+
+1. Resolves `--base` and `--head` to SHAs.
+2. Expands the affected repo set from changed files (direct path match, shared-package indicators, and reverse-dependent repos).
+3. Indexes the head branch into a disposable storage location.
+4. Computes the delta report and writes it to stdout (human-formatted by default, `--json` for machine-readable).
+
+### Key flags
+
+| Flag | Effect |
+|---|---|
+| `--base <REF>` | Base ref — the PR target, typically `main` |
+| `--head <REF>` | Head ref — the PR branch |
+| `--keep-cache` | Preserve the review index for follow-up `impact`/`trace`/`pack` queries |
+| `--severity warn\|strict\|pedantic` | Threshold for non-zero exit. `warn` always returns the report. |
+| `--json` | Emit the `DeltaReport` as JSON |
+
+### Reading the report
+
+The report sections are:
+
+| Section | What it shows |
+|---|---|
+| `changed_files` | Repo-relative paths changed in `merge_base..head` |
+| `routes` | Added / removed / changed HTTP routes with handler info and downstream impact |
+| `symbols` | Added / removed / changed exported symbols; flags `signature_changed` and `visibility_changed` |
+| `payload_contracts` | Field-level diffs: added, removed, type-changed, optional-required flips |
+| `events` | Producer/consumer set diffs across topic, queue, subject, stream, and event virtual nodes |
+| `decorators` | Permission, audit, and authorization decorator changes |
+| `contract_alignments` | Cross-repo clusters of related payload contracts with confidence scores |
+| `removed_surface_risks` | Removed routes / symbols / events with surviving consumers, classified `high` / `medium` / `low` |
+| `deployment` | Deployment-topology changes: Dockerfiles, Compose services, K8s manifests, env vars, secrets, config maps, GitHub Actions deploy jobs |
+| `suggested_followups` | Ready-to-run `gather-step pack` and `trace crud` commands for the highest-impact deltas |
+
+### Follow-up queries against the kept index
+
+When `--keep-cache` is set, the `suggested_followups` field includes commands pre-filled with `--registry` / `--storage` overrides pointing at the kept review index. Run them as-is to inspect PR-branch state rather than workspace baseline:
+
+```bash
+gather-step pr-review --base main --head feat/my-change --keep-cache --json
+
+# then, from suggested_followups:
+gather-step pack <TARGET> --mode review --registry <REVIEW_REGISTRY> --storage <REVIEW_STORAGE>
+```
+
+### Cleaning up artifacts
+
+Without `--keep-cache`, the review index is deleted after the report is returned. To manage kept artifacts:
+
+```bash
+gather-step pr-review clean --dry-run           # list every kept artifact for this workspace
+gather-step pr-review clean --older-than 7d     # prune stale artifacts
+gather-step pr-review clean --all               # wipe all review artifacts
+```
+
+For a step-by-step walkthrough, see the [PR review guide](/guides/pr-review/).
+
 ## Next Steps
 
+- [PR review guide](/guides/pr-review/) — step-by-step walkthrough of the review workflow.
 - [MCP clients](/guides/mcp-clients/) — expose the same graph to an AI coding
   assistant through the stdio MCP server.
 - [CLI reference](/reference/cli/) — complete command and flag documentation.

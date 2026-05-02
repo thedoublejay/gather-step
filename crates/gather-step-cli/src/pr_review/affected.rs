@@ -29,9 +29,9 @@
 //! Phase 4 Task 4 of the PR review mode plan.
 
 use gather_step_core::{EdgeKind, GatherStepConfig};
-use rustc_hash::FxHashSet;
 use gather_step_git::refs::ChangedFile;
 use gather_step_storage::GraphStore;
+use rustc_hash::FxHashSet;
 
 /// Maximum number of incoming edges inspected per directly-changed repo before
 /// truncating the reverse-dependents walk.

@@ -37,6 +37,13 @@ const moats = [
   },
   {
     n: '06',
+    tag: 'PR review',
+    title: 'Cross-repo PR review and deployment topology',
+    body:
+      'Run `gather-step pr-review` against any two refs to get a structured delta report: added/removed routes, exported symbols, payload contracts, event wiring, deployment surfaces, and removal risks — all local, no vendor.',
+  },
+  {
+    n: '07',
     tag: 'Delivery',
     title: 'Task-shaped packs and AI rule files',
     body:
@@ -48,7 +55,7 @@ const moats = [
 <section class="bp-sec" id="moats">
   <div class="bp-sec__head">
     <span class="bp-sec__num">DET-04 · What actually makes it different</span>
-      <h2 class="bp-h2">Six feature groups built for <span class="u">release-grade context.</span></h2>
+      <h2 class="bp-h2">Seven feature groups built for <span class="u">release-grade context.</span></h2>
       <p class="bp-lede">
       Partial context is worse than no context. Gather Step keeps topology, proof,
       storage health, and assistant retrieval in one local workflow.
@@ -58,7 +65,7 @@ const moats = [
     {
       moats.map((moat) => (
         <div class="bp-moat">
-          <span class="bp-moat__num">{moat.n} / 06</span>
+          <span class="bp-moat__num">{moat.n} / 07</span>
           <span class="bp-moat__tag">{moat.tag}</span>
           <h3>{moat.title}</h3>
           <p>{moat.body}</p>

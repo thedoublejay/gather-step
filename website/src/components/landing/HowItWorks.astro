@@ -43,13 +43,23 @@ const steps: Step[] = [
       { line: 'claude: what breaks if I change order.created?' },
     ],
   },
+  {
+    num: '04 · REVIEW',
+    heading: 'Review PRs with structural evidence.',
+    body:
+      'Run `gather-step pr-review` before merge to get a cross-repo surface delta: added and removed routes, exported symbols, payload contracts, event wiring, deployment surfaces, and removal risks — without sending code off-machine.',
+    code: [
+      { dim: '# review a branch against main' },
+      { line: 'gather-step pr-review --base main --head feat/my-change' },
+    ],
+  },
 ];
 ---
 
 <section class="bp-sec" id="how">
   <div class="bp-sec__head">
     <span class="bp-sec__num">DET-08 · From zero to answered questions</span>
-    <h2 class="bp-h2">Initialize, watch, <span class="u">ask.</span></h2>
+    <h2 class="bp-h2">Initialize, watch, ask, <span class="u">review.</span></h2>
     <p class="bp-lede">No API keys. No account. No data leaves your machine.</p>
   </div>
 

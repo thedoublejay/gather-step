@@ -10,9 +10,9 @@ const pillars = [
   {
     ix: '02',
     tag: 'Cross-repo',
-    heading: 'Event flows across services.',
+    heading: 'Event flows and PR diffs across services.',
     body:
-      'Producer-to-consumer, through shared virtual nodes. Your AI finally sees the edges between repos, not just inside them.',
+      'Producer-to-consumer event topology and cross-repo PR surface diffs, through shared virtual nodes. Your AI sees the edges between repos, not just inside them.',
   },
   {
     ix: '03',
@@ -21,18 +21,27 @@ const pillars = [
     body:
       'Re-indexes incrementally on every file save. What the code looks like today, not what a README said two years ago.',
   },
+  {
+    ix: '04',
+    tag: 'v3.0',
+    heading: 'PR review and deployment topology.',
+    body:
+      'Cross-repo PR review without sending code to a vendor. Deployment-topology indexing that maps services to their runtime evidence.',
+  },
 ];
 
 const before = [
   ['✕', 'Sees only the open repo'],
   ['✕', 'Guesses at downstream consumers'],
   ['✕', 'Re-explores the codebase each session'],
+  ['✕', 'No deployment or PR surface evidence'],
 ];
 
 const after = [
   ['✓', 'Sees every repo as one system'],
   ['✓', 'Traces producer to consumer across services'],
   ['✓', 'Starts with pre-computed structural context'],
+  ['✓', 'PR surface deltas and deployment topology, local-first'],
 ];
 ---
 
@@ -49,7 +58,7 @@ const after = [
     {
       pillars.map((pillar) => (
         <div class="bp-pillar">
-          <div class="bp-pillar__num">{pillar.ix} / 03</div>
+          <div class="bp-pillar__num">{pillar.ix} / 04</div>
           <div class="bp-pillar__tag">{pillar.tag}</div>
           <h3>{pillar.heading}</h3>
           <p>{pillar.body}</p>

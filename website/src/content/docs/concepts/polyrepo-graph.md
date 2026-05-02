@@ -171,3 +171,5 @@ The polyrepo code graph provides:
 - **Bounded task packs.** Instead of returning a raw multi-hop neighborhood, the context pack system slices the graph into a byte-budgeted, mode-specific bundle shaped for the specific task at hand.
 
 The retrieval step has already happened. The assistant can focus on synthesis.
+
+The same graph powers cross-repo PR review. When `gather-step pr-review` builds a disposable review index for a branch, it uses the polyrepo graph to compute surface deltas — added and removed routes, exported symbols, payload contracts, and event wiring — across every repo touched by the diff. See the [CLI reference](/reference/cli/) for the full flag set and the [PR review guide](/guides/pr-review/) for a walkthrough.

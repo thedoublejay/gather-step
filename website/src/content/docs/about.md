@@ -48,6 +48,8 @@ The documentation site is intentionally limited to implemented behavior. The cur
 - context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
 - repo-level overview, ownership, dead-code, and convention analysis
 - derived outputs such as assistant rules and ownership files
+- cross-repo PR review via `gather-step pr-review`: structured surface delta (routes, symbols, payload contracts, events, deployment, removal risks) across any two refs, local-first
+- deployment-topology indexing: Dockerfiles, Compose services, Kubernetes manifests, env vars, secrets, config maps, and GitHub Actions deploy jobs mapped to service nodes in the graph
 
 ## Operating Model
 
@@ -64,3 +66,4 @@ That design gives Gather Step three useful properties:
 - Use [Getting started](/guides/getting-started/) for the shortest setup path.
 - Use [Workspace setup](/guides/workspace-setup/) if you need config and indexing details.
 - Use [MCP tools reference](/reference/mcp-tools/) if you want to inspect the tool surface your assistant uses automatically.
+- Use [PR review guide](/guides/pr-review/) to run a cross-repo structural review on a branch before merge.

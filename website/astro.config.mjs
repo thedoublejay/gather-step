@@ -145,6 +145,7 @@ export default defineConfig({
           label: 'Workflows',
           items: [
             { slug: 'guides/operator-workflows' },
+            { slug: 'guides/pr-review' },
             { slug: 'guides/memory-backed-planning' },
             { slug: 'guides/data-shape-verification' },
           ],
