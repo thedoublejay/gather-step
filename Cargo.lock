@@ -1190,14 +1190,14 @@ dependencies = [
 
 [[package]]
 name = "gather-step-deploy"
-version = "2.4.0"
+version = "3.0.0"
 dependencies = [
  "gather-step-core",
  "pretty_assertions",
  "serde",
  "serde_json",
  "serde_norway",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

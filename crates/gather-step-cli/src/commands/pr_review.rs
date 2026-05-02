@@ -2752,6 +2752,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: gather_step_core::IndexingConfig::default(),
+            deployment: gather_step_core::DeploymentConfig::default(),
         };
 
         let changed = vec!["services/api/src/lib.ts".to_owned()];

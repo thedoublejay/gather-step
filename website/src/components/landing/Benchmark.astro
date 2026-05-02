@@ -47,7 +47,7 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
           through repos. Right bar is a single Gather Step pack query.
         </p>
       </div>
-      <span class="bp-stamp">v2.4 · 2026-05-01</span>
+      <span class="bp-stamp">v3.0 · 2026-05-02</span>
     </div>
 
     <div class="bp-bench__hero">
@@ -58,8 +58,8 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         </div>
         <div class="bp-bench__stat__small">
           <b>{totalManual}s</b> of manual exploration, compressed into <b>{totalGatherStep.toFixed(2)}s</b> of
-          pack queries once the graph is built. The v2.4 release keeps setup human-readable,
-          respects edited configs, and reports indexing duration and index size.
+          pack queries once the graph is built. The v3.0 release adds deployment topology
+          indexing and structured PR review on top of the v2.x baseline.
         </div>
       </div>
 
@@ -123,9 +123,10 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         <line x1="12" y1="16" x2="12.01" y2="16"></line>
       </svg>
       <div>
-        <b>v2.4 release.</b> Onboarding now starts with repo selection, existing configs stay
-        authoritative, and indexing logs use clearer technical copy while raw search remains a
-        diagnostic baseline, not a graph-quality gate.
+        <b>v3.0 release.</b> Adds deployment-topology indexing for runtime artifacts
+        (Dockerfiles, Compose, Kubernetes, Helm, GitHub Actions) and `gather-step pr-review`
+        for non-destructive cross-repo PR analysis. Existing v2.x indexing semantics
+        (config-respecting onboarding, deterministic graph) are unchanged.
       </div>
     </div>
   </div>

@@ -114,6 +114,7 @@ pub fn run_review_index(
                 github: full_config.github.clone(),
                 jira: full_config.jira.clone(),
                 indexing: full_config.indexing.clone(),
+                deployment: full_config.deployment.clone(),
             };
             &effective_config
         }
