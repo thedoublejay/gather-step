@@ -95,8 +95,18 @@ pub struct PrReviewArgs {
 
     /// Exit with code 2 if any removed-surface risk has severity `High`.
     /// Without this flag the report is always emitted with exit code 0.
+    ///
+    /// Deprecated: use `--severity strict` instead.  This flag will be
+    /// removed in a future release.
     #[arg(long)]
     pub strict: bool,
+
+    /// Severity mode controlling when the command exits with code 2.
+    /// `warn` (default) always exits 0.  `strict` exits 2 on High risks or
+    /// incompatible payload type changes.  `pedantic` exits 2 on any
+    /// Medium+ risk, any payload change, or removed permission decorators.
+    #[arg(long, value_enum, default_value_t = SeverityMode::Warn)]
+    pub severity: SeverityMode,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -144,6 +154,69 @@ pub struct CleanArgs {
     pub all: bool,
 }
 
+/// Controls how strictly the exit code is influenced by risks in the report.
+#[derive(Clone, Copy, Debug, ValueEnum, Default, PartialEq, Eq)]
+pub enum SeverityMode {
+    /// Warn-only: emit the report and exit 0 regardless of risk.
+    #[default]
+    Warn,
+    /// Strict: exit 2 if any High-severity risk OR any incompatible
+    /// payload-contract shape change (`fields_type_changed` non-empty).
+    Strict,
+    /// Pedantic: exit 2 on any Medium-or-higher risk, any payload-contract
+    /// change at all, or any removed permission/audit decorator.
+    Pedantic,
+}
+
+/// Decorator names that count as permission/audit guards for the Pedantic threshold.
+const PERMISSION_AUDIT_DECORATORS: &[&str] =
+    &["Permission", "Audit", "Authenticated", "Authorize", "Guard"];
+
+/// Returns `true` when the severity threshold is exceeded and the caller
+/// should exit with code 2.
+///
+/// Logic per mode:
+/// - `Warn`: always `false`.
+/// - `Strict`:
+///   - Any [`RemovedSurfaceRisk`] with `severity == High` → `true`.
+///   - Any `payload_contracts.changed[*].fields_type_changed` non-empty → `true`.
+///     MVP heuristic — true positives may include intra-repo type changes;
+///     revisit when payload contracts get impact attachment.
+/// - `Pedantic`:
+///   - Any [`RemovedSurfaceRisk`] with severity `Medium` or `High` → `true`.
+///   - Any `payload_contracts.changed` entry → `true` (any payload change).
+///   - Any `decorators.removed[*]` matching a permission/audit decorator → `true`.
+pub fn evaluate_severity_threshold(mode: SeverityMode, report: &DeltaReport) -> bool {
+    match mode {
+        SeverityMode::Warn => false,
+        SeverityMode::Strict => {
+            let has_high = report
+                .removed_surface_risks
+                .iter()
+                .any(|r| r.severity == RiskSeverity::High);
+            let has_type_change = report
+                .payload_contracts
+                .changed
+                .iter()
+                .any(|c| !c.fields_type_changed.is_empty());
+            has_high || has_type_change
+        }
+        SeverityMode::Pedantic => {
+            let has_medium_or_high = report
+                .removed_surface_risks
+                .iter()
+                .any(|r| r.severity >= RiskSeverity::Medium);
+            let has_any_payload_change = !report.payload_contracts.changed.is_empty();
+            let has_removed_permission_decorator = report.decorators.removed.iter().any(|d| {
+                PERMISSION_AUDIT_DECORATORS
+                    .iter()
+                    .any(|&pat| d.decorator_name.contains(pat))
+            });
+            has_medium_or_high || has_any_payload_change || has_removed_permission_decorator
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ReviewEngine {
     TempIndex,
@@ -172,6 +245,17 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 .context("--head is required when running a review (no subcommand given)")?
                 .to_owned();
 
+            // --strict is a deprecated alias for --severity strict.
+            let effective_severity = if args.strict && args.severity == SeverityMode::Warn {
+                tracing::warn!(
+                    "--strict is deprecated; use --severity strict instead. \
+                     --strict will be removed in a future release."
+                );
+                SeverityMode::Strict
+            } else {
+                args.severity
+            };
+
             // Reconstruct typed args with the validated required fields.
             let review_args = PrReviewRunArgs {
                 base,
@@ -181,9 +265,10 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 json: args.json,
                 cache_root: args.cache_root,
                 strict: args.strict,
+                severity: effective_severity,
             };
 
-            let (report, has_high_risk) = run_inner(app, &review_args)?;
+            let (report, exceeded) = run_inner(app, &review_args)?;
             // Print to stdout.
             #[expect(
                 clippy::print_stdout,
@@ -192,11 +277,11 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
             {
                 println!("{report}");
             }
-            // Exit code 2 when --strict and High-severity risks exist.
+            // Exit code 2 when the severity threshold is exceeded.
             // Using std::process::exit after rendering so the report always prints
             // before the process terminates; callers can distinguish "broke" (exit
-            // 1 from anyhow) from "high-severity risk found" (exit 2).
-            if has_high_risk {
+            // 1 from anyhow) from "threshold exceeded" (exit 2).
+            if exceeded {
                 std::process::exit(2);
             }
             Ok(())
@@ -217,7 +302,9 @@ pub struct PrReviewRunArgs {
     pub keep_cache: bool,
     pub json: bool,
     pub cache_root: Option<PathBuf>,
+    /// Deprecated: kept for backward-compat.  Callers should prefer `severity`.
     pub strict: bool,
+    pub severity: SeverityMode,
 }
 
 /// Internal result type for the cache-hit-or-cold-run branch in [`run_inner`].
@@ -233,11 +320,11 @@ enum RunOutcome {
     },
 }
 
-/// Core implementation — returns `(rendered_string, has_high_risk)`.
+/// Core implementation — returns `(rendered_string, threshold_exceeded)`.
 ///
-/// `has_high_risk` is `true` when `args.strict` is set and at least one
-/// `RemovedSurfaceRisk` has `severity == High`.  The caller uses this to exit
-/// with code 2 AFTER printing the report.
+/// `threshold_exceeded` is `true` when the effective [`SeverityMode`] is
+/// exceeded (see [`evaluate_severity_threshold`]).  The caller uses this to
+/// exit with code 2 AFTER printing the report.
 pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bool)> {
     let emit_json = args.json || app.json_output;
 
@@ -863,12 +950,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         let _ = std::fs::remove_dir_all(&artifact_root.root);
     }
 
-    // ── 11. Compute strict-mode signal ────────────────────────────────────
-    let has_high_risk = args.strict
-        && report
-            .removed_surface_risks
-            .iter()
-            .any(|r| matches!(r.severity, RiskSeverity::High));
+    // ── 11. Evaluate severity threshold ───────────────────────────────────
+    let has_high_risk = evaluate_severity_threshold(args.severity, &report);
 
     // ── 12. Render ─────────────────────────────────────────────────────────
     let rendered = if emit_json {
@@ -1695,6 +1778,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: true,
@@ -1753,6 +1837,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1815,6 +1900,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1876,6 +1962,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1933,6 +2020,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2110,6 +2198,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2169,6 +2258,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2203,6 +2293,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2242,6 +2333,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let _ = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2276,6 +2368,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_root.clone()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let err = run_inner(&app, &args).expect_err("overlapping cache root must be rejected");
@@ -2309,6 +2402,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2353,6 +2447,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2455,6 +2550,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2516,6 +2612,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2570,6 +2667,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2657,6 +2755,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let (cold_rendered, _) = run_inner(&app, &args).expect("cold run must succeed");
         let mut cold: serde_json::Value =
@@ -2700,6 +2799,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
@@ -2748,6 +2848,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
@@ -2774,6 +2875,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let (second_rendered, _) = run_inner(&app, &args2).expect("second run must succeed");
         let second: serde_json::Value = serde_json::from_str(&second_rendered).unwrap();
@@ -2834,6 +2936,7 @@ mod tests {
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let (rendered, _) = run_inner(&app, &args).expect("run must succeed");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -2967,6 +3070,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3058,6 +3162,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3126,6 +3231,7 @@ mod tests {
             json: false,
             cache_root: Some(cache.to_path_buf()),
             strict: false,
+            severity: SeverityMode::Warn,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3142,6 +3248,187 @@ mod tests {
         assert!(
             !root_active.exists(),
             "--all must delete active-key artifact unconditionally"
+        );
+    }
+
+    // ── Phase 6 Task 4: severity threshold tests ──────────────────────────────
+
+    use crate::pr_review::delta_report::{
+        PayloadContractDeltaChange, PayloadFieldSummary, PayloadFieldTypeChange, RemovedSurfaceRisk,
+    };
+
+    fn make_delta_report_empty() -> DeltaReport {
+        DeltaReport {
+            schema_version: 5,
+            metadata: ReviewMetadata {
+                workspace: std::path::PathBuf::from("/tmp/ws"),
+                base_input: "main".to_owned(),
+                base_sha: "a".repeat(40),
+                head_input: "HEAD".to_owned(),
+                head_sha: "b".repeat(40),
+                checkout_mode: "head".to_owned(),
+                changed_repos: vec![],
+                indexed_repos: vec![],
+                elapsed_ms: 0,
+            },
+            safety: SafetyMetadata {
+                baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
+                baseline_storage_path: std::path::PathBuf::from("/tmp/storage"),
+                review_registry_path: std::path::PathBuf::from("/tmp/rev/reg.json"),
+                review_storage_path: std::path::PathBuf::from("/tmp/rev/storage"),
+                review_root: std::path::PathBuf::from("/tmp/rev"),
+                run_id: "test-run".to_owned(),
+                cleanup_policy: CleanupPolicy::RemoveOnExit,
+                cache_key: "hash:aaa:bbb".to_owned(),
+            },
+            changed_files: vec![],
+            changed_files_truncated: false,
+            routes: RouteDeltas::default(),
+            symbols: SymbolDeltas::default(),
+            payload_contracts: PayloadContractDeltas::default(),
+            events: EventDeltas::default(),
+            removed_surface_risks: vec![],
+            contract_alignments: ContractAlignments::default(),
+            decorators: DecoratorDeltas::default(),
+            suggested_followups: vec![],
+            unsupported_surfaces: vec![],
+        }
+    }
+
+    fn make_severity_risk(severity: RiskSeverity) -> RemovedSurfaceRisk {
+        RemovedSurfaceRisk {
+            kind: "shared_symbol".to_owned(),
+            identity: "SomeSymbol".to_owned(),
+            repo: Some("backend".to_owned()),
+            surviving_consumers: vec![],
+            severity,
+        }
+    }
+
+    fn make_payload_type_change(qn: &str) -> PayloadContractDeltaChange {
+        PayloadContractDeltaChange {
+            repo: "backend".to_owned(),
+            file: "src/dto.ts".to_owned(),
+            target_qualified_name: qn.to_owned(),
+            side: "producer".to_owned(),
+            fields_added: vec![],
+            fields_removed: vec![],
+            fields_optional_to_required: vec![],
+            fields_required_to_optional: vec![],
+            fields_type_changed: vec![PayloadFieldTypeChange {
+                name: "status".to_owned(),
+                before_type: Some("string".to_owned()),
+                after_type: Some("number".to_owned()),
+            }],
+        }
+    }
+
+    fn make_payload_fields_added_change(qn: &str) -> PayloadContractDeltaChange {
+        PayloadContractDeltaChange {
+            repo: "backend".to_owned(),
+            file: "src/dto.ts".to_owned(),
+            target_qualified_name: qn.to_owned(),
+            side: "producer".to_owned(),
+            fields_added: vec![PayloadFieldSummary {
+                name: "newField".to_owned(),
+                type_name: Some("string".to_owned()),
+                optional: true,
+            }],
+            fields_removed: vec![],
+            fields_optional_to_required: vec![],
+            fields_required_to_optional: vec![],
+            fields_type_changed: vec![],
+        }
+    }
+
+    /// Warn mode never triggers, regardless of how many High risks exist.
+    #[test]
+    fn severity_warn_never_triggers() {
+        let mut report = make_delta_report_empty();
+        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::High));
+        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::High));
+        report.payload_contracts.changed.push(make_payload_type_change("Foo"));
+        assert!(
+            !evaluate_severity_threshold(SeverityMode::Warn, &report),
+            "Warn mode must never trigger exit 2"
+        );
+    }
+
+    /// Strict mode triggers on a High-severity removed-surface risk.
+    #[test]
+    fn severity_strict_triggers_on_high_risk() {
+        let mut report = make_delta_report_empty();
+        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::High));
+        assert!(
+            evaluate_severity_threshold(SeverityMode::Strict, &report),
+            "Strict must trigger on High risk"
+        );
+    }
+
+    /// Strict mode triggers when any payload contract has a type change.
+    #[test]
+    fn severity_strict_triggers_on_payload_type_change() {
+        let mut report = make_delta_report_empty();
+        report.payload_contracts.changed.push(make_payload_type_change("UpdateLabelDto"));
+        assert!(
+            evaluate_severity_threshold(SeverityMode::Strict, &report),
+            "Strict must trigger when fields_type_changed is non-empty"
+        );
+    }
+
+    /// Pedantic triggers on Medium risk; Strict does not.
+    #[test]
+    fn severity_pedantic_triggers_on_medium_risk() {
+        let mut report = make_delta_report_empty();
+        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::Medium));
+        assert!(
+            evaluate_severity_threshold(SeverityMode::Pedantic, &report),
+            "Pedantic must trigger on Medium risk"
+        );
+        assert!(
+            !evaluate_severity_threshold(SeverityMode::Strict, &report),
+            "Strict must NOT trigger on Medium-only risk"
+        );
+    }
+
+    /// Pedantic triggers on any payload change (`fields_added` only, no type change);
+    /// Strict does not.
+    #[test]
+    fn severity_pedantic_triggers_on_any_payload_change() {
+        let mut report = make_delta_report_empty();
+        report
+            .payload_contracts
+            .changed
+            .push(make_payload_fields_added_change("CreateOrderDto"));
+        assert!(
+            evaluate_severity_threshold(SeverityMode::Pedantic, &report),
+            "Pedantic must trigger on any payload change"
+        );
+        assert!(
+            !evaluate_severity_threshold(SeverityMode::Strict, &report),
+            "Strict must NOT trigger when only fields_added (no type changes)"
+        );
+    }
+
+    /// `--strict` (old flag) is treated as severity = Strict by `run()` but we can
+    /// verify the mapping logic at the args level.
+    ///
+    /// The actual `tracing::warn` deprecation notice is emitted by `run()`; this
+    /// test verifies the semantic: strict==true && severity==Warn → Strict.
+    #[test]
+    fn legacy_strict_flag_maps_to_severity_strict() {
+        // Simulate the logic inside run() that maps --strict to Strict.
+        let strict_flag = true;
+        let severity_arg = SeverityMode::Warn; // default, user did not pass --severity
+        let effective = if strict_flag && severity_arg == SeverityMode::Warn {
+            SeverityMode::Strict
+        } else {
+            severity_arg
+        };
+        assert_eq!(
+            effective,
+            SeverityMode::Strict,
+            "--strict flag must map to SeverityMode::Strict when --severity is default Warn"
         );
     }
 }

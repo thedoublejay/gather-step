@@ -1361,4 +1361,256 @@ mod tests {
         );
         assert_eq!(cmds.len(), 10, "followups must be capped at 10");
     }
+
+    // ── Phase 6 Task 1: stable output snapshots ───────────────────────────────
+
+    /// A "fully populated" report with at least one of each delta kind.
+    /// Used to pin the schema and section order against accidental regression.
+    fn fully_populated_report() -> DeltaReport {
+        DeltaReport {
+            schema_version: 5,
+            metadata: ReviewMetadata {
+                workspace: std::path::PathBuf::from("/tmp/ws"),
+                base_input: "main".to_owned(),
+                base_sha: "a".repeat(40),
+                head_input: "HEAD".to_owned(),
+                head_sha: "b".repeat(40),
+                checkout_mode: "head".to_owned(),
+                changed_repos: vec!["backend".to_owned()],
+                indexed_repos: vec!["backend".to_owned()],
+                elapsed_ms: 1234,
+            },
+            safety: SafetyMetadata {
+                baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
+                baseline_storage_path: std::path::PathBuf::from("/tmp/storage"),
+                review_registry_path: std::path::PathBuf::from("/tmp/rev/reg.json"),
+                review_storage_path: std::path::PathBuf::from("/tmp/rev/storage"),
+                review_root: std::path::PathBuf::from("/tmp/rev"),
+                run_id: "test-run-full".to_owned(),
+                cleanup_policy: CleanupPolicy::KeepCache,
+                cache_key: "hash:aaa:bbb".to_owned(),
+            },
+            changed_files: vec!["backend/src/routes.ts".to_owned()],
+            changed_files_truncated: false,
+            routes: RouteDeltas {
+                added: vec![RouteDelta {
+                    method: "GET".to_owned(),
+                    path: "/orders".to_owned(),
+                    repo: Some("backend".to_owned()),
+                    file: Some("src/routes.ts".to_owned()),
+                    line: Some(10),
+                    handler_qualified_name: Some("OrdersController.list".to_owned()),
+                    impact: None,
+                }],
+                removed: vec![],
+                changed: vec![],
+                unavailable: false,
+            },
+            symbols: SymbolDeltas {
+                added: vec![],
+                removed: vec![SymbolDelta {
+                    kind: "function".to_owned(),
+                    repo: "backend".to_owned(),
+                    qualified_name: "removedFn".to_owned(),
+                    file: Some("src/lib.ts".to_owned()),
+                    line: Some(5),
+                    signature: Some("(): void".to_owned()),
+                    visibility: Some("public".to_owned()),
+                    is_virtual: false,
+                    impact: None,
+                }],
+                changed: vec![],
+                unavailable: false,
+            },
+            payload_contracts: PayloadContractDeltas {
+                added: vec![],
+                removed: vec![],
+                changed: vec![PayloadContractDeltaChange {
+                    repo: "backend".to_owned(),
+                    file: "src/dto.ts".to_owned(),
+                    target_qualified_name: "UpdateOrderDto".to_owned(),
+                    side: "producer".to_owned(),
+                    fields_added: vec![],
+                    fields_removed: vec![],
+                    fields_optional_to_required: vec![],
+                    fields_required_to_optional: vec![],
+                    fields_type_changed: vec![PayloadFieldTypeChange {
+                        name: "status".to_owned(),
+                        before_type: Some("string".to_owned()),
+                        after_type: Some("number".to_owned()),
+                    }],
+                }],
+                unavailable: false,
+            },
+            events: EventDeltas {
+                added: vec![EventDelta {
+                    event_kind: "topic".to_owned(),
+                    event_name: "order.created".to_owned(),
+                    external_id: "topic:order.created".to_owned(),
+                    producers: vec![],
+                    consumers: vec![],
+                }],
+                removed: vec![],
+                changed: vec![],
+                unavailable: false,
+            },
+            removed_surface_risks: vec![RemovedSurfaceRisk {
+                kind: "shared_symbol".to_owned(),
+                identity: "SharedHelper".to_owned(),
+                repo: Some("backend".to_owned()),
+                surviving_consumers: vec![],
+                severity: RiskSeverity::High,
+            }],
+            contract_alignments: ContractAlignments {
+                findings: vec![ContractAlignmentFinding {
+                    identity: "UpdateOrder".to_owned(),
+                    members: vec![ContractAlignmentMember {
+                        role: "backend_dto".to_owned(),
+                        repo: "backend".to_owned(),
+                        qualified_name: "UpdateOrderDto".to_owned(),
+                        file: Some("src/dto.ts".to_owned()),
+                    }],
+                    confidence: AlignmentConfidence::High,
+                    touched_by_pr: true,
+                }],
+                unavailable: false,
+            },
+            decorators: DecoratorDeltas {
+                added: vec![],
+                removed: vec![],
+                changed: vec![DecoratorDeltaChange {
+                    repo: "backend".to_owned(),
+                    target_qualified_name: "OrdersController.create".to_owned(),
+                    before: DecoratorDelta {
+                        repo: "backend".to_owned(),
+                        file: Some("src/controllers/orders.ts".to_owned()),
+                        line: Some(20),
+                        decorator_name: "Permission".to_owned(),
+                        target_qualified_name: Some("OrdersController.create".to_owned()),
+                        args: Some("'write:orders'".to_owned()),
+                    },
+                    after: DecoratorDelta {
+                        repo: "backend".to_owned(),
+                        file: Some("src/controllers/orders.ts".to_owned()),
+                        line: Some(20),
+                        decorator_name: "Permission".to_owned(),
+                        target_qualified_name: Some("OrdersController.create".to_owned()),
+                        args: Some("'read:orders'".to_owned()),
+                    },
+                    args_changed: true,
+                }],
+                unavailable: false,
+            },
+            suggested_followups: vec![],
+            unsupported_surfaces: vec![],
+        }
+    }
+
+    /// Top-level JSON keys are stable.
+    ///
+    /// `serde_json` without `preserve_order` serialises keys alphabetically.
+    /// This list must stay sorted and match the field set of [`DeltaReport`].
+    #[test]
+    fn json_snapshot_top_level_keys_are_stable() {
+        let r = fully_populated_report();
+        let json = serde_json::to_value(&r).unwrap();
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
+        // serde_json serialises alphabetically without preserve_order.
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "changed_files",
+                "changed_files_truncated",
+                "contract_alignments",
+                "decorators",
+                "events",
+                "metadata",
+                "payload_contracts",
+                "removed_surface_risks",
+                "routes",
+                "safety",
+                "schema_version",
+                "suggested_followups",
+                "symbols",
+            ]
+        );
+    }
+
+    /// Nested route delta JSON keys are stable.
+    ///
+    /// `impact` is `skip_serializing_if = "Option::is_none"` so it is absent
+    /// when the route has no impact summary (as in the added-routes set).
+    #[test]
+    fn json_snapshot_route_delta_keys_are_stable() {
+        let r = fully_populated_report();
+        let json = serde_json::to_value(&r).unwrap();
+        // Pull out the first added route.
+        let route = &json["routes"]["added"][0];
+        let mut keys: Vec<&str> = route
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
+        keys.sort_unstable();
+        // `impact` is absent (None, skip_serializing_if).
+        assert_eq!(
+            keys,
+            ["file", "handler_qualified_name", "line", "method", "path", "repo"]
+        );
+    }
+
+    /// Serialising the same report twice produces identical bytes (deterministic).
+    #[test]
+    fn json_serialization_is_deterministic() {
+        let r = fully_populated_report();
+        let a = serde_json::to_string(&r).unwrap();
+        let b = serde_json::to_string(&r).unwrap();
+        assert_eq!(a, b, "identical input must produce identical JSON output");
+    }
+
+    /// Markdown H2 section headers appear in the canonical order.
+    ///
+    /// When all surfaces are available (unavailable = false), every section
+    /// must appear.  The exact heading strings are pinned here so future
+    /// renderer refactors must update this snapshot intentionally.
+    #[test]
+    fn markdown_snapshot_section_headers_are_stable() {
+        let r = fully_populated_report();
+        let md = r.render_markdown();
+        let h2_sections: Vec<&str> =
+            md.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(
+            h2_sections,
+            [
+                "## Review metadata",
+                "## Safety metadata",
+                "## Changed files",
+                "## New routes",
+                "## Removed routes",
+                "## Changed routes",
+                "## New symbols",
+                "## Removed symbols",
+                "## Changed symbols",
+                "## New payload contracts",
+                "## Removed payload contracts",
+                "## Changed payload contracts",
+                "## Events: new producers/consumers",
+                "## Events: removed producers/consumers",
+                "## Events: changed producers/consumers",
+                "## Removed-surface risks",
+                "## Contract alignments",
+                "## New decorators",
+                "## Removed decorators",
+                "## Changed decorators",
+                "## Suggested follow-up commands",
+            ]
+        );
+    }
 }
