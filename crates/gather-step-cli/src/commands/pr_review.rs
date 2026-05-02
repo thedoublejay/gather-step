@@ -588,11 +588,40 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             let cfg_path = artifact_root.worktree_root.join("gather-step.config.yaml");
             GatherStepConfig::from_yaml_file(&cfg_path).ok()
         };
+
+        // Open the baseline graph for reverse-dependents expansion.  Fail-soft:
+        // if the baseline doesn't exist yet (user hasn't indexed), pass None and
+        // fall back to direct-change-only affected set.
+        let affected_baseline_coord = {
+            let baseline_storage = app.workspace_paths().storage_root;
+            if baseline_storage.join("graph.redb").exists() {
+                match gather_step_storage::StorageCoordinator::open_read_only(&baseline_storage) {
+                    Ok(coord) => Some(coord),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "baseline storage not openable for affected-repo expansion; \
+                             skipping reverse-dependents walk"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
         let affected: Option<AffectedRepos> = head_cfg_for_affected.as_ref().map(|cfg| {
-            let a = compute_affected_repos(cfg, &changed);
+            let a = match affected_baseline_coord.as_ref() {
+                Some(coord) => compute_affected_repos(cfg, &changed, Some(coord.graph())),
+                None => {
+                    compute_affected_repos::<gather_step_storage::GraphStoreDb>(cfg, &changed, None)
+                }
+            };
             if !a.all_repos && !a.repos.is_empty() {
                 tracing::info!(
                     repos = ?a.repos,
+                    truncated = a.expansion_truncated,
                     "seeded baseline + reindexing {} affected repos: {:?}",
                     a.repos.len(),
                     a.repos
