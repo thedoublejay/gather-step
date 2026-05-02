@@ -215,12 +215,13 @@ fn open_indexer_with_optional_recovery(
     storage_root: &Path,
     registry_path: &Path,
     auto_recover: bool,
+    options: IndexingOptions,
     output: &crate::app::Output,
 ) -> Result<RepoIndexer> {
     if auto_recover {
-        return reset_and_reopen_indexer(storage_root, registry_path, output);
+        return reset_and_reopen_indexer(storage_root, registry_path, options, output);
     }
-    match RepoIndexer::open(storage_root, IndexingOptions::default()) {
+    match RepoIndexer::open(storage_root, options) {
         Ok(indexer) => Ok(indexer),
         Err(error) => {
             Err(error).with_context(|| format!("opening storage at {}", storage_root.display()))
@@ -231,6 +232,7 @@ fn open_indexer_with_optional_recovery(
 fn reset_and_reopen_indexer(
     storage_root: &Path,
     registry_path: &Path,
+    options: IndexingOptions,
     output: &crate::app::Output,
 ) -> Result<RepoIndexer> {
     clean::reset_index_state(registry_path, storage_root).with_context(|| {
@@ -244,7 +246,7 @@ fn reset_and_reopen_indexer(
         "  {} Rebuilding generated index state from source repositories.",
         style("→").cyan()
     ));
-    RepoIndexer::open(storage_root, IndexingOptions::default())
+    RepoIndexer::open(storage_root, options)
         .with_context(|| format!("opening storage at {}", storage_root.display()))
 }
 
@@ -367,8 +369,13 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     };
     let workspace_timestamp = current_unix_timestamp_string();
 
-    let indexer =
-        open_indexer_with_optional_recovery(&storage_root, &registry_path, auto_recover, &output)?;
+    let indexer = open_indexer_with_optional_recovery(
+        &storage_root,
+        &registry_path,
+        auto_recover,
+        IndexingOptions::from_config(&config),
+        &output,
+    )?;
     let mut registry = RegistryStore::open(&registry_path)
         .with_context(|| format!("opening {}", registry_path.display()))?;
     registry.register_from_config(&config, &config_root)?;

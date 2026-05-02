@@ -44,7 +44,7 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 - Local-first CLI and stdio MCP server
 - Multi-repo indexing into `WORKSPACE/.gather-step/`
 - Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
-- Route, event, shared-symbol, payload-contract, and projection-impact graph surfaces
+- Route, event, shared-symbol, payload-contract, projection-impact, and deployment-topology graph surfaces
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
 - Workspace health commands such as `status`, `doctor`, and `watch`
 - Derived outputs for assistant summaries, rules, and ownership files
@@ -153,6 +153,7 @@ If you want the full walkthrough, start with [Getting started](website/src/conte
 - Who consumes `order.created` across the workspace?
 - What breaks if I change `CreateOrderInput`?
 - Which repos depend on this shared contract?
+- Where is `api` deployed, and which services read `DATABASE_URL`?
 - Give me a review-oriented pack for `createOrder`.
 
 ## Common Commands
@@ -165,6 +166,7 @@ gather-step --workspace /path/to/workspace trace crud --method POST --path /orde
 gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace impact CreateOrderInput
 gather-step --workspace /path/to/workspace projection-impact --target subtaskIds
+gather-step --workspace /path/to/workspace deployment-topology where-deployed --service api
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
 gather-step --workspace /path/to/workspace conventions
 gather-step --workspace /path/to/workspace generate claude-md
@@ -178,7 +180,7 @@ gather-step --workspace /path/to/workspace watch
 
 ## Security
 
-Gather Step does **not** redact secrets embedded in indexed source files. If a repository contains un-rotated API keys, tokens, or credentials (for example in `.env` files, `package.json` `_authToken` fields, or code comments), those values can enter the graph and surface in MCP tool responses.
+Gather Step does **not** redact secrets embedded in indexed source files. The deployment env-file parser stores variable names only, but un-rotated API keys, tokens, or credentials in source files, package metadata, or code comments can enter the graph and surface in MCP tool responses.
 
 `gather-step-output/src/sanitize.rs` is a Markdown-injection escaper — it is not a secret scrubber.
 
@@ -228,6 +230,7 @@ Reference:
 - [Configuration reference](website/src/content/docs/reference/configuration.md)
 - [MCP tools reference](website/src/content/docs/reference/mcp-tools.md)
 - [Projection impact](website/src/content/docs/reference/cli.md#projection-impact)
+- [Deployment topology](website/src/content/docs/reference/cli.md#deployment-topology)
 
 Concepts:
 - [Polyrepo graph](website/src/content/docs/concepts/polyrepo-graph.md)

@@ -132,7 +132,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     )?);
     let watcher = Arc::new(WorkspaceWatcher::new_with_stores(
         stores.as_ref().clone(),
-        IndexingOptions::default(),
+        IndexingOptions::from_config(&config),
         WatcherConfig {
             poll_interval: Duration::from_millis(args.poll_interval_ms),
             debounce_duration: Duration::from_millis(args.debounce_ms),

@@ -1130,6 +1130,10 @@ a {
   font-weight: 700;
 }
 
+.bp-cta__command {
+  overflow-wrap: anywhere;
+}
+
 .bp-cta__cli .stamp-inline {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -1373,7 +1377,15 @@ a {
     flex-wrap: wrap;
   }
 
+  .bp-cta__cli {
+    flex-wrap: wrap;
+  }
+
   .bp-cli .stamp-inline {
+    margin-left: 0;
+  }
+
+  .bp-cta__cli .stamp-inline {
     margin-left: 0;
   }
 

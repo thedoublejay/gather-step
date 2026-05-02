@@ -1,6 +1,7 @@
 pub mod clean;
 pub mod compact;
 pub mod conventions;
+pub mod deployment_topology;
 pub mod doctor;
 pub mod events;
 pub mod generate;
@@ -85,6 +86,7 @@ pub enum Command {
     Generate(generate::GenerateCommand),
     Impact(impact::ImpactArgs),
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
+    DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
     Pack(pack::PackArgs),
     Events(events::EventsArgs),
     Conventions(conventions::ConventionsArgs),
@@ -121,6 +123,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Generate(command)) => generate::run(&app, command),
         Some(Command::Impact(args)) => impact::run(&app, args),
         Some(Command::ProjectionImpact(args)) => projection_impact::run(&app, args),
+        Some(Command::DeploymentTopology(args)) => deployment_topology::run(&app, args),
         Some(Command::Pack(args)) => pack::run(&app, &args),
         Some(Command::Events(args)) => events::run(&app, args),
         Some(Command::Conventions(args)) => conventions::run(&app, args),

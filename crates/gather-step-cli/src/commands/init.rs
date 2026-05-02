@@ -16,7 +16,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use gather_step_core::{GatherStepConfig, IndexingConfig, RepoConfig};
+use gather_step_core::{DeploymentConfig, GatherStepConfig, IndexingConfig, RepoConfig};
 use serde::Serialize;
 
 use crate::{
@@ -248,6 +248,7 @@ fn write_default_config_with_repos(
             github: existing.github.clone(),
             jira: existing.jira.clone(),
             indexing: existing.indexing.clone(),
+            deployment: existing.deployment.clone(),
         },
         None => GatherStepConfig {
             allow_listed_repos: Vec::new(),
@@ -255,6 +256,7 @@ fn write_default_config_with_repos(
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
+            deployment: DeploymentConfig::default(),
         },
     };
     let summary_repos = discovered_repos_from_config(&config);
@@ -694,7 +696,7 @@ fn draw_repo_picker(
         Print(format!(
             "   {} {} selected\r\n\r\n",
             style(selected.len()).cyan().bold(),
-            style("repositories").dim()
+            style(selection_count_label(selected.len())).dim()
         )),
     )?;
 
@@ -750,6 +752,14 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     truncated.push('…');
     truncated
+}
+
+fn selection_count_label(count: usize) -> &'static str {
+    if count == 1 {
+        "repository"
+    } else {
+        "repositories"
+    }
 }
 
 fn toggle_selection_token(
@@ -948,7 +958,9 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use gather_step_core::{DepthLevel, GatherStepConfig, IndexingConfig, RepoConfig};
+    use gather_step_core::{
+        DeploymentConfig, DepthLevel, GatherStepConfig, IndexingConfig, RepoConfig,
+    };
 
     use super::{
         DiscoveredRepo, discover_git_repos, materialize_repo_config,
@@ -1054,6 +1066,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
+            deployment: DeploymentConfig::default(),
         };
         let selected = vec![DiscoveredRepo {
             name: "api".to_owned(),
@@ -1079,6 +1092,7 @@ mod tests {
             github: None,
             jira: None,
             indexing: IndexingConfig::default(),
+            deployment: DeploymentConfig::default(),
         };
         let selected = vec![DiscoveredRepo {
             name: "api".to_owned(),

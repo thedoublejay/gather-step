@@ -57,7 +57,10 @@ Running `gather-step` with no subcommand also starts the guided flow in an inter
 
 ### Interactive wizard
 
-Press Enter to accept the default shown by each prompt. In the common path, that means keep the selected repos, index now, generate AI context files, register local MCP settings, and skip foreground watch mode.
+Use the arrow-key picker to choose repositories, then press Enter to confirm.
+For the remaining prompts, press Enter to accept the default. In the common
+path, that means keep the selected repos, index now, generate AI context files,
+register local MCP settings, and skip foreground watch mode.
 
 ```text
   Hi, welcome to Gather Step setup
@@ -66,16 +69,20 @@ Press Enter to accept the default shown by each prompt. In the common path, that
   Found 3 Git repositories
 
 1) Select repositories to include
-   Use numbers or ranges to toggle, `all`, `none`, or press Enter to confirm.
-   [x] 1. backend  (backend)
-   [x] 2. frontend  (frontend)
-   [x] 3. shared  (shared)
-   Selection [all/none/1,3/1-3/Enter]:
+   ↑/↓ move  Space toggle  Enter confirm  a all  n none  q cancel
+   3 repositories selected
+
+   > [x]  1. backend  (backend)
+     [x]  2. frontend  (frontend)
+     [x]  3. shared  (shared)
 2) Index the selected repositories now? [Y/n]
 3) Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md) [Y/n]
 4) Register Gather Step as an MCP server? [local/global/skip] (default: local)
 5) Watch for repository changes and re-index automatically? [y/N]
 ```
+
+When stdin or stdout is not a terminal, Gather Step falls back to the text
+prompt that accepts numbers, ranges, `all`, `none`, or Enter.
 
 | Wizard prompt | Default | Equivalent flag |
 |---|---|---|

@@ -66,6 +66,16 @@ indexing:
   min_file_size: 100B
   max_file_size: 1MB
   workspace_concurrency: 4
+
+deployment:
+  include:
+    - "**/Dockerfile"
+    - "**/docker-compose*.yml"
+    - "k8s/**/*.yaml"
+  gitops_roots:
+    - platform/apps
+  env_files:
+    - .env.example
 ```
 
 ## Top-level fields
@@ -181,6 +191,18 @@ Files larger than this size are excluded from indexing. Accepts human-readable s
 
 Controls the number of repos indexed concurrently at the workspace level. When omitted, the indexer chooses a default based on available resources. Setting this to `1` forces sequential per-repo indexing, which is useful for debugging.
 
+### `deployment`
+
+**Optional.** Controls deployment-topology artifact discovery. Deployment indexing runs as part of `index` and `watch` and emits graph nodes for deployments, env var names, workflow jobs, brokers, databases, secrets, and config maps. Secret and env file values are not stored.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `include` | `string[]` | built-in artifact patterns | Additional deployment artifact globs to scan inside each repo. Use this for non-standard manifest paths. |
+| `gitops_roots` | `string[]` | `[]` | Repo-relative directories that contain GitOps or platform deployment manifests. |
+| `env_files` | `string[]` | `[]` | Repo-relative env files to scan for variable names. Values are redacted and not persisted. |
+
+The built-in scanner recognizes common Dockerfiles, Docker Compose files, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, and GitHub Actions workflow YAML. Standalone env files are indexed only when listed under `deployment.env_files`; Compose `env_file` references are followed from the Compose file. Configured paths must stay inside the repo; paths that escape with `..` are rejected.
+
 ## Validation rules
 
 The config parser uses `#[serde(deny_unknown_fields)]` on every struct. Unknown YAML keys are hard errors, not warnings.
@@ -197,6 +219,7 @@ The config parser uses `#[serde(deny_unknown_fields)]` on every struct. Unknown 
 | Repo paths must not overlap | A repo path that is a prefix of another repo's path is rejected. |
 | `allow_listed_repos` must reference known repos | Any name not present in `repos` is rejected. |
 | `allow_listed_repos` names must be unique | Duplicate entries are rejected. |
+| Deployment paths must stay inside each repo | `deployment.include`, `deployment.gitops_roots`, and `deployment.env_files` reject absolute paths and `..` escapes. |
 | Repo root symlinks are rejected at index time | A repo whose path resolves through a symlink is rejected during `index` or `watch`. |
 
 ## Depth values

@@ -5,6 +5,7 @@ members = [
     "crates/gather-step-bench",
     "crates/gather-step-cli",
     "crates/gather-step-core",
+    "crates/gather-step-deploy",
     "crates/gather-step-git",
     "crates/gather-step-mcp",
     "crates/gather-step-output",
@@ -25,6 +26,7 @@ description = "High-performance multi-repo codebase intelligence engine"
 [workspace.dependencies]
 gather-step-analysis = { path = "crates/gather-step-analysis", version = "2.4.0" }
 gather-step-core = { path = "crates/gather-step-core", version = "2.4.0" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "2.4.0" }
 gather-step-mcp = { path = "crates/gather-step-mcp", version = "2.4.0" }
 gather-step-parser = { path = "crates/gather-step-parser", version = "2.4.0" }
 gather-step-storage = { path = "crates/gather-step-storage", version = "2.4.0" }

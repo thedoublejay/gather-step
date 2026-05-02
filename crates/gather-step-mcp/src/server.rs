@@ -33,6 +33,14 @@ use crate::{
             trace_impact_tool as run_trace_impact,
         },
         crud_trace::{CrudTraceRequest, CrudTraceResponse, crud_trace_tool as run_crud_trace},
+        deployment_topology::{
+            DeploymentTopologyResponse, EnvVarTopologyRequest, RepoTopologyRequest,
+            ServiceTopologyRequest, deployed_but_no_code_tool as run_deployed_but_no_code,
+            env_var_consumers_tool as run_env_var_consumers, service_env_tool as run_service_env,
+            shared_infra_tool as run_shared_infra,
+            undeployed_services_tool as run_undeployed_services,
+            where_deployed_tool as run_where_deployed,
+        },
         events::{
             EventBlastRadiusRequest, EventBlastRadiusResponse, ListOrphanTopicsRequest,
             ListOrphanTopicsResponse, TraceEventRequest, TraceEventResponse, TraceRouteRequest,
@@ -612,6 +620,120 @@ impl GatherStepMcpServer {
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("projection_impact", &args, move || {
             run_projection_impact(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "where_deployed",
+        description = "Return deployment nodes and deployment evidence linked to an indexed service, scoped by repo when provided.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn where_deployed_tool(
+        &self,
+        Parameters(request): Parameters<ServiceTopologyRequest>,
+    ) -> Result<Json<DeploymentTopologyResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("where_deployed", &args, move || {
+            run_where_deployed(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "service_env",
+        description = "Return environment variables linked to an indexed service.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn service_env_tool(
+        &self,
+        Parameters(request): Parameters<ServiceTopologyRequest>,
+    ) -> Result<Json<DeploymentTopologyResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("service_env", &args, move || {
+            run_service_env(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "env_var_consumers",
+        description = "Return services that read an indexed environment variable.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn env_var_consumers_tool(
+        &self,
+        Parameters(request): Parameters<EnvVarTopologyRequest>,
+    ) -> Result<Json<DeploymentTopologyResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("env_var_consumers", &args, move || {
+            run_env_var_consumers(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "undeployed_services",
+        description = "Return indexed service nodes without deployment evidence.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn undeployed_services_tool(
+        &self,
+        Parameters(request): Parameters<RepoTopologyRequest>,
+    ) -> Result<Json<DeploymentTopologyResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("undeployed_services", &args, move || {
+            run_undeployed_services(&ctx, &request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "deployed_but_no_code",
+        description = "Return deployment nodes that lack service-code linkage.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn deployed_but_no_code_tool(
+        &self,
+        Parameters(request): Parameters<RepoTopologyRequest>,
+    ) -> Result<Json<DeploymentTopologyResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("deployed_but_no_code", &args, move || {
+            run_deployed_but_no_code(&ctx, &request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "shared_infra",
+        description = "Return indexed database and broker nodes with service consumers.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn shared_infra_tool(
+        &self,
+        Parameters(request): Parameters<RepoTopologyRequest>,
+    ) -> Result<Json<DeploymentTopologyResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("shared_infra", &args, move || {
+            run_shared_infra(&ctx, &request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })

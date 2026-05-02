@@ -10,6 +10,7 @@ pub mod conventions;
 pub mod cross_repo;
 pub mod crud_trace;
 pub mod dead_code;
+pub mod deployment_topology;
 pub mod event_topology;
 pub mod evidence;
 pub mod impact;
@@ -38,6 +39,10 @@ pub use crud_trace::{
 pub use dead_code::{
     ConfidenceBand, DeadCodeError, DeadCodeFinding, DeadCodeReport, DetectorBasis, find_dead_code,
     find_dead_code_with_manifest,
+};
+pub use deployment_topology::{
+    DeploymentTopologyEdge, DeploymentTopologyError, DeploymentTopologyNode,
+    DeploymentTopologyQuery, DeploymentTopologyReport, deployment_topology,
 };
 pub use event_topology::{
     BlastRadiusEdge, BlastRadiusNode, EventBlastRadius, EventRole, EventTopologyError, EventTrace,

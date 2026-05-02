@@ -32,8 +32,8 @@ pub use incremental::{
     snapshot_selected_repo_files,
 };
 pub use indexer::{
-    BulkModeGuard, IndexProgress, IndexingOptions, IndexingStats, RepoIndexPayload, RepoIndexer,
-    RepoIndexerError,
+    BulkModeGuard, DeploymentIndexingOptions, IndexProgress, IndexingOptions, IndexingStats,
+    RepoIndexPayload, RepoIndexer, RepoIndexerError,
 };
 pub use metadata::{
     CoChangePairRecord, CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord,

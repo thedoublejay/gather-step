@@ -187,10 +187,20 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
     let output = app.output();
     let paths = app.workspace_paths();
     let metadata_path = paths.storage_root.join("metadata.sqlite");
+    let can_generate_rules = paths.graph_path.exists() && metadata_path.exists();
+
+    if !can_generate_rules {
+        output
+            .line("Warning: Skipped generating .claude/rules/ because no workspace index exists.");
+        output.line(
+            "Hint: Run `gather-step index`, then `gather-step generate claude-md --target rules`.",
+        );
+    }
+
     let generation_bar = ai_generation_bar(app);
     let mut generated_outputs = Vec::new();
 
-    if paths.graph_path.exists() && metadata_path.exists() {
+    if can_generate_rules {
         let payload = generate_claude_md_rules(
             app,
             GenerateClaudeMdArgs {
@@ -200,12 +210,6 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
             },
         )?;
         generated_outputs.push(payload);
-    } else {
-        output
-            .line("Warning: Skipped generating .claude/rules/ because no workspace index exists.");
-        output.line(
-            "Hint: Run `gather-step index`, then `gather-step generate claude-md --target rules`.",
-        );
     }
     if let Some(bar) = &generation_bar {
         bar.inc(1);
