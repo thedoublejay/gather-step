@@ -66,6 +66,23 @@ pub enum ReviewSafetyError {
     )]
     WorkspaceRootCollision { review: PathBuf, workspace: PathBuf },
 
+    /// One of the review paths (root, registry, or storage) lives inside the
+    /// workspace's `.gather-step/` directory.
+    ///
+    /// Anything under `<workspace>/.gather-step/` is workspace-generated state.
+    /// Mixing review artifacts into that tree risks clobbering the baseline index
+    /// or registry.  Review artifacts must always reside outside `.gather-step/`
+    /// (e.g. in the OS cache dir, or in a sibling directory such as
+    /// `.gather-step-review/`).
+    #[error(
+        "review path {review} is inside the workspace-generated state directory {generated_state_root}; \
+         review artifacts must not be placed under `.gather-step/`"
+    )]
+    WorkspaceGeneratedStateOverlap {
+        review: PathBuf,
+        generated_state_root: PathBuf,
+    },
+
     /// Filesystem error while canonicalizing a path.
     #[error("path canonicalization failed for {path}: {source}")]
     Canonicalize {
@@ -300,11 +317,19 @@ impl StorageContext {
     ///   [`ReviewSafetyError::GeneratedStateCollision`].
     /// - `review_workspace_root` equals or contains `workspace.workspace_root`
     ///   → [`ReviewSafetyError::WorkspaceRootCollision`].
+    /// - Any of `review_workspace_root`, `review_registry_path`, or
+    ///   `review_storage_root` lives under `<workspace_root>/.gather-step/`
+    ///   → [`ReviewSafetyError::WorkspaceGeneratedStateOverlap`].
+    ///
+    ///   Anything under `.gather-step/` is workspace-generated state.  Review
+    ///   artifacts placed there risk clobbering the baseline index.  Sibling
+    ///   directories such as `.gather-step-review/` are explicitly **allowed**.
     ///
     /// The reverse of the workspace-root check (review root *inside* workspace
-    /// root) is intentionally **allowed** — workspace-local review artifacts
-    /// behind a flag are explicitly permitted by the master plan, as long as
-    /// the storage and registry paths are disjoint.
+    /// root but **outside** `.gather-step/`) is intentionally **allowed** —
+    /// workspace-local review artifacts in a sibling directory are explicitly
+    /// permitted by the master plan, as long as the storage and registry paths
+    /// are disjoint and do not fall under `.gather-step/`.
     pub fn review_checked(
         workspace: &StorageContext,
         review_workspace_root: PathBuf,
@@ -365,6 +390,20 @@ impl StorageContext {
                 review: c_rev_root,
                 workspace: c_ws_root,
             });
+        }
+
+        // 5. Workspace generated-state overlap: none of the review paths may
+        //    reside under `<workspace_root>/.gather-step/`.  A path that equals
+        //    `.gather-step` itself is also rejected (it would replace the whole
+        //    generated-state directory).
+        let generated_state_root = canonicalize_for_guard(&workspace.workspace_root.join(".gather-step"))?;
+        for candidate in [&c_rev_root, &c_rev_reg, &c_rev_stor] {
+            if candidate.starts_with(&generated_state_root) {
+                return Err(ReviewSafetyError::WorkspaceGeneratedStateOverlap {
+                    review: candidate.clone(),
+                    generated_state_root: generated_state_root.clone(),
+                });
+            }
         }
 
         Ok(Self::review(
@@ -819,19 +858,21 @@ mod tests {
         assert!(matches!(ctx.label(), ContextLabel::Review { run_id } if run_id == "pr-6"));
     }
 
-    /// Review root is *inside* the workspace root, but review storage and
-    /// registry are disjoint from workspace generated state → `Ok`.
+    /// Review root is *inside* the workspace root but **outside** `.gather-step/`,
+    /// and review storage/registry are disjoint from workspace generated state → `Ok`.
     ///
     /// This confirms the "workspace-local review artifacts behind a flag" carve-out
     /// from the master plan: the guard blocks review root *containing* the workspace
-    /// root, but allows review root *inside* the workspace root as long as storage
-    /// and registry paths are disjoint.
+    /// root, and also blocks any review path that falls under `.gather-step/`, but
+    /// allows review root *inside* the workspace root in a sibling directory such
+    /// as `.gather-step-review/`.
     #[test]
     fn review_checked_accepts_workspace_local_review_outside_storage() {
         let tmp = tempfile::TempDir::new().unwrap();
         let ws_ctx = test_workspace_ctx(&tmp);
 
-        // Review root lives inside the workspace, but under a different prefix.
+        // Review root lives inside the workspace under `.gather-step-review/` —
+        // a sibling of `.gather-step/`, NOT a child of it.
         let rev_root = tmp.path().join(".gather-step-review");
         let rev_storage = rev_root.join("storage");
         let rev_registry = rev_root.join("registry.json");
@@ -847,5 +888,40 @@ mod tests {
         assert!(result.is_ok(), "expected Ok, got {}", result.unwrap_err());
         let ctx = result.unwrap();
         assert_eq!(ctx.workspace_root(), rev_root.as_path());
+    }
+
+    /// Review storage placed under `<workspace>/.gather-step/review/` (a CHILD of
+    /// `.gather-step/`) → `WorkspaceGeneratedStateOverlap`.
+    ///
+    /// This is the stricter guard added in PR 14 review feedback: anything under
+    /// `.gather-step/` is workspace-generated state and must not be used as review
+    /// storage.
+    #[test]
+    fn review_checked_rejects_workspace_local_review_inside_dot_gather_step() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws_ctx = test_workspace_ctx(&tmp);
+
+        // Review storage is a CHILD of `.gather-step/` — must be rejected.
+        let dot_gs = tmp.path().join(".gather-step");
+        let rev_root = dot_gs.join("review");
+        let rev_storage = rev_root.join("storage");
+        let rev_registry = rev_root.join("registry.json");
+
+        // Create the directory so canonicalization works.
+        std::fs::create_dir_all(&rev_storage).unwrap();
+
+        let err = StorageContext::review_checked(
+            &ws_ctx,
+            rev_root,
+            rev_registry,
+            rev_storage,
+            "pr-8".into(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ReviewSafetyError::WorkspaceGeneratedStateOverlap { .. }),
+            "expected WorkspaceGeneratedStateOverlap, got {err}"
+        );
     }
 }

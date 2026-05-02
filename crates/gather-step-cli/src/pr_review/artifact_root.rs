@@ -118,6 +118,12 @@ pub struct ReviewMarker {
     /// via the back-compat shim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<CacheKey>,
+    /// RFC 3339 UTC timestamp of the last time this artifact was accessed via a
+    /// cache hit.  Updated each time `pr-review` reuses this artifact so that
+    /// `--older-than` pruning measures last-use time, not creation time.
+    /// `None` for artifacts that have never been accessed via cache reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_accessed_at: Option<String>,
 }
 
 /// Lifecycle state of a review artifact root.
@@ -303,6 +309,7 @@ pub fn materialize_artifact_root(
         created_at: Utc::now().to_rfc3339(),
         status: ReviewStatus::InProgress,
         cache_key,
+        last_accessed_at: None,
     };
     write_marker_to_path(&marker, &artifact.marker_path)?;
 
@@ -339,6 +346,17 @@ pub fn create_artifact_root(
 /// Update the artifact root's marker status to [`ReviewStatus::Completed`].
 pub fn write_marker_completed(root: &ReviewArtifactRoot) -> Result<(), ArtifactRootError> {
     update_marker_status(root, ReviewStatus::Completed)
+}
+
+/// Update `last_accessed_at` in the marker to the current UTC time.
+///
+/// Called on cache hits so that `--older-than` pruning measures last-use time
+/// rather than the original creation time.  Best-effort: errors are silently
+/// ignored by callers because a stale timestamp never corrupts the artifact.
+pub fn touch_marker_accessed(root: &ReviewArtifactRoot) -> Result<(), ArtifactRootError> {
+    let mut marker = read_marker(&root.marker_path)?;
+    marker.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
+    write_marker_to_path(&marker, &root.marker_path)
 }
 
 /// Update the artifact root's marker status to [`ReviewStatus::Quarantined`].

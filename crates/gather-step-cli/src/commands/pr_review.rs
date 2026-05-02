@@ -31,7 +31,8 @@ use crate::{
         artifact_root::{
             ArtifactRootError, MARKER_FILENAME, ReviewArtifactRoot, ReviewStatus,
             default_cache_root, generate_run_id, materialize_artifact_root, plan_artifact_root,
-            read_marker, workspace_hash, write_marker_completed, write_marker_quarantined,
+            read_marker, touch_marker_accessed, workspace_hash, write_marker_completed,
+            write_marker_quarantined,
         },
         cache::{compute_cache_key, is_cache_key_active, pick_seed_source, seed_artifact_root, try_reuse_cache},
         delta_report::{
@@ -61,6 +62,10 @@ use crate::{
 const MAX_CHANGED_FILES: usize = 200;
 
 #[derive(Args, Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "pr-review has several independent opt-in flag fields; a state machine would obscure intent"
+)]
 pub struct PrReviewArgs {
     #[command(subcommand)]
     pub command: Option<PrReviewSubcommand>,
@@ -122,6 +127,17 @@ pub struct PrReviewArgs {
     /// accepted with any format for scripting convenience.
     #[arg(long, value_name = "PATH")]
     pub github_comment_file: Option<PathBuf>,
+
+    /// Skip the check that verifies the workspace HEAD matches `--base`.
+    ///
+    /// By default, `pr-review` warns when the workspace's current HEAD differs
+    /// from the resolved base SHA, because the baseline index may then represent
+    /// the feature branch rather than the base ref.  Pass this flag when you
+    /// intentionally index from a different ref (e.g. in CI where the workspace
+    /// is always checked out at the feature branch and the base is accessed via
+    /// `--base`).
+    #[arg(long)]
+    pub no_baseline_check: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -310,6 +326,7 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 severity: effective_severity,
                 format: effective_format,
                 github_comment_file: args.github_comment_file,
+                no_baseline_check: args.no_baseline_check,
             };
 
             let (report, exceeded) = run_inner(app, &review_args)?;
@@ -339,6 +356,10 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
 ///
 /// Extracted from `PrReviewArgs` after confirming `--base` and `--head` are
 /// present.  Used internally so `run_inner` can still take typed fields.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors PrReviewArgs — each bool is an independent CLI flag; a state machine would obscure intent"
+)]
 pub struct PrReviewRunArgs {
     pub base: String,
     pub head: String,
@@ -355,6 +376,8 @@ pub struct PrReviewRunArgs {
     pub format: OutputFormat,
     /// If `Some`, write the GitHub-comment rendering to this path in addition to stdout.
     pub github_comment_file: Option<PathBuf>,
+    /// When `true`, suppress the workspace-HEAD-vs-base mismatch warning.
+    pub no_baseline_check: bool,
 }
 
 /// Internal result type for the cache-hit-or-cold-run branch in [`run_inner`].
@@ -398,6 +421,33 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let base_sha = resolved.base.sha.clone();
     let head_sha = resolved.head.sha.clone();
 
+    // ── 1b. Baseline-index coherence check ────────────────────────────────
+    // Warn (but do not abort) when the workspace HEAD differs from the resolved
+    // base SHA.  In that case the workspace's `.gather-step/storage` was most
+    // likely indexed against the feature branch, so baseline deltas will be
+    // empty or misleading.  Users who intentionally index from a different ref
+    // (e.g. CI) can suppress this with `--no-baseline-check`.
+    let mut baseline_warnings: Vec<String> = Vec::new();
+    if !args.no_baseline_check {
+        match gather_step_git::refs::resolve_ref(&app.workspace_path, "HEAD") {
+            Ok(ws_head) => {
+                let ws_short = &ws_head.sha[..ws_head.sha.len().min(12)];
+                let base_short = &base_sha[..base_sha.len().min(12)];
+                if ws_head.sha != base_sha {
+                    baseline_warnings.push(format!(
+                        "workspace HEAD {ws_short} does not match --base {base_short}; \
+                         the baseline index may not represent the base ref. \
+                         Re-run after `git checkout {base_short}` and `gather-step index` \
+                         for accurate deltas, or pass --no-baseline-check to suppress this warning."
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "could not resolve workspace HEAD for baseline check");
+            }
+        }
+    }
+
     // ── 2. Changed files ───────────────────────────────────────────────────
     let diff_base_sha = merge_base(&app.workspace_path, &base_sha, &head_sha)
         .with_context(|| format!("finding merge-base for `{base_sha}` and `{head_sha}`"))?;
@@ -435,6 +485,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // Try to reuse a prior completed artifact with the same cache key.
     // Cache reuse is independent of `keep_cache` — `keep_cache` controls
     // whether the CURRENT run's artifact is preserved after delta extraction.
+    let mut was_cache_hit = false;
     let outcome: RunOutcome =
         if let Some(hit_root) = try_reuse_cache(&cache_root, &cache_key_struct).unwrap_or_else(
             |e| {
@@ -443,6 +494,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             },
         ) {
             // Cache hit: skip worktree creation and indexing.
+            was_cache_hit = true;
             RunOutcome::CacheHit(hit_root)
         } else {
             // Cache miss: create a fresh artifact root, worktree, and index.
@@ -964,6 +1016,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             changed_repos,
             indexed_repos,
             elapsed_ms,
+            warnings: baseline_warnings,
         },
         safety: SafetyMetadata {
             baseline_registry_path: ws_paths.registry_path.clone(),
@@ -994,8 +1047,14 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let _ = write_marker_completed(&artifact_root);
 
     // ── 10. Cleanup ────────────────────────────────────────────────────────
-    if !args.keep_cache {
-        // Best-effort: remove the worktree then the artifact root.  Errors are
+    if was_cache_hit {
+        // Cache hit: NEVER delete on success.  The cached artifact exists for
+        // future reuse and is only wiped explicitly via `pr-review clean`.
+        // Update the access timestamp so `--older-than` pruning measures
+        // last-use time, not creation time.
+        let _ = touch_marker_accessed(&artifact_root);
+    } else if !args.keep_cache {
+        // Fresh run: remove the worktree then the artifact root.  Errors are
         // logged but do not fail the command — the marker is already Completed.
         // For cache-hit runs, worktree_opt is None — the worktree was created
         // by a prior run and must not be removed (the artifact may still be
@@ -1800,6 +1859,7 @@ mod tests {
             created_at,
             status,
             cache_key: None, // v1 marker — not eligible for cache reuse
+            last_accessed_at: None,
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -1851,6 +1911,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: true,
@@ -1912,6 +1973,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1977,6 +2039,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2041,6 +2104,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2101,6 +2165,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2158,6 +2223,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
+            last_accessed_at: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -2210,6 +2276,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
+            last_accessed_at: None,
         };
 
         // Write the marker INTO the baseline storage path so re-read works.
@@ -2281,6 +2348,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2343,6 +2411,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2380,6 +2449,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2422,6 +2492,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let _ = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2459,6 +2530,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let err = run_inner(&app, &args).expect_err("overlapping cache root must be rejected");
@@ -2495,6 +2567,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2542,6 +2615,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2647,6 +2721,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2711,6 +2786,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2768,6 +2844,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2858,6 +2935,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let (cold_rendered, _) = run_inner(&app, &args).expect("cold run must succeed");
         let mut cold: serde_json::Value =
@@ -2904,6 +2982,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
@@ -2955,6 +3034,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
@@ -2984,6 +3064,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let (second_rendered, _) = run_inner(&app, &args2).expect("second run must succeed");
         let second: serde_json::Value = serde_json::from_str(&second_rendered).unwrap();
@@ -3030,6 +3111,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None, // v1: no cache key
+            last_accessed_at: None,
         };
         let v1_json = serde_json::to_vec_pretty(&v1_marker).unwrap();
         fs::write(v1_root.join(MARKER_FILENAME), v1_json).unwrap();
@@ -3047,6 +3129,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let (rendered, _) = run_inner(&app, &args).expect("run must succeed");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -3103,6 +3186,7 @@ mod tests {
             created_at,
             status,
             cache_key,
+            last_accessed_at: None,
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -3183,6 +3267,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3277,6 +3362,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3348,6 +3434,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
+            no_baseline_check: false,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3386,6 +3473,7 @@ mod tests {
                 changed_repos: vec![],
                 indexed_repos: vec![],
                 elapsed_ms: 0,
+                warnings: vec![],
             },
             safety: SafetyMetadata {
                 baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
@@ -3579,6 +3667,7 @@ mod tests {
             severity: SeverityMode::Warn,
             format: OutputFormat::GithubComment,
             github_comment_file: Some(comment_path.clone()),
+            no_baseline_check: false,
         };
 
         let _ = run_inner(&app, &args).expect("run_inner should succeed");
@@ -3596,6 +3685,118 @@ mod tests {
         assert!(
             written.len() <= crate::pr_review::delta_report::GITHUB_COMMENT_LIMIT,
             "comment file must fit within GitHub's comment limit"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cleanup guard tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// A cache hit must NOT delete the artifact directory when `--keep-cache` is
+    /// not set.  The artifact must remain on disk for future reuse and should
+    /// only be removed by `pr-review clean`.
+    #[test]
+    fn cache_hit_does_not_delete_artifact_on_default_cleanup() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("cleanup-hit-ws");
+        let cache_tmp = TempDir::new("cleanup-hit-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+
+        // Cold run with keep_cache = true so the artifact is preserved.
+        let args_keep = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+        let (cold_rendered, _) = run_inner(&app, &args_keep).expect("cold run must succeed");
+        let cold_json: serde_json::Value =
+            serde_json::from_str(&cold_rendered).expect("cold JSON must parse");
+        let artifact_root_path = std::path::PathBuf::from(
+            cold_json["safety"]["review_root"]
+                .as_str()
+                .expect("review_root must be a string"),
+        );
+        assert!(
+            artifact_root_path.exists(),
+            "artifact must exist after cold run"
+        );
+
+        // Second run (cache hit) without keep_cache — must NOT delete the artifact.
+        let args_no_keep = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+        let _ = run_inner(&app, &args_no_keep).expect("cached run must succeed");
+
+        assert!(
+            artifact_root_path.exists(),
+            "artifact must still exist after a cache-hit run with default cleanup"
+        );
+    }
+
+    /// A cold run (cache miss) with default cleanup (no `--keep-cache`) must
+    /// still delete the artifact directory when done.  This guards against
+    /// regressions in the cleanup path.
+    #[test]
+    fn cache_miss_with_default_cleanup_still_deletes() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("cleanup-miss-ws");
+        let cache_tmp = TempDir::new("cleanup-miss-cache");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+
+        // Fresh run, no prior artifact — default cleanup should remove it.
+        let args = PrReviewRunArgs {
+            base: base_sha.clone(),
+            head: head_sha.clone(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+        let (rendered, _) = run_inner(&app, &args).expect("cold run must succeed");
+        let report: serde_json::Value =
+            serde_json::from_str(&rendered).expect("JSON must parse");
+        let artifact_root_path = std::path::PathBuf::from(
+            report["safety"]["review_root"]
+                .as_str()
+                .expect("review_root must be a string"),
+        );
+
+        assert!(
+            !artifact_root_path.exists(),
+            "artifact must be deleted after cold run with default cleanup (keep_cache=false)"
         );
     }
 }

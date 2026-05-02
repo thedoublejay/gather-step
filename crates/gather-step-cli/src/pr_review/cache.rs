@@ -232,6 +232,13 @@ pub fn pick_seed_source(
 ///
 /// Files are copied byte-for-byte; sub-directories are deep-copied.  Existing
 /// files in the target are overwritten.
+///
+/// # TODO(perf)
+///
+/// TODO(perf): copy only repos in the affected set (or use reflink/COW on
+/// supported filesystems). Today this deep-copies the whole workspace
+/// storage; on large monorepos this is the dominant cost of a cache miss.
+/// See PR 14 review feedback (2026-05-02).
 pub fn seed_artifact_root(
     seed: &SeedSource,
     target_artifact_root: &ReviewArtifactRoot,
@@ -407,6 +414,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status,
             cache_key: Some(key.clone()),
+            last_accessed_at: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -506,6 +514,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
+            last_accessed_at: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();

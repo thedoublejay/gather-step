@@ -425,6 +425,13 @@ pub struct ReviewMetadata {
     pub indexed_repos: Vec<String>,
     /// Wall-clock milliseconds spent running the review indexer.
     pub elapsed_ms: u64,
+    /// Advisory warnings generated during the review run.
+    ///
+    /// Non-fatal conditions (e.g. workspace HEAD not matching `--base`) are
+    /// collected here so the caller can surface them without aborting the run.
+    /// Empty in the common case; omitted from serialised output when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub warnings: Vec<String>,
 }
 
 /// Paths and identifiers describing the review artifact set.
@@ -711,6 +718,15 @@ impl DeltaReport {
         let mut buf = String::new();
 
         buf.push_str("# gather-step pr-review\n\n");
+
+        // Render warnings before everything else so they are not missed.
+        if !m.warnings.is_empty() {
+            buf.push_str("## Warnings\n\n");
+            for w in &m.warnings {
+                let _ = writeln!(buf, "> **Warning:** {w}");
+            }
+            buf.push('\n');
+        }
 
         buf.push_str("## Review metadata\n\n");
         let _ = writeln!(buf, "- **workspace:** `{}`", m.workspace.display());
@@ -1357,6 +1373,7 @@ mod tests {
                 changed_repos: vec![],
                 indexed_repos: vec![],
                 elapsed_ms: 0,
+                warnings: vec![],
             },
             safety: SafetyMetadata {
                 baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),
@@ -1605,6 +1622,7 @@ mod tests {
                 changed_repos: vec!["backend".to_owned()],
                 indexed_repos: vec!["backend".to_owned()],
                 elapsed_ms: 1234,
+                warnings: vec![],
             },
             safety: SafetyMetadata {
                 baseline_registry_path: std::path::PathBuf::from("/tmp/reg.json"),

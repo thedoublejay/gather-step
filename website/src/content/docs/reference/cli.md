@@ -754,22 +754,27 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The MVP report populates `metadata`, `safety`, `changed_files`, and `suggested_followups`. The `added_routes`, `added_symbols`, and `added_payload_contracts` fields are reserved for Phase 2 and are always empty arrays in this release.
+The report (`schema_version: 5`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`). Surfaces not supported by the active engine are listed in `unsupported_surfaces` and rendered with an informational note rather than an empty section.
 
 **Run a review**
 
 ```bash
 gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine <ENGINE>] \
-  [--keep-cache] [--json]
+  [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--base <REF>` | string | required | Base ref (branch, tag, SHA, or any git rev). |
 | `--head <REF>` | string | required | Head ref (branch, tag, SHA, `HEAD`, etc.). |
-| `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. Only `temp-index` is supported in this release. |
-| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Without this flag, successful runs delete the artifact directory on exit. |
-| `--json` | bool flag | false | Emit JSON output instead of Markdown. The global `--json` flag also works. |
+| `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. `temp-index` builds a full isolated index (default). `overlay` is experimental — does not yet emit diff data; use only for engine-trait testing. |
+| `--severity <MODE>` | enum | `warn` | `warn` always exits 0. `strict` exits 2 on High risks or incompatible payload type changes. `pedantic` exits 2 on any Medium+ risk, any payload change, or removed permission decorators. |
+| `--format <FORMAT>` | enum | `markdown` | `markdown` emits a human-readable Markdown report. `json` emits compact machine-readable JSON. `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit. `braingent` emits Markdown with YAML frontmatter for Braingent archival. |
+| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Cache-hit runs always keep their artifact regardless of this flag. |
+| `--github-comment-file <PATH>` | path | — | Write the GitHub-comment-formatted output to this file in addition to stdout. Accepted with any `--format` for scripting convenience. |
+| `--no-baseline-check` | bool flag | false | Suppress the warning emitted when the workspace HEAD does not match `--base`. Use in CI environments where the workspace is always checked out at the feature branch. |
+| `--json` | bool flag | false | **Deprecated.** Use `--format json` instead. Emits JSON output; equivalent to `--format json`. |
+| `--strict` | bool flag | false | **Deprecated.** Use `--severity strict` instead. |
 
 **Clean up review artifacts**
 

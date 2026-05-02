@@ -400,6 +400,7 @@ mod tests {
                 changed_repos: vec![],
                 indexed_repos: vec![],
                 elapsed_ms: 0,
+                warnings: vec![],
             },
             safety: SafetyMetadata {
                 baseline_registry_path: PathBuf::from("/tmp/reg.json"),

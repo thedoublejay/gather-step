@@ -140,6 +140,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status,
             cache_key: None,
+            last_accessed_at: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -281,6 +282,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
+            last_accessed_at: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
