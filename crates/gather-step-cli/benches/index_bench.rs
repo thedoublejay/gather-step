@@ -86,6 +86,62 @@ fn stage_fixture_workspace(name: &str) -> TempDir {
     temp
 }
 
+fn stage_synthetic_workspace(name: &str, repo_count: usize) -> TempDir {
+    const FIXTURE_REPOS: &[&str] = &[
+        "backend_standard",
+        "frontend_standard",
+        "shared_contracts",
+        "route_constants",
+        "auth_anchor_only",
+        "service_a",
+        "service_b",
+        "service_c",
+        "service_d",
+        "service_e",
+    ];
+
+    let temp = TempDir::new(name);
+    let fixture_workspace = fixture_root().join("workspace");
+    let target_workspace = temp.path().join("workspace");
+    fs::create_dir_all(&target_workspace).expect("synthetic workspace dir should exist");
+
+    let mut config = String::from("repos:\n");
+    for index in 0..repo_count {
+        let source_repo = FIXTURE_REPOS[index % FIXTURE_REPOS.len()];
+        let target_repo = format!("bench_{index:02}_{source_repo}");
+        copy_dir_all(
+            &fixture_workspace.join(source_repo),
+            &target_workspace.join(&target_repo),
+        );
+        config.push_str(&format!(
+            "  - name: {target_repo}\n    path: workspace/{target_repo}\n"
+        ));
+    }
+    config.push_str("indexing:\n  workspace_concurrency: 4\n");
+    fs::write(temp.path().join("gather-step.config.yaml"), config)
+        .expect("synthetic config should write");
+
+    temp
+}
+
+fn index_staged_workspace(workspace: &TempDir) {
+    let config_path = workspace.path().join("gather-step.config.yaml");
+    let config =
+        GatherStepConfig::from_yaml_file(&config_path).expect("fixture config should load");
+    let storage_root = workspace.path().join(".gather-step/storage");
+    fs::create_dir_all(&storage_root).expect("storage dir should exist");
+    let registry_path = workspace.path().join(".gather-step/registry.json");
+    let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+    index_workspace_with_storage(
+        &config,
+        workspace.path(),
+        &mut registry,
+        &storage_root,
+        IndexingOptions::default(),
+    )
+    .expect("fixture workspace should index");
+}
+
 fn bench_full_workspace_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("fixture_workspace_index");
     group.sample_size(10);
@@ -96,22 +152,17 @@ fn bench_full_workspace_index(c: &mut Criterion) {
         b.iter_batched(
             || stage_fixture_workspace("full-index"),
             |workspace| {
-                let config_path = workspace.path().join("gather-step.config.yaml");
-                let config = GatherStepConfig::from_yaml_file(&config_path)
-                    .expect("fixture config should load");
-                let storage_root = workspace.path().join(".gather-step/storage");
-                fs::create_dir_all(&storage_root).expect("storage dir should exist");
-                let registry_path = workspace.path().join(".gather-step/registry.json");
-                let mut registry =
-                    RegistryStore::open(&registry_path).expect("registry should open");
-                index_workspace_with_storage(
-                    &config,
-                    workspace.path(),
-                    &mut registry,
-                    &storage_root,
-                    IndexingOptions::default(),
-                )
-                .expect("fixture workspace should index");
+                index_staged_workspace(&workspace);
+                workspace
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    group.bench_function("cold_index_24_repos", |b| {
+        b.iter_batched(
+            || stage_synthetic_workspace("cold-index-24-repos", 24),
+            |workspace| {
+                index_staged_workspace(&workspace);
                 workspace
             },
             BatchSize::PerIteration,
