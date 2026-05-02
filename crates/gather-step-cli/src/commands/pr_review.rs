@@ -1395,7 +1395,7 @@ fn is_full_sha(s: &str) -> bool {
 
 /// Delete a single artifact root, enforcing all safety guards.
 ///
-/// 1. Re-reads the marker (refuses if missing/unparseable).
+/// 1. Re-reads the marker (refuses if missing/unparsable).
 /// 2. Checks `workspace_hash` matches.
 /// 3. Checks no overlap with baseline storage/registry.
 /// 4. Attempts worktree removal, then `remove_dir_all`.

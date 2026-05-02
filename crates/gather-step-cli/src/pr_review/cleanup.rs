@@ -26,7 +26,7 @@ pub struct ReviewCleanupReport {
     /// Number of artifact roots successfully removed.
     pub removed_count: usize,
     /// Artifacts skipped because their marker didn't match this workspace,
-    /// was unparseable, or overlapped a protected path.
+    /// was unparsable, or overlapped a protected path.
     pub skipped_count: usize,
     /// Total bytes freed (sum of artifact sizes for removed artifacts).
     pub freed_bytes: u64,
