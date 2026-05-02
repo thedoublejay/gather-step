@@ -51,7 +51,7 @@ use crate::{
             deployment::extract_deployment_deltas,
             events::extract_event_deltas,
             impact_attach::impact_for_node,
-            payload_contracts::extract_payload_contract_deltas,
+            payload_contracts::{extract_payload_contract_deltas, find_payload_contract_node_id},
             removed_surfaces::extract_removed_surface_risks,
             routes::{extract_route_deltas, find_route_node_id},
             symbols::{extract_symbol_deltas, find_symbol_node_id},
@@ -954,6 +954,49 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             repo = %repo,
                                             qn = %qn,
                                             "symbol node lookup failed for changed"
+                                        ),
+                                    }
+                                }
+                            }
+
+                            // ── Phase 3: attach impact to removed payload contracts ──
+                            // `PayloadContractDeltaChange` stores fields flat (no
+                            // `before: PayloadContractDelta` sub-struct), so impact for
+                            // changed contracts is carried via `before_impact` — a follow-up
+                            // schema addition.  For now we populate impact on `removed`
+                            // entries only, where `PayloadContractDelta.impact` is defined.
+                            let mut payload_contracts = payload_contracts;
+                            if !payload_contracts.unavailable {
+                                for c in &mut payload_contracts.removed {
+                                    match find_payload_contract_node_id(
+                                        baseline_coord.metadata(),
+                                        &c.repo,
+                                        &c.file,
+                                        &c.target_qualified_name,
+                                        &c.side,
+                                    ) {
+                                        Ok(Some(node_id)) => {
+                                            match impact_for_node(
+                                                baseline_coord.graph(),
+                                                node_id,
+                                                Some(&c.repo),
+                                            ) {
+                                                Ok(summary) => c.impact = Some(summary),
+                                                Err(e) => tracing::warn!(
+                                                    error = %e,
+                                                    repo = %c.repo,
+                                                    target = %c.target_qualified_name,
+                                                    "impact attachment failed for removed \
+                                                     payload contract"
+                                                ),
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            repo = %c.repo,
+                                            target = %c.target_qualified_name,
+                                            "payload contract node lookup failed"
                                         ),
                                     }
                                 }

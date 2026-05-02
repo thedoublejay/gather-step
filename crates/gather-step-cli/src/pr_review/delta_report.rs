@@ -207,6 +207,10 @@ pub struct PayloadContractDelta {
     /// `"producer"` or `"consumer"`.
     pub side: String,
     pub fields: Vec<PayloadFieldSummary>,
+    /// Downstream impact summary.  `None` for `added` contracts (no baseline
+    /// node).  Populated for `removed` and `changed` (before-view) contracts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<ImpactSummary>,
 }
 
 /// Compact field descriptor used in the PR-review report.
@@ -1116,6 +1120,15 @@ fn render_contract_section(buf: &mut String, heading: &str, contracts: &[Payload
             c.side,
             fields.join(", ")
         );
+        if let Some(imp) = &c.impact {
+            let _ = writeln!(
+                buf,
+                "↳ {} consumer(s) across {} repo(s){}",
+                imp.consumer_count,
+                imp.consumer_repos.len(),
+                if imp.truncated { " _(truncated)_" } else { "" }
+            );
+        }
     }
 }
 
