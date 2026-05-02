@@ -57,6 +57,7 @@ pub enum UnsupportedSurface {
     Events,
     Decorators,
     ContractAlignments,
+    Deployment,
 }
 
 impl UnsupportedSurface {
@@ -69,6 +70,7 @@ impl UnsupportedSurface {
             Self::Events => "events",
             Self::Decorators => "decorators",
             Self::ContractAlignments => "contract_alignments",
+            Self::Deployment => "deployment",
         }
     }
 }
@@ -221,6 +223,7 @@ impl ReviewEngineImpl for OverlayEngine {
                 UnsupportedSurface::Events,
                 UnsupportedSurface::Decorators,
                 UnsupportedSurface::ContractAlignments,
+                UnsupportedSurface::Deployment,
             ],
             total_repos: 0,
         })
@@ -450,6 +453,10 @@ mod tests {
         assert!(
             surfaces.contains(&UnsupportedSurface::ContractAlignments),
             "overlay must mark ContractAlignments unsupported"
+        );
+        assert!(
+            surfaces.contains(&UnsupportedSurface::Deployment),
+            "overlay must mark Deployment unsupported"
         );
     }
 }

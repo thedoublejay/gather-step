@@ -754,7 +754,9 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 5`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`). Surfaces not supported by the active engine are listed in `unsupported_surfaces` and rendered with an informational note rather than an empty section.
+The report (`schema_version: 6`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Surfaces not supported by the active engine are listed in `unsupported_surfaces` and rendered with an informational note rather than an empty section.
+
+The `deployment` surface (added in `schema_version: 6`) captures changes to deployment topology: added, removed, and changed deployment targets (services, containers, lambdas, static sites), env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`service`, `container`, `lambda`, `static-site`, or `unknown`) and whether env-var bindings changed between the base and head refs. When the active engine does not support deployment indexing, the `deployment` surface is reported as unsupported and skipped.
 
 **Run a review**
 

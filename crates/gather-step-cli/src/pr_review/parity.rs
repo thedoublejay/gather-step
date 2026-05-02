@@ -365,16 +365,16 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::pr_review::delta_report::{
-        CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
-        PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata, RiskSeverity, RouteDelta,
-        RouteDeltas, SafetyMetadata, SymbolDeltas,
+        CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, DeploymentDeltas,
+        EventDeltas, PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata, RiskSeverity,
+        RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
     };
 
     use super::compare_for_parity;
 
     fn empty_report() -> DeltaReport {
         DeltaReport {
-            schema_version: 5,
+            schema_version: 6,
             metadata: ReviewMetadata {
                 workspace: PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -406,6 +406,7 @@ mod tests {
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),
             decorators: DecoratorDeltas::default(),
+            deployment: DeploymentDeltas::default(),
             suggested_followups: vec![],
             unsupported_surfaces: vec![],
         }

@@ -7,9 +7,11 @@
 //! Tasks 3-6 implement `symbols`, `payload_contracts`, `events`, and
 //! `removed_surfaces`.
 //! Phase 3 Tasks 3+4 add `contract_alignment` and `decorators`.
+//! Phase 7 adds `deployment`.
 
 pub mod contract_alignment;
 pub mod decorators;
+pub mod deployment;
 pub mod events;
 pub mod impact_attach;
 pub mod payload_contracts;

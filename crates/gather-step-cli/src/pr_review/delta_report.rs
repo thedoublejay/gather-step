@@ -14,6 +14,9 @@
 //! Phase 5 Tasks 3+4 add per-surface `unavailable` flags so each delta struct
 //! self-describes whether it was computed or skipped.  `schema_version` is
 //! bumped to 5.
+//!
+//! Phase 7 adds deployment-topology delta extraction.  `schema_version` is
+//! bumped to 6.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -42,6 +45,9 @@ pub struct DeltaReport {
     // ── Phase 3 additions ────────────────────────────────────────────────────
     pub contract_alignments: ContractAlignments,
     pub decorators: DecoratorDeltas,
+
+    // ── Phase 7 additions ────────────────────────────────────────────────────
+    pub deployment: DeploymentDeltas,
 
     pub suggested_followups: Vec<SuggestedCommand>,
 
@@ -399,6 +405,119 @@ pub struct DecoratorDeltaChange {
     pub args_changed: bool,
 }
 
+// ─── Deployment-topology deltas (Phase 7) ────────────────────────────────────
+
+/// Added / removed / changed deployment-topology nodes.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DeploymentDeltas {
+    pub deployments: DeploymentSurfaceDeltas,
+    pub env_vars: EnvVarDeltas,
+    pub secrets: NameOnlyDeltas,
+    pub config_maps: NameOnlyDeltas,
+    pub brokers: NameOnlyDeltas,
+    pub databases: NameOnlyDeltas,
+    pub workflow_jobs: WorkflowJobDeltas,
+    /// `true` when the engine cannot compute these deltas.
+    #[serde(default)]
+    pub unavailable: bool,
+}
+
+/// Added / removed / changed deployment surface nodes.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DeploymentSurfaceDeltas {
+    pub added: Vec<DeploymentDelta>,
+    pub removed: Vec<DeploymentDelta>,
+    pub changed: Vec<DeploymentDeltaChange>,
+}
+
+/// One deployment node as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeploymentDelta {
+    /// Artifact kind string: `"dockerfile"`, `"compose"`, `"kubernetes"`,
+    /// `"kustomize"`, `"helm"`, `"github_actions"`, or `"unknown"`.
+    /// Inferred from `file_path` heuristics.
+    pub kind: String,
+    pub name: String,
+    pub repo: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Associated service name when a `DeployedAs` edge links a Service to
+    /// this Deployment (or None when no such edge is present).
+    pub service: Option<String>,
+    /// Container image reference if the deployment emits one via evidence
+    /// (not stored in `NodeData` directly — always `None` for now).
+    pub image: Option<String>,
+}
+
+/// A deployment node present in both snapshots whose key fields changed.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeploymentDeltaChange {
+    pub kind: String,
+    pub name: String,
+    pub repo: String,
+    pub before: DeploymentDelta,
+    pub after: DeploymentDelta,
+    pub image_changed: bool,
+    /// `true` when the set of env vars associated with this deployment differs.
+    pub env_changed: bool,
+}
+
+/// Added / removed env vars and consumer-set changes.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct EnvVarDeltas {
+    pub added: Vec<EnvVarDelta>,
+    pub removed: Vec<EnvVarDelta>,
+    /// Variables present in both snapshots with a different `consumed_by` set.
+    pub consumer_changes: Vec<EnvVarConsumerChange>,
+}
+
+/// One env var node as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnvVarDelta {
+    pub name: String,
+    pub repo: String,
+    /// `"secret"` | `"config_map"` | `"literal"` | `"env_file"` — not yet
+    /// stored in `NodeData`; always `None`.
+    pub source_kind: Option<String>,
+    /// Name of the deployment this var is attached to (via a `ReadsEnv` edge).
+    pub deployment: Option<String>,
+}
+
+/// Consumer-set delta for an env var that appears in both snapshots.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnvVarConsumerChange {
+    pub name: String,
+    /// Qualified names of services/deployments that newly read this var.
+    pub consumers_added: Vec<String>,
+    /// Qualified names of services/deployments that no longer read this var.
+    pub consumers_removed: Vec<String>,
+}
+
+/// Simple name-only added / removed sets (secrets, config maps, brokers, databases).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct NameOnlyDeltas {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// Added / removed GitHub Actions workflow jobs.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct WorkflowJobDeltas {
+    pub added: Vec<WorkflowJobDelta>,
+    pub removed: Vec<WorkflowJobDelta>,
+}
+
+/// One workflow job as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkflowJobDelta {
+    /// Path to the workflow file (e.g. `.github/workflows/deploy.yml`).
+    pub workflow: String,
+    pub job_name: String,
+    pub repo: String,
+    /// Deployment target name when inferable from a `BuiltBy` edge.
+    pub deploy_target: Option<String>,
+}
+
 // ─── Other shared types ───────────────────────────────────────────────────────
 
 /// Review run metadata emitted in every delta report.
@@ -650,7 +769,7 @@ impl DeltaReport {
         let _ = writeln!(buf, "head: {} ({})", m.head_input, m.head_sha);
         let _ = writeln!(buf, "reviewed_at: {reviewed_at}");
         let _ = writeln!(buf, "gather_step_version: {}", env!("CARGO_PKG_VERSION"));
-        buf.push_str("schema_version: 5\n");
+        buf.push_str("schema_version: 6\n");
         let _ = writeln!(buf, "risk_count_high: {high_count}");
         let _ = writeln!(buf, "risk_count_medium: {medium_count}");
         let _ = writeln!(buf, "risk_count_low: {low_count}");
@@ -862,6 +981,13 @@ impl DeltaReport {
             render_decorator_section(&mut buf, "New decorators", &self.decorators.added);
             render_decorator_section(&mut buf, "Removed decorators", &self.decorators.removed);
             render_decorator_changed_section(&mut buf, &self.decorators.changed);
+        }
+
+        // ── Deployment topology ───────────────────────────────────────────────
+        if self.deployment.unavailable {
+            render_unavailable_section(&mut buf, "Deployment topology", "overlay");
+        } else {
+            render_deployment_topology_section(&mut buf, &self.deployment);
         }
 
         buf.push_str("\n## Suggested follow-up commands\n\n");
@@ -1225,6 +1351,144 @@ fn render_decorator_changed_section(buf: &mut String, changes: &[DecoratorDeltaC
     }
 }
 
+fn render_deployment_topology_section(buf: &mut String, d: &DeploymentDeltas) {
+    let _ = writeln!(buf, "\n## Deployment topology\n");
+
+    // ── Deployments ──────────────────────────────────────────────────────────
+    let _ = writeln!(buf, "### Deployments added\n");
+    if d.deployments.added.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Kind | Name | Repo | File | Service |\n");
+        buf.push_str("|------|------|------|------|---------|\n");
+        for dep in &d.deployments.added {
+            let file = dep.file.as_deref().unwrap_or("—");
+            let service = dep.service.as_deref().unwrap_or("—");
+            let _ = writeln!(
+                buf,
+                "| {} | `{}` | {} | {} | {} |",
+                dep.kind, dep.name, dep.repo, file, service
+            );
+        }
+    }
+    buf.push('\n');
+
+    let _ = writeln!(buf, "### Deployments removed\n");
+    if d.deployments.removed.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Kind | Name | Repo | File | Service |\n");
+        buf.push_str("|------|------|------|------|---------|\n");
+        for dep in &d.deployments.removed {
+            let file = dep.file.as_deref().unwrap_or("—");
+            let service = dep.service.as_deref().unwrap_or("—");
+            let _ = writeln!(
+                buf,
+                "| {} | `{}` | {} | {} | {} |",
+                dep.kind, dep.name, dep.repo, file, service
+            );
+        }
+    }
+    buf.push('\n');
+
+    let _ = writeln!(buf, "### Deployments changed\n");
+    if d.deployments.changed.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Name | Repo | Image changed | Env changed |\n");
+        buf.push_str("|------|------|---------------|-------------|\n");
+        for c in &d.deployments.changed {
+            let _ = writeln!(
+                buf,
+                "| `{}` | {} | {} | {} |",
+                c.name,
+                c.repo,
+                if c.image_changed { "yes" } else { "no" },
+                if c.env_changed { "yes" } else { "no" },
+            );
+        }
+    }
+    buf.push('\n');
+
+    // ── Env vars ─────────────────────────────────────────────────────────────
+    let _ = writeln!(buf, "### Env vars added\n");
+    if d.env_vars.added.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Name | Repo | Deployment |\n");
+        buf.push_str("|------|------|------------|\n");
+        for v in &d.env_vars.added {
+            let dep = v.deployment.as_deref().unwrap_or("—");
+            let _ = writeln!(buf, "| `{}` | {} | {} |", v.name, v.repo, dep);
+        }
+    }
+    buf.push('\n');
+
+    let _ = writeln!(buf, "### Env vars removed\n");
+    if d.env_vars.removed.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Name | Repo | Deployment |\n");
+        buf.push_str("|------|------|------------|\n");
+        for v in &d.env_vars.removed {
+            let dep = v.deployment.as_deref().unwrap_or("—");
+            let _ = writeln!(buf, "| `{}` | {} | {} |", v.name, v.repo, dep);
+        }
+    }
+    buf.push('\n');
+
+    // ── Name-only surfaces ────────────────────────────────────────────────────
+    for (label, deltas) in [
+        ("Secrets", &d.secrets),
+        ("Config maps", &d.config_maps),
+        ("Brokers", &d.brokers),
+        ("Databases", &d.databases),
+    ] {
+        let _ = writeln!(buf, "### {label}\n");
+        if deltas.added.is_empty() && deltas.removed.is_empty() {
+            buf.push_str("_no changes_\n");
+        } else {
+            if !deltas.added.is_empty() {
+                buf.push_str("**Added:**\n");
+                for name in &deltas.added {
+                    let _ = writeln!(buf, "- `{name}`");
+                }
+            }
+            if !deltas.removed.is_empty() {
+                buf.push_str("**Removed:**\n");
+                for name in &deltas.removed {
+                    let _ = writeln!(buf, "- `{name}`");
+                }
+            }
+        }
+        buf.push('\n');
+    }
+
+    // ── Workflow jobs ─────────────────────────────────────────────────────────
+    let _ = writeln!(buf, "### Workflow jobs added\n");
+    if d.workflow_jobs.added.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Workflow | Job | Repo |\n");
+        buf.push_str("|----------|-----|------|\n");
+        for j in &d.workflow_jobs.added {
+            let _ = writeln!(buf, "| {} | `{}` | {} |", j.workflow, j.job_name, j.repo);
+        }
+    }
+    buf.push('\n');
+
+    let _ = writeln!(buf, "### Workflow jobs removed\n");
+    if d.workflow_jobs.removed.is_empty() {
+        buf.push_str("_no changes_\n");
+    } else {
+        buf.push_str("| Workflow | Job | Repo |\n");
+        buf.push_str("|----------|-----|------|\n");
+        for j in &d.workflow_jobs.removed {
+            let _ = writeln!(buf, "| {} | `{}` | {} |", j.workflow, j.job_name, j.repo);
+        }
+    }
+}
+
 fn format_loc(file: Option<&str>, line: Option<u32>) -> String {
     match (file, line) {
         (Some(f), Some(l)) => format!(" ({f}:{l})"),
@@ -1422,6 +1686,7 @@ mod tests {
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),
             decorators: DecoratorDeltas::default(),
+            deployment: DeploymentDeltas::default(),
             suggested_followups: vec![],
             unsupported_surfaces: vec![],
         }
@@ -1448,6 +1713,7 @@ mod tests {
                 "changed_files_truncated",
                 "contract_alignments",
                 "decorators",
+                "deployment",
                 "events",
                 "metadata",
                 "payload_contracts",
@@ -1468,6 +1734,19 @@ mod tests {
         let report = make_empty_report(5);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["schema_version"], 5);
+    }
+
+    /// The canonical schema version is 6 (deployment-topology deltas added).
+    #[test]
+    fn schema_version_is_6() {
+        let report = make_empty_report(6);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["schema_version"], 6);
+        // Confirm the `deployment` key is present.
+        assert!(
+            json.as_object().unwrap().contains_key("deployment"),
+            "schema_version 6 report must include the `deployment` key"
+        );
     }
 
     // ── follow-up command helpers ─────────────────────────────────────────────
@@ -1787,6 +2066,45 @@ mod tests {
                 }],
                 unavailable: false,
             },
+            deployment: DeploymentDeltas {
+                deployments: DeploymentSurfaceDeltas {
+                    added: vec![DeploymentDelta {
+                        kind: "dockerfile".to_owned(),
+                        name: "api".to_owned(),
+                        repo: "backend".to_owned(),
+                        file: Some("Dockerfile".to_owned()),
+                        line: None,
+                        service: Some("api".to_owned()),
+                        image: None,
+                    }],
+                    removed: vec![],
+                    changed: vec![],
+                },
+                env_vars: EnvVarDeltas {
+                    added: vec![EnvVarDelta {
+                        name: "DATABASE_URL".to_owned(),
+                        repo: "backend".to_owned(),
+                        source_kind: None,
+                        deployment: Some("api".to_owned()),
+                    }],
+                    removed: vec![],
+                    consumer_changes: vec![],
+                },
+                secrets: NameOnlyDeltas::default(),
+                config_maps: NameOnlyDeltas::default(),
+                brokers: NameOnlyDeltas::default(),
+                databases: NameOnlyDeltas::default(),
+                workflow_jobs: WorkflowJobDeltas {
+                    added: vec![WorkflowJobDelta {
+                        workflow: ".github/workflows/deploy.yml".to_owned(),
+                        job_name: "deploy".to_owned(),
+                        repo: "backend".to_owned(),
+                        deploy_target: None,
+                    }],
+                    removed: vec![],
+                },
+                unavailable: false,
+            },
             suggested_followups: vec![],
             unsupported_surfaces: vec![],
         }
@@ -1815,6 +2133,7 @@ mod tests {
                 "changed_files_truncated",
                 "contract_alignments",
                 "decorators",
+                "deployment",
                 "events",
                 "metadata",
                 "payload_contracts",
@@ -1901,6 +2220,7 @@ mod tests {
                 "## New decorators",
                 "## Removed decorators",
                 "## Changed decorators",
+                "## Deployment topology",
                 "## Suggested follow-up commands",
             ]
         );
@@ -1995,7 +2315,7 @@ mod tests {
             "braingent frontmatter must include type: code-review"
         );
         assert!(
-            out.contains("schema_version: 5"),
+            out.contains("schema_version: 6"),
             "braingent frontmatter must include schema_version"
         );
     }

@@ -39,15 +39,16 @@ use crate::{
             try_reuse_cache,
         },
         delta_report::{
-            CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
-            GITHUB_COMMENT_LIMIT, PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas,
-            SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, DeploymentDeltas,
+            EventDeltas, GITHUB_COMMENT_LIMIT, PayloadContractDeltas, ReviewMetadata, RiskSeverity,
+            RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
             synthesize_review_pack_commands,
         },
-        engine::{OverlayEngine, ReviewEngineImpl, TempIndexEngine},
+        engine::{OverlayEngine, ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
         extract::{
             contract_alignment::extract_contract_alignments,
             decorators::extract_decorator_deltas,
+            deployment::extract_deployment_deltas,
             events::extract_event_deltas,
             impact_attach::impact_for_node,
             payload_contracts::extract_payload_contract_deltas,
@@ -697,6 +698,9 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let events_unavailable = unsupported.iter().any(|s| s == "events");
     let decorators_unavailable = unsupported.iter().any(|s| s == "decorators");
     let contract_alignments_unavailable = unsupported.iter().any(|s| s == "contract_alignments");
+    let deployment_unavailable = unsupported
+        .iter()
+        .any(|s| s == UnsupportedSurface::Deployment.as_str());
 
     let (
         route_deltas,
@@ -706,6 +710,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         surface_risks,
         contract_alignments,
         decorator_deltas,
+        deployment_deltas,
     ) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
         if baseline_graph_exists {
@@ -1000,6 +1005,29 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             };
 
+                            // ── Phase 7: deployment topology deltas ──────────
+                            let deployment_deltas = if deployment_unavailable {
+                                DeploymentDeltas {
+                                    unavailable: true,
+                                    ..DeploymentDeltas::default()
+                                }
+                            } else {
+                                match extract_deployment_deltas(
+                                    baseline_coord.graph(),
+                                    review_coord.graph(),
+                                ) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "deployment delta extraction failed; \
+                                             emitting empty deltas"
+                                        );
+                                        DeploymentDeltas::default()
+                                    }
+                                }
+                            };
+
                             (
                                 routes,
                                 symbols,
@@ -1008,6 +1036,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 risks,
                                 contract_alignments,
                                 decorator_deltas,
+                                deployment_deltas,
                             )
                         }
                         Err(e) => {
@@ -1024,6 +1053,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 vec![],
                                 ContractAlignments::default(),
                                 DecoratorDeltas::default(),
+                                DeploymentDeltas::default(),
                             )
                         }
                     }
@@ -1042,6 +1072,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         vec![],
                         ContractAlignments::default(),
                         DecoratorDeltas::default(),
+                        DeploymentDeltas::default(),
                     )
                 }
             }
@@ -1059,6 +1090,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 vec![],
                 ContractAlignments::default(),
                 DecoratorDeltas::default(),
+                DeploymentDeltas::default(),
             )
         }
     };
@@ -1089,6 +1121,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         ("events", event_deltas.unavailable),
         ("decorators", decorator_deltas.unavailable),
         ("contract_alignments", contract_alignments.unavailable),
+        ("deployment", deployment_deltas.unavailable),
     ]
     .into_iter()
     .filter(|&(_, unavailable)| unavailable)
@@ -1096,7 +1129,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .collect();
 
     let report = DeltaReport {
-        schema_version: 5,
+        schema_version: 6,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -1128,6 +1161,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         removed_surface_risks: surface_risks,
         contract_alignments,
         decorators: decorator_deltas,
+        deployment: deployment_deltas,
         suggested_followups,
         unsupported_surfaces: derived_unsupported_surfaces,
     };
@@ -3551,12 +3585,13 @@ mod tests {
     // ── Phase 6 Task 4: severity threshold tests ──────────────────────────────
 
     use crate::pr_review::delta_report::{
-        PayloadContractDeltaChange, PayloadFieldSummary, PayloadFieldTypeChange, RemovedSurfaceRisk,
+        DeploymentDeltas, PayloadContractDeltaChange, PayloadFieldSummary, PayloadFieldTypeChange,
+        RemovedSurfaceRisk,
     };
 
     fn make_delta_report_empty() -> DeltaReport {
         DeltaReport {
-            schema_version: 5,
+            schema_version: 6,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -3588,6 +3623,7 @@ mod tests {
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),
             decorators: DecoratorDeltas::default(),
+            deployment: DeploymentDeltas::default(),
             suggested_followups: vec![],
             unsupported_surfaces: vec![],
         }
