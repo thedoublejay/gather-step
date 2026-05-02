@@ -1,4 +1,4 @@
-//! `DiffOverlayStore` — Phase 5 Task 2 prototype.
+//! `DiffOverlayStore` — read-only graph diff overlay.
 //!
 //! A read-only [`GraphStore`] implementation that layers added/changed/removed
 //! nodes and edges over an immutable baseline `GraphStore` without mutating it.
@@ -68,6 +68,44 @@ impl<'a, S: GraphStore> DiffOverlayStore<'a, S> {
         }
     }
 
+    /// Build an overlay by diffing all graph nodes and outgoing edges in
+    /// `review` against `baseline`.
+    pub fn from_graphs<R: GraphStore>(
+        baseline: &'a S,
+        review: &R,
+    ) -> Result<Self, GraphStoreError> {
+        let baseline_nodes = collect_nodes(baseline)?;
+        let review_nodes = collect_nodes(review)?;
+        let baseline_edges = collect_edges(baseline, &baseline_nodes)?;
+        let review_edges = collect_edges(review, &review_nodes)?;
+
+        let mut overlay = Self::new(baseline);
+
+        for (id, review_node) in &review_nodes {
+            match baseline_nodes.get(id) {
+                Some(baseline_node) if baseline_node == review_node => {}
+                Some(_) => overlay.change_node(review_node.clone()),
+                None => overlay.add_node(review_node.clone()),
+            }
+        }
+
+        for id in baseline_nodes.keys() {
+            if !review_nodes.contains_key(id) {
+                overlay.remove_node(*id);
+            }
+        }
+
+        for edge in review_edges.difference(&baseline_edges) {
+            overlay.add_edge(edge.clone());
+        }
+
+        for edge in baseline_edges.difference(&review_edges) {
+            overlay.remove_edge(edge.source, edge.target, edge.kind);
+        }
+
+        Ok(overlay)
+    }
+
     /// Record a node that exists in the PR but not in the baseline.
     pub fn add_node(&mut self, node: NodeData) {
         self.added_nodes.insert(node.id, node);
@@ -112,6 +150,29 @@ impl<'a, S: GraphStore> DiffOverlayStore<'a, S> {
             .chain(self.changed_nodes.values())
             .filter(move |n| n.kind == kind)
     }
+}
+
+fn collect_nodes<S: GraphStore>(store: &S) -> Result<FxHashMap<NodeId, NodeData>, GraphStoreError> {
+    let mut nodes = FxHashMap::default();
+    for &kind in NodeKind::all() {
+        for node in store.nodes_by_type(kind)? {
+            nodes.insert(node.id, node);
+        }
+    }
+    Ok(nodes)
+}
+
+fn collect_edges<S: GraphStore>(
+    store: &S,
+    nodes: &FxHashMap<NodeId, NodeData>,
+) -> Result<FxHashSet<EdgeData>, GraphStoreError> {
+    let mut edges = FxHashSet::default();
+    for id in nodes.keys() {
+        for edge in store.get_outgoing(*id)? {
+            edges.insert(edge);
+        }
+    }
+    Ok(edges)
 }
 
 // ─── GraphStore impl ──────────────────────────────────────────────────────────
@@ -370,6 +431,22 @@ mod tests {
         }
     }
 
+    fn file_node(repo: &str, file: &str) -> NodeData {
+        NodeData {
+            id: node_id(repo, file, NodeKind::File, file),
+            kind: NodeKind::File,
+            repo: repo.to_owned(),
+            file_path: file.to_owned(),
+            name: file.to_owned(),
+            qualified_name: Some(format!("{repo}::{file}")),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+        }
+    }
+
     fn make_edge(source: NodeId, target: NodeId) -> gather_step_core::EdgeData {
         gather_step_core::EdgeData {
             source,
@@ -474,6 +551,71 @@ mod tests {
                 .iter()
                 .any(|e| e.source == src.id && e.target == tgt.id),
             "overlay added edge must appear in get_incoming(target)"
+        );
+    }
+
+    #[test]
+    fn overlay_from_graphs_layers_node_and_edge_diffs() {
+        let baseline = open_baseline();
+        let review = open_baseline();
+
+        let mut common_v1 = function_node("repo", "src/f.ts", "common");
+        common_v1.signature = Some("common(): v1".to_owned());
+        let mut common_v2 = common_v1.clone();
+        common_v2.signature = Some("common(): v2".to_owned());
+
+        let owner_file = file_node("repo", "src/f.ts");
+        let removed = function_node("repo", "src/g.ts", "removed");
+        let added = function_node("repo", "src/h.ts", "added");
+
+        let mut removed_edge = make_edge(common_v1.id, removed.id);
+        removed_edge.owner_file = owner_file.id;
+        let mut added_edge = make_edge(common_v2.id, added.id);
+        added_edge.owner_file = owner_file.id;
+
+        baseline
+            .insert_node(&owner_file)
+            .expect("insert owner file");
+        baseline.insert_node(&common_v1).expect("insert common v1");
+        baseline.insert_node(&removed).expect("insert removed");
+        baseline
+            .insert_edge(&removed_edge)
+            .expect("insert removed edge");
+
+        review.insert_node(&owner_file).expect("insert owner file");
+        review.insert_node(&common_v2).expect("insert common v2");
+        review.insert_node(&added).expect("insert added");
+        review.insert_edge(&added_edge).expect("insert added edge");
+
+        let overlay = DiffOverlayStore::from_graphs(&baseline, &review).expect("build overlay");
+
+        let common = overlay
+            .get_node(common_v1.id)
+            .expect("get common")
+            .expect("common should exist");
+        assert_eq!(common.signature.as_deref(), Some("common(): v2"));
+
+        assert!(
+            overlay.get_node(removed.id).expect("get removed").is_none(),
+            "removed baseline node should be tombstoned"
+        );
+        assert!(
+            overlay
+                .nodes_by_type(NodeKind::Function)
+                .expect("functions")
+                .iter()
+                .any(|node| node.id == added.id),
+            "added review node should be visible"
+        );
+
+        let outgoing = overlay.get_outgoing(common_v1.id).expect("outgoing");
+        assert!(
+            outgoing.iter().any(|edge| edge.target == added.id),
+            "added review edge should be visible"
+        );
+        assert!(
+            outgoing.iter().all(|edge| edge.target != removed.id),
+            "removed baseline edge should be tombstoned"
         );
     }
 }

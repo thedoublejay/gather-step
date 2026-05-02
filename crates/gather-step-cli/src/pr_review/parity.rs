@@ -2,9 +2,8 @@
 //!
 //! Phase 5 Task 4: an automated check that the overlay engine matches the
 //! temp-index engine output for every supported surface.  Implemented as a
-//! deterministic comparator used by unit tests; a fixture-driven end-to-end
-//! test is included but gated with `#[ignore]` until overlay extraction is
-//! wired (Phase 5 follow-up).
+//! deterministic comparator used by unit tests plus a graph-backed parity
+//! fixture for overlay reads.
 
 use crate::pr_review::delta_report::DeltaReport;
 
@@ -362,12 +361,26 @@ fn compare_risk_lists(a: &[RemovedSurfaceRisk], b: &[RemovedSurfaceRisk], diffs:
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+        time::SystemTime,
+    };
+
+    use gather_step_core::{
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, Visibility, node_id,
+        route_qn, virtual_node,
+    };
+    use gather_step_storage::{GraphStore, GraphStoreDb};
 
     use crate::pr_review::delta_report::{
         CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, DeploymentDeltas,
         EventDeltas, PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata, RiskSeverity,
         RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
+    };
+    use crate::pr_review::{
+        extract::routes::extract_route_deltas, overlay::store::DiffOverlayStore,
     };
 
     use super::compare_for_parity;
@@ -422,6 +435,121 @@ mod tests {
             handler_qualified_name: None,
             impact: None,
         }
+    }
+
+    static STORE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempStore {
+        path: PathBuf,
+    }
+
+    impl TempStore {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempStore {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn open_store(label: &str) -> (TempStore, GraphStoreDb) {
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let counter = STORE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "gs-parity-{label}-{}-{nanos}-{counter}.redb",
+            std::process::id()
+        ));
+        let tmp = TempStore { path };
+        let db = GraphStoreDb::open(tmp.path()).expect("store should open");
+        (tmp, db)
+    }
+
+    fn file_node(repo: &str, path: &str) -> NodeData {
+        NodeData {
+            id: node_id(repo, path, NodeKind::File, path),
+            kind: NodeKind::File,
+            repo: repo.to_owned(),
+            file_path: path.to_owned(),
+            name: path.to_owned(),
+            qualified_name: Some(format!("{repo}::{path}")),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+        }
+    }
+
+    fn handler_node(repo: &str, file: &str, name: &str, line: u32) -> NodeData {
+        NodeData {
+            id: node_id(repo, file, NodeKind::Function, name),
+            kind: NodeKind::Function,
+            repo: repo.to_owned(),
+            file_path: file.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(format!("{repo}::{name}")),
+            external_id: None,
+            signature: Some(format!("{name}(): void")),
+            visibility: Some(Visibility::Public),
+            span: Some(SourceSpan {
+                line_start: line,
+                line_len: 10,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+        }
+    }
+
+    fn route_node(method: &str, path: &str) -> NodeData {
+        let qn = route_qn(method, path);
+        virtual_node(
+            NodeKind::Route,
+            "__virtual__",
+            "__virtual__",
+            format!("{method} {path}"),
+            qn,
+        )
+    }
+
+    fn serves_edge(handler: &NodeData, route: &NodeData, owner_file: &NodeData) -> EdgeData {
+        EdgeData {
+            source: handler.id,
+            target: route.id,
+            kind: EdgeKind::Serves,
+            metadata: EdgeMetadata {
+                confidence: Some(900),
+                ..EdgeMetadata::default()
+            },
+            owner_file: owner_file.id,
+            is_cross_file: true,
+        }
+    }
+
+    fn insert_route(
+        store: &GraphStoreDb,
+        repo: &str,
+        file: &str,
+        handler_name: &str,
+        method: &str,
+        path: &str,
+        line: u32,
+    ) {
+        let route_suffix = path.replace('/', "_");
+        let unique_file = format!("{file}.{method}.{route_suffix}.route");
+        let f = file_node(repo, &unique_file);
+        let h = handler_node(repo, file, handler_name, line);
+        let r = route_node(method, path);
+        let e = serves_edge(&h, &r, &f);
+        store
+            .bulk_insert(&[f, h, r], &[e])
+            .expect("bulk insert should succeed");
     }
 
     // ── Test 1: identical routes → match ──────────────────────────────────────
@@ -529,19 +657,66 @@ mod tests {
         );
     }
 
-    // ── End-to-end fixture test (Phase 5 follow-up) ────────────────────────────
+    // ── Graph-backed fixture test ────────────────────────────────────────────
 
     #[test]
-    #[ignore = "Phase 5 follow-up: enable when DiffOverlayStore-backed extraction is wired"]
     fn overlay_engine_matches_temp_index_on_route_fixture() {
-        // Run both engines on the same 2-commit fixture, compare.
-        //
-        // Sketch (to be filled in when overlay extraction lands):
-        //
-        //   let fixture = prepare_two_commit_fixture();
-        //   let ti_report = run_with_engine(&fixture, ReviewEngine::TempIndex);
-        //   let ov_report = run_with_internal_overlay_engine(&fixture);
-        //   let diff = compare_for_parity(&ti_report, &ov_report);
-        //   assert!(diff.is_match(), "{:?}", diff.differences);
+        let (_baseline_tmp, baseline) = open_store("baseline");
+        let (_review_tmp, review) = open_store("review");
+
+        insert_route(
+            &baseline,
+            "api",
+            "src/routes.rs",
+            "list_orders",
+            "GET",
+            "/orders",
+            10,
+        );
+        insert_route(
+            &baseline,
+            "api",
+            "src/routes.rs",
+            "delete_order",
+            "DELETE",
+            "/orders/:id",
+            40,
+        );
+
+        insert_route(
+            &review,
+            "api",
+            "src/routes.rs",
+            "list_orders_v2",
+            "GET",
+            "/orders",
+            20,
+        );
+        insert_route(
+            &review,
+            "api",
+            "src/routes.rs",
+            "create_order",
+            "POST",
+            "/orders",
+            30,
+        );
+
+        let overlay = DiffOverlayStore::from_graphs(&baseline, &review).expect("build overlay");
+
+        let mut temp_index_report = empty_report();
+        temp_index_report.routes =
+            extract_route_deltas(&baseline, &review).expect("temp-index route deltas");
+
+        let mut overlay_report = empty_report();
+        overlay_report.routes =
+            extract_route_deltas(&baseline, &overlay).expect("overlay route deltas");
+
+        let diff = compare_for_parity(&temp_index_report, &overlay_report);
+        assert!(
+            diff.is_match(),
+            "overlay route deltas must match temp-index route deltas: {:?}",
+            diff.differences
+        );
     }
 }

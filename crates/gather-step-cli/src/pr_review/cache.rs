@@ -17,6 +17,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::Command;
+
 use anyhow::{Context, Result};
 use gather_step_git::refs::resolve_ref;
 
@@ -232,27 +235,23 @@ pub fn pick_seed_source(
 /// Copy `registry.json` and the `storage/` tree from `seed` into
 /// `target_artifact_root`.
 ///
-/// Files are copied byte-for-byte; sub-directories are deep-copied.  Existing
-/// files in the target are overwritten.
-///
-/// # TODO(perf)
-///
-/// TODO(perf): copy only repos in the affected set (or use reflink/COW on
-/// supported filesystems). Today this deep-copies the whole workspace
-/// storage; on large monorepos this is the dominant cost of a cache miss.
-/// See PR 14 review feedback (2026-05-02).
+/// Files are first copied with filesystem clone / copy-on-write support where
+/// available, then fall back to byte-for-byte copies. Sub-directories are
+/// deep-copied and existing files in the target are overwritten.
 pub fn seed_artifact_root(
     seed: &SeedSource,
     target_artifact_root: &ReviewArtifactRoot,
 ) -> Result<()> {
     // Copy registry.json.
-    std::fs::copy(&seed.registry_path, &target_artifact_root.registry_path).with_context(|| {
-        format!(
-            "copying seed registry from `{}` to `{}`",
-            seed.registry_path.display(),
-            target_artifact_root.registry_path.display()
-        )
-    })?;
+    copy_file_fast(&seed.registry_path, &target_artifact_root.registry_path).with_context(
+        || {
+            format!(
+                "copying seed registry from `{}` to `{}`",
+                seed.registry_path.display(),
+                target_artifact_root.registry_path.display()
+            )
+        },
+    )?;
 
     // Deep-copy storage/ tree.
     copy_dir_all(&seed.storage_root, &target_artifact_root.storage_root).with_context(|| {
@@ -278,11 +277,58 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
         if file_type.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else if file_type.is_file() {
-            std::fs::copy(&src_path, &dst_path)?;
+            copy_file_fast(&src_path, &dst_path)?;
         }
         // Symlinks are intentionally skipped — review storage never uses them.
     }
     Ok(())
+}
+
+fn copy_file_fast(src: &Path, dst: &Path) -> io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if try_clone_file(src, dst)? {
+        return Ok(());
+    }
+
+    std::fs::copy(src, dst)?;
+    Ok(())
+}
+
+fn try_clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("/bin/cp").arg("-c").arg(src).arg(dst).status();
+        match status {
+            Ok(status) if status.success() => Ok(true),
+            Ok(_) => Ok(false),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = Command::new("cp")
+            .arg("--reflink=auto")
+            .arg(src)
+            .arg(dst)
+            .status();
+        match status {
+            Ok(status) if status.success() => Ok(true),
+            Ok(_) => Ok(false),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (src, dst);
+        Ok(false)
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -744,6 +790,77 @@ mod tests {
         assert!(
             artifact_root.storage_root.join("meta.db").is_file(),
             "meta.db should be deep-copied"
+        );
+    }
+
+    #[test]
+    fn seed_artifact_root_overwrites_target_with_independent_copy() {
+        let ws_tmp = TempDir::new("seed-ws5");
+        let cache_tmp = TempDir::new("seed-cache5");
+
+        let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
+        write_indexed_workspace(ws_tmp.path(), config_bytes);
+
+        let storage = ws_tmp.path().join(".gather-step/storage");
+        fs::write(storage.join("meta.db"), b"seed-metadata").unwrap();
+        fs::write(
+            ws_tmp.path().join(".gather-step/registry.json"),
+            b"{\"seed\":true}",
+        )
+        .unwrap();
+
+        let seed = SeedSource {
+            registry_path: ws_tmp.path().join(".gather-step/registry.json"),
+            storage_root: storage.clone(),
+        };
+
+        let key = compute_cache_key(ws_tmp.path(), "base", "head", config_bytes);
+        let artifact = write_cached_artifact(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "seed-test-overwrite",
+            &key,
+            ReviewStatus::InProgress,
+        );
+        fs::write(artifact.join("registry.json"), b"{\"old\":true}").unwrap();
+        fs::write(artifact.join("storage").join("meta.db"), b"old-metadata").unwrap();
+
+        let artifact_root = ReviewArtifactRoot {
+            root: artifact.clone(),
+            workspace_root: ws_tmp.path().to_path_buf(),
+            worktree_root: artifact.join("worktree"),
+            registry_path: artifact.join("registry.json"),
+            storage_root: artifact.join("storage"),
+            reports_dir: artifact.join("reports"),
+            logs_dir: artifact.join("logs"),
+            marker_path: artifact.join(MARKER_FILENAME),
+            run_id: "seed-test-overwrite".to_owned(),
+            workspace_hash: workspace_hash(ws_tmp.path()),
+        };
+
+        seed_artifact_root(&seed, &artifact_root).expect("seed_artifact_root must not err");
+
+        assert_eq!(
+            fs::read(&artifact_root.registry_path).unwrap(),
+            b"{\"seed\":true}"
+        );
+        assert_eq!(
+            fs::read(artifact_root.storage_root.join("meta.db")).unwrap(),
+            b"seed-metadata"
+        );
+
+        fs::write(&seed.registry_path, b"{\"seed\":false}").unwrap();
+        fs::write(storage.join("meta.db"), b"changed-source").unwrap();
+
+        assert_eq!(
+            fs::read(&artifact_root.registry_path).unwrap(),
+            b"{\"seed\":true}",
+            "target registry should not alias the source after copy"
+        );
+        assert_eq!(
+            fs::read(artifact_root.storage_root.join("meta.db")).unwrap(),
+            b"seed-metadata",
+            "target storage file should not alias the source after copy"
         );
     }
 }

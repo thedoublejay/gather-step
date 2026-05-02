@@ -190,6 +190,7 @@ fn single_decorator_from_swc(
         name,
         arguments,
         raw,
+        span: Some(span_from_swc(decorator.span(), offsets)),
     }
 }
 

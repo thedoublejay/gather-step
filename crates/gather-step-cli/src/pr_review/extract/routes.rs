@@ -33,7 +33,10 @@ type HandlerInfo = (Option<String>, Option<String>, Option<u32>, Option<String>)
 ///
 /// If `baseline` is an empty / never-indexed store every review route is
 /// reported as `added` — no error is returned.
-pub fn extract_route_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<RouteDeltas> {
+pub fn extract_route_deltas<B: GraphStore, R: GraphStore>(
+    baseline: &B,
+    review: &R,
+) -> Result<RouteDeltas> {
     let baseline_map = build_route_map(baseline)?;
     let review_map = build_route_map(review)?;
 

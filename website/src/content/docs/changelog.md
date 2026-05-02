@@ -70,16 +70,16 @@ Combined release covering deployment-topology indexing and `gather-step pr-revie
 - **Impact summaries**: per-removed-and-changed surface, downstream consumer counts grouped by repo and classified as `read_only`, `write_mutate`, `construct_payload`, or `unknown`.
 - **Suggested follow-ups**: synthesized `gather-step pack` and `gather-step trace crud` commands targeting the highest-impact deltas. Capped at 10 commands; all carry `--registry` / `--storage` overrides for the kept review index.
 
-### PR Review Mode — known limitations
+### PR Review Mode — implementation notes
 
-- The overlay engine remains an internal prototype. It is not exposed as a public `pr-review --engine` option until `DiffOverlayStore`-backed extraction reaches parity with `temp-index`.
-- `seed_artifact_root` deep-copies the entire workspace `storage/` even when the affected set is a small subset. Reflink / COW or per-repo seeding is the planned optimization.
-- Decorator extraction surfaces decorator nodes by name but yields thin payload data unless the parser emits `UsesDecorator` edges.
+- The public review engine remains `temp-index`; internal overlay reads now build a `DiffOverlayStore` from baseline/review graph snapshots and have an active parity fixture against temp-index route deltas.
+- Review seed copying attempts filesystem clone / copy-on-write first (`cp -c` on macOS, `cp --reflink=auto` on Linux) and falls back to byte copying. Because the current graph, metadata, and search stores are monolithic files, seed scope remains the full storage tree.
+- Decorator extraction stores raw decorator arguments, decorator-line spans, and `UsesDecorator` edges from the decorated class or method to the decorator node.
 
 ### Verification Coverage
 
 - Added regression coverage for deployment parser false positives, stale deployment fact purging, service-targeted projection-impact topology matching, shared-infra consumers, topology response mapping, and generated MCP tool summaries.
-- 127 `pr_review` library tests covering storage-context safety guards, artifact-root marker schema and cleanup, branch-scoped cache reuse and parity, seed-from-baseline, affected-repo expansion, every delta extractor, severity threshold modes, output renderers (Markdown / JSON / GitHub-comment / Braingent), and the MCP-side wiring.
+- 148 `pr_review` library tests covering storage-context safety guards, artifact-root marker schema and cleanup, branch-scoped cache reuse and parity, seed-from-baseline, affected-repo expansion, every delta extractor, severity threshold modes, output renderers (Markdown / JSON / GitHub-comment / Braingent), and the MCP-side wiring.
 - 8 git-helpers tests for `resolve_ref`, `resolve_range`, `merge_base`, `changed_files`, and detached-worktree creation / removal.
 - 5 worktree-helpers tests confirming target-exists refusal, missing-repo errors, and idempotent removal.
 - Stable JSON top-level-key snapshots and Markdown section-header snapshots prevent accidental schema drift.
