@@ -1009,9 +1009,17 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "pr_review",
-        description = "Build a disposable review index for a PR branch and return the delta report. \
+        description = "Use this tool when the user asks to review a pull request, do a structural PR review, \
+            check what a PR changed, or analyze cross-repo impact of a branch — including phrases like \
+            'review this PR', 'review the PR using gather-step', 'do a code review with gather-step', \
+            'what does this PR change', or 'analyze the impact of branch X'. \
+            Builds a disposable review index for the PR head, diffs it against the workspace baseline, \
+            and returns a structured DeltaReport (routes, symbols, payload contracts, events, decorators, \
+            contract alignments, removed-surface risks, deployment topology, and impact summaries). \
+            The workspace storage is never mutated — the review runs in a separate disposable artifact root. \
             Requires the `gather-step` binary to be on PATH or in the same directory as the MCP server. \
-            The workspace storage is never mutated — the review runs in a separate disposable artifact root.",
+            First runs take ~30-90 seconds because a fresh review index is built; subsequent runs against \
+            the same SHAs reuse the cache.",
         annotations(read_only_hint = true)
     )]
     pub async fn pr_review_tool(
