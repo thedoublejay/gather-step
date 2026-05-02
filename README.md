@@ -176,7 +176,10 @@ gather-step --workspace /path/to/workspace generate codeowners
 gather-step --workspace /path/to/workspace setup-mcp --scope local
 gather-step --workspace /path/to/workspace compact
 gather-step --workspace /path/to/workspace watch
+gather-step --workspace /path/to/workspace pr-review --base main --head feature/my-branch --json
 ```
+
+`pr-review` builds an isolated review index for a PR branch and emits a structured delta report covering changed files, safety signals, and suggested follow-up commands. See [CLI reference](website/src/content/docs/reference/cli.md#pr-review) for the full flag list.
 
 ## Security
 

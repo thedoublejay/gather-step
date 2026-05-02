@@ -794,6 +794,8 @@ fn run_impact_for_scenario(
         storage,
         scenario.repo.as_deref(),
         ImpactArgs {
+            registry: None,
+            storage: None,
             symbol: scenario.target.qn.clone(),
             limit: 20,
         },

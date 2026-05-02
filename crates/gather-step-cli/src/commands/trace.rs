@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 use gather_step_mcp::tools::crud_trace::{CrudTraceRequest, crud_trace_tool};
@@ -5,10 +7,15 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
 pub struct TraceArgs {
+    #[arg(long, help = "Read symbol registry JSON from this path")]
+    pub registry: Option<PathBuf>,
+    #[arg(long, help = "Read storage artifacts from this directory")]
+    pub storage: Option<PathBuf>,
     #[command(subcommand)]
     pub command: TraceCommand,
 }
@@ -31,13 +38,28 @@ pub struct CrudArgs {
 }
 
 pub fn run(app: &AppContext, args: TraceArgs) -> Result<()> {
+    if args.registry.is_some() || args.storage.is_some() {
+        let ctx = StorageContext::workspace_read_only_with_overrides(
+            app,
+            args.registry.clone(),
+            args.storage.clone(),
+        );
+        return run_rendered(app, &ctx, args)?.emit(&app.output());
+    }
+
     let request = daemon_request(&args, app);
-    daemon_proxy::run_read_only_command(app, &request, move |app| run_rendered(app, args))
+    daemon_proxy::run_read_only_command(app, &request, move |app| {
+        run_rendered(app, &StorageContext::workspace_read_only(app), args)
+    })
 }
 
-pub(crate) fn run_rendered(app: &AppContext, args: TraceArgs) -> Result<RenderedCommand> {
+pub(crate) fn run_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: TraceArgs,
+) -> Result<RenderedCommand> {
     match args.command {
-        TraceCommand::Crud(args) => run_crud_rendered(app, args),
+        TraceCommand::Crud(args) => run_crud_rendered(app, ctx, args),
     }
 }
 
@@ -53,12 +75,13 @@ fn daemon_request(args: &TraceArgs, app: &AppContext) -> DaemonRequest {
     }
 }
 
-fn run_crud_rendered(app: &AppContext, args: CrudArgs) -> Result<RenderedCommand> {
-    let ctx = gather_step_mcp::McpContext::open(gather_step_mcp::McpServerConfig::new(
-        app.workspace_paths().registry_path,
-        app.workspace_paths().graph_path,
-    ))?;
-    execute_crud(&ctx, app.repo_filter.as_deref(), args)
+fn run_crud_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: CrudArgs,
+) -> Result<RenderedCommand> {
+    let mcp = gather_step_mcp::McpContext::open(ctx.mcp_server_config())?;
+    execute_crud(&mcp, app.repo_filter.as_deref(), args)
 }
 
 pub(crate) fn execute_crud(

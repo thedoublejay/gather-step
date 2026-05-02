@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
@@ -94,14 +95,20 @@ struct BlastRadiusNodeOutput {
 
 pub fn run(app: &AppContext, args: EventsArgs) -> Result<()> {
     let request = daemon_request(&args, app);
-    daemon_proxy::run_read_only_command(app, &request, move |app| run_rendered(app, args))
+    daemon_proxy::run_read_only_command(app, &request, move |app| {
+        run_rendered(app, &StorageContext::workspace_read_only(app), args)
+    })
 }
 
-pub(crate) fn run_rendered(app: &AppContext, args: EventsArgs) -> Result<RenderedCommand> {
+pub(crate) fn run_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: EventsArgs,
+) -> Result<RenderedCommand> {
     match args.command {
-        EventsCommand::Trace(args) => run_trace_rendered(app, &args),
-        EventsCommand::BlastRadius(args) => run_blast_radius_rendered(app, &args),
-        EventsCommand::Orphans(args) => run_orphans_rendered(app, &args),
+        EventsCommand::Trace(args) => run_trace_rendered(app, ctx, &args),
+        EventsCommand::BlastRadius(args) => run_blast_radius_rendered(app, ctx, &args),
+        EventsCommand::Orphans(args) => run_orphans_rendered(app, ctx, &args),
     }
 }
 
@@ -125,8 +132,12 @@ fn daemon_request(args: &EventsArgs, app: &AppContext) -> DaemonRequest {
     }
 }
 
-fn run_trace_rendered(app: &AppContext, args: &TraceArgs) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+fn run_trace_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: &TraceArgs,
+) -> Result<RenderedCommand> {
+    let storage = ctx.open_storage_coordinator()?;
     execute_trace(&storage, app.repo_filter.as_deref(), args)
 }
 
@@ -224,8 +235,12 @@ pub(crate) fn execute_trace(
     Ok(RenderedCommand::success(json!(payload), lines))
 }
 
-fn run_blast_radius_rendered(app: &AppContext, args: &BlastRadiusArgs) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+fn run_blast_radius_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: &BlastRadiusArgs,
+) -> Result<RenderedCommand> {
+    let storage = ctx.open_storage_coordinator()?;
     execute_blast_radius(&storage, app.repo_filter.as_deref(), args)
 }
 
@@ -302,8 +317,12 @@ struct OrphanOutput {
     severity: String,
 }
 
-fn run_orphans_rendered(app: &AppContext, args: &OrphansArgs) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+fn run_orphans_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: &OrphansArgs,
+) -> Result<RenderedCommand> {
+    let storage = ctx.open_storage_coordinator()?;
     execute_orphans(&storage, app.repo_filter.as_deref(), args)
 }
 

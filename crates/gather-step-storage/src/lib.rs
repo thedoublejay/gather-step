@@ -162,6 +162,17 @@ impl StorageCoordinator {
 
     /// Open a coordinator with a **read-only** Tantivy search store.
     ///
+    /// Use this for read-only commands (e.g. search, status) that must not
+    /// hold a Tantivy write lock. The graph and metadata stores are still
+    /// opened read-write; only the search index is read-only.
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, StorageCoordinatorError> {
+        Ok(Self::from_stores(WorkspaceStores::open_read_only_search(
+            root,
+        )?))
+    }
+
+    /// Open a coordinator with a **read-only** Tantivy search store.
+    ///
     /// The graph and metadata stores are opened read-write. Any attempt to
     /// write to the search index (e.g. inside `reconcile_search`) will fail
     /// with [`SearchStoreError::ReadOnly`], which surfaces as

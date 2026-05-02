@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.4.0"
+version = "3.0.0"
 authors = ["JJ Adonis"]
 edition = "2024"
 rust-version = "1.94.1"
@@ -24,12 +24,12 @@ homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "2.4.0" }
-gather-step-core = { path = "crates/gather-step-core", version = "2.4.0" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "2.4.0" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "2.4.0" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "2.4.0" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "2.4.0" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "3.0.0" }
+gather-step-core = { path = "crates/gather-step-core", version = "3.0.0" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "3.0.0" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "3.0.0" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "3.0.0" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "3.0.0" }
 
 tree-sitter = "=0.26.8"
 tree-sitter-typescript = "0.23.2"
@@ -58,6 +58,8 @@ serde_norway = "0.9.42"
 toml = "1.1.2"
 bitcode = "0.6.9"
 blake3 = "1.8.4"
+dirs = "5"
+rand = "0.9"
 subtle = "2.6.1"
 ignore = "0.4.25"
 globset = "0.4.18"

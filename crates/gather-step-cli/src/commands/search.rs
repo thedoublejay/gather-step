@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
@@ -52,12 +53,17 @@ pub fn run(app: &AppContext, args: SearchArgs) -> Result<()> {
             kind: args.kind.clone(),
             repo_filter: app.repo_filter.clone(),
         },
-        move |app| run_rendered(app, args),
+        move |app| run_rendered(app, &StorageContext::workspace_read_only(app), args),
     )
 }
 
-pub(crate) fn run_rendered(app: &AppContext, args: SearchArgs) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)
+pub(crate) fn run_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: SearchArgs,
+) -> Result<RenderedCommand> {
+    let storage = ctx
+        .open_storage_coordinator()
         .context("opening workspace-local storage")?;
     execute(&storage, app.repo_filter.as_deref(), args)
 }
@@ -189,5 +195,42 @@ fn parse_kind(value: &str) -> Option<NodeKind> {
         "convention" => Some(NodeKind::Convention),
         "service" => Some(NodeKind::Service),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `run_rendered` consults the injected `StorageContext` rather than the
+    /// app's `workspace_paths()` default.  A successful search response with
+    /// `event=search_completed` proves context injection is honoured.
+    #[test]
+    fn search_runs_against_explicit_storage_context() {
+        let (ctx, _workspace) =
+            crate::test_helpers::indexed_fixture("search-ctx-inject", "pr-test-search");
+        let app = crate::test_helpers::test_app(ctx.workspace_root().to_path_buf());
+
+        let rendered = run_rendered(
+            &app,
+            &ctx,
+            SearchArgs {
+                query: "OrderService".to_owned(),
+                limit: 5,
+                kind: None,
+            },
+        )
+        .expect("search::run_rendered should succeed");
+
+        let payload = rendered
+            .payload
+            .as_ref()
+            .expect("search should produce a JSON payload");
+
+        assert_eq!(
+            payload["event"].as_str(),
+            Some("search_completed"),
+            "search payload should have event=search_completed, got: {payload}"
+        );
     }
 }

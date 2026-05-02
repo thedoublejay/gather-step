@@ -142,3 +142,7 @@ The result is a complete, cross-repo picture of the event's reach before a singl
 The event topology feature is strong on NestJS-style decorator patterns, which is where the extraction rules are most developed. Coverage for other messaging frameworks depends on which rule packs are active in your workspace.
 
 Dynamic topic names — topics computed at runtime rather than declared as string literals in decorators — remain unresolved rather than guessed. The graph represents what can be determined with confidence from static analysis. Dynamic patterns show up as unresolved inputs in `gather-step doctor` output.
+
+## See Also
+
+Event topology and deployment topology intersect at shared infrastructure: brokers and queues that appear in both the event graph (as `Topic` / `Queue` virtual nodes with producer and consumer edges) and in deployment config (as `shared_infra` nodes derived from Docker Compose, Kubernetes, and similar manifests). The `shared_infra` MCP tool returns those runtime-adjacent infrastructure names; the `trace_event` tool returns the code-level producer and consumer graph. For a walkthrough of the deployment side, see [Operator workflows — Review a PR](/guides/operator-workflows/) and the [PR review guide](/guides/pr-review/).

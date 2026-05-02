@@ -194,6 +194,7 @@ After setup, the assistant chooses the right Gather Step tools automatically. Fo
 - “Who consumes `order.created`?”
 - “What repos are affected if I change this shared type?”
 - “Give me a review-oriented context pack for `createOrder`.”
+- “Review this PR using gather-step.” (triggers the `pr_review` MCP tool automatically)
 
 The person using the assistant does not need to invoke `trace_route`, `trace_event`, or `planning_pack` directly unless they want to inspect the graph from the terminal.
 
@@ -264,4 +265,5 @@ gather-step --workspace /path/to/workspace compact
 - [Workspace setup](/guides/workspace-setup/) for config and indexing depth
 - [MCP clients](/guides/mcp-clients/) for Claude Code, Cursor, and generic MCP setup
 - [Operator workflows](/guides/operator-workflows/) for direct CLI usage
+- [PR review guide](/guides/pr-review/) to run a structural cross-repo review on a branch before merge
 - [MCP tools reference](/reference/mcp-tools/) for the automatic tool surface

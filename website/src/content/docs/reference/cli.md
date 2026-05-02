@@ -45,6 +45,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`tui`](#tui) — Open the opt-in full-screen workspace dashboard.
 - [`setup-mcp`](#setup-mcp) — Register workspace-pinned Claude MCP settings.
 - [`serve`](#serve) — Start the stdio MCP server.
+- [`pr-review`](#pr-review) — Build an isolated review index for a PR branch and emit a delta report.
 
 ## Command details
 
@@ -163,7 +164,7 @@ Deletes the workspace-local registry and storage directory. This is a destructiv
 Path overrides must stay inside the workspace-local `.gather-step/` directory. Attempts to point `--registry` or `--storage` outside that root are rejected.
 
 ```bash
-gather-step [GLOBAL FLAGS] clean [--registry <PATH>] [--storage <PATH>] [--yes]
+gather-step [GLOBAL FLAGS] clean [--registry <PATH>] [--storage <PATH>] [--yes] [--include-review]
 ```
 
 | Flag | Type | Default | Description |
@@ -171,11 +172,13 @@ gather-step [GLOBAL FLAGS] clean [--registry <PATH>] [--storage <PATH>] [--yes]
 | `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Override the workspace-local registry path. Must stay inside `.gather-step/`. |
 | `--storage <PATH>` | path | `<workspace>/.gather-step/storage` | Override the workspace-local storage directory. Must stay inside `.gather-step/`. |
 | `--yes`, `-y` | bool flag | false | Skip the interactive confirmation prompt. Required when `--json` is active. |
+| `--include-review` | bool flag | false | Also wipe all `pr-review` artifact directories for this workspace (OS cache dir). Without this flag, review artifacts kept with `--keep-cache` are not touched. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace clean --yes
+gather-step --workspace /path/to/workspace clean --yes --include-review
 ```
 
 **Output shape (`--json`)** — emits one line:
@@ -184,7 +187,7 @@ gather-step --workspace /path/to/workspace clean --yes
 {"event":"clean_completed","registry_path":"...","storage_root":"..."}
 ```
 
-**When to use** — before a full re-clone, or to free disk space when the workspace is no longer active.
+**When to use** — before a full re-clone, or to free disk space when the workspace is no longer active. Pass `--include-review` to also remove any kept `pr-review` caches.
 
 ---
 
@@ -310,8 +313,8 @@ gather-step --workspace /path/to/workspace --repo backend_standard search OrderS
 Traces a route-backed CRUD flow by resolving the route entry point and walking the graph to surface frontend callers, backend handlers, continuation nodes, entities, and database hints. Accepts either a `(method, path)` pair or a direct `symbol_id`. Both cannot be provided at the same time.
 
 ```bash
-gather-step [GLOBAL FLAGS] trace crud --method <METHOD> --path <ROUTE_PATH> [--limit <N>]
-gather-step [GLOBAL FLAGS] trace crud --symbol-id <SYMBOL_ID> [--limit <N>]
+gather-step [GLOBAL FLAGS] trace [--registry <PATH>] [--storage <PATH>] crud --method <METHOD> --path <ROUTE_PATH> [--limit <N>]
+gather-step [GLOBAL FLAGS] trace [--registry <PATH>] [--storage <PATH>] crud --symbol-id <SYMBOL_ID> [--limit <N>]
 ```
 
 | Flag | Type | Default | Description |
@@ -320,6 +323,8 @@ gather-step [GLOBAL FLAGS] trace crud --symbol-id <SYMBOL_ID> [--limit <N>]
 | `--path <ROUTE_PATH>` | string | — | Route path, e.g. `/orders`. Required when `--method` is provided. |
 | `--symbol-id <SYMBOL_ID>` | string | — | Stable hex symbol ID as the trace entry point. Mutually exclusive with `--method`/`--path`. |
 | `--limit <N>` | usize | 25 | Maximum matches per result section (callers, handlers, continuation, entities, database hints). |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. Used by `pr-review --keep-cache` follow-up commands. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. Used by `pr-review --keep-cache` follow-up commands. |
 
 **Example**
 
@@ -415,13 +420,15 @@ gather-step --workspace /path/to/workspace events orphans --limit 50
 Searches for symbols matching a name, then for each matching symbol follows its outgoing edges to find virtual nodes (routes, topics, shared symbols). For each virtual node it traces which repos are reachable, producing a cross-repo impact summary.
 
 ```bash
-gather-step [GLOBAL FLAGS] impact <SYMBOL> [--limit <N>]
+gather-step [GLOBAL FLAGS] impact [--registry <PATH>] [--storage <PATH>] <SYMBOL> [--limit <N>]
 ```
 
 | Argument/Flag | Type | Default | Description |
 |---|---|---|---|
 | `<SYMBOL>` | string (positional) | required | Symbol name to inspect. Used as a search query. |
 | `--limit <N>` | usize | 20 | Maximum search candidates to inspect. |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. Used by `pr-review --keep-cache` follow-up commands. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. Used by `pr-review --keep-cache` follow-up commands. |
 
 **Example**
 
@@ -504,7 +511,7 @@ gather-step --workspace /path/to/workspace deployment-topology env-var-consumers
 Returns a bounded context pack for a target symbol. A pack is a ranked, budget-capped bundle of the most relevant symbols, semantic bridges, suggested next steps, and unresolved gaps for a specific task mode. Context packs are precomputed for the top two symbols per repo during `index`, so pack retrieval is fast.
 
 ```bash
-gather-step [GLOBAL FLAGS] pack <TARGET> [--mode <MODE>] [--limit <N>] [--depth <N>] [--budget-bytes <N>]
+gather-step [GLOBAL FLAGS] pack [--registry <PATH>] [--storage <PATH>] <TARGET> [--mode <MODE>] [--limit <N>] [--depth <N>] [--budget-bytes <N>]
 ```
 
 | Argument/Flag | Type | Default | Description |
@@ -514,6 +521,8 @@ gather-step [GLOBAL FLAGS] pack <TARGET> [--mode <MODE>] [--limit <N>] [--depth 
 | `--limit <N>` | usize | 6 | Maximum ranked items to include in the pack. |
 | `--depth <N>` | usize | 2 | Traversal depth for caller and callee context. |
 | `--budget-bytes <N>` | usize | — | Optional response byte budget override. When the pack exceeds this limit, items are trimmed from the tail. |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. Used by `pr-review --keep-cache` follow-up commands. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. Used by `pr-review --keep-cache` follow-up commands. |
 
 **Example**
 
@@ -738,6 +747,79 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 ```
 
 **When to use** — to connect an MCP-capable AI assistant such as Claude Code to an indexed workspace. Add `--watch` during active development when you want one process to serve MCP and keep the index fresh.
+
+---
+
+### `pr-review`
+
+Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
+
+The report (`schema_version: 7`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
+
+The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
+
+**Run a review**
+
+```bash
+gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine temp-index] \
+  [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--base <REF>` | string | required | Base ref (branch, tag, SHA, or any git rev). |
+| `--head <REF>` | string | required | Head ref (branch, tag, SHA, `HEAD`, etc.). |
+| `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. `temp-index` builds a full isolated index. This flag is retained for forward-compatible engine selection; no alternate public engine is currently exposed. |
+| `--severity <MODE>` | enum | `warn` | `warn` always exits 0. `strict` exits 2 on High risks or incompatible payload type changes. `pedantic` exits 2 on any Medium+ risk, any payload change, or removed permission decorators. |
+| `--format <FORMAT>` | enum | `markdown` | `markdown` emits a human-readable Markdown report. `json` emits compact machine-readable JSON. `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit. `braingent` emits Markdown with YAML frontmatter for Braingent archival. |
+| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Cache hits are available when a retained matching artifact already exists. |
+| `--github-comment-file <PATH>` | path | — | Write the GitHub-comment-formatted output to this file in addition to stdout. Accepted with any `--format` for scripting convenience. |
+| `--no-baseline-check` | bool flag | false | Suppress the warning emitted when the workspace HEAD does not match `--base`. Use in CI environments where the workspace is always checked out at the feature branch. |
+| `--json` | bool flag | false | **Deprecated.** Use `--format json` instead. Emits JSON output; equivalent to `--format json`. |
+| `--strict` | bool flag | false | **Deprecated.** Use `--severity strict` instead. |
+
+**Clean up review artifacts**
+
+```bash
+gather-step [GLOBAL FLAGS] pr-review clean --dry-run
+gather-step [GLOBAL FLAGS] pr-review clean --run-id <ID>
+gather-step [GLOBAL FLAGS] pr-review clean --base <REF> --head <REF>
+gather-step [GLOBAL FLAGS] pr-review clean --older-than <DURATION>
+gather-step [GLOBAL FLAGS] pr-review clean --all
+```
+
+Exactly one selector must be given. Combine `--dry-run` with any selector to preview without deleting.
+
+| Flag | Type | Description |
+|---|---|---|
+| `--dry-run` | bool flag | List artifacts that would be deleted; delete nothing. |
+| `--run-id <ID>` | string | Delete the artifact directory for one explicit run ID. Removes `InProgress` artifacts when explicitly targeted. |
+| `--base <REF>` | string | Delete artifacts whose recorded base ref matches this ref. Must be used together with `--head`. |
+| `--head <REF>` | string | Delete artifacts whose recorded head ref matches this ref. Must be used together with `--base`. |
+| `--older-than <DURATION>` | string | Delete completed, failed, and quarantined artifacts older than this duration. Format: `<n><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`. Skips `InProgress` artifacts to avoid racing a live indexing run. |
+| `--all` | bool flag | Delete every review artifact for this workspace, including `InProgress` ones. |
+
+**Examples**
+
+```bash
+# Run a review and print a Markdown report
+gather-step --workspace /path/to/workspace pr-review --base main --head feature/my-branch
+
+# Run with JSON output and keep the cache for follow-up queries
+gather-step --workspace /path/to/workspace pr-review \
+  --base main --head feature/my-branch \
+  --json --keep-cache
+
+# List all kept artifacts (dry run)
+gather-step --workspace /path/to/workspace pr-review clean --dry-run
+
+# Prune artifacts older than one week
+gather-step --workspace /path/to/workspace pr-review clean --older-than 7d
+```
+
+**When to use** — to get a structural delta report before reviewing a PR. The `suggested_followups` in the report include `--registry` / `--storage` overrides that point follow-up commands at the kept review index rather than the workspace baseline.
+
+---
 
 ## Compatibility aliases
 

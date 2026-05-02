@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args, Default)]
@@ -26,16 +27,15 @@ pub fn run(app: &AppContext, _args: ConventionsArgs) -> Result<()> {
         &DaemonRequest::Conventions {
             repo_filter: app.repo_filter.clone(),
         },
-        run_rendered,
+        |app| run_rendered(app, &StorageContext::workspace_read_only(app)),
     )
 }
 
-pub(crate) fn run_rendered(app: &AppContext) -> Result<RenderedCommand> {
-    let paths = app.workspace_paths();
-    let registry = RegistryStore::open(&paths.registry_path)
-        .with_context(|| format!("opening {}", paths.registry_path.display()))?;
-    let graph = GraphStoreDb::open(&paths.graph_path)
-        .with_context(|| format!("opening {}", paths.graph_path.display()))?;
+pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<RenderedCommand> {
+    let registry = RegistryStore::open(ctx.registry_path())
+        .with_context(|| format!("opening {}", ctx.registry_path().display()))?;
+    let graph = GraphStoreDb::open(ctx.graph_path())
+        .with_context(|| format!("opening {}", ctx.graph_path().display()))?;
     execute(&registry, &graph, app.repo_filter.as_deref())
 }
 

@@ -56,6 +56,7 @@ use crate::{
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
             review_pack_tool as run_review_pack,
         },
+        pr_review::{PrReviewInput, PrReviewResponse, run_pr_review},
         projection_impact::{
             ProjectionImpactRequest, ProjectionImpactResponse,
             projection_impact_tool as run_projection_impact,
@@ -1002,6 +1003,33 @@ impl GatherStepMcpServer {
             run_get_overview(&ctx, request)
                 .map(Json)
                 .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "pr_review",
+        description = "Use this tool when the user asks to review a pull request, do a structural PR review, \
+            check what a PR changed, or analyze cross-repo impact of a branch — including phrases like \
+            'review this PR', 'review the PR using gather-step', 'do a code review with gather-step', \
+            'what does this PR change', or 'analyze the impact of branch X'. \
+            Builds a disposable review index for the PR head, diffs it against the workspace baseline, \
+            and returns a structured DeltaReport (routes, symbols, payload contracts, events, decorators, \
+            contract alignments, removed-surface risks, deployment topology, and impact summaries). \
+            The workspace storage is never mutated — the review runs in a separate disposable artifact root. \
+            Requires the `gather-step` binary to be on PATH or in the same directory as the MCP server. \
+            First runs take ~30-90 seconds because a fresh review index is built; cache-hit runs against \
+            the same SHAs complete quickly when a retained matching artifact exists.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn pr_review_tool(
+        &self,
+        Parameters(request): Parameters<PrReviewInput>,
+    ) -> Result<Json<PrReviewResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let workspace = self.ctx.config.workspace_root();
+        self.traced_call("pr_review", &args, move || {
+            run_pr_review(&workspace, &request).map(Json)
         })
         .await
     }

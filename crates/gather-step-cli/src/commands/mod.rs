@@ -10,6 +10,7 @@ pub mod index;
 pub mod init;
 pub mod no_args;
 pub mod pack;
+pub mod pr_review;
 pub mod projection_impact;
 pub mod reindex;
 pub mod search;
@@ -90,6 +91,8 @@ pub enum Command {
     Pack(pack::PackArgs),
     Events(events::EventsArgs),
     Conventions(conventions::ConventionsArgs),
+    #[command(name = "pr-review")]
+    PrReview(pr_review::PrReviewArgs),
     #[command(hide = true)]
     Mcp(McpCommand),
 }
@@ -127,6 +130,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Pack(args)) => pack::run(&app, &args),
         Some(Command::Events(args)) => events::run(&app, args),
         Some(Command::Conventions(args)) => conventions::run(&app, args),
+        Some(Command::PrReview(args)) => pr_review::run(&app, args),
         Some(Command::Mcp(command)) => match command.command {
             McpSubcommand::Serve(args) => serve::run(&app, args).await,
         },
@@ -345,6 +349,7 @@ mod tests {
                 registry: Some("state/registry.json".into()),
                 storage: Some("state/storage".into()),
                 yes: true,
+                include_review: false,
             }
         );
     }

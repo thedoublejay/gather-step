@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args, Default)]
@@ -73,7 +74,7 @@ pub fn run(app: &AppContext, _args: StatusArgs) -> Result<()> {
         &DaemonRequest::Status {
             repo_filter: app.repo_filter.clone(),
         },
-        run_rendered,
+        |app| run_rendered(app, &StorageContext::workspace_read_only(app)),
     )
 }
 
@@ -137,16 +138,16 @@ fn watch_state() -> &'static str {
     "not running"
 }
 
-pub(crate) fn run_rendered(app: &AppContext) -> Result<RenderedCommand> {
-    let paths = app.workspace_paths();
-    let registry = RegistryStore::open(&paths.registry_path)
-        .with_context(|| format!("opening {}", paths.registry_path.display()))?;
-    let storage = StorageCoordinator::open(&paths.storage_root)
-        .with_context(|| format!("opening {}", paths.storage_root.display()))?;
+pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<RenderedCommand> {
+    let registry = RegistryStore::open(ctx.registry_path())
+        .with_context(|| format!("opening {}", ctx.registry_path().display()))?;
+    let storage = ctx
+        .open_storage_coordinator()
+        .with_context(|| format!("opening {}", ctx.storage_root().display()))?;
     execute(
-        &app.workspace_path,
-        &paths.registry_path,
-        &paths.storage_root,
+        ctx.workspace_root(),
+        ctx.registry_path(),
+        ctx.storage_root(),
         &registry,
         &storage,
         app.repo_filter.as_deref(),
@@ -431,6 +432,40 @@ mod tests {
         assert_eq!(
             mcp_state_with_home(&app_for(workspace.path()), Some(home.path().as_os_str())),
             "configured: global"
+        );
+    }
+
+    /// `run_rendered` consults the injected `StorageContext` rather than the
+    /// app's `workspace_paths()` default.  The command must succeed and return
+    /// a well-formed payload; the injected storage has indexed repos so the
+    /// payload must list at least one repo entry.
+    #[test]
+    fn status_runs_against_explicit_storage_context() {
+        let (ctx, _workspace) =
+            crate::test_helpers::indexed_fixture("status-ctx-inject", "pr-test-status");
+        let app = crate::test_helpers::test_app(ctx.workspace_root().to_path_buf());
+
+        let rendered =
+            super::run_rendered(&app, &ctx).expect("status::run_rendered should succeed");
+
+        let payload = rendered
+            .payload
+            .as_ref()
+            .expect("status should produce a JSON payload");
+
+        // The injected fixture workspace has 10 repos indexed — prove the
+        // context was consulted (default paths point at non-existent storage).
+        let repos = payload["repos"]
+            .as_array()
+            .expect("status payload should have a repos array");
+        assert!(
+            !repos.is_empty(),
+            "status should list repos from the injected storage context, got empty repos"
+        );
+        assert_eq!(
+            payload["event"].as_str(),
+            Some("status_completed"),
+            "status payload should have event=status_completed"
         );
     }
 }

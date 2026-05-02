@@ -42,11 +42,13 @@ use crate::{
 /// - `arguments`: the individual comma-separated arguments, each stripped of
 ///   surrounding quotes.  Most decorators carry 0–1 args, so a two-element
 ///   inline buffer avoids heap allocation in the common case.
+/// - `span`: the decorator occurrence itself, not the decorated symbol.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecoratorCapture {
     pub name: String,
     pub arguments: SmallVec<[Box<str>; 2]>,
     pub raw: String,
+    pub span: Option<SourceSpan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1148,7 +1150,7 @@ impl<'a> ParseState<'a> {
             external_id: None,
             signature: Some(decorator.raw.clone()),
             visibility: None,
-            span: owner.span.clone(),
+            span: decorator.span.clone().or_else(|| owner.span.clone()),
             is_virtual: false,
         };
         self.nodes.push(decorator_node.clone());
@@ -2105,6 +2107,7 @@ fn single_decorator(node: Node<'_>, source: &str) -> DecoratorCapture {
         name,
         arguments,
         raw,
+        span: Some(span_from(node)),
     }
 }
 
@@ -4632,6 +4635,84 @@ export class ItemController {
                     .decorators
                     .iter()
                     .any(|decorator| decorator.name == "Get")
+        }));
+    }
+
+    #[test]
+    fn parsed_decorator_nodes_keep_decorator_span_and_arguments() {
+        let temp_dir = TestDir::new("decorator-span");
+        fs::write(
+            temp_dir.path().join("controller.ts"),
+            "import { Controller, Get } from '@nestjs/common';\n\
+\n\
+@Controller('items')\n\
+export class ItemController {\n\
+  @Get('list')\n\
+  async listItems() {\n\
+    return [];\n\
+  }\n\
+}\n",
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "controller.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        let get_symbol = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.node.name == "listItems")
+            .expect("listItems symbol should exist")
+            .decorators
+            .iter()
+            .find(|decorator| decorator.name == "Get")
+            .expect("Get decorator capture should exist");
+        assert_eq!(get_symbol.raw, "'list'");
+        assert_eq!(
+            get_symbol
+                .arguments
+                .iter()
+                .map(Box::as_ref)
+                .collect::<Vec<_>>(),
+            vec!["list"]
+        );
+        assert_eq!(
+            get_symbol.span.as_ref().map(|span| span.line_start),
+            Some(5),
+            "decorator capture should point at the decorator line"
+        );
+
+        let get_node = parsed
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Decorator && node.name == "Get")
+            .expect("Get decorator node should exist");
+        assert_eq!(get_node.signature.as_deref(), Some("'list'"));
+        assert_eq!(
+            get_node.span.as_ref().map(|span| span.line_start),
+            Some(5),
+            "decorator node should point at the decorator line, not the method line"
+        );
+
+        let list_items = parsed
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Function && node.name == "listItems")
+            .expect("listItems function node should exist");
+        assert!(parsed.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::UsesDecorator
+                && edge.source == list_items.id
+                && edge.target == get_node.id
         }));
     }
 

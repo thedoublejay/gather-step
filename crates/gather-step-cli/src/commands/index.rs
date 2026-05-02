@@ -36,6 +36,7 @@ use crate::{
     app::{AppContext, DepthArg},
     commands::clean,
     path_safety,
+    pr_review::cleanup::clean_all_for_workspace,
 };
 
 #[derive(Debug, Args, Default, PartialEq, Eq)]
@@ -895,6 +896,31 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         fs::write(path, artifact)
             .with_context(|| format!("writing artifact to {}", path.display()))?;
         output.line(format!("Release-gate artifact: {}", path.display()));
+    }
+
+    // Best-effort: wipe review artifacts for this workspace after a successful
+    // full reindex.  Every full index rebuilds from scratch, which invalidates
+    // any prior review caches (their baseline SHAs no longer match the new
+    // index).  Failure here is non-fatal — the index run already succeeded.
+    //
+    // NOTE: `gather-step index` is always a full reindex (there is no
+    // incremental index path at the CLI level).  The `auto_recover` flag
+    // additionally wipes storage before re-opening, but either way every run
+    // of this command produces a fresh index.
+    match clean_all_for_workspace(&app.workspace_path) {
+        Ok(report) if report.removed_count > 0 => {
+            output.line(format!(
+                "  wiped {} review artifact(s) (full reindex invalidates their baseline)",
+                report.removed_count,
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(
+                error = %e,
+                "could not wipe review artifacts after full reindex; continuing"
+            );
+        }
     }
 
     if watch || should_prompt_for_watch(app)? {

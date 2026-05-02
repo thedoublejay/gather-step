@@ -210,6 +210,9 @@ follows an async event from producers to consumers across repos. Use these
 when the task involves debugging a specific request path or async flow in the
 polyrepo code graph.
 
+**`pr_review` (on demand)**
+Invoked automatically when the user asks to review a pull request — for example, "review this PR using gather-step" or "what does this branch change?" It builds a disposable review index for `base..head` and returns a structured `DeltaReport` covering added/removed routes, exported symbols, payload contracts, event wiring, deployment surfaces, and removal risks. This tool works with any MCP-aware client that supports stdio transport. First runs take 30-90 seconds; cache hits complete in 1-2 seconds. Pass `keep_cache: true` when you need follow-up `impact`/`trace`/`pack` queries against the PR-branch index.
+
 For a complete list of available MCP tools and their parameters, see the
 [MCP tools reference](/reference/mcp-tools/).
 
@@ -229,6 +232,8 @@ For a complete list of available MCP tools and their parameters, see the
 
 - [Operator workflows](/guides/operator-workflows/) — CLI commands for all the
   same capabilities the MCP tools expose.
+- [PR review guide](/guides/pr-review/) — step-by-step walkthrough of the
+  `pr-review` command and `pr_review` MCP tool.
 - [MCP tools reference](/reference/mcp-tools/) — full tool list with parameter
   documentation.
 - [Concepts: context packs](/concepts/context-packs/) — how packs are built and

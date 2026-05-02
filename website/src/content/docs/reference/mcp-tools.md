@@ -12,6 +12,7 @@ In normal use, engineers do not call these tools manually. An MCP-aware assistan
 - **Orientation**: understand what is indexed before deeper queries
 - **Search and traversal**: find symbols and walk local call relationships
 - **Topology and impact**: trace routes, events, deployments, and cross-repo blast radius
+- **PR review**: build a disposable review index for a PR branch and return a structured delta report
 - **Contracts**: inspect payload shape and producer-consumer drift
 - **Context retrieval**: return short summaries, combined context, and task-shaped packs
 - **Repo intelligence**: inspect ownership, dead code, conventions, and repo summaries
@@ -147,6 +148,50 @@ Used automatically when the assistant needs runtime-adjacent infrastructure name
 > "Where is this shared type used across the workspace?"
 
 Used automatically when the assistant needs repo and file usage for a shared symbol or DTO before changing that contract.
+
+## PR Review
+
+### `pr_review`
+
+> "Review this PR using gather-step."
+
+Used automatically when the user asks to review a pull request, do a structural PR review, check what a branch changed, or analyze cross-repo impact of a PR. Trigger phrases include "review this PR", "review the PR using gather-step", "do a code review", "what does this PR change", "analyze the impact of branch X".
+
+**Inputs.**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | string | yes | Base ref (branch name, tag, or full SHA). The PR's target branch — typically `main`. |
+| `head` | string | yes | Head ref (branch name, tag, or full SHA). The PR's source branch. |
+| `keep_cache` | bool | no | Preserve the review artifact for follow-up `impact`/`trace`/`pack` queries. Default: `false` — the artifact is deleted after the report is returned. |
+| `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. `strict` and `pedantic` cause non-zero exit on threshold violations; `warn` always returns the report regardless. |
+
+**Returns.** A JSON `DeltaReport` (`schema_version: 7`) with these top-level sections:
+
+- `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
+- `safety` — review storage path, run id, cleanup policy, cache key.
+- `changed_files` — list of repo-relative paths changed in `merge_base..head`.
+- `routes` — added / removed / changed HTTP routes by `(method, canonical_path)`. Carry handler info via `Serves` edges and downstream impact summaries.
+- `symbols` — added / removed / changed exported symbols by `(repo, qualified_name)`. Detects `signature_changed` and `visibility_changed` flags. Removed and changed surfaces carry impact summaries.
+- `payload_contracts` — field-level diffs (added / removed / type-changed / `optional`-required flips). Removed and changed contracts can carry impact summaries.
+- `events` — producer/consumer set diffs across `Topic`, `Queue`, `Subject`, `Stream`, and `Event` virtual nodes.
+- `decorators` — added / removed / changed permission, audit, and authorization decorators.
+- `contract_alignments` — cross-repo clusters of related payload contracts with confidence scores.
+- `removed_surface_risks` — removed routes / symbols / events with surviving consumers, classified by severity (`high` / `medium` / `low`).
+- `deployment` — added / removed / changed deployment-topology surfaces (Dockerfiles, Compose services, K8s manifests, env vars, secrets, config maps, brokers, databases, GitHub Actions deploy jobs).
+- `suggested_followups` — synthesized `gather-step pack` and `gather-step trace crud` commands for the highest-impact deltas.
+
+**Hard invariants.**
+
+- The workspace's normal `.gather-step/storage` and `.gather-step/registry.json` are never modified.
+- Review artifacts live under the OS cache directory by default (`<cache>/gather-step/pr-review/<workspace_hash>/<run_id>/`).
+- Baseline index is checked against the resolved `--base` SHA; mismatches surface as a `metadata.warnings` entry rather than a hard error.
+
+**Latency.** First runs take ~30-90 seconds because a fresh review index is built. Cache-hit runs complete in 1-2 seconds when a retained matching artifact exists for the same `(base_sha, head_sha)` pair.
+
+**Cleanup.** Without `keep_cache`, the artifact is removed when the report is returned. With `keep_cache`, the artifact survives until `pr-review clean` is run (or the OS cache root is cleared). The `suggested_followups` field includes commands pre-filled with `--registry` / `--storage` overrides pointing at the kept review index.
+
+**Implementation note.** The MCP tool shells out to the `gather-step` binary's `pr-review` subcommand. The binary must be on PATH or in the same directory as the MCP server.
 
 ## Contracts
 

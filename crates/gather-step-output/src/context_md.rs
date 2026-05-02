@@ -174,6 +174,7 @@ Use Gather Step tools before reasoning about cross-repo impact, tracing a reques
 | `get_dead_code` | Surface dead-code candidates |
 | `get_conventions` | Summarize detected workspace conventions |
 | `get_overview` | Get a high-level workspace overview |
+| `pr_review` | Build a disposable review index for a PR branch and return the delta report |
 
 "
 }

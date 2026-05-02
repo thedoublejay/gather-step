@@ -19,15 +19,20 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+blake3.workspace = true
+chrono.workspace = true
 clap.workspace = true
+dirs.workspace = true
+rand.workspace = true
 comfy-table.workspace = true
 console.workspace = true
 crossbeam-channel.workspace = true
-gather-step-analysis = { path = "../gather-step-analysis", version = "2.4.0" }
+gather-step-analysis = { path = "../gather-step-analysis", version = "3.0.0" }
 gather-step-core.workspace = true
-gather-step-git = { path = "../gather-step-git", version = "2.4.0" }
-gather-step-mcp = { path = "../gather-step-mcp", version = "2.4.0" }
-gather-step-output = { path = "../gather-step-output", version = "2.4.0" }
+rustc-hash.workspace = true
+gather-step-git = { path = "../gather-step-git", version = "3.0.0" }
+gather-step-mcp = { path = "../gather-step-mcp", version = "3.0.0" }
+gather-step-output = { path = "../gather-step-output", version = "3.0.0" }
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
 indicatif.workspace = true
@@ -46,6 +51,7 @@ ratatui = { version = "0.30.0", default-features = false, features = ["crossterm
 [dev-dependencies]
 criterion.workspace = true
 pretty_assertions.workspace = true
+rustc-hash.workspace = true
 rusqlite.workspace = true
 tempfile = "3.27.0"
 toml.workspace = true
