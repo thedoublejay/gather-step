@@ -36,8 +36,9 @@ use crate::{
         cache::{compute_cache_key, is_cache_key_active, pick_seed_source, seed_artifact_root, try_reuse_cache},
         delta_report::{
             CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
-            PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
-            SymbolDeltas, build_suggested_followups, synthesize_review_pack_commands,
+            GITHUB_COMMENT_LIMIT, PayloadContractDeltas, ReviewMetadata, RiskSeverity,
+            RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            synthesize_review_pack_commands,
         },
         extract::{
             contract_alignment::extract_contract_alignments,
@@ -107,6 +108,20 @@ pub struct PrReviewArgs {
     /// Medium+ risk, any payload change, or removed permission decorators.
     #[arg(long, value_enum, default_value_t = SeverityMode::Warn)]
     pub severity: SeverityMode,
+
+    /// Output format.
+    /// `markdown` (default) emits a human-readable Markdown report.
+    /// `json` emits compact machine-readable JSON (equivalent to `--json`).
+    /// `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit.
+    /// `braingent` emits Markdown with YAML frontmatter for Braingent archival.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
+    pub format: OutputFormat,
+
+    /// Write the GitHub-comment-formatted output to this file in addition to (or
+    /// instead of) stdout.  Only meaningful with `--format github-comment`, but
+    /// accepted with any format for scripting convenience.
+    #[arg(long, value_name = "PATH")]
+    pub github_comment_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -166,6 +181,20 @@ pub enum SeverityMode {
     /// Pedantic: exit 2 on any Medium-or-higher risk, any payload-contract
     /// change at all, or any removed permission/audit decorator.
     Pedantic,
+}
+
+/// Output format for `pr-review`.
+#[derive(Clone, Copy, Debug, ValueEnum, Default, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Human-readable Markdown (default).
+    #[default]
+    Markdown,
+    /// Compact machine-readable JSON.
+    Json,
+    /// Markdown truncated to GitHub's 65 536-char comment limit.
+    GithubComment,
+    /// Markdown with YAML frontmatter for Braingent archival.
+    Braingent,
 }
 
 /// Decorator names that count as permission/audit guards for the Pedantic threshold.
@@ -256,6 +285,19 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 args.severity
             };
 
+            // --json is a deprecated alias for --format json.
+            let effective_format = if args.json || app.json_output {
+                if args.json {
+                    tracing::warn!(
+                        "--json is deprecated; use --format json instead. \
+                         --json will be removed in a future release."
+                    );
+                }
+                OutputFormat::Json
+            } else {
+                args.format
+            };
+
             // Reconstruct typed args with the validated required fields.
             let review_args = PrReviewRunArgs {
                 base,
@@ -266,6 +308,8 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 cache_root: args.cache_root,
                 strict: args.strict,
                 severity: effective_severity,
+                format: effective_format,
+                github_comment_file: args.github_comment_file,
             };
 
             let (report, exceeded) = run_inner(app, &review_args)?;
@@ -305,6 +349,12 @@ pub struct PrReviewRunArgs {
     /// Deprecated: kept for backward-compat.  Callers should prefer `severity`.
     pub strict: bool,
     pub severity: SeverityMode,
+    /// Output format.  Defaults to `Markdown`.
+    ///
+    /// When `json = true` (the legacy flag) is set, this is overridden to `Json`.
+    pub format: OutputFormat,
+    /// If `Some`, write the GitHub-comment rendering to this path in addition to stdout.
+    pub github_comment_file: Option<PathBuf>,
 }
 
 /// Internal result type for the cache-hit-or-cold-run branch in [`run_inner`].
@@ -326,7 +376,13 @@ enum RunOutcome {
 /// exceeded (see [`evaluate_severity_threshold`]).  The caller uses this to
 /// exit with code 2 AFTER printing the report.
 pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bool)> {
-    let emit_json = args.json || app.json_output;
+    // Legacy --json flag coerces to Json format.
+    let effective_format = if args.json || app.json_output {
+        OutputFormat::Json
+    } else {
+        args.format
+    };
+    // `effective_format` is used directly for render dispatch; no separate bool needed.
 
     // ── 1. Resolve refs ────────────────────────────────────────────────────
     let resolved =
@@ -954,13 +1010,27 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let has_high_risk = evaluate_severity_threshold(args.severity, &report);
 
     // ── 12. Render ─────────────────────────────────────────────────────────
-    let rendered = if emit_json {
-        report
+    let rendered = match effective_format {
+        OutputFormat::Json => report
             .render_json()
-            .context("serializing delta report to JSON")?
-    } else {
-        report.render_markdown()
+            .context("serializing delta report to JSON")?,
+        OutputFormat::GithubComment => {
+            report.render_github_comment(GITHUB_COMMENT_LIMIT)
+        }
+        OutputFormat::Braingent => report.render_braingent(),
+        OutputFormat::Markdown => report.render_markdown(),
     };
+
+    // ── 13. Optional github-comment file write ─────────────────────────────
+    if let Some(ref path) = args.github_comment_file {
+        let comment = match effective_format {
+            OutputFormat::GithubComment => rendered.clone(),
+            _ => report.render_github_comment(GITHUB_COMMENT_LIMIT),
+        };
+        std::fs::write(path, &comment)
+            .with_context(|| format!("writing github comment to `{}`", path.display()))?;
+    }
+
     Ok((rendered, has_high_risk))
 }
 
@@ -1779,6 +1849,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: true,
@@ -1838,6 +1910,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1901,6 +1975,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -1963,6 +2039,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2021,6 +2099,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2199,6 +2279,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2259,6 +2341,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2294,6 +2378,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2334,6 +2420,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let _ = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2369,6 +2457,8 @@ mod tests {
             cache_root: Some(cache_root.clone()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let err = run_inner(&app, &args).expect_err("overlapping cache root must be rejected");
@@ -2403,6 +2493,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2448,6 +2540,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
 
         let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
@@ -2551,6 +2645,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2613,6 +2709,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2668,6 +2766,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -2756,6 +2856,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let (cold_rendered, _) = run_inner(&app, &args).expect("cold run must succeed");
         let mut cold: serde_json::Value =
@@ -2800,6 +2902,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
@@ -2849,6 +2953,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let (first_rendered, _) = run_inner(&app, &args).expect("first run must succeed");
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
@@ -2876,6 +2982,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let (second_rendered, _) = run_inner(&app, &args2).expect("second run must succeed");
         let second: serde_json::Value = serde_json::from_str(&second_rendered).unwrap();
@@ -2937,6 +3045,8 @@ mod tests {
             cache_root: Some(cache_tmp.path().to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let (rendered, _) = run_inner(&app, &args).expect("run must succeed");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -3071,6 +3181,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3163,6 +3275,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3232,6 +3346,8 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             strict: false,
             severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
         };
         let clean_args = CleanArgs {
             dry_run: false,
@@ -3429,6 +3545,57 @@ mod tests {
             effective,
             SeverityMode::Strict,
             "--strict flag must map to SeverityMode::Strict when --severity is default Warn"
+        );
+    }
+
+    // ── Phase 6 Task 3: github-comment-file flag ──────────────────────────────
+
+    /// Verify that `--github-comment-file` causes the file to be written with
+    /// a GitHub-comment-formatted report.
+    ///
+    /// This test uses a real fixture + `run_inner` so git must be available.
+    #[test]
+    fn github_comment_file_written_when_flag_set() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("gc-file-ws");
+        let cache_tmp = TempDir::new("gc-file-cache");
+        let output_tmp = TempDir::new("gc-file-output");
+        let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
+
+        let comment_path = output_tmp.path().join("github-comment.md");
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::GithubComment,
+            github_comment_file: Some(comment_path.clone()),
+        };
+
+        let _ = run_inner(&app, &args).expect("run_inner should succeed");
+
+        assert!(
+            comment_path.exists(),
+            "--github-comment-file must create the output file"
+        );
+
+        let written = std::fs::read_to_string(&comment_path).expect("comment file must be readable");
+        assert!(
+            written.contains("gather-step pr-review"),
+            "comment file must contain report content"
+        );
+        assert!(
+            written.len() <= crate::pr_review::delta_report::GITHUB_COMMENT_LIMIT,
+            "comment file must fit within GitHub's comment limit"
         );
     }
 }

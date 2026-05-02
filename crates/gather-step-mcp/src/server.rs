@@ -70,6 +70,7 @@ use crate::{
             SearchRequest, SearchResponse, SymbolRequest, SymbolResponse, TraversalRequest,
             TraversalResponse, get_callees, get_callers, get_symbol, search_symbols,
         },
+        pr_review::{PrReviewInput, PrReviewResponse, run_pr_review},
     },
 };
 
@@ -1002,6 +1003,26 @@ impl GatherStepMcpServer {
             run_get_overview(&ctx, request)
                 .map(Json)
                 .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "pr_review",
+        description = "Build a disposable review index for a PR branch and return the delta report. \
+            Requires the `gather-step` binary to be on PATH or in the same directory as the MCP server. \
+            The workspace storage is never mutated — the review runs in a separate disposable artifact root.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn pr_review_tool(
+        &self,
+        Parameters(request): Parameters<PrReviewInput>,
+    ) -> Result<Json<PrReviewResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let workspace = self.ctx.config.workspace_root();
+        self.traced_call("pr_review", &args, move || {
+            run_pr_review(&workspace, &request)
+                .map(Json)
         })
         .await
     }

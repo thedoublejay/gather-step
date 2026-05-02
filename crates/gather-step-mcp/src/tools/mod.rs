@@ -9,6 +9,7 @@ pub mod events;
 pub mod labels;
 pub mod orientation;
 pub mod packs;
+pub mod pr_review;
 pub mod projection_impact;
 pub mod proof_builder;
 pub mod repo_intelligence;
