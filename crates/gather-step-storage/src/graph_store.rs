@@ -10,6 +10,7 @@ use redb::{
     ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
 };
 use rustc_hash::FxHashSet;
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::StorageDaemonMetadata;
@@ -172,6 +173,19 @@ pub struct EdgeCountSummary {
     pub history_ownership_edges: usize,
     /// Edges whose target is a virtual non-`Author` node.
     pub virtual_other_cross_repo_edges: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphTableFootprint {
+    pub name: String,
+    pub table_kind: String,
+    pub entries: u64,
+    pub stored_bytes: u64,
+    pub metadata_bytes: u64,
+    pub fragmented_bytes: u64,
+    pub leaf_pages: u64,
+    pub branch_pages: u64,
+    pub tree_height: u32,
 }
 
 pub trait GraphStore {
@@ -456,6 +470,96 @@ impl GraphStoreDb {
     /// Return database file size in bytes for diagnostic logging.
     pub fn file_size_bytes(&self) -> u64 {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub fn table_footprints(&self) -> Result<Vec<GraphTableFootprint>, GraphStoreError> {
+        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let mut tables = Vec::new();
+
+        macro_rules! record_table {
+            ($name:literal, $kind:literal, $open:expr) => {
+                match $open {
+                    Ok(table) => {
+                        let stats = table.stats().map_err(GraphStoreError::storage)?;
+                        let entries = table.len().map_err(GraphStoreError::storage)?;
+                        tables.push(graph_table_footprint($name, $kind, entries, stats));
+                    }
+                    Err(error) if Self::is_missing_table_error(&error) => {}
+                    Err(error) => return Err(GraphStoreError::storage(error)),
+                }
+            };
+        }
+
+        record_table!("nodes", "table", read_txn.open_table(NODES));
+        record_table!("edges", "table", read_txn.open_table(EDGES));
+        record_table!(
+            "edges_out",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_OUT)
+        );
+        record_table!(
+            "edges_in",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_IN)
+        );
+        record_table!(
+            "edges_by_owner",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_BY_OWNER)
+        );
+        record_table!(
+            "edges_by_kind",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_BY_KIND)
+        );
+        record_table!("by_file", "multimap", read_txn.open_multimap_table(BY_FILE));
+        record_table!("by_repo", "multimap", read_txn.open_multimap_table(BY_REPO));
+        record_table!("by_type", "multimap", read_txn.open_multimap_table(BY_TYPE));
+        record_table!(
+            "by_external_id",
+            "multimap",
+            read_txn.open_multimap_table(BY_EXTERNAL_ID)
+        );
+        record_table!(
+            "cross_file_candidates",
+            "multimap",
+            read_txn.open_multimap_table(CROSS_FILE_CANDIDATES)
+        );
+        record_table!(
+            "event_family_index",
+            "multimap",
+            read_txn.open_multimap_table(EVENT_FAMILY_INDEX)
+        );
+        record_table!(
+            "route_key_index",
+            "multimap",
+            read_txn.open_multimap_table(ROUTE_KEY_INDEX)
+        );
+        record_table!(
+            "shared_symbol_name_index",
+            "multimap",
+            read_txn.open_multimap_table(SHARED_SYMBOL_NAME_INDEX)
+        );
+        record_table!("repo_ids", "table", read_txn.open_table(REPO_IDS));
+        record_table!("repos", "table", read_txn.open_table(REPOS));
+        record_table!("file_path_ids", "table", read_txn.open_table(FILE_PATH_IDS));
+        record_table!("file_paths", "table", read_txn.open_table(FILE_PATHS));
+        record_table!("signature_ids", "table", read_txn.open_table(SIGNATURE_IDS));
+        record_table!("signatures", "table", read_txn.open_table(SIGNATURES));
+        record_table!(
+            "string_metadata",
+            "table",
+            read_txn.open_table(STRING_METADATA)
+        );
+        record_table!("graph_schema", "table", read_txn.open_table(GRAPH_SCHEMA));
+
+        tables.sort_by(|left, right| {
+            right
+                .stored_bytes
+                .cmp(&left.stored_bytes)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(tables)
     }
 
     /// Compact the database to reclaim dead space from delete/rewrite cycles.
@@ -2768,6 +2872,25 @@ impl GraphStoreDb {
             ));
         }
         Ok(result)
+    }
+}
+
+fn graph_table_footprint(
+    name: &str,
+    table_kind: &str,
+    entries: u64,
+    stats: redb::TableStats,
+) -> GraphTableFootprint {
+    GraphTableFootprint {
+        name: name.to_owned(),
+        table_kind: table_kind.to_owned(),
+        entries,
+        stored_bytes: stats.stored_bytes(),
+        metadata_bytes: stats.metadata_bytes(),
+        fragmented_bytes: stats.fragmented_bytes(),
+        leaf_pages: stats.leaf_pages(),
+        branch_pages: stats.branch_pages(),
+        tree_height: stats.tree_height(),
     }
 }
 

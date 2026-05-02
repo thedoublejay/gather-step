@@ -17,6 +17,7 @@ pub mod search;
 pub mod serve;
 pub mod setup_mcp;
 pub mod status;
+pub mod storage_report;
 pub mod trace;
 pub mod tui;
 pub mod watch;
@@ -83,6 +84,8 @@ pub enum Command {
     Tui(tui::TuiArgs),
     SetupMcp(setup_mcp::SetupMcpArgs),
     Status(status::StatusArgs),
+    #[command(name = "storage-report")]
+    StorageReport(storage_report::StorageReportArgs),
     Doctor(doctor::DoctorArgs),
     Generate(generate::GenerateCommand),
     Impact(impact::ImpactArgs),
@@ -122,6 +125,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
         Some(Command::Trace(args)) => trace::run(&app, args),
         Some(Command::SetupMcp(args)) => setup_mcp::run(&app, args),
         Some(Command::Status(args)) => status::run(&app, args),
+        Some(Command::StorageReport(args)) => storage_report::run(&app, args),
         Some(Command::Doctor(args)) => doctor::run(&app, args),
         Some(Command::Generate(command)) => generate::run(&app, command),
         Some(Command::Impact(args)) => impact::run(&app, args),
@@ -198,6 +202,14 @@ mod tests {
                 watch: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_storage_report_command() {
+        let cli = Cli::parse_from(["gather-step", "--json", "storage-report"]);
+
+        assert!(cli.json);
+        assert!(matches!(cli.command, Some(Command::StorageReport(_))));
     }
 
     #[test]

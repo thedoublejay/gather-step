@@ -217,6 +217,27 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .is_some_and(|warnings| !warnings.is_empty())
     );
 
+    let storage_report = run_ok(temp.path(), &["--json", "storage-report"]);
+    let storage_report_json = stdout_json(&storage_report);
+    assert_eq!(storage_report_json["event"], "storage_report_completed");
+    assert!(
+        storage_report_json["components"]
+            .as_array()
+            .is_some_and(|components| components
+                .iter()
+                .any(|component| component["name"] == "graph"))
+    );
+    assert!(
+        storage_report_json["sqlite_objects"]
+            .as_array()
+            .is_some_and(|objects| !objects.is_empty())
+    );
+    assert!(
+        storage_report_json["graph_tables"]
+            .as_array()
+            .is_some_and(|tables| !tables.is_empty())
+    );
+
     let status = run_ok(temp.path(), &["status", "--json"]);
     let status_json = stdout_json(&status);
     assert_eq!(status_json["event"], "status_completed");
