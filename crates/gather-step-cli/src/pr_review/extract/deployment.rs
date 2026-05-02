@@ -30,14 +30,14 @@
 //! set differs, the change is reported in `consumer_changes`.
 
 use anyhow::Result;
-use gather_step_core::{EdgeKind, NodeKind};
+use gather_step_core::{EdgeKind, NodeData, NodeKind};
 use gather_step_storage::GraphStore;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::pr_review::delta_report::{
-    DeploymentDelta, DeploymentDeltaChange, DeploymentDeltas, DeploymentSurfaceDeltas,
-    EnvVarConsumerChange, EnvVarDelta, EnvVarDeltas, NameOnlyDeltas, WorkflowJobDelta,
-    WorkflowJobDeltas,
+    DeploymentChangeReason, DeploymentDelta, DeploymentDeltaChange, DeploymentDeltas,
+    DeploymentSurfaceDeltas, EnvVarConsumerChange, EnvVarDelta, EnvVarDeltas, NameOnlyDeltas,
+    WorkflowJobDelta, WorkflowJobDeltas,
 };
 
 // ── Diff key types ────────────────────────────────────────────────────────────
@@ -57,6 +57,8 @@ type DeploymentMap = FxHashMap<DeploymentKey, DeploymentDelta>;
 type EnvVarMap = FxHashMap<EnvVarKey, EnvVarDelta>;
 // For consumer tracking: key → set of consumer qualified_names
 type EnvVarConsumerMap = FxHashMap<EnvVarKey, FxHashSet<String>>;
+// For deployment change tracking: deployment key → set of env var names read by that deployment/service.
+type DeploymentEnvMap = FxHashMap<DeploymentKey, FxHashSet<String>>;
 type WorkflowJobMap = FxHashMap<WorkflowJobKey, WorkflowJobDelta>;
 
 /// Extract added / removed / changed deployment-topology nodes by diffing the
@@ -71,7 +73,14 @@ pub fn extract_deployment_deltas<S: GraphStore>(
     // ── Deployments ───────────────────────────────────────────────────────────
     let baseline_dep_map = build_deployment_map(baseline)?;
     let review_dep_map = build_deployment_map(review)?;
-    let deployments = diff_deployments(&baseline_dep_map, &review_dep_map);
+    let baseline_deployment_env_map = build_deployment_env_map(baseline)?;
+    let review_deployment_env_map = build_deployment_env_map(review)?;
+    let deployments = diff_deployments(
+        &baseline_dep_map,
+        &review_dep_map,
+        &baseline_deployment_env_map,
+        &review_deployment_env_map,
+    );
 
     // ── Env vars ──────────────────────────────────────────────────────────────
     let baseline_env_map = build_env_var_map(baseline)?;
@@ -230,6 +239,35 @@ fn build_env_consumer_map<S: GraphStore>(store: &S) -> Result<EnvVarConsumerMap>
     Ok(map)
 }
 
+/// Build `(repo, deployment/service name) → env var names read by that deployment/service`.
+fn build_deployment_env_map<S: GraphStore>(store: &S) -> Result<DeploymentEnvMap> {
+    let nodes = store.nodes_by_type(NodeKind::EnvVar)?;
+    let mut map = DeploymentEnvMap::default();
+
+    for node in nodes {
+        let Some(env_name) = decode_env_var_qn(
+            node.qualified_name
+                .as_deref()
+                .or(node.external_id.as_deref()),
+        ) else {
+            continue;
+        };
+
+        for edge in store.get_incoming(node.id)? {
+            if edge.kind == EdgeKind::ReadsEnv
+                && let Some(source) = store.get_node(edge.source)?
+                && matches!(source.kind, NodeKind::Service | NodeKind::Deployment)
+            {
+                map.entry(deployment_source_key(&source))
+                    .or_default()
+                    .insert(env_name.clone());
+            }
+        }
+    }
+
+    Ok(map)
+}
+
 /// Build a set of node names for the given `NodeKind`.
 fn build_name_set<S: GraphStore>(store: &S, kind: NodeKind) -> Result<FxHashSet<String>> {
     let nodes = store.nodes_by_type(kind)?;
@@ -271,7 +309,12 @@ fn build_workflow_job_map<S: GraphStore>(store: &S) -> Result<WorkflowJobMap> {
 
 // ── Diff functions ────────────────────────────────────────────────────────────
 
-fn diff_deployments(baseline: &DeploymentMap, review: &DeploymentMap) -> DeploymentSurfaceDeltas {
+fn diff_deployments(
+    baseline: &DeploymentMap,
+    review: &DeploymentMap,
+    baseline_env: &DeploymentEnvMap,
+    review_env: &DeploymentEnvMap,
+) -> DeploymentSurfaceDeltas {
     let mut added: Vec<DeploymentDelta> = Vec::new();
     let mut removed: Vec<DeploymentDelta> = Vec::new();
     let mut changed: Vec<DeploymentDeltaChange> = Vec::new();
@@ -290,20 +333,34 @@ fn diff_deployments(baseline: &DeploymentMap, review: &DeploymentMap) -> Deploym
         }
     }
 
-    // Changed: in both — compare file path and service.
+    // Changed: in both — compare file path, service, image, and env bindings.
     for (key, review_delta) in review {
         if let Some(baseline_delta) = baseline.get(key) {
             let image_changed = baseline_delta.image != review_delta.image;
             let file_changed = baseline_delta.file != review_delta.file;
-            if image_changed || file_changed {
+            let service_changed = baseline_delta.service != review_delta.service;
+            let env_changed = baseline_env.get(key) != review_env.get(key);
+            let mut change_reasons = Vec::new();
+            if file_changed {
+                change_reasons.push(DeploymentChangeReason::File);
+            }
+            if service_changed {
+                change_reasons.push(DeploymentChangeReason::Service);
+            }
+            if image_changed {
+                change_reasons.push(DeploymentChangeReason::Image);
+            }
+            if env_changed {
+                change_reasons.push(DeploymentChangeReason::Env);
+            }
+            if !change_reasons.is_empty() {
                 changed.push(DeploymentDeltaChange {
                     kind: review_delta.kind.clone(),
                     name: key.1.clone(),
                     repo: key.0.clone(),
                     before: baseline_delta.clone(),
                     after: review_delta.clone(),
-                    image_changed,
-                    env_changed: false, // computed below if needed
+                    change_reasons,
                 });
             }
         }
@@ -446,7 +503,7 @@ fn resolve_deployment_for_env_var<S: GraphStore>(
             && let Some(source) = store.get_node(edge.source)?
             && matches!(source.kind, NodeKind::Service | NodeKind::Deployment)
         {
-            return Ok(Some(source.name));
+            return Ok(Some(deployment_source_name(&source)));
         }
     }
     Ok(None)
@@ -479,6 +536,38 @@ fn decode_deployment_qn(qn: Option<&str>) -> Option<(String, String)> {
         return None;
     }
     Some((repo.to_owned(), name.to_owned()))
+}
+
+/// Decode `"__service__{repo}__{name}"` → `(repo, name)`.
+fn decode_service_qn(qn: Option<&str>) -> Option<(String, String)> {
+    let qn = qn?;
+    let suffix = qn.strip_prefix("__service__")?;
+    let (repo, name) = suffix.split_once("__")?;
+    if repo.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((repo.to_owned(), name.to_owned()))
+}
+
+fn deployment_source_name(source: &NodeData) -> String {
+    deployment_source_key(source).1
+}
+
+fn deployment_source_key(source: &NodeData) -> (String, String) {
+    let qn = source
+        .qualified_name
+        .as_deref()
+        .or(source.external_id.as_deref());
+
+    match source.kind {
+        NodeKind::Deployment => {
+            decode_deployment_qn(qn).unwrap_or_else(|| (source.repo.clone(), source.name.clone()))
+        }
+        NodeKind::Service => {
+            decode_service_qn(qn).unwrap_or_else(|| (source.repo.clone(), source.name.clone()))
+        }
+        _ => (source.repo.clone(), source.name.clone()),
+    }
 }
 
 /// Decode `"__env_var__{name}"` → `name`.
@@ -558,6 +647,8 @@ mod tests {
 
     use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id};
     use gather_step_storage::{GraphStore, GraphStoreDb};
+
+    use crate::pr_review::delta_report::DeploymentChangeReason;
 
     use super::extract_deployment_deltas;
 
@@ -775,7 +866,7 @@ mod tests {
 
     /// Same key in both snapshots but file path changed → appears in `changed`.
     #[test]
-    fn deployment_image_change_appears_in_changed_list() {
+    fn deployment_file_change_appears_in_changed_list() {
         let (_td_b, baseline) = open_store("dep-changed-baseline");
         let (_td_r, review) = open_store("dep-changed-review");
 
@@ -793,12 +884,79 @@ mod tests {
         );
         assert_eq!(deltas.deployments.changed[0].name, "api");
         assert!(
+            deltas.deployments.changed[0]
+                .change_reasons
+                .contains(&DeploymentChangeReason::File),
+            "file moves must be explicit in changed deployment rows"
+        );
+        assert!(
+            !deltas.deployments.changed[0]
+                .change_reasons
+                .contains(&DeploymentChangeReason::Env),
+            "file-only changes must not claim env binding changes"
+        );
+        assert!(
             deltas.deployments.added.is_empty(),
             "no deployments should be added"
         );
         assert!(
             deltas.deployments.removed.is_empty(),
             "no deployments should be removed"
+        );
+    }
+
+    /// Same deployment key with a changed env binding set records an env reason.
+    #[test]
+    fn deployment_env_binding_change_marks_deployment_changed() {
+        let (_td_b, baseline) = open_store("dep-env-baseline");
+        let (_td_r, review) = open_store("dep-env-review");
+
+        let owner = file_node("backend", "compose.yaml");
+        let deployment = deployment_node("backend", "compose.yaml", "api");
+        let service = service_node("backend", "api");
+        let env_a = env_var_node("backend", "database_url");
+        let env_b = env_var_node("backend", "redis_url");
+
+        baseline
+            .bulk_insert(
+                &[
+                    owner.clone(),
+                    deployment.clone(),
+                    service.clone(),
+                    env_a.clone(),
+                ],
+                &[reads_env_edge(&service, &env_a, &owner)],
+            )
+            .expect("bulk insert baseline");
+        review
+            .bulk_insert(
+                &[
+                    owner.clone(),
+                    deployment,
+                    service.clone(),
+                    env_a.clone(),
+                    env_b.clone(),
+                ],
+                &[
+                    reads_env_edge(&service, &env_a, &owner),
+                    reads_env_edge(&service, &env_b, &owner),
+                ],
+            )
+            .expect("bulk insert review");
+
+        let deltas = extract_deployment_deltas(&baseline, &review).expect("should succeed");
+
+        assert_eq!(deltas.deployments.changed.len(), 1);
+        assert_eq!(deltas.deployments.changed[0].name, "api");
+        assert!(
+            deltas.deployments.changed[0]
+                .change_reasons
+                .contains(&DeploymentChangeReason::Env)
+        );
+        assert!(
+            !deltas.deployments.changed[0]
+                .change_reasons
+                .contains(&DeploymentChangeReason::File)
         );
     }
 

@@ -754,14 +754,14 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 6`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Surfaces not supported by the active engine are listed in `unsupported_surfaces` and rendered with an informational note rather than an empty section.
+The report (`schema_version: 7`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
 
-The `deployment` surface (added in `schema_version: 6`) captures changes to deployment topology: added, removed, and changed deployment targets (services, containers, lambdas, static sites), env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`service`, `container`, `lambda`, `static-site`, or `unknown`) and whether env-var bindings changed between the base and head refs. When the active engine does not support deployment indexing, the `deployment` surface is reported as unsupported and skipped.
+The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
 
 **Run a review**
 
 ```bash
-gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine <ENGINE>] \
+gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine temp-index] \
   [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
 ```
 
@@ -769,10 +769,10 @@ gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine <ENGINE
 |---|---|---|---|
 | `--base <REF>` | string | required | Base ref (branch, tag, SHA, or any git rev). |
 | `--head <REF>` | string | required | Head ref (branch, tag, SHA, `HEAD`, etc.). |
-| `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. `temp-index` builds a full isolated index (default). `overlay` is experimental — does not yet emit diff data; use only for engine-trait testing. |
+| `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. `temp-index` builds a full isolated index. This flag is retained for forward-compatible engine selection; no alternate public engine is currently exposed. |
 | `--severity <MODE>` | enum | `warn` | `warn` always exits 0. `strict` exits 2 on High risks or incompatible payload type changes. `pedantic` exits 2 on any Medium+ risk, any payload change, or removed permission decorators. |
 | `--format <FORMAT>` | enum | `markdown` | `markdown` emits a human-readable Markdown report. `json` emits compact machine-readable JSON. `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit. `braingent` emits Markdown with YAML frontmatter for Braingent archival. |
-| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Cache-hit runs always keep their artifact regardless of this flag. |
+| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Cache hits are available when a retained matching artifact already exists. |
 | `--github-comment-file <PATH>` | path | — | Write the GitHub-comment-formatted output to this file in addition to stdout. Accepted with any `--format` for scripting convenience. |
 | `--no-baseline-check` | bool flag | false | Suppress the warning emitted when the workspace HEAD does not match `--base`. Use in CI environments where the workspace is always checked out at the feature branch. |
 | `--json` | bool flag | false | **Deprecated.** Use `--format json` instead. Emits JSON output; equivalent to `--format json`. |

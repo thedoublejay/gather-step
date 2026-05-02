@@ -20,7 +20,8 @@ Use `pr-review` before merging any branch that:
 
 For smaller, self-contained changes with no cross-repo surface the report is
 still useful but usually short. The cost is the indexing time on the first run
-(30-90 seconds); cache hits complete in 1-2 seconds.
+(30-90 seconds); cache hits complete in 1-2 seconds when a retained matching
+artifact exists.
 
 ## Running It Locally
 
@@ -40,7 +41,7 @@ and prints the delta report.
 gather-step pr-review --base main --head feat/my-change --json
 ```
 
-The JSON form emits a `DeltaReport` (`schema_version: 6`) suitable for
+The JSON form emits a `DeltaReport` (`schema_version: 7`) suitable for
 piping into other tools or reading programmatically.
 
 ### Keeping the cache for follow-up queries

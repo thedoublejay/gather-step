@@ -35,14 +35,6 @@ pub struct PrReviewInput {
     /// Keep the review artifact after the run.
     #[serde(default)]
     pub keep_cache: Option<bool>,
-    /// When `true`, the response includes a bounded review pack for the top
-    /// findings (same data as the delta report, but pre-filtered for AI
-    /// context windows).
-    ///
-    /// Currently returns the JSON delta report regardless of this flag.
-    /// Full pack integration is a follow-up (TODO).
-    #[serde(default)]
-    pub include_pack: Option<bool>,
     /// Severity mode: `"warn"` (default) | `"strict"` | `"pedantic"`.
     #[serde(default)]
     pub severity: Option<String>,
@@ -55,10 +47,6 @@ pub struct PrReviewResponse {
     pub delta_report: serde_json::Value,
     /// `true` when the effective severity threshold was exceeded.
     pub threshold_exceeded: bool,
-    /// Optional bounded review pack (populated when `include_pack = true`).
-    /// Currently always `null` — follow-up work will wire the pack builder.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review_pack: Option<serde_json::Value>,
 }
 
 // ─── Tool function ────────────────────────────────────────────────────────────
@@ -116,7 +104,6 @@ pub fn run_pr_review(
     Ok(PrReviewResponse {
         delta_report,
         threshold_exceeded,
-        review_pack: None,
     })
 }
 
@@ -150,7 +137,6 @@ mod tests {
         assert_eq!(input.base, "main");
         assert_eq!(input.head, "HEAD");
         assert!(input.keep_cache.is_none());
-        assert!(input.include_pack.is_none());
         assert!(input.severity.is_none());
     }
 
@@ -161,7 +147,6 @@ mod tests {
             "base": "v1.0.0",
             "head": "feat/my-feature",
             "keep_cache": true,
-            "include_pack": false,
             "severity": "strict"
         }"#;
         let input: PrReviewInput = serde_json::from_str(json).unwrap();
@@ -174,15 +159,12 @@ mod tests {
     #[test]
     fn pr_review_response_serialises() {
         let resp = PrReviewResponse {
-            delta_report: serde_json::json!({"schema_version": 5}),
+            delta_report: serde_json::json!({"schema_version": 7}),
             threshold_exceeded: false,
-            review_pack: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json.get("delta_report").is_some());
         assert!(json.get("threshold_exceeded").is_some());
-        // review_pack is None → skipped by skip_serializing_if.
-        assert!(json.get("review_pack").is_none());
     }
 
     // ── Integration tests (require compiled gather-step binary on PATH) ────────

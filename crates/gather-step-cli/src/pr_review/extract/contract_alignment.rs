@@ -528,6 +528,7 @@ mod tests {
             fields_optional_to_required: vec![],
             fields_required_to_optional: vec![],
             fields_type_changed: vec![],
+            impact: None,
         });
 
         let result = extract_contract_alignments(&store, &deltas).expect("should succeed");

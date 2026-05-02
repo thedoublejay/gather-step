@@ -280,6 +280,7 @@ fn diff_fields(
         fields_optional_to_required,
         fields_required_to_optional,
         fields_type_changed,
+        impact: None,
     })
 }
 

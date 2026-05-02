@@ -1018,8 +1018,8 @@ impl GatherStepMcpServer {
             contract alignments, removed-surface risks, deployment topology, and impact summaries). \
             The workspace storage is never mutated — the review runs in a separate disposable artifact root. \
             Requires the `gather-step` binary to be on PATH or in the same directory as the MCP server. \
-            First runs take ~30-90 seconds because a fresh review index is built; subsequent runs against \
-            the same SHAs reuse the cache.",
+            First runs take ~30-90 seconds because a fresh review index is built; cache-hit runs against \
+            the same SHAs complete quickly when a retained matching artifact exists.",
         annotations(read_only_hint = true)
     )]
     pub async fn pr_review_tool(

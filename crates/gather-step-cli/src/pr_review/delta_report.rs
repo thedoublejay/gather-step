@@ -16,7 +16,9 @@
 //! bumped to 5.
 //!
 //! Phase 7 adds deployment-topology delta extraction.  `schema_version` is
-//! bumped to 6.
+//! bumped to 6.  Phase 7 follow-up adds impact summaries for changed payload
+//! contracts and richer deployment change reasons; `schema_version` is bumped
+//! to 7.
 
 use std::{fmt::Write as _, path::PathBuf};
 
@@ -236,6 +238,9 @@ pub struct PayloadContractDeltaChange {
     /// Field names that flipped from `optional = false` to `optional = true`.
     pub fields_required_to_optional: Vec<String>,
     pub fields_type_changed: Vec<PayloadFieldTypeChange>,
+    /// Downstream impact summary for the baseline contract node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impact: Option<ImpactSummary>,
 }
 
 /// A single field whose declared type changed between baseline and review.
@@ -453,6 +458,16 @@ pub struct DeploymentDelta {
     pub image: Option<String>,
 }
 
+/// Why a deployment node present in both snapshots is reported as changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentChangeReason {
+    File,
+    Service,
+    Image,
+    Env,
+}
+
 /// A deployment node present in both snapshots whose key fields changed.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeploymentDeltaChange {
@@ -461,9 +476,7 @@ pub struct DeploymentDeltaChange {
     pub repo: String,
     pub before: DeploymentDelta,
     pub after: DeploymentDelta,
-    pub image_changed: bool,
-    /// `true` when the set of env vars associated with this deployment differs.
-    pub env_changed: bool,
+    pub change_reasons: Vec<DeploymentChangeReason>,
 }
 
 /// Added / removed env vars and consumer-set changes.
@@ -773,7 +786,7 @@ impl DeltaReport {
         let _ = writeln!(buf, "head: {} ({})", m.head_input, m.head_sha);
         let _ = writeln!(buf, "reviewed_at: {reviewed_at}");
         let _ = writeln!(buf, "gather_step_version: {}", env!("CARGO_PKG_VERSION"));
-        buf.push_str("schema_version: 6\n");
+        buf.push_str("schema_version: 7\n");
         let _ = writeln!(buf, "risk_count_high: {high_count}");
         let _ = writeln!(buf, "risk_count_medium: {medium_count}");
         let _ = writeln!(buf, "risk_count_low: {low_count}");
@@ -1174,6 +1187,15 @@ fn render_contract_changed_section(buf: &mut String, changes: &[PayloadContractD
                 let _ = writeln!(buf, "  - `{}`: `{}` → `{}`", tc.name, before, after);
             }
         }
+        if let Some(imp) = &c.impact {
+            let _ = writeln!(
+                buf,
+                "- **Impact:** {} consumer(s) across {} repo(s){}",
+                imp.consumer_count,
+                imp.consumer_repos.len(),
+                if imp.truncated { " _(truncated)_" } else { "" }
+            );
+        }
         buf.push('\n');
     }
 }
@@ -1408,16 +1430,38 @@ fn render_deployment_topology_section(buf: &mut String, d: &DeploymentDeltas) {
     if d.deployments.changed.is_empty() {
         buf.push_str("_no changes_\n");
     } else {
-        buf.push_str("| Name | Repo | Image changed | Env changed |\n");
-        buf.push_str("|------|------|---------------|-------------|\n");
+        buf.push_str(
+            "| Name | Repo | File changed | Service changed | Image changed | Env changed |\n",
+        );
+        buf.push_str(
+            "|------|------|--------------|-----------------|---------------|-------------|\n",
+        );
         for c in &d.deployments.changed {
             let _ = writeln!(
                 buf,
-                "| `{}` | {} | {} | {} |",
+                "| `{}` | {} | {} | {} | {} | {} |",
                 c.name,
                 c.repo,
-                if c.image_changed { "yes" } else { "no" },
-                if c.env_changed { "yes" } else { "no" },
+                if c.change_reasons.contains(&DeploymentChangeReason::File) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if c.change_reasons.contains(&DeploymentChangeReason::Service) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if c.change_reasons.contains(&DeploymentChangeReason::Image) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if c.change_reasons.contains(&DeploymentChangeReason::Env) {
+                    "yes"
+                } else {
+                    "no"
+                },
             );
         }
     }
@@ -1743,22 +1787,23 @@ mod tests {
     // ── schema_version ────────────────────────────────────────────────────────
 
     #[test]
-    fn schema_version_is_5() {
-        let report = make_empty_report(5);
+    fn schema_version_accepts_explicit_value() {
+        let report = make_empty_report(3);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 5);
+        assert_eq!(json["schema_version"], 3);
     }
 
-    /// The canonical schema version is 6 (deployment-topology deltas added).
+    /// The canonical schema version is 7 (changed payload impact and deployment
+    /// change reasons added).
     #[test]
-    fn schema_version_is_6() {
-        let report = make_empty_report(6);
+    fn schema_version_is_7() {
+        let report = make_empty_report(7);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 6);
+        assert_eq!(json["schema_version"], 7);
         // Confirm the `deployment` key is present.
         assert!(
             json.as_object().unwrap().contains_key("deployment"),
-            "schema_version 6 report must include the `deployment` key"
+            "schema_version 7 report must include the `deployment` key"
         );
     }
 
@@ -1871,6 +1916,7 @@ mod tests {
             fields_optional_to_required: vec![],
             fields_required_to_optional: vec![],
             fields_type_changed: vec![],
+            impact: None,
         }
     }
 
@@ -1945,7 +1991,7 @@ mod tests {
     /// Used to pin the schema and section order against accidental regression.
     fn fully_populated_report() -> DeltaReport {
         DeltaReport {
-            schema_version: 5,
+            schema_version: 7,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -2017,6 +2063,7 @@ mod tests {
                         before_type: Some("string".to_owned()),
                         after_type: Some("number".to_owned()),
                     }],
+                    impact: None,
                 }],
                 unavailable: false,
             },
@@ -2328,7 +2375,7 @@ mod tests {
             "braingent frontmatter must include type: code-review"
         );
         assert!(
-            out.contains("schema_version: 6"),
+            out.contains("schema_version: 7"),
             "braingent frontmatter must include schema_version"
         );
     }

@@ -165,16 +165,15 @@ Used automatically when the user asks to review a pull request, do a structural 
 | `head` | string | yes | Head ref (branch name, tag, or full SHA). The PR's source branch. |
 | `keep_cache` | bool | no | Preserve the review artifact for follow-up `impact`/`trace`/`pack` queries. Default: `false` — the artifact is deleted after the report is returned. |
 | `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. `strict` and `pedantic` cause non-zero exit on threshold violations; `warn` always returns the report regardless. |
-| `include_pack` | bool | no | Currently a no-op; reserved for bounded review-pack synthesis in a future release. |
 
-**Returns.** A JSON `DeltaReport` (`schema_version: 6`) with these top-level sections:
+**Returns.** A JSON `DeltaReport` (`schema_version: 7`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
 - `safety` — review storage path, run id, cleanup policy, cache key.
 - `changed_files` — list of repo-relative paths changed in `merge_base..head`.
 - `routes` — added / removed / changed HTTP routes by `(method, canonical_path)`. Carry handler info via `Serves` edges and downstream impact summaries.
 - `symbols` — added / removed / changed exported symbols by `(repo, qualified_name)`. Detects `signature_changed` and `visibility_changed` flags. Removed and changed surfaces carry impact summaries.
-- `payload_contracts` — field-level diffs (added / removed / type-changed / `optional`-required flips). Removed contracts carry impact summaries.
+- `payload_contracts` — field-level diffs (added / removed / type-changed / `optional`-required flips). Removed and changed contracts can carry impact summaries.
 - `events` — producer/consumer set diffs across `Topic`, `Queue`, `Subject`, `Stream`, and `Event` virtual nodes.
 - `decorators` — added / removed / changed permission, audit, and authorization decorators.
 - `contract_alignments` — cross-repo clusters of related payload contracts with confidence scores.
@@ -188,7 +187,7 @@ Used automatically when the user asks to review a pull request, do a structural 
 - Review artifacts live under the OS cache directory by default (`<cache>/gather-step/pr-review/<workspace_hash>/<run_id>/`).
 - Baseline index is checked against the resolved `--base` SHA; mismatches surface as a `metadata.warnings` entry rather than a hard error.
 
-**Latency.** First runs take ~30-90 seconds because a fresh review index is built. Subsequent runs against the same `(base_sha, head_sha)` pair reuse the cache and complete in 1-2 seconds.
+**Latency.** First runs take ~30-90 seconds because a fresh review index is built. Cache-hit runs complete in 1-2 seconds when a retained matching artifact exists for the same `(base_sha, head_sha)` pair.
 
 **Cleanup.** Without `keep_cache`, the artifact is removed when the report is returned. With `keep_cache`, the artifact survives until `pr-review clean` is run (or the OS cache root is cleared). The `suggested_followups` field includes commands pre-filled with `--registry` / `--storage` overrides pointing at the kept review index.
 

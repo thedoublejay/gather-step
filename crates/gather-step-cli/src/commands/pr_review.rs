@@ -44,7 +44,7 @@ use crate::{
             RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
             synthesize_review_pack_commands,
         },
-        engine::{OverlayEngine, ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
+        engine::{ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
         extract::{
             contract_alignment::extract_contract_alignments,
             decorators::extract_decorator_deltas,
@@ -269,11 +269,6 @@ pub fn evaluate_severity_threshold(mode: SeverityMode, report: &DeltaReport) -> 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ReviewEngine {
     TempIndex,
-    /// Graph-only diff overlay over the baseline index.
-    /// `PayloadContracts`, `Events`, `Decorators`, and `ContractAlignments` are
-    /// marked unsupported — Phase 5 Task 3 will resolve the search/metadata
-    /// gap.
-    Overlay,
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -634,7 +629,6 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         let index_start = Instant::now();
         let engine: Box<dyn ReviewEngineImpl> = match args.engine {
             ReviewEngine::TempIndex => Box::new(TempIndexEngine),
-            ReviewEngine::Overlay => Box::new(OverlayEngine::new()),
         };
         let engine_snapshot = match engine.materialize(
             &artifact_root,
@@ -988,12 +982,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             }
 
-                            // ── Phase 3: attach impact to removed payload contracts ──
-                            // `PayloadContractDeltaChange` stores fields flat (no
-                            // `before: PayloadContractDelta` sub-struct), so impact for
-                            // changed contracts is carried via `before_impact` — a follow-up
-                            // schema addition.  For now we populate impact on `removed`
-                            // entries only, where `PayloadContractDelta.impact` is defined.
+                            // ── Phase 3: attach impact to removed/changed payload contracts ──
                             let mut payload_contracts = payload_contracts;
                             if !payload_contracts.unavailable {
                                 for c in &mut payload_contracts.removed {
@@ -1026,6 +1015,39 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             repo = %c.repo,
                                             target = %c.target_qualified_name,
                                             "payload contract node lookup failed"
+                                        ),
+                                    }
+                                }
+                                for c in &mut payload_contracts.changed {
+                                    match find_payload_contract_node_id(
+                                        baseline_coord.metadata(),
+                                        &c.repo,
+                                        &c.file,
+                                        &c.target_qualified_name,
+                                        &c.side,
+                                    ) {
+                                        Ok(Some(node_id)) => {
+                                            match impact_for_node(
+                                                baseline_coord.graph(),
+                                                node_id,
+                                                Some(&c.repo),
+                                            ) {
+                                                Ok(summary) => c.impact = Some(summary),
+                                                Err(e) => tracing::warn!(
+                                                    error = %e,
+                                                    repo = %c.repo,
+                                                    target = %c.target_qualified_name,
+                                                    "impact attachment failed for changed \
+                                                     payload contract"
+                                                ),
+                                            }
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::warn!(
+                                            error = %e,
+                                            repo = %c.repo,
+                                            target = %c.target_qualified_name,
+                                            "payload contract node lookup failed for changed"
                                         ),
                                     }
                                 }
@@ -1201,7 +1223,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .collect();
 
     let report = DeltaReport {
-        schema_version: 6,
+        schema_version: 7,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -3663,7 +3685,7 @@ mod tests {
 
     fn make_delta_report_empty() -> DeltaReport {
         DeltaReport {
-            schema_version: 6,
+            schema_version: 7,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -3726,6 +3748,7 @@ mod tests {
                 before_type: Some("string".to_owned()),
                 after_type: Some("number".to_owned()),
             }],
+            impact: None,
         }
     }
 
@@ -3744,6 +3767,7 @@ mod tests {
             fields_optional_to_required: vec![],
             fields_required_to_optional: vec![],
             fields_type_changed: vec![],
+            impact: None,
         }
     }
 

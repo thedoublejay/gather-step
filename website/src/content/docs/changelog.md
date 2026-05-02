@@ -29,13 +29,13 @@ Combined release covering deployment-topology indexing and `gather-step pr-revie
 - Added `gather-step pr-review clean` with five selectors (`--dry-run`, `--run-id`, `--base/--head`, `--older-than`, `--all`) and an `--include-active` opt-in for pruning the still-resolvable cache. `clean --older-than` skips `InProgress` artifacts so it cannot race a long indexing run.
 - Added `--severity {warn, strict, pedantic}` threshold modes. `warn` is the default; `strict` exits with code 2 on any High-severity removed-surface risk or payload type change; `pedantic` extends that to Medium risks and any payload change. Legacy `--strict` flag remains a deprecated alias.
 - Added `--format {markdown, json, github-comment, braingent}` plus `--github-comment-file <PATH>` for CI integrations. The GitHub-comment renderer auto-truncates to fit the platform's 65,536-char comment limit. The Braingent renderer emits a YAML-frontmatter Markdown record suitable for archiving in a memory store. Legacy `--json` flag remains a deprecated alias.
-- Added `--engine {temp-index, overlay}`. `temp-index` is the default and the parity oracle. `overlay` is wired as an experimental scaffold (`DiffOverlayStore` over the baseline graph) and currently inherits temp-index storage; do not use it for production reviews until the parity gate lands.
+- Added `--engine temp-index`. `temp-index` is the default public review engine and builds a full isolated index for the PR head.
 - Added `--keep-cache` to preserve the review artifact root for follow-up `trace`, `impact`, `pack`, and `projection-impact` commands. Suggested follow-up commands in the report are pre-filled with `--registry` / `--storage` overrides pointing at the kept index.
 - Added `--no-baseline-check` to suppress the workspace-HEAD-vs-`--base` SHA mismatch warning. By default the report's `## Warnings` block surfaces the mismatch so reviewers know the diff may be feature-vs-feature instead of base-vs-head.
 - Added `--registry` and `--storage` flags on `trace`, `impact`, `pack`, and other read commands so they can target a kept review artifact root and replay PR-only context.
 - Extended `gather-step clean` with `--include-review` to also wipe review artifacts for the workspace.
 - Wired a full `gather-step index` reindex to automatically wipe review artifacts (their baseline is invalidated).
-- Added a branch-scoped review cache keyed by `(workspace_hash, base_sha, head_sha, config_hash, schema_version, gather_step_version)`. Cache hits skip worktree creation and indexing; the artifact survives the run regardless of `--keep-cache`. Marker schema is now v2 (added `cache_key` and `last_accessed_at`); v1 markers remain readable by the cleanup tooling.
+- Added a branch-scoped review cache keyed by `(workspace_hash, base_sha, head_sha, config_hash, schema_version, gather_step_version)`. Cache hits skip worktree creation and indexing when a retained matching artifact exists. Marker schema is now v2 (added `cache_key` and `last_accessed_at`); v1 markers remain readable by the cleanup tooling.
 - Added `pr_review` MCP tool exposing the same delta report to MCP clients. The tool shells out to the CLI to inherit the workspace-storage safety guard.
 - Added a top-level `CLAUDE.md` documenting the agent workflow for "review this PR using gather-step" plus project conventions.
 
@@ -57,26 +57,24 @@ Combined release covering deployment-topology indexing and `gather-step pr-revie
 - `StorageContext::review_checked` rejects any review path that lives under `<workspace>/.gather-step/`. Workspace-local review artifacts must use a sibling (e.g. `.gather-step-review/`) or the OS cache directory.
 - `pr-review clean` refuses to delete any path whose marker file does not match the current workspace hash, and refuses paths overlapping the baseline `storage/` or `registry.json`.
 
-### PR Review Mode — delta report (`schema_version: 5`)
+### PR Review Mode — delta report (`schema_version: 7`)
 
 - **Routes**: added / removed / changed by `(method, canonical_path)`. Handler info (repo, file, line, qualified name) attached via `Serves` edges.
 - **Symbols**: added / removed / changed exported symbols and shared-symbol stubs by `(repo, qualified_name)`. Reports `signature_changed` and `visibility_changed` flags.
-- **Payload contracts**: field-level diffs (added / removed / type-changed / `optional`-required flips) keyed by `(repo, file, target_qualified_name, side)`.
+- **Payload contracts**: field-level diffs (added / removed / type-changed / `optional`-required flips) keyed by `(repo, file, target_qualified_name, side)`. Removed and changed contracts can carry downstream impact summaries.
 - **Events**: producer and consumer set diffs across `Topic`, `Queue`, `Subject`, `Stream`, and `Event` virtual nodes.
 - **Decorators**: added / removed / changed permission, audit, and authorization decorators.
 - **Contract alignments**: cross-repo clusters of related payload contracts with high / medium / low confidence, marked when any cluster member is touched by the PR.
 - **Removed-surface risks**: removed routes / symbols / events with surviving consumers, classified by severity (`high` for cross-repo, `medium` for same-repo, `low` for unconsumed).
+- **Deployment topology**: added / removed / changed deployment targets, env vars, secrets, config maps, shared infrastructure, and GitHub Actions deploy jobs. Changed deployments report file, service, image-evidence, and env-binding change reasons.
 - **Impact summaries**: per-removed-and-changed surface, downstream consumer counts grouped by repo and classified as `read_only`, `write_mutate`, `construct_payload`, or `unknown`.
 - **Suggested follow-ups**: synthesized `gather-step pack` and `gather-step trace crud` commands targeting the highest-impact deltas. Capped at 10 commands; all carry `--registry` / `--storage` overrides for the kept review index.
 
 ### PR Review Mode — known limitations
 
-- The `overlay` engine is a scaffold: `OverlayEngine::materialize` opens the baseline coordinator instead of a `DiffOverlayStore`-backed snapshot. The parity-gate test is `#[ignore]`'d until the snapshot wiring lands. `--engine overlay` is documented as experimental.
-- Reverse-dependents expansion in the affected-repo computation is a TODO. Today the affected set is the directly-changed repos plus the full-expansion fallback for shared packages, root config, and gateway/router files.
+- The overlay engine remains an internal prototype. It is not exposed as a public `pr-review --engine` option until `DiffOverlayStore`-backed extraction reaches parity with `temp-index`.
 - `seed_artifact_root` deep-copies the entire workspace `storage/` even when the affected set is a small subset. Reflink / COW or per-repo seeding is the planned optimization.
-- The MCP `pr_review` tool's `include_pack` parameter is currently a no-op. The structured response carries the `DeltaReport` only; bounded review-pack synthesis is wired in CLI follow-ups.
 - Decorator extraction surfaces decorator nodes by name but yields thin payload data unless the parser emits `UsesDecorator` edges.
-- Payload-contract impact attach is conservative: contract changes use a Strict-mode threshold without consumer-cardinality scoring.
 
 ### Verification Coverage
 

@@ -374,7 +374,7 @@ mod tests {
 
     fn empty_report() -> DeltaReport {
         DeltaReport {
-            schema_version: 6,
+            schema_version: 7,
             metadata: ReviewMetadata {
                 workspace: PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -540,7 +540,7 @@ mod tests {
         //
         //   let fixture = prepare_two_commit_fixture();
         //   let ti_report = run_with_engine(&fixture, ReviewEngine::TempIndex);
-        //   let ov_report = run_with_engine(&fixture, ReviewEngine::Overlay);
+        //   let ov_report = run_with_internal_overlay_engine(&fixture);
         //   let diff = compare_for_parity(&ti_report, &ov_report);
         //   assert!(diff.is_match(), "{:?}", diff.differences);
     }
