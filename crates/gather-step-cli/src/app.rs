@@ -337,7 +337,7 @@ pub fn maybe_print_banner(app: &AppContext) {
     }
 
     let footer = format!(
-        "v{}  ·  © 2026 JJ Adonis  ·  http://gatherstep.dev/",
+        "v{}  ·  © 2026 JJ Adonis  ·  https://gatherstep.dev/",
         env!("CARGO_PKG_VERSION")
     );
     let banner_width = BANNER

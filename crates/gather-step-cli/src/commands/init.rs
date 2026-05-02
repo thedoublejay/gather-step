@@ -696,7 +696,7 @@ fn draw_repo_picker(
         Print(format!(
             "   {} {} selected\r\n\r\n",
             style(selected.len()).cyan().bold(),
-            style("repositories").dim()
+            style(selection_count_label(selected.len())).dim()
         )),
     )?;
 
@@ -752,6 +752,14 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     truncated.push('…');
     truncated
+}
+
+fn selection_count_label(count: usize) -> &'static str {
+    if count == 1 {
+        "repository"
+    } else {
+        "repositories"
+    }
 }
 
 fn toggle_selection_token(
