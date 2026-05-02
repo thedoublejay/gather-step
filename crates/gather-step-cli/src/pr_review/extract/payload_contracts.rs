@@ -74,12 +74,23 @@ pub fn extract_payload_contract_deltas<M: MetadataStore>(
     }
 
     // Sort for deterministic output.
-    let sort_key =
-        |d: &PayloadContractDelta| (d.repo.clone(), d.file.clone(), d.target_qualified_name.clone(), d.side.clone());
+    let sort_key = |d: &PayloadContractDelta| {
+        (
+            d.repo.clone(),
+            d.file.clone(),
+            d.target_qualified_name.clone(),
+            d.side.clone(),
+        )
+    };
     added.sort_by_key(sort_key);
     removed.sort_by_key(sort_key);
     let change_sort_key = |c: &PayloadContractDeltaChange| {
-        (c.repo.clone(), c.file.clone(), c.target_qualified_name.clone(), c.side.clone())
+        (
+            c.repo.clone(),
+            c.file.clone(),
+            c.target_qualified_name.clone(),
+            c.side.clone(),
+        )
     };
     changed.sort_by_key(change_sort_key);
 
@@ -285,9 +296,7 @@ mod tests {
         NodeKind, PayloadContractDoc, PayloadContractRecord, PayloadField, PayloadInferenceKind,
         PayloadSide, ref_node_id,
     };
-    use gather_step_storage::{
-        MetadataStore, MetadataStoreDb, PayloadContractStoreRecord,
-    };
+    use gather_step_storage::{MetadataStore, MetadataStoreDb, PayloadContractStoreRecord};
 
     use super::extract_payload_contract_deltas;
 
@@ -335,7 +344,10 @@ mod tests {
     ) -> PayloadContractStoreRecord {
         let target_id = ref_node_id(NodeKind::Topic, target_qn);
         let source_id = ref_node_id(NodeKind::Function, &format!("{repo}::handler"));
-        let contract_id = ref_node_id(NodeKind::PayloadContract, &format!("__pc__{repo}__{target_qn}"));
+        let contract_id = ref_node_id(
+            NodeKind::PayloadContract,
+            &format!("__pc__{repo}__{target_qn}"),
+        );
         PayloadContractStoreRecord {
             record: PayloadContractRecord {
                 payload_contract_node_id: contract_id,
@@ -397,11 +409,13 @@ mod tests {
         );
         insert_contract(&review, record);
 
-        let deltas =
-            extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
+        let deltas = extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
 
         assert_eq!(deltas.added.len(), 1, "expected one added contract");
-        assert_eq!(deltas.added[0].target_qualified_name, "__topic__order.created");
+        assert_eq!(
+            deltas.added[0].target_qualified_name,
+            "__topic__order.created"
+        );
         assert_eq!(deltas.added[0].side, "producer");
         assert!(deltas.removed.is_empty(), "nothing removed");
         assert!(deltas.changed.is_empty(), "nothing changed");
@@ -422,11 +436,13 @@ mod tests {
         );
         insert_contract(&baseline, record);
 
-        let deltas =
-            extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
+        let deltas = extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
 
         assert_eq!(deltas.removed.len(), 1, "expected one removed contract");
-        assert_eq!(deltas.removed[0].target_qualified_name, "__topic__order.created");
+        assert_eq!(
+            deltas.removed[0].target_qualified_name,
+            "__topic__order.created"
+        );
         assert!(deltas.added.is_empty(), "nothing added");
         assert!(deltas.changed.is_empty(), "nothing changed");
     }
@@ -458,8 +474,7 @@ mod tests {
         insert_contract(&baseline, base_record);
         insert_contract(&review, review_record);
 
-        let deltas =
-            extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
+        let deltas = extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
 
         assert_eq!(deltas.changed.len(), 1, "expected one changed contract");
         let c = &deltas.changed[0];
@@ -501,13 +516,13 @@ mod tests {
         insert_contract(&baseline, base_record);
         insert_contract(&review, review_record);
 
-        let deltas =
-            extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
+        let deltas = extract_payload_contract_deltas(&baseline, &review).expect("should succeed");
 
         assert_eq!(deltas.changed.len(), 1, "expected one changed contract");
         let c = &deltas.changed[0];
         assert!(
-            c.fields_optional_to_required.contains(&"description".to_owned()),
+            c.fields_optional_to_required
+                .contains(&"description".to_owned()),
             "description must be in fields_optional_to_required; got {:?}",
             c.fields_optional_to_required
         );

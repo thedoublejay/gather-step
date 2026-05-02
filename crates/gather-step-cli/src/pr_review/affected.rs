@@ -228,7 +228,10 @@ repos:
         let config = make_config();
         let files = changed(&["shared_contracts/events/order.ts"]);
         let result = compute_affected_repos(&config, &files);
-        assert!(result.all_repos, "shared_contracts change should expand to all");
+        assert!(
+            result.all_repos,
+            "shared_contracts change should expand to all"
+        );
         assert_eq!(result.repos.len(), 3);
     }
 

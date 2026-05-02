@@ -84,7 +84,10 @@ pub fn extract_decorator_deltas<S: GraphStore>(
 
     // Changed: same key, different args.
     for (key, review_delta) in &review_map {
-        if let Some(baseline_delta) = baseline_map.get(key).filter(|b| b.args != review_delta.args) {
+        if let Some(baseline_delta) = baseline_map
+            .get(key)
+            .filter(|b| b.args != review_delta.args)
+        {
             changed.push(DecoratorDeltaChange {
                 repo: key.0.clone(),
                 target_qualified_name: key.3.clone(),
@@ -112,7 +115,12 @@ pub fn extract_decorator_deltas<S: GraphStore>(
             .then_with(|| a.target_qualified_name.cmp(&b.target_qualified_name))
     });
 
-    Ok(DecoratorDeltas { added, removed, changed, unavailable: false })
+    Ok(DecoratorDeltas {
+        added,
+        removed,
+        changed,
+        unavailable: false,
+    })
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -129,7 +137,9 @@ fn is_interesting(name: &str) -> bool {
 ///
 /// Target resolution: walk `UsesDecorator` edges.  If neither direction yields
 /// a target the field is left empty (and a debug-level log is emitted).
-fn build_decorator_map<S: GraphStore>(store: &S) -> Result<FxHashMap<DecoratorKey, DecoratorDelta>> {
+fn build_decorator_map<S: GraphStore>(
+    store: &S,
+) -> Result<FxHashMap<DecoratorKey, DecoratorDelta>> {
     let nodes = store.nodes_by_type(NodeKind::Decorator)?;
 
     if nodes.is_empty() {
@@ -180,7 +190,10 @@ fn build_decorator_map<S: GraphStore>(store: &S) -> Result<FxHashMap<DecoratorKe
 ///    edges pointing from a *target* symbol TO the decorator (i.e., we check
 ///    *incoming* edges on the decorator).
 /// 2. Return the first target's `qualified_name` if found; `None` otherwise.
-fn resolve_target<S: GraphStore>(store: &S, node: &gather_step_core::NodeData) -> Result<Option<String>> {
+fn resolve_target<S: GraphStore>(
+    store: &S,
+    node: &gather_step_core::NodeData,
+) -> Result<Option<String>> {
     // Walk incoming edges: target → (UsesDecorator) → decorator
     let incoming = store.get_incoming(node.id)?;
     for edge in &incoming {
@@ -242,7 +255,12 @@ mod tests {
             external_id: None,
             signature: None,
             visibility: None,
-            span: Some(SourceSpan { line_start: line, line_len: 1, column_start: 0, column_len: 0 }),
+            span: Some(SourceSpan {
+                line_start: line,
+                line_len: 1,
+                column_start: 0,
+                column_len: 0,
+            }),
             is_virtual: false,
         }
     }
@@ -257,7 +275,10 @@ mod tests {
         let (_td_b, baseline) = open_store("added-baseline");
         let (_td_r, review) = open_store("added-review");
 
-        insert_node(&review, decorator_node("backend", "src/ctrl.ts", "Audit", 10));
+        insert_node(
+            &review,
+            decorator_node("backend", "src/ctrl.ts", "Audit", 10),
+        );
 
         let deltas = extract_decorator_deltas(&baseline, &review).expect("should succeed");
 
@@ -273,7 +294,10 @@ mod tests {
         let (_td_b, baseline) = open_store("removed-baseline");
         let (_td_r, review) = open_store("removed-review");
 
-        insert_node(&baseline, decorator_node("backend", "src/ctrl.ts", "Permission", 5));
+        insert_node(
+            &baseline,
+            decorator_node("backend", "src/ctrl.ts", "Permission", 5),
+        );
 
         let deltas = extract_decorator_deltas(&baseline, &review).expect("should succeed");
 
@@ -290,11 +314,17 @@ mod tests {
         let (_td_r, review) = open_store("uninteresting-review");
 
         // "Component" is not on the interesting list.
-        insert_node(&review, decorator_node("backend", "src/comp.ts", "Component", 1));
+        insert_node(
+            &review,
+            decorator_node("backend", "src/comp.ts", "Component", 1),
+        );
 
         let deltas = extract_decorator_deltas(&baseline, &review).expect("should succeed");
 
-        assert!(deltas.added.is_empty(), "Component decorator must be filtered out");
+        assert!(
+            deltas.added.is_empty(),
+            "Component decorator must be filtered out"
+        );
         assert!(deltas.removed.is_empty());
         assert!(deltas.changed.is_empty());
     }

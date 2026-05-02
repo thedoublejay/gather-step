@@ -74,9 +74,15 @@ pub fn extract_symbol_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<
     }
 
     // Deterministic output — sort by (kind, repo, qualified_name).
-    added.sort_by(|a, b| (&a.kind, &a.repo, &a.qualified_name).cmp(&(&b.kind, &b.repo, &b.qualified_name)));
-    removed.sort_by(|a, b| (&a.kind, &a.repo, &a.qualified_name).cmp(&(&b.kind, &b.repo, &b.qualified_name)));
-    changed.sort_by(|a, b| (&a.kind, &a.repo, &a.qualified_name).cmp(&(&b.kind, &b.repo, &b.qualified_name)));
+    added.sort_by(|a, b| {
+        (&a.kind, &a.repo, &a.qualified_name).cmp(&(&b.kind, &b.repo, &b.qualified_name))
+    });
+    removed.sort_by(|a, b| {
+        (&a.kind, &a.repo, &a.qualified_name).cmp(&(&b.kind, &b.repo, &b.qualified_name))
+    });
+    changed.sort_by(|a, b| {
+        (&a.kind, &a.repo, &a.qualified_name).cmp(&(&b.kind, &b.repo, &b.qualified_name))
+    });
 
     Ok(SymbolDeltas {
         added,
@@ -105,9 +111,7 @@ pub fn find_symbol_node_id<S: GraphStore>(
         if !node.is_virtual {
             continue;
         }
-        if node.repo == repo
-            && node.qualified_name.as_deref() == Some(qualified_name)
-        {
+        if node.repo == repo && node.qualified_name.as_deref() == Some(qualified_name) {
             return Ok(Some(node.id));
         }
     }
@@ -117,7 +121,10 @@ pub fn find_symbol_node_id<S: GraphStore>(
         if node.is_virtual {
             continue;
         }
-        if !matches!(node.kind, NodeKind::Function | NodeKind::Class | NodeKind::Type) {
+        if !matches!(
+            node.kind,
+            NodeKind::Function | NodeKind::Class | NodeKind::Type
+        ) {
             continue;
         }
         if node.visibility != Some(Visibility::Public) {
@@ -220,7 +227,10 @@ fn node_to_delta(node: &NodeData, kind_str: &str) -> SymbolDelta {
     SymbolDelta {
         kind: kind_str.to_owned(),
         repo: node.repo.clone(),
-        qualified_name: node.qualified_name.clone().unwrap_or_else(|| node.name.clone()),
+        qualified_name: node
+            .qualified_name
+            .clone()
+            .unwrap_or_else(|| node.name.clone()),
         file: if node.file_path.is_empty() {
             None
         } else {
@@ -339,7 +349,13 @@ mod tests {
         let (_td_b, baseline) = open_store("fn-removed-baseline");
         let (_td_r, review) = open_store("fn-removed-review");
 
-        let node = function_node("api", "src/orders.ts", "listOrders", "api::listOrders", Visibility::Public);
+        let node = function_node(
+            "api",
+            "src/orders.ts",
+            "listOrders",
+            "api::listOrders",
+            Visibility::Public,
+        );
         baseline
             .bulk_insert(&[node], &[])
             .expect("insert should succeed");
@@ -360,15 +376,25 @@ mod tests {
         let (_td_b, baseline) = open_store("sig-changed-baseline");
         let (_td_r, review) = open_store("sig-changed-review");
 
-        let mut base_node =
-            function_node("api", "src/orders.ts", "listOrders", "api::listOrders", Visibility::Public);
+        let mut base_node = function_node(
+            "api",
+            "src/orders.ts",
+            "listOrders",
+            "api::listOrders",
+            Visibility::Public,
+        );
         base_node.signature = Some("listOrders(): Order[]".to_owned());
         baseline
             .bulk_insert(&[base_node], &[])
             .expect("baseline insert");
 
-        let mut review_node =
-            function_node("api", "src/orders.ts", "listOrders", "api::listOrders", Visibility::Public);
+        let mut review_node = function_node(
+            "api",
+            "src/orders.ts",
+            "listOrders",
+            "api::listOrders",
+            Visibility::Public,
+        );
         review_node.signature = Some("listOrders(filter: Filter): Order[]".to_owned());
         review
             .bulk_insert(&[review_node], &[])

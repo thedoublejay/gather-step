@@ -47,20 +47,22 @@ pub fn try_reuse_cache(cache_root: &Path, key: &CacheKey) -> Result<Option<Revie
     }
 
     // Collect all run sub-dirs with their mtime so we can sort newest-first.
-    let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = std::fs::read_dir(
-        &hash_dir,
-    )
-    .map_err(|e| anyhow::anyhow!("reading cache hash-dir `{}`: {e}", hash_dir.display()))?
-    .filter_map(|entry| {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if !path.is_dir() {
-            return None;
-        }
-        let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        Some((path, mtime))
-    })
-    .collect();
+    let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> =
+        std::fs::read_dir(&hash_dir)
+            .map_err(|e| anyhow::anyhow!("reading cache hash-dir `{}`: {e}", hash_dir.display()))?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    return None;
+                }
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                Some((path, mtime))
+            })
+            .collect();
 
     // Sort newest first.
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
@@ -244,24 +246,22 @@ pub fn seed_artifact_root(
     target_artifact_root: &ReviewArtifactRoot,
 ) -> Result<()> {
     // Copy registry.json.
-    std::fs::copy(&seed.registry_path, &target_artifact_root.registry_path)
-        .with_context(|| {
-            format!(
-                "copying seed registry from `{}` to `{}`",
-                seed.registry_path.display(),
-                target_artifact_root.registry_path.display()
-            )
-        })?;
+    std::fs::copy(&seed.registry_path, &target_artifact_root.registry_path).with_context(|| {
+        format!(
+            "copying seed registry from `{}` to `{}`",
+            seed.registry_path.display(),
+            target_artifact_root.registry_path.display()
+        )
+    })?;
 
     // Deep-copy storage/ tree.
-    copy_dir_all(&seed.storage_root, &target_artifact_root.storage_root)
-        .with_context(|| {
-            format!(
-                "copying seed storage from `{}` to `{}`",
-                seed.storage_root.display(),
-                target_artifact_root.storage_root.display()
-            )
-        })?;
+    copy_dir_all(&seed.storage_root, &target_artifact_root.storage_root).with_context(|| {
+        format!(
+            "copying seed storage from `{}` to `{}`",
+            seed.storage_root.display(),
+            target_artifact_root.storage_root.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -461,8 +461,7 @@ mod tests {
             ReviewStatus::InProgress,
         );
 
-        let result =
-            try_reuse_cache(cache_tmp.path(), &key).expect("try_reuse_cache must not err");
+        let result = try_reuse_cache(cache_tmp.path(), &key).expect("try_reuse_cache must not err");
         assert!(result.is_none(), "InProgress artifact must not be reused");
     }
 
@@ -521,7 +520,10 @@ mod tests {
 
         let key = compute_cache_key(ws, "base000", "head000", b"cfg");
         let result = try_reuse_cache(cache, &key).expect("must not err");
-        assert!(result.is_none(), "v1 marker without cache_key must not match");
+        assert!(
+            result.is_none(),
+            "v1 marker without cache_key must not match"
+        );
     }
 
     #[test]
@@ -637,8 +639,8 @@ mod tests {
         write_indexed_workspace(ws_tmp.path(), config_bytes);
 
         let config_hash = config_hash_of(config_bytes);
-        let result = pick_seed_source(ws_tmp.path(), &config_hash)
-            .expect("pick_seed_source must not err");
+        let result =
+            pick_seed_source(ws_tmp.path(), &config_hash).expect("pick_seed_source must not err");
 
         assert!(
             result.is_some(),
@@ -674,8 +676,8 @@ mod tests {
         fs::write(ws_tmp.path().join("gather-step.config.yaml"), config_bytes).unwrap();
 
         let config_hash = config_hash_of(config_bytes);
-        let result = pick_seed_source(ws_tmp.path(), &config_hash)
-            .expect("pick_seed_source must not err");
+        let result =
+            pick_seed_source(ws_tmp.path(), &config_hash).expect("pick_seed_source must not err");
 
         assert!(
             result.is_none(),

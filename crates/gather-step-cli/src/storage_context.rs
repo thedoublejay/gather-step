@@ -396,7 +396,8 @@ impl StorageContext {
         //    reside under `<workspace_root>/.gather-step/`.  A path that equals
         //    `.gather-step` itself is also rejected (it would replace the whole
         //    generated-state directory).
-        let generated_state_root = canonicalize_for_guard(&workspace.workspace_root.join(".gather-step"))?;
+        let generated_state_root =
+            canonicalize_for_guard(&workspace.workspace_root.join(".gather-step"))?;
         for candidate in [&c_rev_root, &c_rev_reg, &c_rev_stor] {
             if candidate.starts_with(&generated_state_root) {
                 return Err(ReviewSafetyError::WorkspaceGeneratedStateOverlap {
@@ -920,7 +921,10 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(err, ReviewSafetyError::WorkspaceGeneratedStateOverlap { .. }),
+            matches!(
+                err,
+                ReviewSafetyError::WorkspaceGeneratedStateOverlap { .. }
+            ),
             "expected WorkspaceGeneratedStateOverlap, got {err}"
         );
     }

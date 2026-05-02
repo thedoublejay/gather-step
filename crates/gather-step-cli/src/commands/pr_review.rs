@@ -34,13 +34,17 @@ use crate::{
             read_marker, touch_marker_accessed, workspace_hash, write_marker_completed,
             write_marker_quarantined,
         },
-        cache::{compute_cache_key, is_cache_key_active, pick_seed_source, seed_artifact_root, try_reuse_cache},
+        cache::{
+            compute_cache_key, is_cache_key_active, pick_seed_source, seed_artifact_root,
+            try_reuse_cache,
+        },
         delta_report::{
             CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
-            GITHUB_COMMENT_LIMIT, PayloadContractDeltas, ReviewMetadata, RiskSeverity,
-            RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            GITHUB_COMMENT_LIMIT, PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas,
+            SafetyMetadata, SymbolDeltas, build_suggested_followups,
             synthesize_review_pack_commands,
         },
+        engine::{OverlayEngine, ReviewEngineImpl, TempIndexEngine},
         extract::{
             contract_alignment::extract_contract_alignments,
             decorators::extract_decorator_deltas,
@@ -51,7 +55,6 @@ use crate::{
             routes::{extract_route_deltas, find_route_node_id},
             symbols::{extract_symbol_deltas, find_symbol_node_id},
         },
-        engine::{OverlayEngine, ReviewEngineImpl, TempIndexEngine},
     },
     storage_context::StorageContext,
 };
@@ -486,159 +489,155 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // Cache reuse is independent of `keep_cache` — `keep_cache` controls
     // whether the CURRENT run's artifact is preserved after delta extraction.
     let mut was_cache_hit = false;
-    let outcome: RunOutcome =
-        if let Some(hit_root) = try_reuse_cache(&cache_root, &cache_key_struct).unwrap_or_else(
-            |e| {
-                tracing::debug!(error = %e, "cache lookup failed; falling back to cold run");
-                None
-            },
+    let outcome: RunOutcome = if let Some(hit_root) =
+        try_reuse_cache(&cache_root, &cache_key_struct).unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "cache lookup failed; falling back to cold run");
+            None
+        }) {
+        // Cache hit: skip worktree creation and indexing.
+        was_cache_hit = true;
+        RunOutcome::CacheHit(hit_root)
+    } else {
+        // Cache miss: create a fresh artifact root, worktree, and index.
+        let run_id = generate_run_id();
+
+        let artifact_root = plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
+            .with_context(|| format!("planning artifact root for run `{run_id}`"))?;
+
+        // Safety guard: construct both contexts and verify no path overlap before
+        // creating review directories, writing the marker, or opening any review
+        // storage.
+        let workspace_ctx = StorageContext::workspace_read_only(app);
+        let _review_ctx = StorageContext::review_checked(
+            &workspace_ctx,
+            artifact_root.root.clone(),
+            artifact_root.registry_path.clone(),
+            artifact_root.storage_root.clone(),
+            run_id.clone(),
+        )
+        .map_err(ArtifactRootError::Safety)
+        .with_context(|| "review safety guard rejected the proposed artifact paths")?;
+
+        materialize_artifact_root(
+            &artifact_root,
+            &base_sha,
+            &head_sha,
+            Some(cache_key_struct.clone()),
+        )
+        .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
+
+        // ── 5. Materialize worktree ────────────────────────────────────────
+        // `materialize_artifact_root` pre-creates the worktree directory; git worktree
+        // add refuses to clobber an existing directory, so remove it first.
+        if artifact_root.worktree_root.exists() {
+            std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
+                format!(
+                    "removing pre-created worktree placeholder at `{}`",
+                    artifact_root.worktree_root.display()
+                )
+            })?;
+        }
+
+        let worktree = match create_detached_worktree(
+            &app.workspace_path,
+            &artifact_root.worktree_root,
+            &head_sha,
         ) {
-            // Cache hit: skip worktree creation and indexing.
-            was_cache_hit = true;
-            RunOutcome::CacheHit(hit_root)
-        } else {
-            // Cache miss: create a fresh artifact root, worktree, and index.
-            let run_id = generate_run_id();
-
-            let artifact_root =
-                plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
-                    .with_context(|| format!("planning artifact root for run `{run_id}`"))?;
-
-            // Safety guard: construct both contexts and verify no path overlap before
-            // creating review directories, writing the marker, or opening any review
-            // storage.
-            let workspace_ctx = StorageContext::workspace_read_only(app);
-            let _review_ctx = StorageContext::review_checked(
-                &workspace_ctx,
-                artifact_root.root.clone(),
-                artifact_root.registry_path.clone(),
-                artifact_root.storage_root.clone(),
-                run_id.clone(),
-            )
-            .map_err(ArtifactRootError::Safety)
-            .with_context(|| "review safety guard rejected the proposed artifact paths")?;
-
-            materialize_artifact_root(
-                &artifact_root,
-                &base_sha,
-                &head_sha,
-                Some(cache_key_struct.clone()),
-            )
-            .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
-
-            // ── 5. Materialize worktree ────────────────────────────────────────
-            // `materialize_artifact_root` pre-creates the worktree directory; git worktree
-            // add refuses to clobber an existing directory, so remove it first.
-            if artifact_root.worktree_root.exists() {
-                std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
+            Ok(wt) => wt,
+            Err(e) => {
+                quarantine_on_error(&artifact_root);
+                return Err(e).with_context(|| {
                     format!(
-                        "removing pre-created worktree placeholder at `{}`",
+                        "creating detached worktree at `{}`",
                         artifact_root.worktree_root.display()
                     )
-                })?;
+                });
             }
+        };
 
-            let worktree = match create_detached_worktree(
-                &app.workspace_path,
-                &artifact_root.worktree_root,
-                &head_sha,
-            ) {
-                Ok(wt) => wt,
-                Err(e) => {
-                    quarantine_on_error(&artifact_root);
-                    return Err(e).with_context(|| {
-                        format!(
-                            "creating detached worktree at `{}`",
-                            artifact_root.worktree_root.display()
-                        )
-                    });
-                }
-            };
-
-            // ── 5b. Seed from baseline (Task 3) ───────────────────────────────
-            // If the workspace has a normal index with a matching config hash,
-            // copy it into the review artifact root so the indexer only needs to
-            // update changed repos rather than rebuild from scratch.
-            match pick_seed_source(&app.workspace_path, &cache_key_struct.config_hash) {
-                Ok(Some(seed)) => {
-                    tracing::info!("seeding review artifact from baseline workspace index");
-                    if let Err(e) = seed_artifact_root(&seed, &artifact_root) {
-                        // Non-fatal: log and continue with a full index.
-                        tracing::warn!(
-                            error = %e,
-                            "seed_artifact_root failed; falling back to full reindex"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    tracing::debug!("workspace baseline not seedable; doing full review index");
-                }
-                Err(e) => {
+        // ── 5b. Seed from baseline (Task 3) ───────────────────────────────
+        // If the workspace has a normal index with a matching config hash,
+        // copy it into the review artifact root so the indexer only needs to
+        // update changed repos rather than rebuild from scratch.
+        match pick_seed_source(&app.workspace_path, &cache_key_struct.config_hash) {
+            Ok(Some(seed)) => {
+                tracing::info!("seeding review artifact from baseline workspace index");
+                if let Err(e) = seed_artifact_root(&seed, &artifact_root) {
+                    // Non-fatal: log and continue with a full index.
                     tracing::warn!(
                         error = %e,
-                        "pick_seed_source error; falling back to full reindex"
+                        "seed_artifact_root failed; falling back to full reindex"
                     );
                 }
             }
+            Ok(None) => {
+                tracing::debug!("workspace baseline not seedable; doing full review index");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "pick_seed_source error; falling back to full reindex"
+                );
+            }
+        }
 
-            // ── 5c. Compute affected repos (Task 4) ───────────────────────────
-            // Load the head config from the worktree for prefix matching.
-            let head_cfg_for_affected = {
-                let cfg_path = artifact_root.worktree_root.join("gather-step.config.yaml");
-                GatherStepConfig::from_yaml_file(&cfg_path).ok()
-            };
-            let affected: Option<AffectedRepos> =
-                head_cfg_for_affected.as_ref().map(|cfg| {
-                    let a = compute_affected_repos(cfg, &changed);
-                    if !a.all_repos && !a.repos.is_empty() {
-                        tracing::info!(
-                            repos = ?a.repos,
-                            "seeded baseline + reindexing {} affected repos: {:?}",
-                            a.repos.len(),
-                            a.repos
-                        );
-                    }
-                    a
-                });
+        // ── 5c. Compute affected repos (Task 4) ───────────────────────────
+        // Load the head config from the worktree for prefix matching.
+        let head_cfg_for_affected = {
+            let cfg_path = artifact_root.worktree_root.join("gather-step.config.yaml");
+            GatherStepConfig::from_yaml_file(&cfg_path).ok()
+        };
+        let affected: Option<AffectedRepos> = head_cfg_for_affected.as_ref().map(|cfg| {
+            let a = compute_affected_repos(cfg, &changed);
+            if !a.all_repos && !a.repos.is_empty() {
+                tracing::info!(
+                    repos = ?a.repos,
+                    "seeded baseline + reindexing {} affected repos: {:?}",
+                    a.repos.len(),
+                    a.repos
+                );
+            }
+            a
+        });
 
-            // ── 6. Materialize via engine ──────────────────────────────────────
-            let index_start = Instant::now();
-            let engine: Box<dyn ReviewEngineImpl> = match args.engine {
-                ReviewEngine::TempIndex => Box::new(TempIndexEngine),
-                ReviewEngine::Overlay => Box::new(OverlayEngine::new()),
-            };
-            let engine_snapshot = match engine.materialize(
-                &artifact_root,
-                affected.as_ref(),
-                IndexingOptions::default(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    quarantine_on_error(&artifact_root);
-                    return Err(e).with_context(|| "review engine materialize failed");
-                }
-            };
-            let engine_total_repos = engine_snapshot.total_repos;
-            let engine_unsupported: Vec<String> = engine_snapshot
-                .unsupported_surfaces
-                .iter()
-                .map(|s| s.as_str().to_owned())
-                .collect();
-            // Truncation is intentional: no real indexing run takes > 584 million years.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "elapsed_ms will never overflow u64 in practice"
-            )]
-            let elapsed_ms = index_start.elapsed().as_millis() as u64;
-
-            RunOutcome::ColdRun {
-                artifact_root,
-                worktree,
-                elapsed_ms,
-                total_repos: engine_total_repos,
-                unsupported_surfaces: engine_unsupported,
+        // ── 6. Materialize via engine ──────────────────────────────────────
+        let index_start = Instant::now();
+        let engine: Box<dyn ReviewEngineImpl> = match args.engine {
+            ReviewEngine::TempIndex => Box::new(TempIndexEngine),
+            ReviewEngine::Overlay => Box::new(OverlayEngine::new()),
+        };
+        let engine_snapshot = match engine.materialize(
+            &artifact_root,
+            affected.as_ref(),
+            IndexingOptions::default(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                quarantine_on_error(&artifact_root);
+                return Err(e).with_context(|| "review engine materialize failed");
             }
         };
+        let engine_total_repos = engine_snapshot.total_repos;
+        let engine_unsupported: Vec<String> = engine_snapshot
+            .unsupported_surfaces
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
+        // Truncation is intentional: no real indexing run takes > 584 million years.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "elapsed_ms will never overflow u64 in practice"
+        )]
+        let elapsed_ms = index_start.elapsed().as_millis() as u64;
+
+        RunOutcome::ColdRun {
+            artifact_root,
+            worktree,
+            elapsed_ms,
+            total_repos: engine_total_repos,
+            unsupported_surfaces: engine_unsupported,
+        }
+    };
 
     // Destructure the outcome for the remainder of the function.
     let (artifact_root, worktree_opt, elapsed_ms, total_repos_hint, run_unsupported_surfaces) =
@@ -699,7 +698,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let decorators_unavailable = unsupported.iter().any(|s| s == "decorators");
     let contract_alignments_unavailable = unsupported.iter().any(|s| s == "contract_alignments");
 
-    let (route_deltas, symbol_deltas, payload_contract_deltas, event_deltas, surface_risks, contract_alignments, decorator_deltas) = {
+    let (
+        route_deltas,
+        symbol_deltas,
+        payload_contract_deltas,
+        event_deltas,
+        surface_risks,
+        contract_alignments,
+        decorator_deltas,
+    ) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
         if baseline_graph_exists {
             let review_coord = gather_step_storage::StorageCoordinator::open_read_only(
@@ -713,9 +720,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     match baseline_coord {
                         Ok(baseline_coord) => {
                             let routes = if routes_unavailable {
-                                RouteDeltas { unavailable: true, ..RouteDeltas::default() }
+                                RouteDeltas {
+                                    unavailable: true,
+                                    ..RouteDeltas::default()
+                                }
                             } else {
-                                match extract_route_deltas(baseline_coord.graph(), review_coord.graph()) {
+                                match extract_route_deltas(
+                                    baseline_coord.graph(),
+                                    review_coord.graph(),
+                                ) {
                                     Ok(d) => d,
                                     Err(e) => {
                                         tracing::warn!(
@@ -727,9 +740,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             };
                             let symbols = if symbols_unavailable {
-                                SymbolDeltas { unavailable: true, ..SymbolDeltas::default() }
+                                SymbolDeltas {
+                                    unavailable: true,
+                                    ..SymbolDeltas::default()
+                                }
                             } else {
-                                match extract_symbol_deltas(baseline_coord.graph(), review_coord.graph()) {
+                                match extract_symbol_deltas(
+                                    baseline_coord.graph(),
+                                    review_coord.graph(),
+                                ) {
                                     Ok(d) => d,
                                     Err(e) => {
                                         tracing::warn!(
@@ -741,7 +760,10 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             };
                             let payload_contracts = if payload_contracts_unavailable {
-                                PayloadContractDeltas { unavailable: true, ..PayloadContractDeltas::default() }
+                                PayloadContractDeltas {
+                                    unavailable: true,
+                                    ..PayloadContractDeltas::default()
+                                }
                             } else {
                                 match extract_payload_contract_deltas(
                                     baseline_coord.metadata(),
@@ -759,9 +781,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             };
                             let events = if events_unavailable {
-                                EventDeltas { unavailable: true, ..EventDeltas::default() }
+                                EventDeltas {
+                                    unavailable: true,
+                                    ..EventDeltas::default()
+                                }
                             } else {
-                                match extract_event_deltas(baseline_coord.graph(), review_coord.graph()) {
+                                match extract_event_deltas(
+                                    baseline_coord.graph(),
+                                    review_coord.graph(),
+                                ) {
                                     Ok(d) => d,
                                     Err(e) => {
                                         tracing::warn!(
@@ -798,9 +826,17 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                             let mut routes = routes;
                             if !routes.unavailable {
                                 for r in &mut routes.removed {
-                                    match find_route_node_id(baseline_coord.graph(), &r.method, &r.path) {
+                                    match find_route_node_id(
+                                        baseline_coord.graph(),
+                                        &r.method,
+                                        &r.path,
+                                    ) {
                                         Ok(Some(node_id)) => {
-                                            match impact_for_node(baseline_coord.graph(), node_id, r.repo.as_deref()) {
+                                            match impact_for_node(
+                                                baseline_coord.graph(),
+                                                node_id,
+                                                r.repo.as_deref(),
+                                            ) {
                                                 Ok(summary) => r.impact = Some(summary),
                                                 Err(e) => tracing::warn!(
                                                     error = %e,
@@ -824,8 +860,13 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     let (method, path) = (&c.method.clone(), &c.path.clone());
                                     match find_route_node_id(baseline_coord.graph(), method, path) {
                                         Ok(Some(node_id)) => {
-                                            let repo = c.before.as_ref().and_then(|b| b.repo.as_deref());
-                                            match impact_for_node(baseline_coord.graph(), node_id, repo) {
+                                            let repo =
+                                                c.before.as_ref().and_then(|b| b.repo.as_deref());
+                                            match impact_for_node(
+                                                baseline_coord.graph(),
+                                                node_id,
+                                                repo,
+                                            ) {
                                                 Ok(summary) => {
                                                     if let Some(before) = c.before.as_mut() {
                                                         before.impact = Some(summary);
@@ -854,9 +895,17 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                             let mut symbols = symbols;
                             if !symbols.unavailable {
                                 for s in &mut symbols.removed {
-                                    match find_symbol_node_id(baseline_coord.graph(), &s.repo, &s.qualified_name) {
+                                    match find_symbol_node_id(
+                                        baseline_coord.graph(),
+                                        &s.repo,
+                                        &s.qualified_name,
+                                    ) {
                                         Ok(Some(node_id)) => {
-                                            match impact_for_node(baseline_coord.graph(), node_id, Some(&s.repo)) {
+                                            match impact_for_node(
+                                                baseline_coord.graph(),
+                                                node_id,
+                                                Some(&s.repo),
+                                            ) {
                                                 Ok(summary) => s.impact = Some(summary),
                                                 Err(e) => tracing::warn!(
                                                     error = %e,
@@ -880,7 +929,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     let (repo, qn) = (c.repo.clone(), c.qualified_name.clone());
                                     match find_symbol_node_id(baseline_coord.graph(), &repo, &qn) {
                                         Ok(Some(node_id)) => {
-                                            match impact_for_node(baseline_coord.graph(), node_id, Some(&repo)) {
+                                            match impact_for_node(
+                                                baseline_coord.graph(),
+                                                node_id,
+                                                Some(&repo),
+                                            ) {
                                                 Ok(summary) => c.before.impact = Some(summary),
                                                 Err(e) => tracing::warn!(
                                                     error = %e,
@@ -903,7 +956,10 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
                             // ── Phase 3 Task 3: contract alignment ───────────
                             let contract_alignments = if contract_alignments_unavailable {
-                                ContractAlignments { unavailable: true, ..ContractAlignments::default() }
+                                ContractAlignments {
+                                    unavailable: true,
+                                    ..ContractAlignments::default()
+                                }
                             } else {
                                 match extract_contract_alignments(
                                     review_coord.metadata(),
@@ -923,7 +979,10 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
                             // ── Phase 3 Task 4: decorator deltas ──────────────
                             let decorator_deltas = if decorators_unavailable {
-                                DecoratorDeltas { unavailable: true, ..DecoratorDeltas::default() }
+                                DecoratorDeltas {
+                                    unavailable: true,
+                                    ..DecoratorDeltas::default()
+                                }
                             } else {
                                 match extract_decorator_deltas(
                                     baseline_coord.graph(),
@@ -941,7 +1000,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 }
                             };
 
-                            (routes, symbols, payload_contracts, events, risks, contract_alignments, decorator_deltas)
+                            (
+                                routes,
+                                symbols,
+                                payload_contracts,
+                                events,
+                                risks,
+                                contract_alignments,
+                                decorator_deltas,
+                            )
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -949,7 +1016,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 "baseline storage could not be opened; \
                                  emitting empty deltas"
                             );
-                            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![], ContractAlignments::default(), DecoratorDeltas::default())
+                            (
+                                RouteDeltas::default(),
+                                SymbolDeltas::default(),
+                                PayloadContractDeltas::default(),
+                                EventDeltas::default(),
+                                vec![],
+                                ContractAlignments::default(),
+                                DecoratorDeltas::default(),
+                            )
                         }
                     }
                 }
@@ -959,7 +1034,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         "review storage could not be opened for diff extraction; \
                          emitting empty deltas"
                     );
-                    (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![], ContractAlignments::default(), DecoratorDeltas::default())
+                    (
+                        RouteDeltas::default(),
+                        SymbolDeltas::default(),
+                        PayloadContractDeltas::default(),
+                        EventDeltas::default(),
+                        vec![],
+                        ContractAlignments::default(),
+                        DecoratorDeltas::default(),
+                    )
                 }
             }
         } else {
@@ -968,7 +1051,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 "baseline index not found; run `gather-step index` first \
                  to enable PR-review deltas"
             );
-            (RouteDeltas::default(), SymbolDeltas::default(), PayloadContractDeltas::default(), EventDeltas::default(), vec![], ContractAlignments::default(), DecoratorDeltas::default())
+            (
+                RouteDeltas::default(),
+                SymbolDeltas::default(),
+                PayloadContractDeltas::default(),
+                EventDeltas::default(),
+                vec![],
+                ContractAlignments::default(),
+                DecoratorDeltas::default(),
+            )
         }
     };
 
@@ -1073,9 +1164,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         OutputFormat::Json => report
             .render_json()
             .context("serializing delta report to JSON")?,
-        OutputFormat::GithubComment => {
-            report.render_github_comment(GITHUB_COMMENT_LIMIT)
-        }
+        OutputFormat::GithubComment => report.render_github_comment(GITHUB_COMMENT_LIMIT),
         OutputFormat::Braingent => report.render_braingent(),
         OutputFormat::Markdown => report.render_markdown(),
     };
@@ -2875,10 +2964,7 @@ mod tests {
     /// order so two JSON values from different runs can be byte-compared.
     fn normalize_report_json(v: &mut serde_json::Value) {
         if let Some(Some(obj)) = v.get_mut("metadata").map(serde_json::Value::as_object_mut) {
-            obj.insert(
-                "elapsed_ms".to_owned(),
-                serde_json::Value::Number(0.into()),
-            );
+            obj.insert("elapsed_ms".to_owned(), serde_json::Value::Number(0.into()));
             // Sort indexed_repos so order differences are invisible.
             if let Some(Some(arr)) = obj
                 .get_mut("indexed_repos")
@@ -2889,7 +2975,10 @@ mod tests {
         }
         // Zero run-specific paths in safety to avoid diff noise.
         if let Some(Some(obj)) = v.get_mut("safety").map(serde_json::Value::as_object_mut) {
-            obj.insert("run_id".to_owned(), serde_json::Value::String(String::new()));
+            obj.insert(
+                "run_id".to_owned(),
+                serde_json::Value::String(String::new()),
+            );
             obj.insert(
                 "review_root".to_owned(),
                 serde_json::Value::String(String::new()),
@@ -3142,7 +3231,10 @@ mod tests {
         );
 
         // v1 artifact root still exists (was not deleted by the fresh run).
-        assert!(v1_root.exists(), "v1 artifact must remain on disk after fresh run");
+        assert!(
+            v1_root.exists(),
+            "v1 artifact must remain on disk after fresh run"
+        );
     }
 
     // =========================================================================
@@ -3374,7 +3466,8 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than --include-active should succeed");
+        run_clean(&app, &top, &clean_args)
+            .expect("clean --older-than --include-active should succeed");
 
         assert!(
             !root_active.exists(),
@@ -3549,9 +3642,16 @@ mod tests {
     #[test]
     fn severity_warn_never_triggers() {
         let mut report = make_delta_report_empty();
-        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::High));
-        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::High));
-        report.payload_contracts.changed.push(make_payload_type_change("Foo"));
+        report
+            .removed_surface_risks
+            .push(make_severity_risk(RiskSeverity::High));
+        report
+            .removed_surface_risks
+            .push(make_severity_risk(RiskSeverity::High));
+        report
+            .payload_contracts
+            .changed
+            .push(make_payload_type_change("Foo"));
         assert!(
             !evaluate_severity_threshold(SeverityMode::Warn, &report),
             "Warn mode must never trigger exit 2"
@@ -3562,7 +3662,9 @@ mod tests {
     #[test]
     fn severity_strict_triggers_on_high_risk() {
         let mut report = make_delta_report_empty();
-        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::High));
+        report
+            .removed_surface_risks
+            .push(make_severity_risk(RiskSeverity::High));
         assert!(
             evaluate_severity_threshold(SeverityMode::Strict, &report),
             "Strict must trigger on High risk"
@@ -3573,7 +3675,10 @@ mod tests {
     #[test]
     fn severity_strict_triggers_on_payload_type_change() {
         let mut report = make_delta_report_empty();
-        report.payload_contracts.changed.push(make_payload_type_change("UpdateLabelDto"));
+        report
+            .payload_contracts
+            .changed
+            .push(make_payload_type_change("UpdateLabelDto"));
         assert!(
             evaluate_severity_threshold(SeverityMode::Strict, &report),
             "Strict must trigger when fields_type_changed is non-empty"
@@ -3584,7 +3689,9 @@ mod tests {
     #[test]
     fn severity_pedantic_triggers_on_medium_risk() {
         let mut report = make_delta_report_empty();
-        report.removed_surface_risks.push(make_severity_risk(RiskSeverity::Medium));
+        report
+            .removed_surface_risks
+            .push(make_severity_risk(RiskSeverity::Medium));
         assert!(
             evaluate_severity_threshold(SeverityMode::Pedantic, &report),
             "Pedantic must trigger on Medium risk"
@@ -3677,7 +3784,8 @@ mod tests {
             "--github-comment-file must create the output file"
         );
 
-        let written = std::fs::read_to_string(&comment_path).expect("comment file must be readable");
+        let written =
+            std::fs::read_to_string(&comment_path).expect("comment file must be readable");
         assert!(
             written.contains("gather-step pr-review"),
             "comment file must contain report content"
@@ -3786,8 +3894,7 @@ mod tests {
             no_baseline_check: false,
         };
         let (rendered, _) = run_inner(&app, &args).expect("cold run must succeed");
-        let report: serde_json::Value =
-            serde_json::from_str(&rendered).expect("JSON must parse");
+        let report: serde_json::Value = serde_json::from_str(&rendered).expect("JSON must parse");
         let artifact_root_path = std::path::PathBuf::from(
             report["safety"]["review_root"]
                 .as_str()

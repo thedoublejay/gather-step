@@ -218,8 +218,6 @@ mod tests {
     #[ignore = "requires gather-step binary on PATH and a git fixture on disk"]
     fn mcp_pr_review_does_not_touch_workspace_storage() {
         // TODO: checksum .gather-step/ before and after run_pr_review call.
-        unimplemented!(
-            "implement once a fixture helper is available in gather-step-mcp tests"
-        );
+        unimplemented!("implement once a fixture helper is available in gather-step-mcp tests");
     }
 }

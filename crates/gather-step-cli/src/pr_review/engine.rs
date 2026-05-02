@@ -12,9 +12,7 @@ use anyhow::{Result, anyhow};
 use gather_step_storage::{IndexingOptions, StorageCoordinator};
 
 use crate::pr_review::{
-    affected::AffectedRepos,
-    artifact_root::ReviewArtifactRoot,
-    index_runner::run_review_index,
+    affected::AffectedRepos, artifact_root::ReviewArtifactRoot, index_runner::run_review_index,
 };
 
 // ─── Snapshot ────────────────────────────────────────────────────────────────
@@ -339,7 +337,14 @@ mod tests {
                 .expect("git command")
         };
         git(&["init"]);
-        git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+        git(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
 
         let cache_tmp = TempDir::new("cache");
         let artifact_root = create_artifact_root(

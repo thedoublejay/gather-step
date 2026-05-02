@@ -143,9 +143,8 @@ impl<S: GraphStore> GraphStore for DiffOverlayStore<'_, S> {
         let mut baseline = self.baseline.nodes_by_type(kind)?;
 
         // Remove tombstoned or changed nodes from baseline result.
-        baseline.retain(|n| {
-            !self.is_node_tombstoned(n.id) && !self.changed_nodes.contains_key(&n.id)
-        });
+        baseline
+            .retain(|n| !self.is_node_tombstoned(n.id) && !self.changed_nodes.contains_key(&n.id));
 
         // Add overlay nodes of this kind (changed win over baseline; we already
         // stripped baseline changed above, so add all overlay of this kind).
@@ -159,9 +158,8 @@ impl<S: GraphStore> GraphStore for DiffOverlayStore<'_, S> {
     fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError> {
         let mut baseline = self.baseline.nodes_by_repo(repo)?;
 
-        baseline.retain(|n| {
-            !self.is_node_tombstoned(n.id) && !self.changed_nodes.contains_key(&n.id)
-        });
+        baseline
+            .retain(|n| !self.is_node_tombstoned(n.id) && !self.changed_nodes.contains_key(&n.id));
 
         // Overlay nodes for this repo.
         for node in self
@@ -301,10 +299,7 @@ impl<S: GraphStore> GraphStore for DiffOverlayStore<'_, S> {
         Err(unsupported("nodes_by_event_family_name"))
     }
 
-    fn nodes_by_route_key(
-        &self,
-        _canonical_key: &str,
-    ) -> Result<Vec<NodeData>, GraphStoreError> {
+    fn nodes_by_route_key(&self, _canonical_key: &str) -> Result<Vec<NodeData>, GraphStoreError> {
         Err(unsupported("nodes_by_route_key"))
     }
 
@@ -315,11 +310,7 @@ impl<S: GraphStore> GraphStore for DiffOverlayStore<'_, S> {
         Err(unsupported("nodes_by_shared_symbol_name"))
     }
 
-    fn bulk_insert(
-        &self,
-        _nodes: &[NodeData],
-        _edges: &[EdgeData],
-    ) -> Result<(), GraphStoreError> {
+    fn bulk_insert(&self, _nodes: &[NodeData], _edges: &[EdgeData]) -> Result<(), GraphStoreError> {
         Err(unsupported("bulk_insert"))
     }
 }
@@ -328,7 +319,9 @@ impl<S: GraphStore> GraphStore for DiffOverlayStore<'_, S> {
 
 #[cfg(test)]
 mod tests {
-    use gather_step_core::{EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, Visibility, node_id};
+    use gather_step_core::{
+        EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, Visibility, node_id,
+    };
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
     use super::DiffOverlayStore;
@@ -477,7 +470,9 @@ mod tests {
 
         let incoming = overlay.get_incoming(tgt.id).expect("get_incoming");
         assert!(
-            incoming.iter().any(|e| e.source == src.id && e.target == tgt.id),
+            incoming
+                .iter()
+                .any(|e| e.source == src.id && e.target == tgt.id),
             "overlay added edge must appear in get_incoming(target)"
         );
     }

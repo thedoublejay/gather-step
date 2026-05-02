@@ -54,12 +54,10 @@ pub fn extract_event_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<E
     // Changed: same key in both — diff producer/consumer sets.
     for (key, review_delta) in &review_map {
         if let Some(baseline_delta) = baseline_map.get(key) {
-            let producers_added =
-                endpoint_diff(&baseline_delta.producers, &review_delta.producers);
+            let producers_added = endpoint_diff(&baseline_delta.producers, &review_delta.producers);
             let producers_removed =
                 endpoint_diff(&review_delta.producers, &baseline_delta.producers);
-            let consumers_added =
-                endpoint_diff(&baseline_delta.consumers, &review_delta.consumers);
+            let consumers_added = endpoint_diff(&baseline_delta.consumers, &review_delta.consumers);
             let consumers_removed =
                 endpoint_diff(&review_delta.consumers, &baseline_delta.consumers);
 
@@ -118,10 +116,11 @@ fn build_event_map<S: GraphStore>(store: &S) -> Result<EventMap> {
             let Some(event_name) = event_name_for_node(&node) else {
                 continue;
             };
-            let external_id = node
-                .external_id
-                .clone()
-                .unwrap_or_else(|| node.qualified_name.clone().unwrap_or_else(|| node.name.clone()));
+            let external_id = node.external_id.clone().unwrap_or_else(|| {
+                node.qualified_name
+                    .clone()
+                    .unwrap_or_else(|| node.name.clone())
+            });
 
             let (producers, consumers) = resolve_endpoints(store, &node)?;
 
@@ -417,7 +416,13 @@ mod tests {
 
         // Baseline: empty (no topics).
         // Review: one Topic with one publisher.
-        insert_topic_with_publisher(&review, "order-created", "api", "src/orders.ts", "emitOrder");
+        insert_topic_with_publisher(
+            &review,
+            "order-created",
+            "api",
+            "src/orders.ts",
+            "emitOrder",
+        );
 
         let deltas = extract_event_deltas(&baseline, &review).expect("should succeed");
 
@@ -464,7 +469,11 @@ mod tests {
 
         assert!(deltas.added.is_empty(), "event must not appear in added");
         assert!(deltas.removed.is_empty());
-        assert_eq!(deltas.changed.len(), 1, "expected exactly one changed event");
+        assert_eq!(
+            deltas.changed.len(),
+            1,
+            "expected exactly one changed event"
+        );
         let change = &deltas.changed[0];
         assert_eq!(change.event_name, "order-created");
         assert_eq!(change.consumers_added.len(), 1);
@@ -488,13 +497,7 @@ mod tests {
             "src/pay.ts",
             "emitPayment",
         );
-        insert_consumer_for_topic(
-            &baseline,
-            &topic_b,
-            "legacy",
-            "src/legacy.ts",
-            "emitLegacy",
-        );
+        insert_consumer_for_topic(&baseline, &topic_b, "legacy", "src/legacy.ts", "emitLegacy");
         // (legacy consumer acts as a second "publisher" for test purposes;
         //  instead, let's add a real second producer via a raw edge)
         let second_producer = function_node("payments", "src/retry.ts", "retryEmit", 5);
@@ -520,7 +523,10 @@ mod tests {
         assert_eq!(deltas.changed.len(), 1);
         let change = &deltas.changed[0];
         assert_eq!(change.event_name, "payment-processed");
-        assert!(!change.producers_removed.is_empty(), "a producer must be removed");
+        assert!(
+            !change.producers_removed.is_empty(),
+            "a producer must be removed"
+        );
     }
 
     /// Same topic with identical producer/consumer sets → not in any list.

@@ -345,9 +345,24 @@ mod tests {
         let f1 = file_node("frontend", "src/api.ts");
         let f2 = file_node("frontend", "src/api2.ts");
         let b1 = file_node("backend", "src/svc.ts");
-        let c1 = symbol_node("frontend", "src/api.ts", "fetchOrder", "frontend::fetchOrder");
-        let c2 = symbol_node("frontend", "src/api2.ts", "fetchOrders", "frontend::fetchOrders");
-        let c3 = symbol_node("backend", "src/svc.ts", "OrderService", "backend::OrderService");
+        let c1 = symbol_node(
+            "frontend",
+            "src/api.ts",
+            "fetchOrder",
+            "frontend::fetchOrder",
+        );
+        let c2 = symbol_node(
+            "frontend",
+            "src/api2.ts",
+            "fetchOrders",
+            "frontend::fetchOrders",
+        );
+        let c3 = symbol_node(
+            "backend",
+            "src/svc.ts",
+            "OrderService",
+            "backend::OrderService",
+        );
 
         store
             .bulk_insert(
@@ -372,9 +387,17 @@ mod tests {
 
         assert_eq!(summary.consumer_count, 3, "3 consumers total");
         assert_eq!(summary.consumer_repos.len(), 2, "2 distinct repos");
-        let frontend_row = summary.by_repo.iter().find(|r| r.repo == "frontend").expect("frontend");
+        let frontend_row = summary
+            .by_repo
+            .iter()
+            .find(|r| r.repo == "frontend")
+            .expect("frontend");
         assert_eq!(frontend_row.total, 2, "frontend has 2 consumers");
-        let backend_row = summary.by_repo.iter().find(|r| r.repo == "backend").expect("backend");
+        let backend_row = summary
+            .by_repo
+            .iter()
+            .find(|r| r.repo == "backend")
+            .expect("backend");
         assert_eq!(backend_row.total, 1, "backend has 1 consumer");
     }
 
@@ -383,12 +406,20 @@ mod tests {
     /// `ReadsField` edge is classified as `ReadOnly`.
     #[test]
     fn classify_reads_field_as_read_only() {
-        assert_eq!(classify(EdgeKind::ReadsField, None), Classification::ReadOnly);
+        assert_eq!(
+            classify(EdgeKind::ReadsField, None),
+            Classification::ReadOnly
+        );
 
         let (_td, store) = open_store("reads-field");
         let target = shared_symbol("contracts", "src/order.ts", "OrderField");
         let owner = file_node("consumer-svc", "src/reader.ts");
-        let consumer = symbol_node("consumer-svc", "src/reader.ts", "readField", "consumer-svc::readField");
+        let consumer = symbol_node(
+            "consumer-svc",
+            "src/reader.ts",
+            "readField",
+            "consumer-svc::readField",
+        );
 
         store
             .bulk_insert(
@@ -461,7 +492,12 @@ mod tests {
 
         for i in 0..total_consumers {
             let owner = NodeData {
-                id: node_id("consumer-svc", &format!("src/consumer{i}.ts"), NodeKind::File, &format!("src/consumer{i}.ts")),
+                id: node_id(
+                    "consumer-svc",
+                    &format!("src/consumer{i}.ts"),
+                    NodeKind::File,
+                    &format!("src/consumer{i}.ts"),
+                ),
                 kind: NodeKind::File,
                 repo: "consumer-svc".to_owned(),
                 file_path: format!("src/consumer{i}.ts"),
@@ -474,7 +510,12 @@ mod tests {
                 is_virtual: false,
             };
             let consumer = NodeData {
-                id: node_id("consumer-svc", &format!("src/consumer{i}.ts"), NodeKind::Function, &format!("fn{i}")),
+                id: node_id(
+                    "consumer-svc",
+                    &format!("src/consumer{i}.ts"),
+                    NodeKind::Function,
+                    &format!("fn{i}"),
+                ),
                 kind: NodeKind::Function,
                 repo: "consumer-svc".to_owned(),
                 file_path: format!("src/consumer{i}.ts"),
@@ -500,13 +541,14 @@ mod tests {
 
         // Insert in batches to avoid the owner-file deduplication issue.
         // All edges share different owner files, so a single bulk_insert works.
-        store
-            .bulk_insert(&nodes, &edges_vec)
-            .expect("bulk insert");
+        store.bulk_insert(&nodes, &edges_vec).expect("bulk insert");
 
         let summary = impact_for_node(&store, target.id, None).expect("impact");
 
-        assert!(summary.truncated, "truncated must be true when cap exceeded");
+        assert!(
+            summary.truncated,
+            "truncated must be true when cap exceeded"
+        );
         assert_eq!(
             summary.consumer_count, IMPACT_CAP,
             "consumer_count must equal the cap"
@@ -531,12 +573,28 @@ mod tests {
 
         // Cross-repo consumer via ConsumesApiFrom.
         let consumer_owner = file_node("frontend", "src/api.ts");
-        let consumer = symbol_node("frontend", "src/api.ts", "fetchOrders", "frontend::fetchOrders");
-        let consume_edge = edge(consumer.id, route.id, EdgeKind::ConsumesApiFrom, consumer_owner.id);
+        let consumer = symbol_node(
+            "frontend",
+            "src/api.ts",
+            "fetchOrders",
+            "frontend::fetchOrders",
+        );
+        let consume_edge = edge(
+            consumer.id,
+            route.id,
+            EdgeKind::ConsumesApiFrom,
+            consumer_owner.id,
+        );
 
         baseline
             .bulk_insert(
-                &[route.clone(), handler_owner, handler, consumer_owner, consumer],
+                &[
+                    route.clone(),
+                    handler_owner,
+                    handler,
+                    consumer_owner,
+                    consumer,
+                ],
                 &[srv_edge, consume_edge],
             )
             .expect("baseline insert");

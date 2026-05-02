@@ -56,6 +56,7 @@ use crate::{
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
             review_pack_tool as run_review_pack,
         },
+        pr_review::{PrReviewInput, PrReviewResponse, run_pr_review},
         projection_impact::{
             ProjectionImpactRequest, ProjectionImpactResponse,
             projection_impact_tool as run_projection_impact,
@@ -70,7 +71,6 @@ use crate::{
             SearchRequest, SearchResponse, SymbolRequest, SymbolResponse, TraversalRequest,
             TraversalResponse, get_callees, get_callers, get_symbol, search_symbols,
         },
-        pr_review::{PrReviewInput, PrReviewResponse, run_pr_review},
     },
 };
 
@@ -1021,8 +1021,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let workspace = self.ctx.config.workspace_root();
         self.traced_call("pr_review", &args, move || {
-            run_pr_review(&workspace, &request)
-                .map(Json)
+            run_pr_review(&workspace, &request).map(Json)
         })
         .await
     }

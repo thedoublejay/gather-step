@@ -44,14 +44,7 @@ use crate::pr_review::delta_report::{
 const MAX_FINDINGS: usize = 50;
 
 /// Suffixes stripped when computing a canonical identity (longest first).
-const STRIP_SUFFIXES: &[&str] = &[
-    "payload",
-    "request",
-    "response",
-    "input",
-    "body",
-    "dto",
-];
+const STRIP_SUFFIXES: &[&str] = &["payload", "request", "response", "input", "body", "dto"];
 
 /// `(repo, file_path, qualified_name, field_names)` — one row per contract record.
 type MemberRaw = (String, String, String, Vec<String>);
@@ -68,13 +61,25 @@ pub fn extract_contract_alignments<M: MetadataStore>(
     // Build a set of (repo, file, target_qn) for PR-touched contracts (any side).
     let mut touched: FxHashSet<(String, String, String)> = FxHashSet::default();
     for c in &payload_changes.added {
-        touched.insert((c.repo.clone(), c.file.clone(), c.target_qualified_name.clone()));
+        touched.insert((
+            c.repo.clone(),
+            c.file.clone(),
+            c.target_qualified_name.clone(),
+        ));
     }
     for c in &payload_changes.removed {
-        touched.insert((c.repo.clone(), c.file.clone(), c.target_qualified_name.clone()));
+        touched.insert((
+            c.repo.clone(),
+            c.file.clone(),
+            c.target_qualified_name.clone(),
+        ));
     }
     for c in &payload_changes.changed {
-        touched.insert((c.repo.clone(), c.file.clone(), c.target_qualified_name.clone()));
+        touched.insert((
+            c.repo.clone(),
+            c.file.clone(),
+            c.target_qualified_name.clone(),
+        ));
     }
 
     // Group records by canonical identity.
@@ -96,15 +101,12 @@ pub fn extract_contract_alignments<M: MetadataStore>(
             .iter()
             .map(|f| f.name.clone())
             .collect();
-        by_identity
-            .entry(identity)
-            .or_default()
-            .push((
-                rec.record.repo.clone(),
-                rec.record.file_path.clone(),
-                qn.to_owned(),
-                field_names,
-            ));
+        by_identity.entry(identity).or_default().push((
+            rec.record.repo.clone(),
+            rec.record.file_path.clone(),
+            qn.to_owned(),
+            field_names,
+        ));
     }
 
     let mut findings: Vec<ContractAlignmentFinding> = Vec::new();
@@ -122,7 +124,11 @@ pub fn extract_contract_alignments<M: MetadataStore>(
                 role: infer_role(qn, repo),
                 repo: repo.clone(),
                 qualified_name: qn.clone(),
-                file: if file.is_empty() { None } else { Some(file.clone()) },
+                file: if file.is_empty() {
+                    None
+                } else {
+                    Some(file.clone())
+                },
             })
             .collect();
 
@@ -135,7 +141,9 @@ pub fn extract_contract_alignments<M: MetadataStore>(
         let confidence = compute_confidence(members_raw);
 
         let touched_by_pr = members_raw.iter().any(|(repo, file, qn, _)| {
-            touched.iter().any(|(tr, tf, tqn)| tr == repo && tf == file && tqn == qn)
+            touched
+                .iter()
+                .any(|(tr, tf, tqn)| tr == repo && tf == file && tqn == qn)
         });
 
         findings.push(ContractAlignmentFinding {
@@ -158,7 +166,10 @@ pub fn extract_contract_alignments<M: MetadataStore>(
         findings.truncate(MAX_FINDINGS);
     }
 
-    Ok(ContractAlignments { findings, unavailable: false })
+    Ok(ContractAlignments {
+        findings,
+        unavailable: false,
+    })
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
@@ -168,7 +179,11 @@ fn canonical_identity(qn: &str) -> String {
     // Strip any leading virtual-node prefix (e.g. "__topic__kafka__") first
     // by taking the last `__`-separated segment.
     let name = if let Some(pos) = qn.rfind("__") {
-        if pos + 2 < qn.len() { &qn[pos + 2..] } else { qn }
+        if pos + 2 < qn.len() {
+            &qn[pos + 2..]
+        } else {
+            qn
+        }
     } else {
         qn
     };
@@ -186,8 +201,7 @@ fn canonical_identity(qn: &str) -> String {
 
 /// Returns `true` if `s` ends with `suffix` (ASCII case-insensitive).
 fn ends_with_ignore_ascii(s: &str, suffix: &str) -> bool {
-    s.len() >= suffix.len()
-        && s[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+    s.len() >= suffix.len() && s[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 /// Returns `true` if `s` contains `needle` (ASCII case-insensitive).
@@ -228,9 +242,7 @@ fn infer_role(qn: &str, repo: &str) -> String {
 }
 
 /// Compute alignment confidence from the minimum pairwise Jaccard similarity.
-fn compute_confidence(
-    members: &[(String, String, String, Vec<String>)],
-) -> AlignmentConfidence {
+fn compute_confidence(members: &[(String, String, String, Vec<String>)]) -> AlignmentConfidence {
     if members.len() < 2 {
         return AlignmentConfidence::Low;
     }
@@ -276,7 +288,8 @@ fn compute_confidence(
 #[cfg(test)]
 mod tests {
     use std::{
-        env, path::PathBuf,
+        env,
+        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -309,9 +322,10 @@ mod tests {
     impl Drop for TempDb {
         fn drop(&mut self) {
             for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(self.path.with_extension(
-                    format!("sqlite3{suffix}").trim_start_matches('.'),
-                ));
+                let _ = std::fs::remove_file(
+                    self.path
+                        .with_extension(format!("sqlite3{suffix}").trim_start_matches('.')),
+                );
                 // Also try removing plain path + suffix.
                 let p = format!("{}{}", self.path.display(), suffix);
                 let _ = std::fs::remove_file(&p);
@@ -334,8 +348,10 @@ mod tests {
     ) -> PayloadContractStoreRecord {
         let target_id = ref_node_id(NodeKind::Topic, target_qn);
         let source_id = ref_node_id(NodeKind::Function, &format!("{repo}::handler"));
-        let contract_id =
-            ref_node_id(NodeKind::PayloadContract, &format!("__pc__{repo}__{target_qn}"));
+        let contract_id = ref_node_id(
+            NodeKind::PayloadContract,
+            &format!("__pc__{repo}__{target_qn}"),
+        );
         PayloadContractStoreRecord {
             record: PayloadContractRecord {
                 payload_contract_node_id: contract_id,
@@ -431,7 +447,14 @@ mod tests {
                 "src/dto.ts",
                 "CreateOrderDto",
                 PayloadSide::Producer,
-                vec![field("a"), field("b"), field("c"), field("d"), field("e"), field("x")],
+                vec![
+                    field("a"),
+                    field("b"),
+                    field("c"),
+                    field("d"),
+                    field("e"),
+                    field("x"),
+                ],
             ),
         );
         insert(
@@ -441,7 +464,14 @@ mod tests {
                 "src/payload.ts",
                 "CreateOrderPayload",
                 PayloadSide::Consumer,
-                vec![field("a"), field("b"), field("c"), field("d"), field("e"), field("y")],
+                vec![
+                    field("a"),
+                    field("b"),
+                    field("c"),
+                    field("d"),
+                    field("e"),
+                    field("y"),
+                ],
             ),
         );
 

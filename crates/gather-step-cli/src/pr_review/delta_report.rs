@@ -630,10 +630,10 @@ impl DeltaReport {
             .filter(|r| r.severity == RiskSeverity::Low)
             .count();
 
-        let workspace_name = m
-            .workspace
-            .file_name()
-            .map_or_else(|| m.workspace.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let workspace_name = m.workspace.file_name().map_or_else(
+            || m.workspace.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
 
         let reviewed_at = {
             // Use a static timestamp format. chrono is available in gather-step-cli.
@@ -815,7 +815,11 @@ impl DeltaReport {
         if self.payload_contracts.unavailable {
             render_unavailable_section(&mut buf, "Payload contracts", "overlay");
         } else {
-            render_contract_section(&mut buf, "New payload contracts", &self.payload_contracts.added);
+            render_contract_section(
+                &mut buf,
+                "New payload contracts",
+                &self.payload_contracts.added,
+            );
             render_contract_section(
                 &mut buf,
                 "Removed payload contracts",
@@ -828,8 +832,16 @@ impl DeltaReport {
         if self.events.unavailable {
             render_unavailable_section(&mut buf, "Events", "overlay");
         } else {
-            render_event_section(&mut buf, "Events: new producers/consumers", &self.events.added);
-            render_event_section(&mut buf, "Events: removed producers/consumers", &self.events.removed);
+            render_event_section(
+                &mut buf,
+                "Events: new producers/consumers",
+                &self.events.added,
+            );
+            render_event_section(
+                &mut buf,
+                "Events: removed producers/consumers",
+                &self.events.removed,
+            );
             render_event_changed_section(&mut buf, &self.events.changed);
         }
 
@@ -1143,13 +1155,25 @@ fn render_contract_alignments_section(buf: &mut String, alignments: &ContractAli
             AlignmentConfidence::Medium => "MEDIUM",
             AlignmentConfidence::Low => "LOW",
         };
-        let touched = if f.touched_by_pr { " *(touched by PR)*" } else { "" };
-        let _ = writeln!(buf, "### `{}` — confidence: {}{}\n", f.identity, confidence_badge, touched);
+        let touched = if f.touched_by_pr {
+            " *(touched by PR)*"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            buf,
+            "### `{}` — confidence: {}{}\n",
+            f.identity, confidence_badge, touched
+        );
         buf.push_str("| Role | Repo | Qualified name | File |\n");
         buf.push_str("|------|------|----------------|------|\n");
         for m in &f.members {
             let file = m.file.as_deref().unwrap_or("—");
-            let _ = writeln!(buf, "| {} | {} | `{}` | {} |", m.role, m.repo, m.qualified_name, file);
+            let _ = writeln!(
+                buf,
+                "| {} | {} | `{}` | {} |",
+                m.role, m.repo, m.qualified_name, file
+            );
         }
         buf.push('\n');
     }
@@ -1183,7 +1207,11 @@ fn render_decorator_changed_section(buf: &mut String, changes: &[DecoratorDeltaC
         return;
     }
     for c in changes {
-        let args_note = if c.args_changed { " *(args changed)*" } else { "" };
+        let args_note = if c.args_changed {
+            " *(args changed)*"
+        } else {
+            ""
+        };
         let _ = writeln!(
             buf,
             "### `{}` on `{}`{}\n",
@@ -1541,7 +1569,11 @@ mod tests {
             target_qualified_name: qn.to_owned(),
             side: "producer".to_owned(),
             fields_added: (0..field_count)
-                .map(|i| PayloadFieldSummary { name: format!("field{i}"), type_name: Some("string".to_owned()), optional: false })
+                .map(|i| PayloadFieldSummary {
+                    name: format!("field{i}"),
+                    type_name: Some("string".to_owned()),
+                    optional: false,
+                })
                 .collect(),
             fields_removed: vec![],
             fields_optional_to_required: vec![],
@@ -1564,7 +1596,11 @@ mod tests {
             &risks,
         );
         assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].command.contains("pack UpdateLabelProjectInput"), "command should pack the identity: {}", cmds[0].command);
+        assert!(
+            cmds[0].command.contains("pack UpdateLabelProjectInput"),
+            "command should pack the identity: {}",
+            cmds[0].command
+        );
         assert!(cmds[0].requires_keep_cache);
     }
 
@@ -1572,7 +1608,9 @@ mod tests {
     #[test]
     fn changed_payload_with_three_field_changes_emits_pack() {
         let mut payloads = PayloadContractDeltas::default();
-        payloads.changed.push(make_payload_change("UpdateLabelProjectDto", 3));
+        payloads
+            .changed
+            .push(make_payload_change("UpdateLabelProjectDto", 3));
         let cmds = synthesize_review_pack_commands(
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/reg.json"),
@@ -1583,7 +1621,11 @@ mod tests {
             &[],
         );
         assert_eq!(cmds.len(), 1);
-        assert!(cmds[0].command.contains("pack UpdateLabelProjectDto"), "command should pack the contract: {}", cmds[0].command);
+        assert!(
+            cmds[0].command.contains("pack UpdateLabelProjectDto"),
+            "command should pack the contract: {}",
+            cmds[0].command
+        );
         assert!(cmds[0].requires_keep_cache);
     }
 
@@ -1806,7 +1848,14 @@ mod tests {
         // `impact` is absent (None, skip_serializing_if).
         assert_eq!(
             keys,
-            ["file", "handler_qualified_name", "line", "method", "path", "repo"]
+            [
+                "file",
+                "handler_qualified_name",
+                "line",
+                "method",
+                "path",
+                "repo"
+            ]
         );
     }
 
@@ -1828,8 +1877,7 @@ mod tests {
     fn markdown_snapshot_section_headers_are_stable() {
         let r = fully_populated_report();
         let md = r.render_markdown();
-        let h2_sections: Vec<&str> =
-            md.lines().filter(|l| l.starts_with("## ")).collect();
+        let h2_sections: Vec<&str> = md.lines().filter(|l| l.starts_with("## ")).collect();
         assert_eq!(
             h2_sections,
             [

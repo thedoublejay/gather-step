@@ -94,7 +94,10 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
             let nodes = baseline.nodes_by_repo(&symbol.repo)?;
             nodes.into_iter().find(|n| {
                 n.qualified_name.as_deref() == Some(&symbol.qualified_name)
-                    && matches!(n.kind, NodeKind::Function | NodeKind::Class | NodeKind::Type)
+                    && matches!(
+                        n.kind,
+                        NodeKind::Function | NodeKind::Class | NodeKind::Type
+                    )
             })
         };
 
@@ -129,9 +132,9 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
         // Find the baseline event virtual node by external_id.
         let kind = event_kind_to_node_kind(&event.event_kind);
         let nodes = baseline.nodes_by_type(kind)?;
-        let event_node = nodes.into_iter().find(|n| {
-            n.is_virtual && n.external_id.as_deref() == Some(&event.external_id)
-        });
+        let event_node = nodes
+            .into_iter()
+            .find(|n| n.is_virtual && n.external_id.as_deref() == Some(&event.external_id));
 
         let Some(event_node) = event_node else {
             continue;
@@ -453,14 +456,8 @@ mod tests {
             impact: None,
         };
 
-        let risks = extract_removed_surface_risks(
-            &baseline,
-            &review,
-            &[removed_route],
-            &[],
-            &[],
-        )
-        .expect("should succeed");
+        let risks = extract_removed_surface_risks(&baseline, &review, &[removed_route], &[], &[])
+            .expect("should succeed");
 
         assert_eq!(risks.len(), 1);
         assert_eq!(risks[0].severity, RiskSeverity::High);
@@ -475,9 +472,7 @@ mod tests {
         let (_td_r, review) = open_store("sym-low-review");
 
         let sym = shared_symbol_node("shared-lib", "SharedUtil");
-        baseline
-            .bulk_insert(&[sym], &[])
-            .expect("baseline insert");
+        baseline.bulk_insert(&[sym], &[]).expect("baseline insert");
 
         let removed_symbol = SymbolDelta {
             kind: "shared_symbol".to_owned(),
@@ -491,14 +486,8 @@ mod tests {
             impact: None,
         };
 
-        let risks = extract_removed_surface_risks(
-            &baseline,
-            &review,
-            &[],
-            &[removed_symbol],
-            &[],
-        )
-        .expect("should succeed");
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[removed_symbol], &[])
+            .expect("should succeed");
 
         assert_eq!(risks.len(), 1);
         assert_eq!(risks[0].severity, RiskSeverity::Low);
@@ -534,14 +523,8 @@ mod tests {
             consumers: vec![],
         };
 
-        let risks = extract_removed_surface_risks(
-            &baseline,
-            &review,
-            &[],
-            &[],
-            &[removed_event],
-        )
-        .expect("should succeed");
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[removed_event])
+            .expect("should succeed");
 
         assert_eq!(risks.len(), 1);
         assert_eq!(risks[0].severity, RiskSeverity::High);
@@ -579,14 +562,8 @@ mod tests {
             impact: None,
         };
 
-        let risks = extract_removed_surface_risks(
-            &baseline,
-            &review,
-            &[],
-            &[removed_symbol],
-            &[],
-        )
-        .expect("should succeed");
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[removed_symbol], &[])
+            .expect("should succeed");
 
         // B was also removed, so no surviving consumers.
         assert_eq!(risks.len(), 1);

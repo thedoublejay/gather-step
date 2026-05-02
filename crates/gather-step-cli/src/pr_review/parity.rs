@@ -139,9 +139,8 @@ pub fn compare_for_parity(temp_index: &DeltaReport, overlay: &DeltaReport) -> Pa
     // ── Removed-surface risks ─────────────────────────────────────────────────
     // Risks are derived from routes/symbols/events; if those surfaces are
     // available on the overlay, risks should match too.
-    let risks_surface_available = !overlay.routes.unavailable
-        && !overlay.symbols.unavailable
-        && !overlay.events.unavailable;
+    let risks_surface_available =
+        !overlay.routes.unavailable && !overlay.symbols.unavailable && !overlay.events.unavailable;
     if risks_surface_available {
         compare_risk_lists(
             &temp_index.removed_surface_risks,
@@ -164,12 +163,7 @@ fn route_key(r: &RouteDelta) -> String {
     format!("{} {}", r.method, r.path)
 }
 
-fn compare_route_lists(
-    label: &str,
-    a: &[RouteDelta],
-    b: &[RouteDelta],
-    diffs: &mut Vec<String>,
-) {
+fn compare_route_lists(label: &str, a: &[RouteDelta], b: &[RouteDelta], diffs: &mut Vec<String>) {
     let mut ak: Vec<String> = a.iter().map(route_key).collect();
     let mut bk: Vec<String> = b.iter().map(route_key).collect();
     ak.sort();
@@ -273,12 +267,7 @@ fn event_key(e: &EventDelta) -> String {
     format!("{}:{}", e.event_kind, e.event_name)
 }
 
-fn compare_event_lists(
-    label: &str,
-    a: &[EventDelta],
-    b: &[EventDelta],
-    diffs: &mut Vec<String>,
-) {
+fn compare_event_lists(label: &str, a: &[EventDelta], b: &[EventDelta], diffs: &mut Vec<String>) {
     let mut ak: Vec<String> = a.iter().map(event_key).collect();
     let mut bk: Vec<String> = b.iter().map(event_key).collect();
     ak.sort();
@@ -341,11 +330,7 @@ fn risk_key(r: &RemovedSurfaceRisk) -> String {
     format!("{}:{}", r.kind, r.identity)
 }
 
-fn compare_risk_lists(
-    a: &[RemovedSurfaceRisk],
-    b: &[RemovedSurfaceRisk],
-    diffs: &mut Vec<String>,
-) {
+fn compare_risk_lists(a: &[RemovedSurfaceRisk], b: &[RemovedSurfaceRisk], diffs: &mut Vec<String>) {
     let mut ak: Vec<String> = a.iter().map(risk_key).collect();
     let mut bk: Vec<String> = b.iter().map(risk_key).collect();
     ak.sort();
@@ -381,8 +366,8 @@ mod tests {
 
     use crate::pr_review::delta_report::{
         CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, EventDeltas,
-        PayloadContractDeltas, ReviewMetadata, RiskSeverity, RemovedSurfaceRisk,
-        RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
+        PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata, RiskSeverity, RouteDelta,
+        RouteDeltas, SafetyMetadata, SymbolDeltas,
     };
 
     use super::compare_for_parity;
@@ -451,7 +436,11 @@ mod tests {
         ov.routes.added.push(route);
 
         let diff = compare_for_parity(&ti, &ov);
-        assert!(diff.is_match(), "expected match but got: {:?}", diff.differences);
+        assert!(
+            diff.is_match(),
+            "expected match but got: {:?}",
+            diff.differences
+        );
     }
 
     // ── Test 2: differing routes → mismatch ──────────────────────────────────
@@ -483,12 +472,14 @@ mod tests {
         // temp-index has 5 contract alignments.
         let mut ti = empty_report();
         for i in 0..5 {
-            ti.contract_alignments.findings.push(ContractAlignmentFinding {
-                identity: format!("Contract{i}"),
-                members: vec![],
-                confidence: AlignmentConfidence::High,
-                touched_by_pr: false,
-            });
+            ti.contract_alignments
+                .findings
+                .push(ContractAlignmentFinding {
+                    identity: format!("Contract{i}"),
+                    members: vec![],
+                    confidence: AlignmentConfidence::High,
+                    touched_by_pr: false,
+                });
         }
 
         // overlay marks contract_alignments as unavailable.
@@ -529,7 +520,9 @@ mod tests {
         let diff = compare_for_parity(&ti, &ov);
         assert!(!diff.is_match(), "severity mismatch should be detected");
         assert!(
-            diff.differences.iter().any(|d| d.contains("severity mismatch")),
+            diff.differences
+                .iter()
+                .any(|d| d.contains("severity mismatch")),
             "difference message should mention severity: {:?}",
             diff.differences
         );

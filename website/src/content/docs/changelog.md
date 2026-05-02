@@ -13,15 +13,35 @@ No unreleased changes yet.
 
 Release status: **draft**.
 
-Deployment-topology release for indexing runtime deployment artifacts, querying service/runtime relationships from the CLI and MCP, and using concrete topology evidence in projection-impact review.
+Combined release covering deployment-topology indexing and `gather-step pr-review`, a non-destructive PR analysis command that builds an isolated review index for a PR branch and emits a typed delta report.
 
-### Highlights
+### Highlights — Deployment Topology
 
 - Added deployment topology indexing for Dockerfiles, Docker Compose, Kubernetes manifests, Kustomize files, explicit Helm chart artifacts, GitHub Actions deploy jobs, configured env files, and Compose `env_file` references.
 - Added graph nodes and edges for deployments, env vars, secrets, config maps, workflow jobs, brokers, and databases.
 - Added `gather-step deployment-topology` plus MCP tools for `where_deployed`, `service_env`, `env_var_consumers`, `undeployed_services`, `deployed_but_no_code`, and `shared_infra`.
 - Projection impact now replaces `deployed_owner_unchecked` with `deployed_owner_topology_observed` when indexed deployment evidence exists for the affected service or repo.
 - Refreshed MCP protocol dependencies by updating `rmcp` and `rmcp-macros` to `1.6.0`.
+
+### Highlights — PR Review Mode
+
+- Added `gather-step pr-review --base <REF> --head <REF>` to build a disposable review index in the OS cache directory and emit a structured `DeltaReport` for human or machine consumption.
+- Added `gather-step pr-review clean` with five selectors (`--dry-run`, `--run-id`, `--base/--head`, `--older-than`, `--all`) and an `--include-active` opt-in for pruning the still-resolvable cache. `clean --older-than` skips `InProgress` artifacts so it cannot race a long indexing run.
+- Added `--severity {warn, strict, pedantic}` threshold modes. `warn` is the default; `strict` exits with code 2 on any High-severity removed-surface risk or payload type change; `pedantic` extends that to Medium risks and any payload change. Legacy `--strict` flag remains a deprecated alias.
+- Added `--format {markdown, json, github-comment, braingent}` plus `--github-comment-file <PATH>` for CI integrations. The GitHub-comment renderer auto-truncates to fit the platform's 65,536-char comment limit. The Braingent renderer emits a YAML-frontmatter Markdown record suitable for archiving in a memory store. Legacy `--json` flag remains a deprecated alias.
+- Added `--engine {temp-index, overlay}`. `temp-index` is the default and the parity oracle. `overlay` is wired as an experimental scaffold (`DiffOverlayStore` over the baseline graph) and currently inherits temp-index storage; do not use it for production reviews until the parity gate lands.
+- Added `--keep-cache` to preserve the review artifact root for follow-up `trace`, `impact`, `pack`, and `projection-impact` commands. Suggested follow-up commands in the report are pre-filled with `--registry` / `--storage` overrides pointing at the kept index.
+- Added `--no-baseline-check` to suppress the workspace-HEAD-vs-`--base` SHA mismatch warning. By default the report's `## Warnings` block surfaces the mismatch so reviewers know the diff may be feature-vs-feature instead of base-vs-head.
+- Added `--registry` and `--storage` flags on `trace`, `impact`, `pack`, and other read commands so they can target a kept review artifact root and replay PR-only context.
+- Extended `gather-step clean` with `--include-review` to also wipe review artifacts for the workspace.
+- Wired a full `gather-step index` reindex to automatically wipe review artifacts (their baseline is invalidated).
+- Added a branch-scoped review cache keyed by `(workspace_hash, base_sha, head_sha, config_hash, schema_version, gather_step_version)`. Cache hits skip worktree creation and indexing; the artifact survives the run regardless of `--keep-cache`. Marker schema is now v2 (added `cache_key` and `last_accessed_at`); v1 markers remain readable by the cleanup tooling.
+- Added `pr_review` MCP tool exposing the same delta report to MCP clients. The tool shells out to the CLI to inherit the workspace-storage safety guard.
+- Added a top-level `CLAUDE.md` documenting the agent workflow for "review this PR using gather-step" plus project conventions.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.0.0`.
 
 ### Deployment Topology
 
@@ -31,9 +51,40 @@ Deployment-topology release for indexing runtime deployment artifacts, querying 
 - Helm and GitHub Actions detection is intentionally conservative to avoid treating generic `values.yaml`, `chart.yaml`, `helm lint`, or `DEPLOY_*` env references as deployment evidence.
 - Incremental indexing now purges stale deployment facts when a previously indexed artifact becomes malformed or stops classifying as deployment data.
 
+### PR Review Mode — hard invariants
+
+- `pr-review` and `pr-review clean` never mutate the workspace's normal `.gather-step/storage` or `.gather-step/registry.json`. Every review run logs the exact baseline storage path, review storage path, run id, and cleanup policy in the report's `safety` metadata block.
+- `StorageContext::review_checked` rejects any review path that lives under `<workspace>/.gather-step/`. Workspace-local review artifacts must use a sibling (e.g. `.gather-step-review/`) or the OS cache directory.
+- `pr-review clean` refuses to delete any path whose marker file does not match the current workspace hash, and refuses paths overlapping the baseline `storage/` or `registry.json`.
+
+### PR Review Mode — delta report (`schema_version: 5`)
+
+- **Routes**: added / removed / changed by `(method, canonical_path)`. Handler info (repo, file, line, qualified name) attached via `Serves` edges.
+- **Symbols**: added / removed / changed exported symbols and shared-symbol stubs by `(repo, qualified_name)`. Reports `signature_changed` and `visibility_changed` flags.
+- **Payload contracts**: field-level diffs (added / removed / type-changed / `optional`-required flips) keyed by `(repo, file, target_qualified_name, side)`.
+- **Events**: producer and consumer set diffs across `Topic`, `Queue`, `Subject`, `Stream`, and `Event` virtual nodes.
+- **Decorators**: added / removed / changed permission, audit, and authorization decorators.
+- **Contract alignments**: cross-repo clusters of related payload contracts with high / medium / low confidence, marked when any cluster member is touched by the PR.
+- **Removed-surface risks**: removed routes / symbols / events with surviving consumers, classified by severity (`high` for cross-repo, `medium` for same-repo, `low` for unconsumed).
+- **Impact summaries**: per-removed-and-changed surface, downstream consumer counts grouped by repo and classified as `read_only`, `write_mutate`, `construct_payload`, or `unknown`.
+- **Suggested follow-ups**: synthesized `gather-step pack` and `gather-step trace crud` commands targeting the highest-impact deltas. Capped at 10 commands; all carry `--registry` / `--storage` overrides for the kept review index.
+
+### PR Review Mode — known limitations
+
+- The `overlay` engine is a scaffold: `OverlayEngine::materialize` opens the baseline coordinator instead of a `DiffOverlayStore`-backed snapshot. The parity-gate test is `#[ignore]`'d until the snapshot wiring lands. `--engine overlay` is documented as experimental.
+- Reverse-dependents expansion in the affected-repo computation is a TODO. Today the affected set is the directly-changed repos plus the full-expansion fallback for shared packages, root config, and gateway/router files.
+- `seed_artifact_root` deep-copies the entire workspace `storage/` even when the affected set is a small subset. Reflink / COW or per-repo seeding is the planned optimization.
+- The MCP `pr_review` tool's `include_pack` parameter is currently a no-op. The structured response carries the `DeltaReport` only; bounded review-pack synthesis is wired in CLI follow-ups.
+- Decorator extraction surfaces decorator nodes by name but yields thin payload data unless the parser emits `UsesDecorator` edges.
+- Payload-contract impact attach is conservative: contract changes use a Strict-mode threshold without consumer-cardinality scoring.
+
 ### Verification Coverage
 
 - Added regression coverage for deployment parser false positives, stale deployment fact purging, service-targeted projection-impact topology matching, shared-infra consumers, topology response mapping, and generated MCP tool summaries.
+- 127 `pr_review` library tests covering storage-context safety guards, artifact-root marker schema and cleanup, branch-scoped cache reuse and parity, seed-from-baseline, affected-repo expansion, every delta extractor, severity threshold modes, output renderers (Markdown / JSON / GitHub-comment / Braingent), and the MCP-side wiring.
+- 8 git-helpers tests for `resolve_ref`, `resolve_range`, `merge_base`, `changed_files`, and detached-worktree creation / removal.
+- 5 worktree-helpers tests confirming target-exists refusal, missing-repo errors, and idempotent removal.
+- Stable JSON top-level-key snapshots and Markdown section-header snapshots prevent accidental schema drift.
 - Verified with Rust formatting, deploy/analysis/storage/MCP/CLI tests, workspace clippy, website build, and GitHub Actions during release preparation.
 
 ## v2.4.0 (2026-05-01)
