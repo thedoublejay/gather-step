@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
@@ -10,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use console::style;
 use gather_step_core::{
-    GatherStepConfig, NodeKind, RegistryStore, RepoIndexMetadata, WorkspaceRepoResult,
+    GatherStepConfig, NodeData, NodeKind, RegistryStore, RepoIndexMetadata, WorkspaceRepoResult,
     WorkspaceStats,
 };
 use gather_step_git::{
@@ -1197,41 +1198,52 @@ fn collect_precomputed_pack_targets(
 ) -> Result<Vec<String>> {
     let mut targets = Vec::new();
     for repo in &config.repos {
-        let mut candidates = graph
-            .nodes_by_repo(&repo.name)?
-            .into_iter()
-            .filter(|node| {
-                node.kind.is_search_indexable()
-                    && !node.is_virtual
-                    && node.kind != NodeKind::File
-                    && !node.name.is_empty()
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.file_path
-                .cmp(&right.file_path)
-                .then(
-                    left.span
-                        .as_ref()
-                        .map(|span| span.line_start)
-                        .cmp(&right.span.as_ref().map(|span| span.line_start)),
-                )
-                .then(left.name.cmp(&right.name))
-                .then(left.id.cmp(&right.id))
-        });
-        candidates.dedup_by(|left, right| left.id == right.id);
         let remaining = PRECOMPUTED_PACK_TARGET_LIMIT.saturating_sub(targets.len());
         if remaining == 0 {
             break;
         }
-        targets.extend(
-            candidates
-                .into_iter()
-                .take(PRECOMPUTED_PACK_TARGETS_PER_REPO.min(remaining))
-                .map(|node| encode_node_id(node.id)),
-        );
+        let per_repo_limit = PRECOMPUTED_PACK_TARGETS_PER_REPO.min(remaining);
+        let mut candidates = Vec::with_capacity(per_repo_limit);
+        for node in graph.nodes_by_repo(&repo.name)? {
+            if node.kind.is_search_indexable()
+                && !node.is_virtual
+                && node.kind != NodeKind::File
+                && !node.name.is_empty()
+            {
+                insert_precompute_candidate(&mut candidates, node, per_repo_limit);
+            }
+        }
+        targets.extend(candidates.into_iter().map(|node| encode_node_id(node.id)));
     }
     Ok(targets)
+}
+
+fn insert_precompute_candidate(candidates: &mut Vec<NodeData>, node: NodeData, limit: usize) {
+    if limit == 0 || candidates.iter().any(|candidate| candidate.id == node.id) {
+        return;
+    }
+    let insert_at = candidates
+        .iter()
+        .position(|candidate| precompute_candidate_cmp(&node, candidate).is_lt())
+        .unwrap_or(candidates.len());
+    if insert_at >= limit {
+        return;
+    }
+    candidates.insert(insert_at, node);
+    candidates.truncate(limit);
+}
+
+fn precompute_candidate_cmp(left: &NodeData, right: &NodeData) -> Ordering {
+    left.file_path
+        .cmp(&right.file_path)
+        .then(
+            left.span
+                .as_ref()
+                .map(|span| span.line_start)
+                .cmp(&right.span.as_ref().map(|span| span.line_start)),
+        )
+        .then(left.name.cmp(&right.name))
+        .then(left.id.cmp(&right.id))
 }
 
 fn precompute_context_packs(
@@ -1477,13 +1489,14 @@ fn format_pack_precompute_message(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gather_step_core::WorkspaceStats;
+    use gather_step_core::{NodeData, NodeKind, SourceSpan, WorkspaceStats, node_id};
     use gather_step_storage::PackCallLogEntry;
 
     use super::{
         CROSS_REPO_COUNT_MESSAGE, SEARCH_FLUSH_MESSAGE, enforce_summary_invariant, format_bytes,
-        format_duration_hh_mm_ss, format_pack_precompute_message, precompute_pack_call_count,
-        should_precompute_fallback_targets, should_update_numeric_progress,
+        format_duration_hh_mm_ss, format_pack_precompute_message, insert_precompute_candidate,
+        precompute_pack_call_count, should_precompute_fallback_targets,
+        should_update_numeric_progress,
     };
 
     #[test]
@@ -1549,6 +1562,42 @@ mod tests {
             precompute_pack_call_count(&[], &["a".to_owned(), "b".to_owned()]),
             10
         );
+    }
+
+    #[test]
+    fn precompute_candidate_selection_keeps_stable_top_k() {
+        let mut candidates = Vec::new();
+        insert_precompute_candidate(&mut candidates, candidate_node("later", "src/z.ts", 1), 2);
+        insert_precompute_candidate(&mut candidates, candidate_node("second", "src/a.ts", 20), 2);
+        insert_precompute_candidate(&mut candidates, candidate_node("first", "src/a.ts", 10), 2);
+        insert_precompute_candidate(&mut candidates, candidate_node("first", "src/a.ts", 10), 2);
+
+        let names = candidates
+            .into_iter()
+            .map(|node| node.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["first", "second"]);
+    }
+
+    fn candidate_node(name: &str, file_path: &str, line_start: u32) -> NodeData {
+        NodeData {
+            id: node_id("repo", file_path, NodeKind::Function, name),
+            kind: NodeKind::Function,
+            repo: "repo".to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(name.to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: Some(SourceSpan {
+                line_start,
+                line_len: 0,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+        }
     }
 
     fn stats(files: u64, symbols: u64, edges: u64) -> WorkspaceStats {
