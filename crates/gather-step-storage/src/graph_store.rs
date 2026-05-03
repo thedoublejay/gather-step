@@ -180,7 +180,7 @@ struct EdgeIndexTables<'txn> {
     edges_out: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edges_in: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edges_by_owner: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
-    edges_by_kind: MultimapTable<'txn, u8, EdgeIdBytes>,
+    edge_kind_counts: redb::Table<'txn, u8, u64>,
 }
 
 const NODES: TableDefinition<NodeIdBytes, &[u8]> = TableDefinition::new("nodes");
@@ -191,8 +191,7 @@ const EDGES_IN: MultimapTableDefinition<NodeIdBytes, EdgeIdBytes> =
     MultimapTableDefinition::new("edges_in");
 const EDGES_BY_OWNER: MultimapTableDefinition<NodeIdBytes, EdgeIdBytes> =
     MultimapTableDefinition::new("edges_by_owner");
-const EDGES_BY_KIND: MultimapTableDefinition<u8, EdgeIdBytes> =
-    MultimapTableDefinition::new("edges_by_kind");
+const EDGE_KIND_COUNTS: TableDefinition<u8, u64> = TableDefinition::new("edge_kind_counts");
 const BY_FILE: MultimapTableDefinition<&[u8], NodeIdBytes> =
     MultimapTableDefinition::new("by_file");
 const BY_REPO: MultimapTableDefinition<u32, NodeIdBytes> = MultimapTableDefinition::new("by_repo");
@@ -261,7 +260,7 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 ///
 /// Bump this when node/edge discriminants or graph-derived evidence semantics
 /// change in a way that requires rebuilding `.gather-step/storage/graph.redb`.
-pub const GRAPH_SCHEMA_VERSION: u32 = 4;
+pub const GRAPH_SCHEMA_VERSION: u32 = 5;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -615,9 +614,9 @@ impl GraphStoreDb {
             read_txn.open_multimap_table(EDGES_BY_OWNER)
         );
         record_table!(
-            "edges_by_kind",
-            "multimap",
-            read_txn.open_multimap_table(EDGES_BY_KIND)
+            "edge_kind_counts",
+            "table",
+            read_txn.open_table(EDGE_KIND_COUNTS)
         );
         record_table!("by_file", "multimap", read_txn.open_multimap_table(BY_FILE));
         record_table!("by_repo", "multimap", read_txn.open_multimap_table(BY_REPO));
@@ -1368,6 +1367,41 @@ impl GraphStoreDb {
         })
     }
 
+    fn increment_edge_kind_count(
+        counts: &mut redb::Table<'_, u8, u64>,
+        kind: EdgeKind,
+    ) -> Result<(), GraphStoreError> {
+        let key = kind.as_u8();
+        let next = counts
+            .get(key)
+            .map_err(GraphStoreError::storage)?
+            .map_or(1, |current| current.value().saturating_add(1));
+        counts.insert(key, next).map_err(GraphStoreError::storage)?;
+        Ok(())
+    }
+
+    fn decrement_edge_kind_count(
+        counts: &mut redb::Table<'_, u8, u64>,
+        kind: EdgeKind,
+    ) -> Result<(), GraphStoreError> {
+        let key = kind.as_u8();
+        let Some(current) = counts
+            .get(key)
+            .map_err(GraphStoreError::storage)?
+            .map(|current| current.value())
+        else {
+            return Ok(());
+        };
+        if current <= 1 {
+            let _ = counts.remove(key).map_err(GraphStoreError::storage)?;
+        } else {
+            counts
+                .insert(key, current - 1)
+                .map_err(GraphStoreError::storage)?;
+        }
+        Ok(())
+    }
+
     fn edge_id(edge: &EdgeData) -> EdgeIdBytes {
         // Pack identity fields into a fixed stack buffer (no heap allocation).
         // `is_cross_file` is derived and not included in the identity hash.
@@ -1894,12 +1928,10 @@ impl GraphStoreDb {
         }
 
         {
-            let mut edges_by_kind = write_txn
-                .open_multimap_table(EDGES_BY_KIND)
+            let mut edge_kind_counts = write_txn
+                .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?;
-            edges_by_kind
-                .insert(edge.kind.as_u8(), edge_id)
-                .map_err(GraphStoreError::storage)?;
+            Self::increment_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
         }
 
         Ok(())
@@ -1924,8 +1956,8 @@ impl GraphStoreDb {
             edges_by_owner: write_txn
                 .open_multimap_table(EDGES_BY_OWNER)
                 .map_err(GraphStoreError::storage)?,
-            edges_by_kind: write_txn
-                .open_multimap_table(EDGES_BY_KIND)
+            edge_kind_counts: write_txn
+                .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?,
         })
     }
@@ -1995,10 +2027,7 @@ impl GraphStoreDb {
                 .edges_by_owner
                 .insert(edge.owner_file.as_bytes(), edge_id)
                 .map_err(GraphStoreError::storage)?;
-            tables
-                .edges_by_kind
-                .insert(edge.kind.as_u8(), edge_id)
-                .map_err(GraphStoreError::storage)?;
+            Self::increment_edge_kind_count(&mut tables.edge_kind_counts, edge.kind)?;
         }
 
         let encoded = Self::encode_edge(edge);
@@ -2042,12 +2071,10 @@ impl GraphStoreDb {
         }
 
         {
-            let mut edges_by_kind = write_txn
-                .open_multimap_table(EDGES_BY_KIND)
+            let mut edge_kind_counts = write_txn
+                .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?;
-            edges_by_kind
-                .remove(edge.kind.as_u8(), edge_id)
-                .map_err(GraphStoreError::storage)?;
+            Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
         }
 
         Ok(())
@@ -2275,12 +2302,10 @@ impl GraphStoreDb {
                         .map_err(GraphStoreError::storage)?;
                 }
                 {
-                    let mut edges_by_kind = write_txn
-                        .open_multimap_table(EDGES_BY_KIND)
+                    let mut edge_kind_counts = write_txn
+                        .open_table(EDGE_KIND_COUNTS)
                         .map_err(GraphStoreError::storage)?;
-                    edges_by_kind
-                        .remove(edge.kind.as_u8(), edge_id)
-                        .map_err(GraphStoreError::storage)?;
+                    Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
                 }
                 Self::delete_canonical_edge(write_txn, edge_id)?;
             }
@@ -2319,12 +2344,10 @@ impl GraphStoreDb {
                         .map_err(GraphStoreError::storage)?;
                 }
                 {
-                    let mut edges_by_kind = write_txn
-                        .open_multimap_table(EDGES_BY_KIND)
+                    let mut edge_kind_counts = write_txn
+                        .open_table(EDGE_KIND_COUNTS)
                         .map_err(GraphStoreError::storage)?;
-                    edges_by_kind
-                        .remove(edge.kind.as_u8(), edge_id)
-                        .map_err(GraphStoreError::storage)?;
+                    Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
                 }
                 Self::delete_canonical_edge(write_txn, edge_id)?;
             }
@@ -2465,12 +2488,10 @@ impl GraphStoreDb {
                         .map_err(GraphStoreError::storage)?;
                 }
                 {
-                    let mut edges_by_kind = write_txn
-                        .open_multimap_table(EDGES_BY_KIND)
+                    let mut edge_kind_counts = write_txn
+                        .open_table(EDGE_KIND_COUNTS)
                         .map_err(GraphStoreError::storage)?;
-                    edges_by_kind
-                        .remove(edge.kind.as_u8(), edge_id)
-                        .map_err(GraphStoreError::storage)?;
+                    Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
                 }
                 Self::delete_canonical_edge(write_txn, edge_id)?;
             }
@@ -3348,15 +3369,17 @@ impl GraphStore for GraphStoreDb {
 
     fn count_edges_by_kind(&self, kind: EdgeKind) -> Result<usize, GraphStoreError> {
         let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
-        let by_kind = match read_txn.open_multimap_table(EDGES_BY_KIND) {
-            Ok(by_kind) => by_kind,
+        let edge_kind_counts = match read_txn.open_table(EDGE_KIND_COUNTS) {
+            Ok(edge_kind_counts) => edge_kind_counts,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
             Err(error) => return Err(GraphStoreError::storage(error)),
         };
-        Ok(by_kind
+        Ok(edge_kind_counts
             .get(kind.as_u8())
             .map_err(GraphStoreError::storage)?
-            .count())
+            .map_or(0, |count| {
+                usize::try_from(count.value()).unwrap_or(usize::MAX)
+            }))
     }
 
     fn nodes_by_event_family_name(
@@ -3454,7 +3477,7 @@ mod tests {
     use redb::ReadableDatabase;
 
     use super::{
-        BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGES_BY_KIND, GraphStore, GraphStoreDb,
+        BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGE_KIND_COUNTS, GraphStore, GraphStoreDb,
         StoredDriftKind, StoredEdgeMetadata, StoredResolver,
     };
     use crate::{StorageDaemonMetadata, StorageDaemonMetadataGuard};
@@ -4631,15 +4654,15 @@ mod tests {
         );
 
         let read_txn = store.db.begin_read().expect("read txn should open");
-        let by_kind = read_txn
-            .open_multimap_table(EDGES_BY_KIND)
-            .expect("by kind table should open");
+        let edge_kind_counts = read_txn
+            .open_table(EDGE_KIND_COUNTS)
+            .expect("edge kind counts table should open");
         assert_eq!(
-            by_kind
+            edge_kind_counts
                 .get(EdgeKind::Calls.as_u8())
                 .expect("lookup should work")
-                .count(),
-            1
+                .map(|count| count.value()),
+            Some(1)
         );
     }
 
