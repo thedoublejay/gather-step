@@ -369,6 +369,9 @@ fn parse_file_core(
         let mut seen_groups = rustc_hash::FxHashSet::default();
         for pack in &active_pack_refs {
             let pack_id = pack.id;
+            if !pack_id.applies_to_language(file.language) {
+                continue;
+            }
             let group = pack_id.aug_group();
             if !seen_groups.insert(group) {
                 continue;
@@ -540,10 +543,7 @@ fn parse_file_core(
     let mut seen_groups = rustc_hash::FxHashSet::default();
     for pack in &active_pack_refs {
         let pack_id = pack.id;
-        // Skip SharedLib and FrontendHooks for non-TS/JS files (belt-and-suspenders guard).
-        if matches!(pack_id, PackId::SharedLib | PackId::FrontendHooks)
-            && !matches!(file.language, Language::TypeScript | Language::JavaScript)
-        {
+        if !pack_id.applies_to_language(file.language) {
             continue;
         }
         let group = pack_id.aug_group();
