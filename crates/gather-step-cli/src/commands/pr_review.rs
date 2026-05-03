@@ -1788,7 +1788,9 @@ mod tests {
     use super::*;
     use crate::{
         app::AppContext,
-        pr_review::artifact_root::{MARKER_FILENAME, ReviewMarker, ReviewStatus, workspace_hash},
+        pr_review::artifact_root::{
+            MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+        },
     };
 
     // ── temp-dir helper ───────────────────────────────────────────────────────
@@ -2064,7 +2066,7 @@ mod tests {
             created_at_override.map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
 
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash,
             workspace_root: workspace_root.to_path_buf(),
             base_sha: base_sha.to_owned(),
@@ -2075,7 +2077,7 @@ mod tests {
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at,
             status,
-            cache_key: None, // v1 marker — not eligible for cache reuse
+            cache_key: None,
             last_accessed_at: None,
         };
 
@@ -2428,7 +2430,7 @@ mod tests {
         let root = cache.join(&real_hash).join(run_id);
         fs::create_dir_all(&root).unwrap();
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: "deadbeefdeadbeef".to_owned(), // wrong hash
             workspace_root: ws.to_path_buf(),
             base_sha: "base".to_owned(),
@@ -2481,7 +2483,7 @@ mod tests {
         fs::create_dir_all(&baseline_storage).unwrap();
 
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: workspace_hash(ws),
             workspace_root: ws.to_path_buf(),
             base_sha: "b".to_owned(),
@@ -3295,46 +3297,48 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Parity Test 4: cache invalidates on gather_step_version change (v1 marker)
+    // Parity Test 4: cache ignores completed markers without cache keys
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn cache_invalidates_on_v1_marker_without_cache_key() {
+    fn cache_ignores_marker_without_cache_key() {
         if !git_available() {
             return;
         }
 
-        let ws_tmp = TempDir::new("v1-ws");
-        let cache_tmp = TempDir::new("v1-cache");
+        let ws_tmp = TempDir::new("no-cache-key-ws");
+        let cache_tmp = TempDir::new("no-cache-key-cache");
         let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
 
-        // Manually plant a v1 marker (no cache_key) in the expected cache dir.
+        // Manually plant a completed marker without a cache_key in the
+        // expected cache dir.
         let ws_hash = workspace_hash(&ws);
-        let v1_run_id = "review-v1-legacy-run";
-        let v1_root = cache_tmp.path().join(&ws_hash).join(v1_run_id);
-        fs::create_dir_all(v1_root.join("storage")).unwrap();
-        fs::create_dir_all(v1_root.join("worktree")).unwrap();
-        fs::write(v1_root.join("registry.json"), b"{}").unwrap();
+        let planted_run_id = "review-no-cache-key-run";
+        let planted_root = cache_tmp.path().join(&ws_hash).join(planted_run_id);
+        fs::create_dir_all(planted_root.join("storage")).unwrap();
+        fs::create_dir_all(planted_root.join("worktree")).unwrap();
+        fs::write(planted_root.join("registry.json"), b"{}").unwrap();
 
-        let v1_marker = ReviewMarker {
-            schema_version: 1,
+        let planted_marker = ReviewMarker {
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: ws_hash.clone(),
             workspace_root: ws.clone(),
             base_sha: base_sha.clone(),
             head_sha: head_sha.clone(),
-            run_id: v1_run_id.to_owned(),
-            storage_path: v1_root.join("storage"),
-            registry_path: v1_root.join("registry.json"),
+            run_id: planted_run_id.to_owned(),
+            storage_path: planted_root.join("storage"),
+            registry_path: planted_root.join("registry.json"),
             gather_step_version: "0.0.0".to_owned(), // old version
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
-            cache_key: None, // v1: no cache key
+            cache_key: None,
             last_accessed_at: None,
         };
-        let v1_json = serde_json::to_vec_pretty(&v1_marker).unwrap();
-        fs::write(v1_root.join(MARKER_FILENAME), v1_json).unwrap();
+        let planted_json = serde_json::to_vec_pretty(&planted_marker).unwrap();
+        fs::write(planted_root.join(MARKER_FILENAME), planted_json).unwrap();
 
-        // Run with current binary version → must NOT reuse v1 artifact.
+        // Run with current binary version: it must not reuse an artifact that
+        // lacks the branch-scoped cache key.
         let app = make_app(&ws);
         let args = PrReviewRunArgs {
             base: base_sha.clone(),
@@ -3353,16 +3357,16 @@ mod tests {
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let run_id = report["safety"]["run_id"].as_str().unwrap();
 
-        // The run_id must differ from v1_run_id — a fresh artifact was created.
+        // The run_id must differ from the planted run: a fresh artifact was created.
         assert_ne!(
-            run_id, v1_run_id,
-            "v1 marker without cache_key must not be reused; got run_id={run_id}"
+            run_id, planted_run_id,
+            "marker without cache_key must not be reused; got run_id={run_id}"
         );
 
-        // v1 artifact root still exists (was not deleted by the fresh run).
+        // Planted artifact root still exists (was not deleted by the fresh run).
         assert!(
-            v1_root.exists(),
-            "v1 artifact must remain on disk after fresh run"
+            planted_root.exists(),
+            "planted artifact must remain on disk after fresh run"
         );
     }
 

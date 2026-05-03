@@ -2,9 +2,7 @@ use std::io::ErrorKind;
 
 use anyhow::Error;
 use gather_step_core::ConfigError;
-use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError};
-
-const UNSUPPORTED_SCHEMA_MESSAGE: &str = "Generated index state uses an unsupported schema. Run `gather-step index --auto-recover` to rebuild from source repos.";
+use gather_step_storage::GraphStoreError;
 
 #[must_use]
 pub fn format_operator_error(error: &Error) -> String {
@@ -14,15 +12,6 @@ pub fn format_operator_error(error: &Error) -> String {
         if let Some(config_error) = cause.downcast_ref::<ConfigError>() {
             return format_config_error(config_error);
         }
-        if cause
-            .downcast_ref::<MetadataStoreError>()
-            .is_some_and(|err| matches!(err, MetadataStoreError::SchemaVersionMismatch { .. }))
-            || cause
-                .downcast_ref::<SearchStoreError>()
-                .is_some_and(|err| matches!(err, SearchStoreError::VersionMismatch { .. }))
-        {
-            return UNSUPPORTED_SCHEMA_MESSAGE.to_owned();
-        }
         if let Some(graph_error) = cause.downcast_ref::<GraphStoreError>() {
             match graph_error {
                 GraphStoreError::StorageHeld { .. }
@@ -31,9 +20,6 @@ pub fn format_operator_error(error: &Error) -> String {
                 }
                 GraphStoreError::Corrupt { .. } => {
                     return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
-                }
-                GraphStoreError::SchemaVersionMismatch { .. } => {
-                    return UNSUPPORTED_SCHEMA_MESSAGE.to_owned();
                 }
                 _ => {}
             }
@@ -57,7 +43,6 @@ pub fn format_operator_error(error: &Error) -> String {
     if contains_ascii_case_insensitive(&full, "db corrupted")
         || contains_ascii_case_insensitive(&full, "corrupt")
         || contains_ascii_case_insensitive(&full, "repair aborted")
-        || contains_ascii_case_insensitive(&full, "manual upgrade required")
     {
         return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
     }
@@ -122,25 +107,4 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-#[cfg(test)]
-mod tests {
-    use gather_step_storage::GraphStoreError;
-
-    use super::format_operator_error;
-
-    #[test]
-    fn graph_schema_mismatch_reports_auto_recover() {
-        let error = anyhow::Error::new(GraphStoreError::SchemaVersionMismatch {
-            stored: 0,
-            expected: 1,
-        })
-        .context("opening storage at /tmp/workspace/.gather-step/storage");
-
-        let message = format_operator_error(&error);
-
-        assert!(message.contains("unsupported schema"));
-        assert!(message.contains("gather-step index --auto-recover"));
-    }
 }

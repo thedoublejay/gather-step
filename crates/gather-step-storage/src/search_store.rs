@@ -46,10 +46,10 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 
 /// Current search-index schema version.
 ///
-/// Bump this constant whenever the Tantivy schema changes (fields added or
-/// removed) so that incompatible on-disk indexes are rejected at open time
-/// rather than silently producing wrong results.
-pub const SEARCH_INDEX_VERSION: u32 = 3;
+/// v3.1 is a fresh generated-state release. Search schema stamping starts at
+/// zero and does not carry migration or upgrade branches for older development
+/// indexes.
+pub const SEARCH_INDEX_VERSION: u32 = 0;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -254,10 +254,6 @@ pub enum SearchStoreError {
     InvalidNodeId(usize),
     #[error("invalid node kind tag `{0}`")]
     InvalidNodeKind(u64),
-    #[error(
-        "your local index uses an unsupported schema; run `gather-step clean && gather-step index` to rebuild"
-    )]
-    VersionMismatch { stored: u32, expected: u32 },
 }
 
 impl TantivySearchStore {
@@ -291,11 +287,11 @@ impl TantivySearchStore {
         // Caller must have validated path via cli::path_safety before opening.
         crate::fs_mode::apply_private_dir(&path)?;
 
-        // Check (non-test) or skip (test/RamDirectory) schema version guard.
+        // Stamp (non-test) or skip (test/RamDirectory) schema version metadata.
         // RamDirectory indexes are always fresh so the version file is not
         // written or read in test builds.
         #[cfg(not(test))]
-        check_or_write_schema_version(&path)?;
+        stamp_schema_version_if_missing(&path)?;
 
         let schema = build_schema();
         #[cfg(test)]
@@ -307,7 +303,7 @@ impl TantivySearchStore {
         };
         register_tokenizers(&mut index);
 
-        let fields = SearchFields::from_schema(&index.schema());
+        let fields = SearchFields::from_schema(&index.schema())?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -761,92 +757,24 @@ impl SearchDocument {
     }
 }
 
-/// Read the schema version recorded in `SEARCH_VERSION_FILE` inside `dir`.
-///
-/// - If the file is absent this is a fresh index: write the current version
-///   and proceed.
-/// - If the file exists and its version matches [`SEARCH_INDEX_VERSION`],
-///   proceed normally.
-/// - If the file exists but the version differs, return
-///   [`SearchStoreError::VersionMismatch`] so the caller can prompt the user
-///   to rebuild generated index state.
+/// Ensure the search directory carries the v3.1 fresh-release schema stamp.
 ///
 /// The version file is a plain decimal `u32` followed by a newline.
 ///
 /// Exposed as `pub(crate)` so the unit-test suite can exercise it directly
 /// against a real filesystem directory without needing a non-test binary.
-pub(crate) fn check_or_write_schema_version(dir: &std::path::Path) -> Result<(), SearchStoreError> {
+pub(crate) fn stamp_schema_version_if_missing(
+    dir: &std::path::Path,
+) -> Result<(), SearchStoreError> {
     let version_path = dir.join(SEARCH_VERSION_FILE);
     match fs::read_to_string(&version_path) {
-        Ok(contents) => {
-            let stored: u32 = contents.trim().parse().unwrap_or(0);
-            if stored != SEARCH_INDEX_VERSION {
-                return Err(SearchStoreError::VersionMismatch {
-                    stored,
-                    expected: SEARCH_INDEX_VERSION,
-                });
-            }
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // Stamp the version file only when the directory is genuinely
-            // empty (or contains nothing but our sentinel file).  A non-empty
-            // directory without a version file is incompatible generated
-            // state. Treating it as "fresh" would silently stamp the sentinel
-            // and the next schema-dependent lookup (`SearchFields::from_schema`)
-            // could panic on a missing field. Reject with `VersionMismatch` so
-            // the operator can run `gather-step clean --storage` and reindex.
-            if directory_has_index_artifacts(dir)? {
-                return Err(SearchStoreError::VersionMismatch {
-                    stored: 0,
-                    expected: SEARCH_INDEX_VERSION,
-                });
-            }
             fs::write(&version_path, format!("{SEARCH_INDEX_VERSION}\n"))?;
             Ok(())
         }
         Err(error) => Err(SearchStoreError::Io(error)),
     }
-}
-
-/// Returns `true` when `dir` contains recognizable Tantivy index artifacts.
-///
-/// Stray platform/editor files in an otherwise fresh directory (for example
-/// `.DS_Store`) should not force a legacy-index failure; only real index files
-/// without the schema sentinel mean we must reject and ask for a clean reindex.
-fn directory_has_index_artifacts(dir: &std::path::Path) -> Result<bool, SearchStoreError> {
-    let entries = match fs::read_dir(dir) {
-        Ok(it) => it,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(SearchStoreError::Io(error)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(SearchStoreError::Io)?;
-        let file_name = entry.file_name();
-        if file_name == SEARCH_VERSION_FILE {
-            continue;
-        }
-        if is_search_index_artifact_name(&file_name) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn is_search_index_artifact_name(file_name: &std::ffi::OsStr) -> bool {
-    let Some(name) = file_name.to_str() else {
-        return false;
-    };
-    if matches!(name, "meta.json" | ".managed.json" | "managed.json") {
-        return true;
-    }
-    let Some((_, extension)) = name.rsplit_once('.') else {
-        return false;
-    };
-    matches!(
-        extension,
-        "idx" | "term" | "pos" | "fast" | "fieldnorm" | "store" | "del"
-    )
 }
 
 fn build_schema() -> Schema {
@@ -1290,45 +1218,26 @@ fn fast_node_kind(
 }
 
 impl SearchFields {
-    fn from_schema(schema: &Schema) -> Self {
-        Self {
-            node_id: schema
-                .get_field(FIELD_NODE_ID)
-                .expect("node_id field should exist"),
-            repo: schema
-                .get_field(FIELD_REPO)
-                .expect("repo field should exist"),
-            file_key: schema
-                .get_field(FIELD_FILE_KEY)
-                .expect("file_key field should exist"),
-            symbol_name: schema
-                .get_field(FIELD_SYMBOL_NAME)
-                .expect("symbol_name field should exist"),
-            content: schema
-                .get_field(FIELD_CONTENT)
-                .expect("content field should exist"),
-            file_name: schema
-                .get_field(FIELD_FILE_NAME)
-                .expect("file_name field should exist"),
-            file_path_tokens: schema
-                .get_field(FIELD_FILE_PATH_TOKENS)
-                .expect("file_path_tokens field should exist"),
-            node_kind: schema
-                .get_field(FIELD_NODE_KIND)
-                .expect("node_kind field should exist"),
-            last_modified: schema
-                .get_field(FIELD_LAST_MODIFIED)
-                .expect("last_modified field should exist"),
-            is_exported: schema
-                .get_field(FIELD_IS_EXPORTED)
-                .expect("is_exported field should exist"),
-            lang: schema
-                .get_field(FIELD_LANG)
-                .expect("lang field should exist"),
-            file_path_stored: schema
-                .get_field(FIELD_FILE_PATH_STORED)
-                .expect("file_path_stored field should exist"),
-        }
+    fn from_schema(schema: &Schema) -> Result<Self, SearchStoreError> {
+        let field = |name: &'static str| {
+            schema
+                .get_field(name)
+                .map_err(|_| SearchStoreError::MissingField(name))
+        };
+        Ok(Self {
+            node_id: field(FIELD_NODE_ID)?,
+            repo: field(FIELD_REPO)?,
+            file_key: field(FIELD_FILE_KEY)?,
+            symbol_name: field(FIELD_SYMBOL_NAME)?,
+            content: field(FIELD_CONTENT)?,
+            file_name: field(FIELD_FILE_NAME)?,
+            file_path_tokens: field(FIELD_FILE_PATH_TOKENS)?,
+            node_kind: field(FIELD_NODE_KIND)?,
+            last_modified: field(FIELD_LAST_MODIFIED)?,
+            is_exported: field(FIELD_IS_EXPORTED)?,
+            lang: field(FIELD_LANG)?,
+            file_path_stored: field(FIELD_FILE_PATH_STORED)?,
+        })
     }
 }
 
@@ -2094,9 +2003,9 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Schema-version guard tests
+    // Schema-version stamp tests
     //
-    // These tests exercise `check_or_write_schema_version` directly against
+    // These tests exercise `stamp_schema_version_if_missing` directly against
     // a real filesystem directory because the version file is not used in
     // in-memory (RamDirectory) test indexes.
     // -------------------------------------------------------------------------
@@ -2104,157 +2013,58 @@ mod tests {
     /// A directory with no version file is treated as a fresh index: the
     /// current version is stamped and `Ok(())` is returned.
     #[test]
-    fn schema_version_check_stamps_fresh_directory() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
+    fn schema_version_stamp_writes_zero_for_fresh_directory() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
         let dir = temp_search_dir("version-fresh");
         fs::create_dir_all(&dir).expect("dir should exist");
 
-        check_or_write_schema_version(&dir).expect("fresh directory should succeed");
+        stamp_schema_version_if_missing(&dir).expect("fresh directory should succeed");
 
         let written = fs::read_to_string(dir.join(SEARCH_VERSION_FILE))
             .expect("version file should have been created");
         let parsed: u32 = written.trim().parse().expect("version should be numeric");
-        assert_eq!(parsed, SEARCH_INDEX_VERSION);
+        assert_eq!(parsed, 0);
+        assert_eq!(SEARCH_INDEX_VERSION, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A directory already at the current version passes the check.
+    /// Existing stamps are left alone. v3.1 does not carry a mixed-version
+    /// branch; incompatible older generated state fails later through the
+    /// underlying Tantivy schema/open path rather than custom upgrade UX.
     #[test]
-    fn schema_version_check_accepts_current_version() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
+    fn schema_version_stamp_preserves_existing_stamp() {
+        use super::{SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
-        let dir = temp_search_dir("version-current");
+        let dir = temp_search_dir("version-existing");
         fs::create_dir_all(&dir).expect("dir should exist");
-        fs::write(
-            dir.join(SEARCH_VERSION_FILE),
-            format!("{SEARCH_INDEX_VERSION}\n"),
-        )
-        .expect("write version file");
+        fs::write(dir.join(SEARCH_VERSION_FILE), "99\n").expect("write version file");
 
-        check_or_write_schema_version(&dir)
-            .expect("directory at current version should pass check");
+        stamp_schema_version_if_missing(&dir).expect("existing stamp should pass through");
+
+        let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
+        assert_eq!(stamp.trim(), "99");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A directory stamped with a mismatched version returns `VersionMismatch`.
     #[test]
-    fn schema_version_check_rejects_mismatched_version() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
+    fn schema_version_stamp_writes_zero_in_non_empty_directory() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
-        let dir = temp_search_dir("version-mismatch");
+        let dir = temp_search_dir("version-non-empty");
         fs::create_dir_all(&dir).expect("dir should exist");
-        let mismatched_version = SEARCH_INDEX_VERSION + 1;
-        fs::write(
-            dir.join(SEARCH_VERSION_FILE),
-            format!("{mismatched_version}\n"),
-        )
-        .expect("write mismatched version file");
-
-        let err = check_or_write_schema_version(&dir)
-            .expect_err("mismatched-version directory must be rejected");
-
-        assert!(
-            matches!(
-                err,
-                SearchStoreError::VersionMismatch {
-                    stored,
-                    expected,
-                } if stored == mismatched_version && expected == SEARCH_INDEX_VERSION
-            ),
-            "expected VersionMismatch error; got: {err}"
-        );
-        assert!(
-            err.to_string()
-                .contains("gather-step clean && gather-step index"),
-            "error message should instruct the user to rebuild generated state; got: {err}"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A non-empty index directory with no version sentinel must be rejected
-    /// with `VersionMismatch { stored: 0 }`, not silently stamped as fresh.
-    /// Stamping it would let the next schema-dependent lookup panic on a
-    /// missing field.
-    #[test]
-    fn schema_version_check_rejects_unstamped_non_empty_directory() {
-        use super::{SEARCH_INDEX_VERSION, check_or_write_schema_version};
-        use std::fs;
-
-        let dir = temp_search_dir("version-unstamped");
-        fs::create_dir_all(&dir).expect("dir should exist");
-        // Simulate index artifacts without the schema-version sentinel.
         fs::write(dir.join("meta.json"), "{}").expect("write index artifact");
 
-        let err = check_or_write_schema_version(&dir)
-            .expect_err("unstamped non-empty directory must be rejected");
-
-        assert!(
-            matches!(
-                err,
-                SearchStoreError::VersionMismatch {
-                    stored: 0,
-                    expected,
-                } if expected == SEARCH_INDEX_VERSION
-            ),
-            "expected VersionMismatch {{ stored: 0 }} for unstamped non-empty directory; got: {err}"
-        );
-
-        // Sentinel file must NOT have been written; the directory stays as-is
-        // until the operator cleans it.
-        assert!(
-            !dir.join(super::SEARCH_VERSION_FILE).exists(),
-            "version sentinel must not be stamped on unstamped non-empty directory"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A directory containing ONLY the schema-version sentinel (e.g. from a
-    /// prior clean run) is treated as fresh — re-stamping is a no-op when
-    /// the existing stamp matches the current version, and other branches
-    /// already cover stamped directories.  This guards against the edge case
-    /// where `directory_has_index_artifacts` would otherwise misclassify a
-    /// directory that contains only its own sentinel as having artifacts.
-    #[test]
-    fn schema_version_check_treats_sentinel_only_directory_as_fresh() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
-        use std::fs;
-
-        let dir = temp_search_dir("version-sentinel-only");
-        fs::create_dir_all(&dir).expect("dir should exist");
-        // No artifacts — directory is empty.  Stamping should succeed.
-        check_or_write_schema_version(&dir).expect("empty dir should be stampable");
-
-        // Now the sentinel exists.  A subsequent call must accept it (the
-        // current-version branch in `check_or_write_schema_version`).
-        let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
-        assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());
-        check_or_write_schema_version(&dir).expect("sentinel-only dir should accept current ver");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn schema_version_check_ignores_stray_non_index_files_in_fresh_directory() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
-        use std::fs;
-
-        let dir = temp_search_dir("version-stray-file");
-        fs::create_dir_all(&dir).expect("dir should exist");
-        fs::write(dir.join(".DS_Store"), "finder metadata").expect("write stray file");
-
-        check_or_write_schema_version(&dir)
-            .expect("stray non-index files should not be treated as legacy index artifacts");
+        stamp_schema_version_if_missing(&dir).expect("non-empty dir should still be stamped");
 
         let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
         assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());
+        assert_eq!(SEARCH_INDEX_VERSION, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }

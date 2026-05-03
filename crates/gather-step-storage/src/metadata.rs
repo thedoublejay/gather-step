@@ -956,14 +956,13 @@ pub enum MetadataStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("metadata store connection pool mutex was poisoned")]
     Poisoned,
-    #[error(
-        "your local index uses an unsupported schema; run `gather-step clean && gather-step index` to rebuild"
-    )]
-    SchemaVersionMismatch { stored: i64, expected: i64 },
 }
 
 /// Current metadata schema version.
-pub const METADATA_SCHEMA_VERSION: i64 = 1;
+///
+/// v3.1 is a fresh generated-state release. SQLite metadata starts at user
+/// version zero and does not carry migration or upgrade branches.
+pub const METADATA_SCHEMA_VERSION: i64 = 0;
 
 impl MetadataStoreDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetadataStoreError> {
@@ -1037,25 +1036,8 @@ impl MetadataStoreDb {
     }
 
     fn bootstrap_schema(connection: &mut Connection) -> Result<(), MetadataStoreError> {
-        let stored_version: i64 =
-            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-
-        if stored_version == 0 {
-            // Fresh database: create all tables at the current schema version.
-            connection.execute_batch(CURRENT_SCHEMA)?;
-            connection.pragma_update(None, "user_version", METADATA_SCHEMA_VERSION)?;
-        } else if stored_version == METADATA_SCHEMA_VERSION {
-            // Already at the current version; run `CREATE TABLE IF NOT EXISTS`
-            // to add any tables that might be missing (e.g. a DB from a
-            // development build that predates a table addition within the same
-            // schema version).
-            connection.execute_batch(CURRENT_SCHEMA)?;
-        } else {
-            return Err(MetadataStoreError::SchemaVersionMismatch {
-                stored: stored_version,
-                expected: METADATA_SCHEMA_VERSION,
-            });
-        }
+        connection.execute_batch(CURRENT_SCHEMA)?;
+        connection.pragma_update(None, "user_version", METADATA_SCHEMA_VERSION)?;
         Ok(())
     }
 

@@ -581,8 +581,8 @@ fn corrupt_graph_index_reports_auto_recover_and_auto_recover_rebuilds() {
 }
 
 #[test]
-fn unsupported_metadata_schema_reports_stable_rebuild_message() {
-    let temp = TempDir::new("unsupported-metadata-schema");
+fn metadata_schema_user_version_resets_to_fresh_release_zero() {
+    let temp = TempDir::new("metadata-schema-zero");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
 
@@ -590,17 +590,18 @@ fn unsupported_metadata_schema_reports_stable_rebuild_message() {
     fs::create_dir_all(&storage_root).expect("storage dir");
     let conn = Connection::open(storage_root.join("metadata.sqlite")).expect("metadata sqlite");
     conn.pragma_update(None, "user_version", 99)
-        .expect("stamp unsupported schema");
+        .expect("stamp old development schema");
     drop(conn);
 
-    let output = run_fail(temp.path(), &["index", "--json"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unsupported schema"));
-    assert!(stderr.contains("gather-step index --auto-recover"));
+    let output = run_ok(temp.path(), &["index", "--json"]);
+    let output_json = stdout_json(&output);
+    assert_eq!(output_json["event"], "index_completed");
 
-    let recovered = run_ok(temp.path(), &["index", "--auto-recover", "--json"]);
-    let recovered_json = stdout_json(&recovered);
-    assert_eq!(recovered_json["event"], "index_completed");
+    let conn = Connection::open(storage_root.join("metadata.sqlite")).expect("metadata sqlite");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("user_version should read");
+    assert_eq!(version, 0);
 }
 
 #[test]
