@@ -146,6 +146,24 @@ fn run_ok_text(workspace: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("stdout should be valid utf8")
 }
 
+fn assert_registry_symbols_match_graph_nodes(status: &Value) {
+    let repos = status["repos"]
+        .as_array()
+        .expect("status repos should be an array");
+    let registry_symbols: u64 = repos
+        .iter()
+        .map(|repo| repo["registry_symbol_count"].as_u64().unwrap_or(0))
+        .sum();
+    let graph_nodes: u64 = repos
+        .iter()
+        .map(|repo| repo["graph_node_count"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(
+        registry_symbols, graph_nodes,
+        "registry symbol totals should reflect the final graph state"
+    );
+}
+
 fn projection_field_paths(report: &Value, key: &str) -> Vec<Value> {
     let mut fields = report[key]
         .as_array()
@@ -251,6 +269,7 @@ fn integration_pipeline_runs_on_committed_fixture_workspace() {
     assert!(repos.iter().any(|repo| repo["repo"] == "backend_standard"));
     assert!(repos.iter().any(|repo| repo["repo"] == "frontend_standard"));
     assert!(repos.iter().any(|repo| repo["repo"] == "shared_contracts"));
+    assert_registry_symbols_match_graph_nodes(&status);
 
     // Doctor must exit zero on the committed fixture. If this regresses, it
     // means either a legitimate indexer problem (real unresolved call or
@@ -940,6 +959,37 @@ export class OrderFeedConsumer {
             .iter()
             .all(|item| item.field_name != "orderId")
     );
+}
+
+#[test]
+fn partial_cli_reindex_refreshes_registry_counts_from_final_graph() {
+    let temp = stage_fixture_workspace("partial-registry");
+    run_ok_json(temp.path(), &["index"]);
+    run_ok_json(temp.path(), &["index"]);
+
+    let target = temp
+        .path()
+        .join("workspace/backend_standard/src/order.service.ts");
+    let mut source = fs::read_to_string(&target).expect("fixture source should read");
+    source.push_str("\nexport function incrementalProbe(): string { return \"ok\"; }\n");
+    fs::write(&target, source).expect("fixture source should update");
+
+    run_ok_json(temp.path(), &["index", "--repo", "backend_standard"]);
+    let status = run_ok_json(temp.path(), &["status"]);
+    assert_registry_symbols_match_graph_nodes(&status);
+
+    let search = run_ok_json(
+        temp.path(),
+        &[
+            "search",
+            "incrementalProbe",
+            "--repo",
+            "backend_standard",
+            "--limit",
+            "5",
+        ],
+    );
+    assert_eq!(search["total_hits"], 1);
 }
 
 /// query-latency regression gate.

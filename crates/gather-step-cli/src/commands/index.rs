@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -283,6 +283,13 @@ struct AnalyticsRepoResult {
     status: RepoAnalyticsStatus,
 }
 
+#[derive(Clone, Copy)]
+struct RepoGraphCounts {
+    files: u64,
+    symbols: u64,
+    edges: u64,
+}
+
 #[derive(Default)]
 struct ProducerTimings {
     prepare_total: u64,
@@ -351,6 +358,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
 
     let mut config = GatherStepConfig::from_yaml_file(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
+    let configured_repos = config.repos.clone();
     apply_repo_filter(&mut config, app.repo_filter.as_deref())?;
     apply_depth_override(&mut config, args.depth);
 
@@ -521,30 +529,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 writer_timings.storage_commit =
                     writer_timings.storage_commit.saturating_add(commit_ms);
 
-                // Authoritative per-repo counts from the graph state.  The
-                // per-batch accumulator inside index_repo returns deltas
-                // (zero on a warm re-run where no files changed), so the
-                // graph is the only source of truth.
-                let count_start = Instant::now();
-                let (authoritative_files, authoritative_symbols, authoritative_edges) = {
-                    let graph = indexer_ref.storage().graph();
-                    let total_nodes = graph
-                        .count_nodes_by_repo(&prep.repo_name)
-                        .with_context(|| format!("counting nodes for repo `{}`", prep.repo_name))?;
-                    let file_nodes = graph
-                        .count_nodes_by_repo_and_kind(&prep.repo_name, NodeKind::File)
-                        .with_context(|| {
-                            format!("counting file nodes for repo `{}`", prep.repo_name)
-                        })?;
-                    let edge_count = graph
-                        .count_edges_by_owner_repo(&prep.repo_name)
-                        .with_context(|| format!("counting edges for repo `{}`", prep.repo_name))?;
-                    (file_nodes, total_nodes, edge_count)
-                };
-                writer_timings.authoritative_count = writer_timings
-                    .authoritative_count
-                    .saturating_add(elapsed_ms(count_start));
-
                 let mut frameworks = prep
                     .detected_frameworks
                     .iter()
@@ -558,9 +542,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                     path = %prep.repo_root.display(),
                     prepare_ms = prep.prepare_ms,
                     commit_ms,
-                    files = authoritative_files,
-                    symbols = authoritative_symbols,
-                    edges = authoritative_edges,
                     "Indexing from directory finished.",
                 );
 
@@ -585,9 +566,9 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                     result: WorkspaceRepoResult {
                         repo: prep.repo_name.clone(),
                         last_indexed_at: Some(workspace_timestamp_ref.clone()),
-                        file_count: u64::try_from(authoritative_files).unwrap_or(u64::MAX),
-                        symbol_count: u64::try_from(authoritative_symbols).unwrap_or(u64::MAX),
-                        edge_count: authoritative_edges,
+                        file_count: 0,
+                        symbol_count: 0,
+                        edge_count: 0,
                         frameworks,
                         depth_level,
                     },
@@ -696,7 +677,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let PipelineOutput {
         committed,
         analytics_results,
-        writer_timings,
+        mut writer_timings,
         analytics_timings,
         producer_timings,
     } = pipeline;
@@ -706,6 +687,28 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         .collect::<BTreeMap<_, _>>();
     let mut committed = committed;
     committed.sort_by_key(|c| c.repo_idx);
+    let count_start = Instant::now();
+    let final_counts_by_repo = configured_repos
+        .iter()
+        .map(|repo| {
+            count_repo_graph_totals(indexer.storage().graph(), &repo.name)
+                .map(|counts| (repo.name.clone(), counts))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    for c in &mut committed {
+        if let Some(counts) = final_counts_by_repo.get(&c.result.repo) {
+            c.result.file_count = counts.files;
+            c.result.symbol_count = counts.symbols;
+            c.result.edge_count = counts.edges;
+        }
+    }
+    writer_timings.authoritative_count = writer_timings
+        .authoritative_count
+        .saturating_add(elapsed_ms(count_start));
+    let committed_repo_names = committed
+        .iter()
+        .map(|c| c.result.repo.clone())
+        .collect::<BTreeSet<_>>();
     for c in committed {
         let analytics_status = analytics_by_repo_idx
             .get(&c.repo_idx)
@@ -744,6 +747,27 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             git_analytics_status: analytics_status.label(),
             git_analytics_warning: analytics_warning,
         });
+    }
+    for repo in &configured_repos {
+        if committed_repo_names.contains(&repo.name) {
+            continue;
+        }
+        let Some(counts) = final_counts_by_repo.get(&repo.name) else {
+            continue;
+        };
+        let Some(existing) = registry.registry().repo(&repo.name).cloned() else {
+            continue;
+        };
+        registry.update_repo_metadata(
+            &repo.name,
+            RepoIndexMetadata {
+                last_indexed_at: existing.last_indexed_at,
+                file_count: counts.files,
+                symbol_count: counts.symbols,
+                frameworks: existing.frameworks,
+                depth_level: existing.depth_level,
+            },
+        )?;
     }
 
     let finalization_bar = (!output.is_json()).then(|| {
@@ -1137,6 +1161,23 @@ fn enforce_summary_invariant(stats: &WorkspaceStats) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn count_repo_graph_totals(graph: &impl GraphStore, repo: &str) -> Result<RepoGraphCounts> {
+    let total_nodes = graph
+        .count_nodes_by_repo(repo)
+        .with_context(|| format!("counting nodes for repo `{repo}`"))?;
+    let file_nodes = graph
+        .count_nodes_by_repo_and_kind(repo, NodeKind::File)
+        .with_context(|| format!("counting file nodes for repo `{repo}`"))?;
+    let edge_count = graph
+        .count_edges_by_owner_repo(repo)
+        .with_context(|| format!("counting edges for repo `{repo}`"))?;
+    Ok(RepoGraphCounts {
+        files: u64::try_from(file_nodes).unwrap_or(u64::MAX),
+        symbols: u64::try_from(total_nodes).unwrap_or(u64::MAX),
+        edges: edge_count,
+    })
 }
 
 const PRECOMPUTED_PACK_TARGETS_PER_REPO: usize = 2;
