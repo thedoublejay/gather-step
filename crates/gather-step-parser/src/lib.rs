@@ -8,6 +8,7 @@ pub(crate) mod projection;
 pub mod resolve;
 pub mod traverse;
 pub mod tree_sitter;
+pub(crate) mod ts_js_backend;
 pub(crate) mod ts_js_swc;
 pub mod tsconfig;
 pub mod workspace_manifest;

@@ -292,23 +292,20 @@ fn parse_file_core(
         });
 
         let fallback_checkpoint = state.checkpoint();
-        let swc_status = crate::ts_js_swc::parse_ts_js_with_swc_with_status(
+        let ts_js_status = crate::ts_js_backend::parse_ts_js_with_backend(
+            crate::ts_js_backend::TsJsParserBackend::current(),
             file,
             &mut state,
             &source,
             &absolute_path,
         );
-        if swc_status != crate::ts_js_swc::SwcParseStatus::Parsed {
-            let status = match swc_status {
-                crate::ts_js_swc::SwcParseStatus::Parsed => "parsed",
-                crate::ts_js_swc::SwcParseStatus::Recovered => "recovered",
-                crate::ts_js_swc::SwcParseStatus::Unrecoverable => "unrecoverable",
-            };
+        if ts_js_status != crate::ts_js_backend::TsJsParseStatus::Parsed {
+            let status = ts_js_status.as_str();
             state.restore(fallback_checkpoint);
             tracing::warn!(
                 path = %absolute_path.display(),
-                swc_status = status,
-                "falling back to tree-sitter TS/JS parser after non-parsed SWC result"
+                ts_js_status = status,
+                "falling back to tree-sitter TS/JS parser after non-parsed TS/JS backend result"
             );
             let fallback_start = std::time::Instant::now();
             let tree = PARSER.with_borrow_mut(|parser| -> Result<_, ParseError> {
