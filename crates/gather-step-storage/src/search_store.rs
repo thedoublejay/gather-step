@@ -30,6 +30,7 @@ use tantivy::{
     },
 };
 use thiserror::Error;
+use tracing::warn;
 
 const CODE_TOKENIZER_NAME: &str = "code";
 const PATH_TOKENIZER_NAME: &str = "path";
@@ -182,6 +183,32 @@ pub struct TantivySearchStore {
     last_seen_commit: AtomicU64,
     /// The workload mode used to open this store.  [`None`] means read-only.
     workload: Option<SearchWorkload>,
+}
+
+pub struct DeferredCommitGuard<'store> {
+    store: &'store TantivySearchStore,
+    flushed: bool,
+}
+
+impl DeferredCommitGuard<'_> {
+    pub fn mark_flushed(mut self) {
+        self.flushed = true;
+        self.store.set_deferred_commit(false);
+    }
+}
+
+impl Drop for DeferredCommitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.flushed
+            && let Err(error) = self.store.rollback()
+        {
+            warn!(
+                error = %error,
+                "failed to roll back deferred search index writes",
+            );
+        }
+        self.store.set_deferred_commit(false);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -440,6 +467,15 @@ impl TantivySearchStore {
     /// workers reading the flag inside `commit()` on other cores.
     pub fn set_deferred_commit(&self, enabled: bool) {
         self.deferred_commit.store(enabled, AtomicOrdering::Release);
+    }
+
+    #[must_use]
+    pub fn begin_deferred_commit(&self) -> DeferredCommitGuard<'_> {
+        self.set_deferred_commit(true);
+        DeferredCommitGuard {
+            store: self,
+            flushed: false,
+        }
     }
 
     pub fn commit(&self) -> Result<(), SearchStoreError> {
@@ -1633,6 +1669,68 @@ mod tests {
         assert!(old_results.is_empty());
         assert_eq!(new_results.len(), 1);
         assert_eq!(new_results[0].symbol_name, "updateOrderUseCase");
+    }
+
+    #[test]
+    fn deferred_commit_guard_rolls_back_unflushed_writes_on_unwind() {
+        let store = TantivySearchStore::open(temp_search_dir("deferred-rollback"))
+            .expect("store should open");
+        let original = SearchDocument::from_node(&node("createOrderUseCase", "src/foo.ts"), 1);
+        let replacement = SearchDocument::from_node(&node("updateOrderUseCase", "src/foo.ts"), 2);
+
+        store
+            .index_symbol(&original)
+            .expect("original document should index");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.begin_deferred_commit();
+            store
+                .replace_by_files(&[("service-a", "src/foo.ts")], &[replacement])
+                .expect("deferred replacement should stage");
+            panic!("injected deferred search panic");
+        }));
+        assert!(result.is_err(), "test must exercise the unwind path");
+
+        let old_results = store
+            .search("createOrderUseCase", 10)
+            .expect("old symbol search should succeed");
+        let new_results = store
+            .search("updateOrderUseCase", 10)
+            .expect("new symbol search should succeed");
+
+        assert_eq!(old_results.len(), 1);
+        assert!(
+            new_results.is_empty(),
+            "unflushed deferred writes must not survive guard drop"
+        );
+    }
+
+    #[test]
+    fn deferred_commit_guard_keeps_flushed_writes() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("deferred-flush")).expect("store should open");
+        let original = SearchDocument::from_node(&node("createOrderUseCase", "src/foo.ts"), 1);
+        let replacement = SearchDocument::from_node(&node("updateOrderUseCase", "src/foo.ts"), 2);
+
+        store
+            .index_symbol(&original)
+            .expect("original document should index");
+        let guard = store.begin_deferred_commit();
+        store
+            .replace_by_files(&[("service-a", "src/foo.ts")], &[replacement])
+            .expect("deferred replacement should stage");
+        store.flush().expect("deferred writes should flush");
+        guard.mark_flushed();
+
+        let old_results = store
+            .search("createOrderUseCase", 10)
+            .expect("old symbol search should succeed");
+        let new_results = store
+            .search("updateOrderUseCase", 10)
+            .expect("new symbol search should succeed");
+
+        assert!(old_results.is_empty());
+        assert_eq!(new_results.len(), 1);
     }
 
     #[test]

@@ -407,7 +407,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // this collapses ~250 segment commits (one per repo × batch) into 1 and
     // eliminates the `segment_manager "couldn't find segment"` warnings
     // caused by the background merge thread racing per-batch reader reloads.
-    indexer.storage().search().set_deferred_commit(true);
+    let search_deferred_commit = indexer.storage().search().begin_deferred_commit();
 
     // Both the workspace-level bar and per-repo spinners are registered on the
     // shared MultiProgress so they draw cleanly together and coordinate with
@@ -769,6 +769,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         .search()
         .flush()
         .context("finalizing search index flush")?;
+    search_deferred_commit.mark_flushed();
     let search_flush_ms = elapsed_ms(search_flush_start);
     info!(
         flush_ms = search_flush_ms,
