@@ -2118,8 +2118,7 @@ fn is_path_alias_config_path(path: &str) -> bool {
         || file_name == "pnpm-workspace.yaml"
         || file_name == "pnpm-workspace.yml"
         || file_name == ".gather-step.local.yaml"
-        || file_name.starts_with("tsconfig")
-            && file_name.ends_with(".json")
+        || file_name.starts_with("tsconfig") && file_name.ends_with(".json")
 }
 
 fn has_indexable_manifest(repo_root: &Path) -> bool {

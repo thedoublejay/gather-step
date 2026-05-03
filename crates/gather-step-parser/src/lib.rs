@@ -15,6 +15,8 @@ pub mod tsconfig;
 pub mod workspace_manifest;
 
 #[cfg(feature = "test-support")]
+pub use ts_js_oxc::oxc_test_support;
+#[cfg(feature = "test-support")]
 pub use ts_js_swc::swc_test_support;
 
 pub use manifests::{

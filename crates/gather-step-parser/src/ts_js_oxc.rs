@@ -89,6 +89,29 @@ fn line_col(offset: u32, line_offsets: &[u32]) -> Option<(u32, u32)> {
     ))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod oxc_test_support {
+    use std::path::{Path, PathBuf};
+
+    use crate::traverse::{FileEntry, Language};
+
+    pub fn parse_recovery_status_for_path(path: &Path, source: &str) -> &'static str {
+        let file = FileEntry {
+            path: path.to_path_buf(),
+            language: Language::TypeScript,
+            size_bytes: source.len() as u64,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+        super::parse_ts_js_for_status(&file, source).as_str()
+    }
+
+    pub fn parse_recovery_status_for_extension(ext: &str, source: &str) -> &'static str {
+        let path = PathBuf::from(format!("status.{ext}"));
+        parse_recovery_status_for_path(&path, source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};

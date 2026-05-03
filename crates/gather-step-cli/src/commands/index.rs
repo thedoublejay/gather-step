@@ -800,14 +800,14 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
 
     let total_wall_ms = elapsed_ms(total_start);
     let should_measure_index_size = output.is_json() || artifact_path.is_some();
-    let index_size_bytes = if should_measure_index_size {
-        Some(
-            directory_size_bytes(&storage_root)
-                .with_context(|| format!("measuring index size under {}", storage_root.display()))?,
-        )
-    } else {
-        None
-    };
+    let index_size_bytes =
+        if should_measure_index_size {
+            Some(directory_size_bytes(&storage_root).with_context(|| {
+                format!("measuring index size under {}", storage_root.display())
+            })?)
+        } else {
+            None
+        };
     let graph_build_ms = writer_timings.storage_commit;
     let parser_augment_ms = producer_timings.prepare_total;
     let pack_precompute_ms = precompute_ms;

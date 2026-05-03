@@ -71,6 +71,10 @@ name = "extraction_fidelity"
 required-features = ["test-support"]
 
 [[test]]
+name = "oxc_parity"
+required-features = ["test-support"]
+
+[[test]]
 name = "workspace_alias"
 
 [[test]]
