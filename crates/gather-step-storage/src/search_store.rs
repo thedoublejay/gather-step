@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     fs,
     path::{Path, PathBuf},
@@ -24,17 +25,13 @@ use tantivy::{
         BytesOptions, FAST, Field, IndexRecordOption, NumericOptions, STORED, STRING, Schema,
         TextFieldIndexing, TextOptions, document::Value as _,
     },
-    tokenizer::{
-        Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
-        TokenStream, Tokenizer,
-    },
+    tokenizer::{RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer},
 };
 use thiserror::Error;
 use tracing::warn;
 
 const CODE_TOKENIZER_NAME: &str = "code";
 const PATH_TOKENIZER_NAME: &str = "path";
-const NL_TOKENIZER_NAME: &str = "nl";
 /// Minimum heap the tantivy index writer will accept (50 MiB).
 const MIN_WRITER_HEAP_BYTES: usize = 50 * 1024 * 1024;
 /// Heap budget for one-shot CLI runs: 64 MiB.  Lower is fine because the
@@ -52,7 +49,7 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 /// Bump this constant whenever the Tantivy schema changes (fields added or
 /// removed) so that incompatible on-disk indexes are rejected at open time
 /// rather than silently producing wrong results.
-pub const SEARCH_INDEX_VERSION: u32 = 1;
+pub const SEARCH_INDEX_VERSION: u32 = 2;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -64,7 +61,6 @@ const FIELD_SYMBOL_NAME: &str = "symbol_name";
 const FIELD_CONTENT: &str = "content";
 const FIELD_FILE_NAME: &str = "file_name";
 const FIELD_FILE_PATH_TOKENS: &str = "file_path_tokens";
-const FIELD_DESCRIPTION: &str = "description";
 const FIELD_NODE_KIND: &str = "node_kind";
 const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
@@ -220,7 +216,6 @@ struct SearchFields {
     content: Field,
     file_name: Field,
     file_path_tokens: Field,
-    description: Field,
     node_kind: Field,
     last_modified: Field,
     is_exported: Field,
@@ -537,9 +532,6 @@ impl TantivySearchStore {
         tantivy_doc.add_text(self.fields.file_path_tokens, &document.file_path);
         // Stored (not indexed) copy of the path for query-aware rerank.
         tantivy_doc.add_text(self.fields.file_path_stored, &document.file_path);
-        if !document.description.is_empty() {
-            tantivy_doc.add_text(self.fields.description, &document.description);
-        }
         tantivy_doc.add_u64(self.fields.node_kind, u64::from(document.node_kind.as_u8()));
         tantivy_doc.add_u64(self.fields.last_modified, document.last_modified);
         tantivy_doc.add_bool(self.fields.is_exported, document.is_exported);
@@ -556,7 +548,6 @@ impl TantivySearchStore {
                 self.fields.content,
                 self.fields.file_name,
                 self.fields.file_path_tokens,
-                self.fields.description,
             ],
         );
         parser.set_conjunction_by_default();
@@ -568,7 +559,6 @@ impl TantivySearchStore {
                 self.fields.content,
                 self.fields.file_name,
                 self.fields.file_path_tokens,
-                self.fields.description,
             ] {
                 parser.set_field_fuzzy(field, false, 1, true);
             }
@@ -591,7 +581,8 @@ impl TantivySearchStore {
             .map_err(|_| SearchStoreError::ReaderPoisoned)?;
         let searcher = reader.searcher();
         let parser = self.build_query_parser(fuzzy);
-        let (query, _) = parser.parse_query_lenient(query_text);
+        let parser_text = parser_query_text(query_text);
+        let (query, _) = parser.parse_query_lenient(parser_text.as_ref());
         let query = self.apply_filters(query, filters);
         let fetch_limit = limit.max(1).saturating_mul(5).min(MAX_RESULT_WINDOW);
         let collector = TopDocs::with_limit(fetch_limit).order_by_score();
@@ -875,7 +866,6 @@ fn build_schema() -> Schema {
     builder.add_text_field(FIELD_CONTENT, code_text_options(false, true));
     builder.add_text_field(FIELD_FILE_NAME, code_text_options(false, false));
     builder.add_text_field(FIELD_FILE_PATH_TOKENS, path_text_options(false, false));
-    builder.add_text_field(FIELD_DESCRIPTION, nl_text_options(false, true));
     builder.add_u64_field(FIELD_NODE_KIND, fast_numeric_options(false));
     builder.add_u64_field(FIELD_LAST_MODIFIED, fast_numeric_options(false));
     builder.add_bool_field(FIELD_IS_EXPORTED, FAST | STORED);
@@ -917,21 +907,6 @@ fn path_text_options(stored: bool, with_positions: bool) -> TextOptions {
     options
 }
 
-fn nl_text_options(stored: bool, with_positions: bool) -> TextOptions {
-    let indexing = TextFieldIndexing::default()
-        .set_tokenizer(NL_TOKENIZER_NAME)
-        .set_index_option(if with_positions {
-            IndexRecordOption::WithFreqsAndPositions
-        } else {
-            IndexRecordOption::WithFreqs
-        });
-    let mut options = TextOptions::default().set_indexing_options(indexing);
-    if stored {
-        options = options.set_stored();
-    }
-    options
-}
-
 fn fast_numeric_options(stored: bool) -> NumericOptions {
     let mut options = NumericOptions::default().set_fast().set_indexed();
     if stored {
@@ -953,14 +928,30 @@ fn register_tokenizers(index: &mut Index) {
             .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
             .build(),
     );
-    index.tokenizers().register(
-        NL_TOKENIZER_NAME,
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
-            .filter(LowerCaser)
-            .filter(Stemmer::new(Language::English))
-            .build(),
-    );
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "query expansion needs a short owned string only when a single CamelCase identifier splits"
+)]
+fn parser_query_text(query: &str) -> Cow<'_, str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Cow::Borrowed(query);
+    }
+
+    let spans = split_identifier_spans(trimmed);
+    if spans.len() <= 1 {
+        return Cow::Borrowed(query);
+    }
+
+    Cow::Owned(
+        spans
+            .into_iter()
+            .map(|span| trimmed[span.start..span.end].to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// Return the first code-token (split at CamelCase / underscore boundaries)
@@ -1300,9 +1291,6 @@ impl SearchFields {
             file_path_tokens: schema
                 .get_field(FIELD_FILE_PATH_TOKENS)
                 .expect("file_path_tokens field should exist"),
-            description: schema
-                .get_field(FIELD_DESCRIPTION)
-                .expect("description field should exist"),
             node_kind: schema
                 .get_field(FIELD_NODE_KIND)
                 .expect("node_kind field should exist"),
@@ -1516,17 +1504,16 @@ mod tests {
     fn indexes_symbol_and_matches_order_search() {
         let store =
             TantivySearchStore::open(temp_search_dir("index-symbol")).expect("store should open");
-        let doc = SearchDocument::from_node(
-            &node(
-                "createOrderUseCase",
-                "src/workflows/order/create-order.use-case.ts",
-            ),
-            1_713_000_000,
+        let mut symbol = node(
+            "createOrderUseCase",
+            "src/workflows/order/create-order.use-case.ts",
         );
+        symbol.signature = None;
+        let doc = SearchDocument::from_node(&symbol, 1_713_000_000);
 
         store.index_symbol(&doc).expect("document should index");
         let results = store
-            .search("service-a", 10)
+            .search("createOrderUseCase", 10)
             .expect("search should succeed");
 
         assert_eq!(results.len(), 1);
@@ -1751,8 +1738,7 @@ mod tests {
         // When the query starts with an uppercase letter the PascalCase-type
         // boost (1.2×) combined with the exact-symbol boost (1.6×) must lift
         // a matching Type node above a Function hit that only has a higher
-        // raw BM25 score due to appearing in more fields (e.g. content /
-        // description).
+        // raw BM25 score due to appearing repeatedly in content.
         let store =
             TantivySearchStore::open(temp_search_dir("pascal-boost")).expect("store should open");
 
