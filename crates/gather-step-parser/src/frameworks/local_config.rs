@@ -33,9 +33,15 @@
 //! When no config file is found, the orchestrator falls back to automatic
 //! framework detection for each repo.
 
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{Error, ErrorKind, Read},
+    path::Path,
+};
 
 use super::profile::{Profile, ResolvedPack, resolve_profile};
+
+const MAX_LOCAL_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Schema for `.gather-step.local.yaml`.
 ///
@@ -81,7 +87,7 @@ impl LocalConfig {
     #[must_use]
     pub fn load(dir: &Path) -> Option<Self> {
         let config_path = dir.join(".gather-step.local.yaml");
-        let raw = match std::fs::read_to_string(&config_path) {
+        let raw = match read_local_config_capped(&config_path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
             Err(err) => {
@@ -149,6 +155,24 @@ impl LocalConfig {
     }
 }
 
+fn read_local_config_capped(config_path: &Path) -> Result<String, Error> {
+    let file = File::open(config_path)?;
+    let mut reader = file.take(MAX_LOCAL_CONFIG_BYTES.saturating_add(1));
+    let mut raw = String::new();
+    reader.read_to_string(&mut raw)?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_LOCAL_CONFIG_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "local config `{}` exceeds 2 MiB safety limit ({} bytes)",
+                config_path.display(),
+                MAX_LOCAL_CONFIG_BYTES
+            ),
+        ));
+    }
+    Ok(raw)
+}
+
 fn paths_match(config_path: &str, repo_path: &str) -> bool {
     let normalized_config = normalize_path(config_path);
     let normalized_repo = normalize_path(repo_path);
@@ -176,7 +200,7 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use super::{LocalConfig, RepoPackConfig};
+    use super::{LocalConfig, MAX_LOCAL_CONFIG_BYTES, RepoPackConfig, read_local_config_capped};
     use crate::frameworks::{
         profile::{PackRef, Profile},
         registry::PackId,
@@ -248,6 +272,21 @@ repos:
             LocalConfig::load(&dir.path).is_none(),
             "load() must return None when the config file does not exist"
         );
+    }
+
+    #[test]
+    fn rejects_local_config_over_size_cap() {
+        let dir = TempDir::new("oversized-config");
+        let oversized = vec![b'\n'; usize::try_from(MAX_LOCAL_CONFIG_BYTES + 1).unwrap()];
+        fs::write(dir.path.join(".gather-step.local.yaml"), oversized)
+            .expect("oversized config should write");
+
+        let err = read_local_config_capped(&dir.path.join(".gather-step.local.yaml"))
+            .expect_err("oversized config should reject before parsing");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains(".gather-step.local.yaml"));
+        assert!(err.to_string().contains("2 MiB safety limit"));
+        assert!(LocalConfig::load(&dir.path).is_none());
     }
 
     #[test]
