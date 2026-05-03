@@ -633,7 +633,18 @@ impl RepoIndexer {
             let full_path = repo_root.join(relative_path);
             let file_path =
                 normalize_path_separators(&relative_path.to_string_lossy()).into_owned();
-            let metadata = file_metadata_stamp(&full_path)?;
+            let link_metadata = fs::symlink_metadata(&full_path)?;
+            if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+                warn!(
+                    repo,
+                    path = %relative_path.display(),
+                    "skipping symlinked or non-file deployment artifact"
+                );
+                self.storage
+                    .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
+                continue;
+            }
+            let metadata = file_stat_from_metadata(&link_metadata);
             if u64::try_from(metadata.size_bytes).unwrap_or(u64::MAX)
                 > MAX_DEPLOYMENT_ARTIFACT_BYTES
             {
@@ -1734,16 +1745,20 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
 
 fn file_metadata_stamp(path: impl AsRef<Path>) -> Result<FileStat, std::io::Error> {
     let metadata = fs::metadata(path)?;
+    Ok(file_stat_from_metadata(&metadata))
+}
+
+fn file_stat_from_metadata(metadata: &fs::Metadata) -> FileStat {
     let mtime_ns = metadata
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or_default();
-    Ok(FileStat {
+    FileStat {
         size_bytes: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         mtime_ns,
-    })
+    }
 }
 
 fn collect_deployment_artifact_paths(
@@ -2749,6 +2764,58 @@ spec:
             env_vars
                 .iter()
                 .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn configured_env_file_symlinks_are_not_indexed() {
+        let repo_root = TestDir::new("deployment-symlinked-env-repo");
+        let external_root = TestDir::new("deployment-symlinked-env-external");
+        let storage_root = TestDir::new("deployment-symlinked-env-storage");
+        fs::create_dir_all(repo_root.path().join("config")).expect("config dir should exist");
+        fs::write(
+            external_root.path().join("runtime.vars"),
+            "AWS_SECRET_ACCESS_KEY=super-secret-token\n",
+        )
+        .expect("external env fixture should write");
+        symlink(
+            external_root.path().join("runtime.vars"),
+            repo_root.path().join("config/runtime.vars"),
+        )
+        .expect("env symlink should create");
+
+        let options = IndexingOptions {
+            deployment: DeploymentIndexingOptions {
+                env_files: vec!["config/runtime.vars".to_owned()],
+                ..DeploymentIndexingOptions::default()
+            },
+            ..IndexingOptions::default()
+        };
+        let indexer = RepoIndexer::open(storage_root.path(), options).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let env_vars = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::EnvVar)
+            .expect("env var nodes should load");
+        assert!(
+            !env_vars.iter().any(|node| {
+                node.qualified_name.as_deref() == Some("__env_var__aws_secret_access_key")
+            }),
+            "configured env file symlinks should not be indexed"
+        );
+        let search_hits = indexer
+            .storage()
+            .search()
+            .search("super-secret-token", 10)
+            .expect("search should succeed");
+        assert!(
+            search_hits.is_empty(),
+            "symlinked env file values should not enter search"
         );
     }
 
