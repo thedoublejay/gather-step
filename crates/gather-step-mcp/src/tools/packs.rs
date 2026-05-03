@@ -45,7 +45,11 @@ use crate::{
 
 const DEFAULT_PACK_LIMIT: usize = 6;
 const MAX_CONTEXT_PACK_CACHE_BYTES: i64 = 64 * 1024 * 1024;
-const CONTEXT_PACK_CACHE_KEY_VERSION: &str = "v2";
+const CONTEXT_PACK_CACHE_KEY_VERSION: &str = "v3";
+const CONTEXT_PACK_GRAPH_SCHEMA_VERSION: u32 = 0;
+const CONTEXT_PACK_SEARCH_SCHEMA_VERSION: u32 = 0;
+const CONTEXT_PACK_TS_JS_BACKEND_VERSION: &str = "swc";
+const CONTEXT_PACK_DEPLOYMENT_TOPOLOGY_VERSION: &str = "v3";
 const MIGRATION_COLLECTION_PREFIX: &str = "__migration_collection__";
 const OPTIONALITY_MIN_CONFIDENCE: u16 = 750;
 const PACK_CONFIDENCE_MODEL_VERSION: &str = "v1.0";
@@ -2529,7 +2533,7 @@ fn pack_identity_key(
         .as_deref()
         .unwrap_or(request.target.trim());
     format!(
-        "context_pack:{CONTEXT_PACK_CACHE_KEY_VERSION}:mode={}:repo={}:target={cache_target}:depth={depth}:limit={limit}:budget={}",
+        "context_pack:{CONTEXT_PACK_CACHE_KEY_VERSION}:graph_schema={CONTEXT_PACK_GRAPH_SCHEMA_VERSION}:search_schema={CONTEXT_PACK_SEARCH_SCHEMA_VERSION}:ts_js_backend={CONTEXT_PACK_TS_JS_BACKEND_VERSION}:deployment_topology={CONTEXT_PACK_DEPLOYMENT_TOPOLOGY_VERSION}:mode={}:repo={}:target={cache_target}:depth={depth}:limit={limit}:budget={}",
         mode.as_str(),
         request.repo.as_deref().unwrap_or(""),
         request.budget_bytes.unwrap_or(0)
@@ -5542,6 +5546,39 @@ mod tests {
         let meta = response.meta.expect("meta should be present");
         assert!(meta.warnings.is_empty());
         assert_eq!(meta.completeness, "complete");
+    }
+
+    #[test]
+    fn context_pack_cache_key_includes_compatibility_versions() {
+        let request = super::ContextPackRequest {
+            budget_bytes: Some(4096),
+            depth: Some(2),
+            limit: Some(6),
+            repo: Some("backend_standard".to_owned()),
+            mode: "planning".to_owned(),
+            target: "OrderService".to_owned(),
+        };
+        let resolved = ResolvedPackTarget {
+            alternate_anchors: Vec::new(),
+            candidate_count: 1,
+            confidence_model_version: Some(super::PACK_CONFIDENCE_MODEL_VERSION.to_owned()),
+            resolution: "symbol_id".to_owned(),
+            resolution_confidence: Some("high".to_owned()),
+            symbol_id: Some("01HV2SYMBOL".to_owned()),
+            winner_margin: Some(250),
+            ranked_alternates: Vec::new(),
+        };
+
+        let key = super::pack_identity_key(&request, PackMode::Planning, 2, 6, &resolved);
+
+        assert!(key.starts_with("context_pack:v3:"));
+        assert!(key.contains("graph_schema=0"));
+        assert!(key.contains("search_schema=0"));
+        assert!(key.contains("ts_js_backend=swc"));
+        assert!(key.contains("deployment_topology=v3"));
+        assert!(key.contains("mode=planning"));
+        assert!(key.contains("repo=backend_standard"));
+        assert!(key.contains("target=01HV2SYMBOL"));
     }
 
     #[test]
