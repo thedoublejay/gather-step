@@ -508,6 +508,22 @@ const UPSERT_FILE_STATE_SQL: &str = r"
         parse_ms = excluded.parse_ms
 ";
 
+const STORED_CONTENT_HASH_BYTES: usize = 16;
+
+/// Store only a 128-bit BLAKE3 prefix for per-file change detection.
+///
+/// Indexer-produced hashes are full 32-byte BLAKE3 digests. A 16-byte prefix
+/// keeps collision risk negligible for this rebuildable cache while halving
+/// the hottest `file_index_state.content_hash` BLOB. Tests sometimes use
+/// deliberately tiny fixture hashes; those stay unchanged.
+fn stored_content_hash(hash: &[u8]) -> &[u8] {
+    if hash.len() > STORED_CONTENT_HASH_BYTES {
+        &hash[..STORED_CONTENT_HASH_BYTES]
+    } else {
+        hash
+    }
+}
+
 const UPSERT_COMMIT_SQL: &str = r"
     INSERT INTO commits (
         sha, repo, author_email, date, message, classification,
@@ -1343,7 +1359,7 @@ impl MetadataStoreDb {
             )
             .optional()?;
         Ok(match stored_hash {
-            Some(hash) => hash != current_hash,
+            Some(hash) => hash != stored_content_hash(current_hash),
             None => true,
         })
     }
@@ -1597,7 +1613,7 @@ impl MetadataStoreDb {
                 statement.execute(params![
                     &state.repo,
                     path_bytes,
-                    &state.content_hash,
+                    stored_content_hash(&state.content_hash),
                     state.size_bytes,
                     state.mtime_ns,
                     state.node_count,
@@ -1923,10 +1939,9 @@ impl MetadataStoreDb {
         }
 
         for (file_path, current_hash) in files {
-            if stored_hashes
-                .get(*file_path)
-                .is_some_and(|stored_hash| stored_hash == current_hash)
-            {
+            if stored_hashes.get(*file_path).is_some_and(|stored_hash| {
+                stored_hash.as_slice() == stored_content_hash(current_hash)
+            }) {
                 required.remove(*file_path);
             }
         }
@@ -2406,7 +2421,7 @@ impl MetadataStore for MetadataStoreDb {
         statement.execute(params![
             &state.repo,
             path_bytes,
-            &state.content_hash,
+            stored_content_hash(&state.content_hash),
             state.size_bytes,
             state.mtime_ns,
             state.node_count,
@@ -2427,7 +2442,7 @@ impl MetadataStore for MetadataStoreDb {
                 statement.execute(params![
                     &state.repo,
                     path_bytes,
-                    &state.content_hash,
+                    stored_content_hash(&state.content_hash),
                     state.size_bytes,
                     state.mtime_ns,
                     state.node_count,
@@ -2457,7 +2472,7 @@ impl MetadataStore for MetadataStoreDb {
             .optional()?;
 
         Ok(match stored_hash {
-            Some(hash) => hash != current_hash,
+            Some(hash) => hash != stored_content_hash(current_hash),
             None => true,
         })
     }
@@ -2517,7 +2532,7 @@ impl MetadataStore for MetadataStoreDb {
         for (file_path, current_hash) in files {
             if stored_hashes
                 .get(*file_path)
-                .is_some_and(|stored| stored == current_hash)
+                .is_some_and(|stored| stored.as_slice() == stored_content_hash(current_hash))
             {
                 required.remove(*file_path);
             }
@@ -2576,7 +2591,7 @@ impl MetadataStore for MetadataStoreDb {
         for (file_path, current_hash) in files {
             if stored_hashes
                 .get(*file_path)
-                .is_some_and(|stored| stored == current_hash)
+                .is_some_and(|stored| stored.as_slice() == stored_content_hash(current_hash))
             {
                 required.remove(*file_path);
             }
@@ -3635,6 +3650,24 @@ mod tests {
         assert!(!store.should_reindex("service-a", "src/lib.rs", &[1, 2, 3, 4])?);
         assert!(store.should_reindex("service-a", "src/lib.rs", &[9, 9, 9, 9])?);
         assert!(store.should_reindex("service-a", "src/main.rs", &[1, 2, 3, 4])?);
+
+        let long_hash = (0_u8..32).collect::<Vec<_>>();
+        store.upsert_file_state(&FileIndexState {
+            repo: "service-a".to_owned(),
+            file_path: "src/full-hash.rs".to_owned(),
+            content_hash: long_hash.clone(),
+            ..state.clone()
+        })?;
+        let stored_len = store.read_connection()?.query_row(
+            "SELECT length(content_hash) FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
+            params!["service-a", "src/full-hash.rs".as_bytes()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(stored_len, 16);
+        assert!(!store.should_reindex("service-a", "src/full-hash.rs", &long_hash)?);
+        let mut changed_prefix = long_hash;
+        changed_prefix[0] ^= 0xFF;
+        assert!(store.should_reindex("service-a", "src/full-hash.rs", &changed_prefix)?);
         Ok(())
     }
 
