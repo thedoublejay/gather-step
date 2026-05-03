@@ -851,7 +851,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     );
     drop(indexer);
     let precompute_start = Instant::now();
-    let precompute_pack_count = hot_pack_targets.len() + precomputed_pack_targets.len();
+    let precompute_pack_count =
+        precompute_pack_call_count(&hot_pack_targets, &precomputed_pack_targets);
     if let Some(bar) = &finalization_bar {
         bar.set_message(format_pack_precompute_message(precompute_pack_count));
     }
@@ -1139,9 +1140,10 @@ fn enforce_summary_invariant(stats: &WorkspaceStats) -> Result<()> {
 }
 
 const PRECOMPUTED_PACK_TARGETS_PER_REPO: usize = 2;
+const PRECOMPUTED_PACK_TARGET_LIMIT: usize = 8;
 /// Upper bound on `(target, mode)` pairs pulled from the MCP pack call log
 /// when deciding which packs to precompute at index finalize.
-const HOT_PACK_WHITELIST_LIMIT: usize = 200;
+const HOT_PACK_WHITELIST_LIMIT: usize = 32;
 
 fn collect_precomputed_pack_targets(
     graph: &impl GraphStore,
@@ -1172,10 +1174,14 @@ fn collect_precomputed_pack_targets(
                 .then(left.id.cmp(&right.id))
         });
         candidates.dedup_by(|left, right| left.id == right.id);
+        let remaining = PRECOMPUTED_PACK_TARGET_LIMIT.saturating_sub(targets.len());
+        if remaining == 0 {
+            break;
+        }
         targets.extend(
             candidates
                 .into_iter()
-                .take(PRECOMPUTED_PACK_TARGETS_PER_REPO)
+                .take(PRECOMPUTED_PACK_TARGETS_PER_REPO.min(remaining))
                 .map(|node| encode_node_id(node.id)),
         );
     }
@@ -1205,6 +1211,7 @@ fn precompute_context_packs(
             target: entry.target.clone(),
         };
         match entry.mode.as_str() {
+            mode if !is_precomputable_pack_mode(mode) => {}
             "planning" => {
                 planning_pack_tool(&ctx, request)?;
             }
@@ -1220,10 +1227,7 @@ fn precompute_context_packs(
             "change_impact" => {
                 change_impact_pack_tool(&ctx, request)?;
             }
-            // Unknown modes in the log are ignored rather than failing indexing.
-            // The log can pick up legacy modes after an upgrade; skipping keeps
-            // the index step forward-compatible.
-            _ => {}
+            _ => unreachable!("precomputable mode guard should cover all known modes"),
         }
     }
 
@@ -1254,6 +1258,28 @@ fn should_precompute_fallback_targets(
     hot_targets: &[gather_step_storage::PackCallLogEntry],
 ) -> bool {
     hot_targets.is_empty()
+}
+
+fn is_precomputable_pack_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "planning" | "debug" | "fix" | "review" | "change_impact"
+    )
+}
+
+fn precompute_pack_call_count(
+    hot_targets: &[gather_step_storage::PackCallLogEntry],
+    fallback_targets: &[String],
+) -> usize {
+    let hot_count = hot_targets
+        .iter()
+        .filter(|entry| is_precomputable_pack_mode(&entry.mode))
+        .count();
+    if hot_count > 0 {
+        hot_count
+    } else {
+        fallback_targets.len() * 5
+    }
 }
 
 fn apply_repo_filter(config: &mut GatherStepConfig, repo_filter: Option<&str>) -> Result<()> {
@@ -1410,7 +1436,7 @@ mod tests {
 
     use super::{
         CROSS_REPO_COUNT_MESSAGE, SEARCH_FLUSH_MESSAGE, enforce_summary_invariant, format_bytes,
-        format_duration_hh_mm_ss, format_pack_precompute_message,
+        format_duration_hh_mm_ss, format_pack_precompute_message, precompute_pack_call_count,
         should_precompute_fallback_targets, should_update_numeric_progress,
     };
 
@@ -1451,6 +1477,32 @@ mod tests {
             call_count: 3,
             last_called_at: 42,
         }]));
+    }
+
+    #[test]
+    fn precompute_pack_count_tracks_actual_work() {
+        let hot_targets = vec![
+            PackCallLogEntry {
+                target: "target-a".to_owned(),
+                mode: "planning".to_owned(),
+                call_count: 3,
+                last_called_at: 42,
+            },
+            PackCallLogEntry {
+                target: "legacy".to_owned(),
+                mode: "legacy_mode".to_owned(),
+                call_count: 9,
+                last_called_at: 50,
+            },
+        ];
+        assert_eq!(
+            precompute_pack_call_count(&hot_targets, &["fallback".to_owned()]),
+            1
+        );
+        assert_eq!(
+            precompute_pack_call_count(&[], &["a".to_owned(), "b".to_owned()]),
+            10
+        );
     }
 
     fn stats(files: u64, symbols: u64, edges: u64) -> WorkspaceStats {
