@@ -49,7 +49,7 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 /// Bump this constant whenever the Tantivy schema changes (fields added or
 /// removed) so that incompatible on-disk indexes are rejected at open time
 /// rather than silently producing wrong results.
-pub const SEARCH_INDEX_VERSION: u32 = 2;
+pub const SEARCH_INDEX_VERSION: u32 = 3;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -652,8 +652,8 @@ impl TantivySearchStore {
         let symbol_name = first_text(&document, self.fields.symbol_name, FIELD_SYMBOL_NAME)?;
         let node_kind = fast_node_kind(segment_reader, address.doc_id)?;
         let last_modified = fast_u64(segment_reader, FIELD_LAST_MODIFIED, address.doc_id)?;
-        let is_exported = first_bool(&document, self.fields.is_exported, FIELD_IS_EXPORTED)?;
-        let lang = first_text(&document, self.fields.lang, FIELD_LANG)?;
+        let is_exported = fast_bool(segment_reader, FIELD_IS_EXPORTED, address.doc_id)?;
+        let lang = fast_string(segment_reader, FIELD_LANG, address.doc_id)?;
         // `file_path_stored` may be absent for documents written before the
         // field was added.  Treat absence as empty string; the path-token boost
         // is a no-op on empty paths.
@@ -868,8 +868,8 @@ fn build_schema() -> Schema {
     builder.add_text_field(FIELD_FILE_PATH_TOKENS, path_text_options(false, false));
     builder.add_u64_field(FIELD_NODE_KIND, fast_numeric_options(false));
     builder.add_u64_field(FIELD_LAST_MODIFIED, fast_numeric_options(false));
-    builder.add_bool_field(FIELD_IS_EXPORTED, FAST | STORED);
-    builder.add_text_field(FIELD_LANG, STRING | FAST | STORED);
+    builder.add_bool_field(FIELD_IS_EXPORTED, FAST);
+    builder.add_text_field(FIELD_LANG, STRING | FAST);
     // Stored (not indexed) copy of the file path for query-aware rerank.
     // Uses `STORED` only — no tokenizer, no index.
     builder.add_text_field(FIELD_FILE_PATH_STORED, STORED);
@@ -1220,17 +1220,6 @@ fn first_text(
         .ok_or(SearchStoreError::MissingField(name))
 }
 
-fn first_bool(
-    document: &TantivyDocument,
-    field: Field,
-    name: &'static str,
-) -> Result<bool, SearchStoreError> {
-    document
-        .get_first(field)
-        .and_then(|value| value.as_bool())
-        .ok_or(SearchStoreError::MissingField(name))
-}
-
 fn first_node_id(document: &TantivyDocument, field: Field) -> Result<NodeId, SearchStoreError> {
     let bytes = document
         .get_first(field)
@@ -1256,6 +1245,39 @@ fn fast_u64(
         .values_for_doc(doc_id)
         .next()
         .ok_or(SearchStoreError::MissingField(field_name))
+}
+
+fn fast_bool(
+    segment_reader: &tantivy::SegmentReader,
+    field_name: &'static str,
+    doc_id: tantivy::DocId,
+) -> Result<bool, SearchStoreError> {
+    segment_reader
+        .fast_fields()
+        .bool(field_name)?
+        .first(doc_id)
+        .ok_or(SearchStoreError::MissingField(field_name))
+}
+
+fn fast_string(
+    segment_reader: &tantivy::SegmentReader,
+    field_name: &'static str,
+    doc_id: tantivy::DocId,
+) -> Result<String, SearchStoreError> {
+    let column = segment_reader
+        .fast_fields()
+        .str(field_name)?
+        .ok_or(SearchStoreError::MissingField(field_name))?;
+    let ord = column
+        .ords()
+        .first(doc_id)
+        .ok_or(SearchStoreError::MissingField(field_name))?;
+    let mut value = String::new();
+    if column.ord_to_str(ord, &mut value)? {
+        Ok(value)
+    } else {
+        Err(SearchStoreError::MissingField(field_name))
+    }
 }
 
 fn fast_node_kind(
