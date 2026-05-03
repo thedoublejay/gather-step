@@ -864,7 +864,7 @@ fn register_tokenizers(index: &mut Index) {
 )]
 fn parser_query_text(query: &str) -> Cow<'_, str> {
     let trimmed = query.trim();
-    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+    if trimmed.is_empty() || !trimmed.bytes().all(is_identifier_query_byte) {
         return Cow::Borrowed(query);
     }
 
@@ -880,6 +880,10 @@ fn parser_query_text(query: &str) -> Cow<'_, str> {
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+fn is_identifier_query_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
 }
 
 /// Return the first code-token (split at CamelCase / underscore boundaries)
@@ -1449,6 +1453,36 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol_name, "createOrderUseCase");
+        assert!(results[0].exact_match);
+    }
+
+    #[test]
+    fn snake_case_query_matches_split_symbol_tokens() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("snake-query")).expect("store should open");
+        let mut repo_node = node("backend_standard", "__repo__");
+        repo_node.id = node_id(
+            "backend_standard",
+            "__repo__",
+            NodeKind::Repo,
+            "backend_standard",
+        );
+        repo_node.kind = NodeKind::Repo;
+        repo_node.repo = "backend_standard".to_owned();
+        repo_node.file_path = "__repo__".to_owned();
+        repo_node.qualified_name = Some("backend_standard::__repo__".to_owned());
+        repo_node.signature = None;
+        repo_node.visibility = None;
+        let doc = SearchDocument::from_node(&repo_node, 1_713_000_000);
+
+        store.index_symbol(&doc).expect("document should index");
+        let results = store
+            .search("backend_standard", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_name, "backend_standard");
+        assert_eq!(results[0].node_kind, NodeKind::Repo);
         assert!(results[0].exact_match);
     }
 
