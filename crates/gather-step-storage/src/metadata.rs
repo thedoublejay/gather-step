@@ -509,6 +509,7 @@ const UPSERT_FILE_STATE_SQL: &str = r"
 ";
 
 const STORED_CONTENT_HASH_BYTES: usize = 16;
+const CONTEXT_PACK_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Store only a 128-bit BLAKE3 prefix for per-file change detection.
 ///
@@ -1090,6 +1091,17 @@ impl MetadataStoreDb {
         let value = action(&tx)?;
         tx.commit()?;
         Ok(value)
+    }
+
+    fn prune_stale_context_packs_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        now_unix: i64,
+    ) -> Result<usize, rusqlite::Error> {
+        let cutoff = now_unix.saturating_sub(CONTEXT_PACK_RETENTION_SECONDS);
+        tx.execute(
+            "DELETE FROM context_packs WHERE last_read_at < ?1",
+            params![cutoff],
+        )
     }
 
     fn read_connection(&self) -> Result<PooledConnection<'_>, MetadataStoreError> {
@@ -2184,6 +2196,10 @@ impl MetadataStoreDb {
         const CONTEXT_PACK_FILE_CHUNK_SIZE: usize = 300;
 
         self.with_write_txn(|tx| {
+            Self::prune_stale_context_packs_in_tx(
+                tx,
+                record.created_at.max(record.last_read_at),
+            )?;
             tx.execute(
                 "INSERT INTO context_packs(pack_key, mode, target, generation, response, created_at, last_read_at, byte_size, hit_count)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -3342,10 +3358,10 @@ mod tests {
     };
 
     use super::{
-        CoChangePairRecord, CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord,
-        ContextPackRecord, FileAnalytics, FileIndexState, MetadataStore, MetadataStoreDb,
-        MetadataStoreError, PayloadContractQuery, PayloadContractStoreRecord,
-        SQLITE_PAGE_SIZE_BYTES,
+        CONTEXT_PACK_RETENTION_SECONDS, CoChangePairRecord, CommitFileChangeKind,
+        CommitFileDeltaRecord, CommitRecord, ContextPackRecord, FileAnalytics, FileIndexState,
+        MetadataStore, MetadataStoreDb, MetadataStoreError, PayloadContractQuery,
+        PayloadContractStoreRecord, SQLITE_PAGE_SIZE_BYTES,
     };
 
     static NEXT_TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
@@ -4202,6 +4218,51 @@ mod tests {
         assert!(store.get_context_pack("pack:key")?.is_none());
         assert!(store.context_pack_files_for_key("pack:key")?.is_empty());
         assert_eq!(store.clear_context_packs()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn put_context_pack_prunes_stale_packs_and_file_deps() -> Result<(), MetadataStoreError> {
+        let (_db_path, store) = open_store("context-pack-age-prune")?;
+        let stale = ContextPackRecord {
+            pack_key: "pack:stale".to_owned(),
+            mode: "planning".to_owned(),
+            target: "staleTarget".to_owned(),
+            generation: 1,
+            response: br#"{"stale":true}"#.to_vec(),
+            created_at: 1,
+            last_read_at: 1,
+            byte_size: 14,
+            hit_count: 0,
+        };
+        let fresh = ContextPackRecord {
+            pack_key: "pack:fresh".to_owned(),
+            mode: "planning".to_owned(),
+            target: "freshTarget".to_owned(),
+            generation: 2,
+            response: br#"{"fresh":true}"#.to_vec(),
+            created_at: CONTEXT_PACK_RETENTION_SECONDS + 10,
+            last_read_at: CONTEXT_PACK_RETENTION_SECONDS + 10,
+            byte_size: 14,
+            hit_count: 0,
+        };
+        store.put_context_pack(
+            &stale,
+            &[("frontend_standard".to_owned(), "src/stale.ts".to_owned())],
+        )?;
+
+        store.put_context_pack(
+            &fresh,
+            &[("frontend_standard".to_owned(), "src/fresh.ts".to_owned())],
+        )?;
+
+        assert!(store.get_context_pack("pack:stale")?.is_none());
+        assert!(store.context_pack_files_for_key("pack:stale")?.is_empty());
+        assert_eq!(store.get_context_pack("pack:fresh")?, Some(fresh));
+        assert_eq!(
+            store.context_pack_files_for_key("pack:fresh")?,
+            vec![("frontend_standard".to_owned(), "src/fresh.ts".to_owned())]
+        );
         Ok(())
     }
 
