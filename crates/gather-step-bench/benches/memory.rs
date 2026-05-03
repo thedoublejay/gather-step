@@ -3,11 +3,16 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use gather_step_bench::metrics::capture_rss;
-use gather_step_storage::{IndexingOptions, RepoIndexer};
+use gather_step_bench::metrics::ResourceSampler;
+use gather_step_core::GatherStepConfig;
+use gather_step_storage::{
+    IndexingOptions, RepoIndexer, WatcherConfig, WorkspaceStores, WorkspaceWatcher,
+};
+use tokio_util::sync::CancellationToken;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -61,20 +66,19 @@ fn bench_index_memory(c: &mut Criterion) {
 
     let fixture = curated_fixture_root();
 
-    // Capture RSS before any indexing to establish the baseline.
-    let rss_before = capture_rss();
-
+    let resources = ResourceSampler::start();
     let storage = TempDir::new("memory-check");
     let indexer =
         RepoIndexer::open(storage.path(), IndexingOptions::default()).expect("indexer should open");
     indexer
         .index_repo("curated_monorepo", fixture, None)
         .expect("fixture should index");
+    let resource_peaks = resources.finish();
 
-    let rss_after = capture_rss();
-
-    if let (Some(before), Some(after)) = (rss_before, rss_after) {
-        let growth = after.saturating_sub(before);
+    if let (Some(before), Some(growth)) = (
+        resource_peaks.start_rss_bytes,
+        resource_peaks.rss_growth_bytes(),
+    ) {
         // RSS byte counts fit comfortably within f64 mantissa for realistic workloads.
         #[expect(
             clippy::cast_precision_loss,
@@ -96,6 +100,15 @@ fn bench_index_memory(c: &mut Criterion) {
     } else {
         note("note: RSS capture not available on this platform; memory assertion skipped");
     }
+    if let (Some(start), Some(peak)) = (resource_peaks.start_open_fds, resource_peaks.peak_open_fds)
+    {
+        assert!(
+            peak >= start,
+            "open-FD peak {peak} should be >= start {start}"
+        );
+    } else {
+        note("note: open-FD capture not available on this platform; FD assertion skipped");
+    }
 
     // Criterion timing: time the full index pass for throughput context.
     let mut group = c.benchmark_group("memory_rss");
@@ -104,15 +117,14 @@ fn bench_index_memory(c: &mut Criterion) {
         b.iter_batched(
             || TempDir::new("mem-timing"),
             |tmp| {
-                let rss_b = capture_rss();
+                let resources = ResourceSampler::start();
                 let indexer = RepoIndexer::open(tmp.path(), IndexingOptions::default())
                     .expect("indexer should open");
                 indexer
                     .index_repo("curated_monorepo", curated_fixture_root(), None)
                     .expect("fixture should index");
-                let rss_a = capture_rss();
-                // Return both so the compiler cannot optimise away the work.
-                (tmp, rss_b, rss_a)
+                let resource_peaks = resources.finish();
+                (tmp, resource_peaks)
             },
             criterion::BatchSize::PerIteration,
         );
@@ -120,5 +132,59 @@ fn bench_index_memory(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_index_memory);
+fn bench_watch_resources(c: &mut Criterion) {
+    let fixture = curated_fixture_root();
+    let config = GatherStepConfig::from_yaml_file(fixture.join("gather-step.config.yaml"))
+        .expect("fixture config should load");
+    let mut group = c.benchmark_group("watch_resources");
+    group.sample_size(10);
+    group.bench_function("curated_monorepo_watch_startup", |b| {
+        b.iter_batched(
+            || TempDir::new("watch-resources"),
+            |tmp| {
+                let resources = ResourceSampler::start();
+                let stores = WorkspaceStores::open(tmp.path()).expect("workspace stores");
+                let watcher = WorkspaceWatcher::new_with_stores(
+                    stores,
+                    IndexingOptions::from_config(&config),
+                    WatcherConfig {
+                        poll_interval: Duration::from_millis(100),
+                        debounce_duration: Duration::from_millis(100),
+                        consecutive_error_limit: 1,
+                        error_backoff: Duration::from_millis(100),
+                    },
+                    &config,
+                    &fixture,
+                )
+                .expect("workspace watcher");
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("tokio runtime");
+                let cancel = CancellationToken::new();
+                runtime
+                    .block_on(async {
+                        let run = watcher.run(cancel.clone());
+                        let stop = async {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            cancel.cancel();
+                        };
+                        tokio::pin!(run);
+                        tokio::pin!(stop);
+                        tokio::select! {
+                            result = &mut run => result,
+                            () = &mut stop => run.await,
+                        }
+                    })
+                    .expect("watcher should stop cleanly");
+                let resource_peaks = resources.finish();
+                (tmp, resource_peaks)
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_index_memory, bench_watch_resources);
 criterion_main!(benches);

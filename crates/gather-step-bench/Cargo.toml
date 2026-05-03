@@ -56,6 +56,8 @@ gather-step-parser.workspace = true
 criterion = { workspace = true, features = ["html_reports"] }
 rustc-hash.workspace = true
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["rt", "time"] }
+tokio-util.workspace = true
 
 [lints]
 workspace = true
