@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind, VIRTUAL_NODE_REPO};
+use gather_step_core::{
+    EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId,
+    NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO,
+};
 use redb::{
     Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadableDatabase,
     ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
@@ -33,7 +36,111 @@ struct StoredEdge {
     target: NodeId,
     kind: gather_step_core::EdgeKind,
     owner_file: NodeId,
-    metadata: gather_step_core::EdgeMetadata,
+    metadata: StoredEdgeMetadata,
+}
+
+/// Compact on-disk mirror of [`EdgeMetadata`].
+///
+/// The public metadata type stays serde-friendly and string-based. The graph
+/// store is a fresh/rebuildable index, so it can encode known high-repeat
+/// strings as enum tags while preserving unknown producer strings.
+#[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
+struct StoredEdgeMetadata {
+    weight: Option<u32>,
+    confidence: Option<u16>,
+    timestamp_unix: Option<i64>,
+    drift_kind: Option<StoredDriftKind>,
+    resolver: Option<StoredResolver>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
+enum StoredResolver {
+    Known(ResolverStrategy),
+    Other(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
+enum StoredDriftKind {
+    Shape,
+    Type,
+    Optionality,
+    MissingField,
+    ExtraField,
+    MigrationFilters(String),
+    Other(String),
+}
+
+impl StoredEdgeMetadata {
+    fn from_public(metadata: &EdgeMetadata) -> Self {
+        Self {
+            weight: metadata.weight,
+            confidence: metadata.confidence,
+            timestamp_unix: metadata.timestamp_unix,
+            drift_kind: metadata
+                .drift_kind
+                .as_deref()
+                .map(StoredDriftKind::from_public),
+            resolver: metadata
+                .resolver
+                .as_deref()
+                .map(StoredResolver::from_public),
+        }
+    }
+
+    fn into_public(self) -> EdgeMetadata {
+        EdgeMetadata {
+            weight: self.weight,
+            confidence: self.confidence,
+            timestamp_unix: self.timestamp_unix,
+            drift_kind: self.drift_kind.map(StoredDriftKind::into_public),
+            resolver: self.resolver.map(StoredResolver::into_public),
+        }
+    }
+}
+
+impl StoredResolver {
+    fn from_public(value: &str) -> Self {
+        ResolverStrategy::from_str(value).map_or_else(|| Self::Other(value.to_owned()), Self::Known)
+    }
+
+    fn into_public(self) -> String {
+        match self {
+            Self::Known(strategy) => strategy.as_str().to_owned(),
+            Self::Other(value) => value,
+        }
+    }
+}
+
+impl StoredDriftKind {
+    fn from_public(value: &str) -> Self {
+        match value {
+            "shape" => Self::Shape,
+            "type" => Self::Type,
+            "optionality" => Self::Optionality,
+            "missing_field" => Self::MissingField,
+            "extra_field" => Self::ExtraField,
+            value => value
+                .strip_prefix(MIGRATION_FILTERS_METADATA_PREFIX)
+                .map_or_else(
+                    || Self::Other(value.to_owned()),
+                    |filters| Self::MigrationFilters(filters.to_owned()),
+                ),
+        }
+    }
+
+    fn into_public(self) -> String {
+        match self {
+            Self::Shape => "shape".to_owned(),
+            Self::Type => "type".to_owned(),
+            Self::Optionality => "optionality".to_owned(),
+            Self::MissingField => "missing_field".to_owned(),
+            Self::ExtraField => "extra_field".to_owned(),
+            Self::MigrationFilters(filters) => {
+                format!("{MIGRATION_FILTERS_METADATA_PREFIX}{filters}")
+            }
+            Self::Other(value) => value,
+        }
+    }
 }
 
 /// On-disk node representation. Signatures are interned in the `SIGNATURES`
@@ -154,7 +261,7 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 ///
 /// Bump this when node/edge discriminants or graph-derived evidence semantics
 /// change in a way that requires rebuilding `.gather-step/storage/graph.redb`.
-pub const GRAPH_SCHEMA_VERSION: u32 = 3;
+pub const GRAPH_SCHEMA_VERSION: u32 = 4;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -1242,7 +1349,7 @@ impl GraphStoreDb {
             target: edge.target,
             kind: edge.kind,
             owner_file: edge.owner_file,
-            metadata: edge.metadata.clone(),
+            metadata: StoredEdgeMetadata::from_public(&edge.metadata),
         })
     }
 
@@ -1256,7 +1363,7 @@ impl GraphStoreDb {
             target: stored.target,
             kind: stored.kind,
             owner_file: stored.owner_file,
-            metadata: stored.metadata,
+            metadata: stored.metadata.into_public(),
             is_cross_file: false,
         })
     }
@@ -3340,12 +3447,16 @@ mod tests {
     };
 
     use gather_step_core::{
-        EdgeKind, EdgeMetadata, ResolverStrategy, SourceSpan, Visibility, node_id,
+        EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, ResolverStrategy, SourceSpan,
+        Visibility, node_id,
     };
     use pretty_assertions::assert_eq;
     use redb::ReadableDatabase;
 
-    use super::{BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGES_BY_KIND, GraphStore, GraphStoreDb};
+    use super::{
+        BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGES_BY_KIND, GraphStore, GraphStoreDb,
+        StoredDriftKind, StoredEdgeMetadata, StoredResolver,
+    };
     use crate::{StorageDaemonMetadata, StorageDaemonMetadataGuard};
     use gather_step_core::{EdgeData, NodeData, NodeId, NodeKind};
 
@@ -3770,6 +3881,31 @@ mod tests {
         let outgoing = store.get_outgoing(source.id).expect("outgoing should load");
         assert_eq!(outgoing, vec![updated]);
         assert_eq!(store.count_edges().expect("edge count should load"), 1);
+    }
+
+    #[test]
+    fn stored_edge_metadata_compacts_known_strings_and_round_trips() {
+        let metadata = EdgeMetadata {
+            weight: Some(7),
+            confidence: Some(88),
+            timestamp_unix: Some(1_700_000_123),
+            drift_kind: Some(format!("{MIGRATION_FILTERS_METADATA_PREFIX}[\"tenantId\"]")),
+            resolver: Some(ResolverStrategy::ImportMap.as_str().to_owned()),
+        };
+
+        let stored = StoredEdgeMetadata::from_public(&metadata);
+
+        assert_eq!(
+            stored.drift_kind,
+            Some(StoredDriftKind::MigrationFilters(
+                "[\"tenantId\"]".to_owned()
+            ))
+        );
+        assert_eq!(
+            stored.resolver,
+            Some(StoredResolver::Known(ResolverStrategy::ImportMap))
+        );
+        assert_eq!(stored.into_public(), metadata);
     }
 
     #[test]
