@@ -840,16 +840,14 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     drop(workspace_bulk);
     let durable_sync_ms = elapsed_ms(durable_sync_start);
     info!(durable_sync_ms, "stage timing: graph durable sync complete",);
-    let cache_clear_start = Instant::now();
-    let context_pack_cache_rows_removed = indexer
-        .storage()
-        .metadata()
-        .clear_context_packs()
-        .context("clearing derived context-pack cache after index")?;
-    let context_pack_cache_clear_ms = elapsed_ms(cache_clear_start);
+    // Per-batch graph commits synchronously invalidate packs that depend on
+    // changed targets. Do not clear the whole cache here; unrelated packs can
+    // survive the index run and generation checks still reject stale rows.
+    let context_pack_cache_rows_removed = 0;
+    let context_pack_cache_clear_ms = 0;
     info!(
         context_pack_cache_clear_ms,
-        context_pack_cache_rows_removed, "stage timing: context-pack cache clear complete",
+        context_pack_cache_rows_removed, "stage timing: global context-pack cache clear skipped",
     );
     drop(indexer);
     let precompute_start = Instant::now();

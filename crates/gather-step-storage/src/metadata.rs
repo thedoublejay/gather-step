@@ -4200,6 +4200,52 @@ mod tests {
     }
 
     #[test]
+    fn context_pack_target_invalidation_preserves_unrelated_packs() -> Result<(), MetadataStoreError>
+    {
+        let (_db_path, store) = open_store("context-pack-preserve-unrelated")?;
+        let changed = ContextPackRecord {
+            pack_key: "pack:changed".to_owned(),
+            mode: "planning".to_owned(),
+            target: "changedTarget".to_owned(),
+            generation: 99,
+            response: br#"{"changed":true}"#.to_vec(),
+            created_at: 100,
+            last_read_at: 100,
+            byte_size: 16,
+            hit_count: 0,
+        };
+        let unrelated = ContextPackRecord {
+            pack_key: "pack:unrelated".to_owned(),
+            mode: "planning".to_owned(),
+            target: "unrelatedTarget".to_owned(),
+            generation: 99,
+            response: br#"{"unrelated":true}"#.to_vec(),
+            created_at: 100,
+            last_read_at: 100,
+            byte_size: 18,
+            hit_count: 0,
+        };
+        store.put_context_pack(
+            &changed,
+            &[("frontend_standard".to_owned(), "src/api.ts".to_owned())],
+        )?;
+        store.put_context_pack(
+            &unrelated,
+            &[("frontend_standard".to_owned(), "src/other.ts".to_owned())],
+        )?;
+
+        let removed = store.invalidate_context_packs_for_targets(&[(
+            "frontend_standard".to_owned(),
+            "src/api.ts".to_owned(),
+        )])?;
+
+        assert_eq!(removed, 1);
+        assert!(store.get_context_pack("pack:changed")?.is_none());
+        assert!(store.get_context_pack("pack:unrelated")?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn reverse_dependents_returns_same_repo_sources() -> Result<(), MetadataStoreError> {
         let (_db_path, store) = open_store("reverse-dependents")?;
         store.with_write_txn(|tx| {
