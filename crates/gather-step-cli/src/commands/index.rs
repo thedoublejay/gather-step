@@ -78,7 +78,8 @@ struct IndexOutput {
     config_path: String,
     registry_path: String,
     storage_root: String,
-    index_size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_size_bytes: Option<u64>,
     stats: IndexStatsOutput,
     timings: IndexTimingOutput,
     warnings: Vec<String>,
@@ -798,8 +799,15 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     }
 
     let total_wall_ms = elapsed_ms(total_start);
-    let index_size_bytes = directory_size_bytes(&storage_root)
-        .with_context(|| format!("measuring index size under {}", storage_root.display()))?;
+    let should_measure_index_size = output.is_json() || artifact_path.is_some();
+    let index_size_bytes = if should_measure_index_size {
+        Some(
+            directory_size_bytes(&storage_root)
+                .with_context(|| format!("measuring index size under {}", storage_root.display()))?,
+        )
+    } else {
+        None
+    };
     let graph_build_ms = writer_timings.storage_commit;
     let parser_augment_ms = producer_timings.prepare_total;
     let pack_precompute_ms = precompute_ms;
@@ -849,7 +857,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         workspace = %app.workspace_path.display(),
         storage_root = %storage_root.display(),
         duration_ms = total_wall_ms,
-        index_size_bytes,
+        ?index_size_bytes,
         "Indexing from directory finished.",
     );
 
@@ -873,11 +881,18 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         style(payload.stats.total_edges).dim(),
         style(payload.stats.cross_repo_edges).dim()
     ));
-    output.line(format!(
-        "    Time: {}  Index size: {}",
-        style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
-        style(format_bytes(payload.index_size_bytes)).dim(),
-    ));
+    if let Some(index_size_bytes) = payload.index_size_bytes {
+        output.line(format!(
+            "    Time: {}  Index size: {}",
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
+            style(format_bytes(index_size_bytes)).dim(),
+        ));
+    } else {
+        output.line(format!(
+            "    Time: {}",
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
+        ));
+    }
     for warning in &payload.warnings {
         output.line(format!("  {} {warning}", style("Warning:").yellow().bold()));
     }
