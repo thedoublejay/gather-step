@@ -463,7 +463,12 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bulk = indexer.begin_workspace_bulk_session();
 
     let (tx, rx) = crossbeam_channel::bounded::<PreparedRepo>(PHASE_CHANNEL_DEPTH);
-    let (analytics_tx, analytics_rx) = crossbeam_channel::unbounded::<AnalyticsJob>();
+    // One analytics job is produced per repo after its storage commit. Capacity
+    // equal to the run's repo count bounds retained jobs while avoiding writer
+    // backpressure when analytics is slower than storage commits.
+    let analytics_queue_depth = config.repos.len().max(1);
+    let (analytics_tx, analytics_rx) =
+        crossbeam_channel::bounded::<AnalyticsJob>(analytics_queue_depth);
     let (analytics_result_tx, analytics_result_rx) =
         crossbeam_channel::unbounded::<AnalyticsRepoResult>();
     let indexer_ref = &indexer;
