@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    fs,
+    io::ErrorKind,
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -489,13 +491,8 @@ impl Watcher {
         self.repos
             .values()
             .filter_map(|repo_watch| {
-                let relative = path.strip_prefix(&repo_watch.repo_root).ok()?;
-                let relative = relative.to_string_lossy().replace('\\', "/");
-                if relative.is_empty()
-                    || !self.traverse.is_index_relevant_path(Path::new(&relative))
-                {
-                    return None;
-                }
+                let relative =
+                    safe_watch_relative_path(&repo_watch.repo_root, path, &self.traverse)?;
                 Some((
                     repo_watch.repo.as_str(),
                     repo_watch.repo_root.components().count(),
@@ -740,6 +737,50 @@ impl Watcher {
 
         Ok(impacted.len())
     }
+}
+
+fn safe_watch_relative_path(
+    repo_root: &Path,
+    path: &Path,
+    traverse: &TraverseConfig,
+) -> Option<String> {
+    let relative = path.strip_prefix(repo_root).ok()?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || watch_path_has_symlink_component(repo_root, relative)
+    {
+        return None;
+    }
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    traverse
+        .is_index_relevant_path(Path::new(&relative))
+        .then_some(relative)
+}
+
+fn watch_path_has_symlink_component(repo_root: &Path, relative: &Path) -> bool {
+    let mut cursor = repo_root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return true;
+        };
+        cursor.push(part);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => return false,
+            Err(error) => {
+                warn!(
+                    path = %cursor.display(),
+                    error = %error,
+                    "failed to inspect watch event path; ignoring event path"
+                );
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn incremental_reindex_async(
@@ -1077,6 +1118,57 @@ repos:
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(queued, vec!["package.json".to_owned()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn record_event_paths_ignores_symlink_escape_and_keeps_regular_file() {
+        let storage_root = TestDir::new("symlink-storage");
+        let repo_root = TestDir::new("symlink-repo");
+        let outside_root = TestDir::new("symlink-outside");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir");
+        fs::write(
+            repo_root.path().join("src/app.ts"),
+            "export function app() { return 1; }\n",
+        )
+        .expect("regular file");
+        fs::write(
+            outside_root.path().join("secret.ts"),
+            "export const token = 'outside';\n",
+        )
+        .expect("outside file");
+        std::os::unix::fs::symlink(
+            outside_root.path().join("secret.ts"),
+            repo_root.path().join("src/secret-link.ts"),
+        )
+        .expect("symlink should create");
+
+        let mut watcher = Watcher::new(
+            storage_root.path(),
+            IndexingOptions::default(),
+            WatcherConfig::default(),
+        )
+        .expect("watcher should open");
+        watcher
+            .add_repo("sample-service", repo_root.path())
+            .expect("repo should register");
+
+        let mut pending = BTreeMap::new();
+        watcher.record_event_paths(
+            &Event::new(EventKind::Any)
+                .add_path(repo_root.path().join("src/secret-link.ts"))
+                .add_path(repo_root.path().join("src/app.ts")),
+            &mut pending,
+        );
+
+        let queued = pending
+            .get("sample-service")
+            .expect("regular file should be queued")
+            .files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(queued, vec!["src/app.ts".to_owned()]);
     }
 
     #[test]
