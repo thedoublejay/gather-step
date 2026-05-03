@@ -155,6 +155,8 @@ fn cli_styles() -> Styles {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use clap::Parser;
     use pretty_assertions::assert_eq;
 
@@ -206,10 +208,24 @@ mod tests {
 
     #[test]
     fn parses_storage_report_command() {
-        let cli = Cli::parse_from(["gather-step", "--json", "storage-report"]);
+        let cli = Cli::parse_from([
+            "gather-step",
+            "--json",
+            "storage-report",
+            "--storage",
+            "/tmp/gather-step-storage",
+        ]);
 
         assert!(cli.json);
-        assert!(matches!(cli.command, Some(Command::StorageReport(_))));
+        match cli.command {
+            Some(Command::StorageReport(args)) => {
+                assert_eq!(
+                    args.storage.as_deref(),
+                    Some(Path::new("/tmp/gather-step-storage"))
+                );
+            }
+            other => panic!("expected storage-report command, got {other:?}"),
+        }
     }
 
     #[test]

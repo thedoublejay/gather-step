@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
@@ -8,7 +10,10 @@ use serde::Serialize;
 use crate::app::AppContext;
 
 #[derive(Debug, Args, Default)]
-pub struct StorageReportArgs {}
+pub struct StorageReportArgs {
+    #[arg(long, help = "Read storage artifacts from this directory")]
+    pub storage: Option<PathBuf>,
+}
 
 #[derive(Debug, Serialize)]
 struct StorageReportOutput<'a> {
@@ -17,8 +22,10 @@ struct StorageReportOutput<'a> {
     report: &'a StorageFootprintReport,
 }
 
-pub fn run(app: &AppContext, _args: StorageReportArgs) -> Result<()> {
-    let storage_root = app.workspace_paths().storage_root;
+pub fn run(app: &AppContext, args: StorageReportArgs) -> Result<()> {
+    let storage_root = args
+        .storage
+        .unwrap_or_else(|| app.workspace_paths().storage_root);
     let report = storage_footprint_report(&storage_root)?;
     let payload = StorageReportOutput {
         event: "storage_report_completed",
