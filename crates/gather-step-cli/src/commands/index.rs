@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -119,6 +120,9 @@ struct IndexTimingOutput {
     writer_storage_commit: u64,
     #[serde(rename = "writer_analytics_total_ms")]
     writer_analytics: u64,
+    analytics_total_ms: u64,
+    analytics_max_ms: u64,
+    analytics_recv_wait_total_ms: u64,
     #[serde(rename = "writer_authoritative_count_total_ms")]
     writer_authoritative_count: u64,
     #[serde(rename = "producer_send_wait_total_ms")]
@@ -266,8 +270,17 @@ struct PreparedRepo {
 struct CommittedRepo {
     repo_idx: usize,
     result: WorkspaceRepoResult,
-    analytics_warning: Option<String>,
-    analytics_status_label: &'static str,
+}
+
+struct AnalyticsJob {
+    repo_idx: usize,
+    repo_name: String,
+    repo_root: PathBuf,
+}
+
+struct AnalyticsRepoResult {
+    repo_idx: usize,
+    status: RepoAnalyticsStatus,
 }
 
 #[derive(Default)]
@@ -280,14 +293,22 @@ struct ProducerTimings {
 #[derive(Default)]
 struct WriterTimings {
     storage_commit: u64,
-    analytics: u64,
     authoritative_count: u64,
+    recv_wait: u64,
+}
+
+#[derive(Default)]
+struct AnalyticsTimings {
+    total: u64,
+    max: u64,
     recv_wait: u64,
 }
 
 struct PipelineOutput {
     committed: Vec<CommittedRepo>,
+    analytics_results: Vec<AnalyticsRepoResult>,
     writer_timings: WriterTimings,
+    analytics_timings: AnalyticsTimings,
     producer_timings: ProducerTimings,
 }
 
@@ -409,10 +430,11 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // ── Streaming parse → write pipeline ────────────────────────────────────
     // Serial producer prepares one repo at a time on the main thread; a
     // dedicated writer thread drains a bounded `crossbeam-channel` and runs
-    // `commit_repo_payload` + git analytics for each received payload.  This
-    // pipelines prepare(N+1) with commit(N) without running multiple whole-repo
-    // prepares concurrently, which would split the inner file-level rayon pool
-    // and spike peak RSS.
+    // `commit_repo_payload` for each received payload. Git analytics runs on a
+    // separate scoped worker fed by the writer after each repo storage commit.
+    // This pipelines prepare(N+1) with commit(N) without running multiple
+    // whole-repo prepares concurrently, which would split the inner file-level
+    // rayon pool and spike peak RSS.
     //
     // Outer repo-level `par_iter()` is explicitly avoided: `prepare_repo_files`
     // wraps its file-level `par_iter()` inside `std::thread::scope(...)`, so
@@ -433,6 +455,9 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bulk = indexer.begin_workspace_bulk_session();
 
     let (tx, rx) = crossbeam_channel::bounded::<PreparedRepo>(PHASE_CHANNEL_DEPTH);
+    let (analytics_tx, analytics_rx) = crossbeam_channel::unbounded::<AnalyticsJob>();
+    let (analytics_result_tx, analytics_result_rx) =
+        crossbeam_channel::unbounded::<AnalyticsRepoResult>();
     let indexer_ref = &indexer;
     let config_ref = &config;
     let config_root_ref = &config_root;
@@ -440,7 +465,40 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bar_ref = &workspace_bar;
 
     let pipeline = std::thread::scope(|scope| -> Result<PipelineOutput> {
-        // Writer thread: drains the channel, commits + analytics per repo.
+        let analytics_worker = scope.spawn(move || -> AnalyticsTimings {
+            let mut timings = AnalyticsTimings::default();
+            loop {
+                let recv_start = Instant::now();
+                let Ok(job) = analytics_rx.recv() else {
+                    timings.recv_wait = timings.recv_wait.saturating_add(elapsed_ms(recv_start));
+                    break;
+                };
+                timings.recv_wait = timings.recv_wait.saturating_add(elapsed_ms(recv_start));
+                let analytics_start = Instant::now();
+                let status = sync_repo_analytics(
+                    indexer_ref,
+                    &job.repo_name,
+                    &job.repo_root,
+                    current_unix_timestamp_i64(),
+                );
+                let analytics_ms = elapsed_ms(analytics_start);
+                timings.total = timings.total.saturating_add(analytics_ms);
+                timings.max = timings.max.max(analytics_ms);
+                if analytics_result_tx
+                    .send(AnalyticsRepoResult {
+                        repo_idx: job.repo_idx,
+                        status,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            timings
+        });
+
+        // Writer thread: drains the channel, commits repos, and queues git
+        // analytics for the dedicated analytics worker.
         let writer = scope.spawn(move || -> Result<(Vec<CommittedRepo>, WriterTimings)> {
             let mut committed = Vec::with_capacity(config_ref.repos.len());
             let mut writer_timings = WriterTimings::default();
@@ -462,16 +520,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 let commit_ms = elapsed_ms(commit_start);
                 writer_timings.storage_commit =
                     writer_timings.storage_commit.saturating_add(commit_ms);
-
-                let analytics_start = Instant::now();
-                let analytics_status = sync_repo_analytics(
-                    indexer_ref,
-                    &prep.repo_name,
-                    &prep.repo_root,
-                    current_unix_timestamp_i64(),
-                );
-                let analytics_ms = elapsed_ms(analytics_start);
-                writer_timings.analytics = writer_timings.analytics.saturating_add(analytics_ms);
 
                 // Authoritative per-repo counts from the graph state.  The
                 // per-batch accumulator inside index_repo returns deltas
@@ -522,6 +570,16 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                     .and_then(|r| r.depth)
                     .unwrap_or(gather_step_core::DepthLevel::Full);
 
+                analytics_tx
+                    .send(AnalyticsJob {
+                        repo_idx: prep.repo_idx,
+                        repo_name: prep.repo_name.clone(),
+                        repo_root: prep.repo_root.clone(),
+                    })
+                    .with_context(|| {
+                        format!("queueing git analytics for repo `{}`", prep.repo_name)
+                    })?;
+
                 committed.push(CommittedRepo {
                     repo_idx: prep.repo_idx,
                     result: WorkspaceRepoResult {
@@ -533,8 +591,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                         frameworks,
                         depth_level,
                     },
-                    analytics_warning: analytics_status.warning().map(ToOwned::to_owned),
-                    analytics_status_label: analytics_status.label(),
                 });
 
                 if let Some(bar) = workspace_bar_ref {
@@ -614,6 +670,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         let writer_result = writer
             .join()
             .map_err(|_| anyhow::anyhow!("writer thread panicked"))?;
+        let analytics_timings = analytics_worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("analytics thread panicked"))?;
+        let analytics_results = analytics_result_rx.try_iter().collect::<Vec<_>>();
 
         // Prefer the writer's error (more specific to storage) over producer's
         // secondary "send failed" symptom.
@@ -623,7 +683,9 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 producer_result?;
                 Ok(PipelineOutput {
                     committed,
+                    analytics_results,
                     writer_timings,
+                    analytics_timings,
                     producer_timings,
                 })
             }
@@ -633,13 +695,29 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // Apply committed repos to registry / stats / repo_results in config order.
     let PipelineOutput {
         committed,
+        analytics_results,
         writer_timings,
+        analytics_timings,
         producer_timings,
     } = pipeline;
+    let analytics_by_repo_idx = analytics_results
+        .into_iter()
+        .map(|result| (result.repo_idx, result.status))
+        .collect::<BTreeMap<_, _>>();
     let mut committed = committed;
     committed.sort_by_key(|c| c.repo_idx);
     for c in committed {
-        if let Some(warning) = c.analytics_warning.clone() {
+        let analytics_status = analytics_by_repo_idx
+            .get(&c.repo_idx)
+            .cloned()
+            .unwrap_or_else(|| RepoAnalyticsStatus::Degraded {
+                warning: format!(
+                    "repo `{}`: git analytics did not report a result; continuing without ownership and co-change analytics",
+                    c.result.repo
+                ),
+            });
+        let analytics_warning = analytics_status.warning().map(ToOwned::to_owned);
+        if let Some(warning) = analytics_warning.clone() {
             warnings.push(warning);
         }
         registry.update_repo_metadata(
@@ -663,8 +741,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             symbols: c.result.symbol_count,
             edges: c.result.edge_count,
             frameworks: c.result.frameworks.clone(),
-            git_analytics_status: c.analytics_status_label,
-            git_analytics_warning: c.analytics_warning.clone(),
+            git_analytics_status: analytics_status.label(),
+            git_analytics_warning: analytics_warning,
         });
     }
 
@@ -753,7 +831,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         collect_precomputed_pack_targets(indexer.storage().graph(), &config)
             .context("collecting precomputed context-pack targets")?;
     let pack_target_discovery_ms = elapsed_ms(pack_target_discovery_start);
-    // Durable sync must be the first post-pipeline action. Clearing the
+    // The pipeline joins the analytics worker before returning, so no
+    // analytics writes can continue past this durable marker. Clearing the
     // derived pack cache before bulk-mode commit would let concurrent pack
     // requests repopulate cache entries from a not-yet-durable graph.
     let durable_sync_start = Instant::now();
@@ -838,7 +917,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             prepare_total: producer_timings.prepare_total,
             prepare_max: producer_timings.prepare_max,
             writer_storage_commit: writer_timings.storage_commit,
-            writer_analytics: writer_timings.analytics,
+            writer_analytics: 0,
+            analytics_total_ms: analytics_timings.total,
+            analytics_max_ms: analytics_timings.max,
+            analytics_recv_wait_total_ms: analytics_timings.recv_wait,
             writer_authoritative_count: writer_timings.authoritative_count,
             producer_send_wait_total: producer_timings.send_wait_total,
             writer_recv_wait: writer_timings.recv_wait,

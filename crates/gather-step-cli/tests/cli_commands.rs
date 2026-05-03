@@ -204,12 +204,17 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
         "parser_augment_ms",
         "pack_precompute_ms",
         "metadata_persist_ms",
+        "writer_analytics_total_ms",
+        "analytics_total_ms",
+        "analytics_max_ms",
+        "analytics_recv_wait_total_ms",
     ] {
         assert!(
             index_json["timings"][key].is_u64(),
             "index timings.{key} must be numeric"
         );
     }
+    assert_eq!(index_json["timings"]["writer_analytics_total_ms"], 0);
     assert_eq!(index_json["repos"][0]["git_analytics_status"], "degraded");
     assert!(
         index_json["warnings"]
