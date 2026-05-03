@@ -10,7 +10,8 @@ use gather_step_mcp::{
         context_pack::{ContextPackRequest, context_pack_tool},
         deployment_topology::{
             EnvVarTopologyRequest, RepoTopologyRequest, ServiceTopologyRequest,
-            env_var_consumers_tool, service_env_tool, shared_infra_tool, where_deployed_tool,
+            deployed_but_no_code_tool, env_var_consumers_tool, service_env_tool, shared_infra_tool,
+            undeployed_services_tool, where_deployed_tool,
         },
         search::{SearchRequest, search_symbols},
     },
@@ -238,6 +239,28 @@ spec:
             .expect("shared infra should succeed"),
         )
         .expect("shared infra json"),
+        serde_json::to_value(
+            undeployed_services_tool(
+                &ctx,
+                &RepoTopologyRequest {
+                    repo: None,
+                    limit: 20,
+                },
+            )
+            .expect("undeployed services should succeed"),
+        )
+        .expect("undeployed services json"),
+        serde_json::to_value(
+            deployed_but_no_code_tool(
+                &ctx,
+                &RepoTopologyRequest {
+                    repo: None,
+                    limit: 20,
+                },
+            )
+            .expect("deployed but no code should succeed"),
+        )
+        .expect("deployed but no code json"),
     ];
     assert_no_fake_tokens(
         "deployment MCP responses",
