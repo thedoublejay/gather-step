@@ -494,12 +494,13 @@ pub fn collect_repo_files(
                 return WalkState::Continue;
             }
 
-            let source_bytes: std::sync::Arc<[u8]> = bytes.clone().into();
+            let content_hash = hash_bytes(&bytes);
+            let source_bytes: std::sync::Arc<[u8]> = bytes.into_boxed_slice().into();
             let file = FileEntry {
                 path: relative_path.clone(),
                 language,
                 size_bytes: metadata.len(),
-                content_hash: hash_bytes(&bytes),
+                content_hash,
                 source_bytes: Some(source_bytes),
             };
             let path_id_bytes = PathId::from_path(&relative_path).as_bytes().to_vec();
