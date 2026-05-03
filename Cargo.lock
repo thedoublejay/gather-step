@@ -1328,6 +1328,7 @@ dependencies = [
  "lru 0.17.0",
  "memchr",
  "oxc_allocator",
+ "oxc_ast",
  "oxc_parser",
  "oxc_span",
  "pretty_assertions",

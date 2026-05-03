@@ -17,6 +17,15 @@ use oxc_span::{SourceType, Span};
 
 use crate::{traverse::FileEntry, ts_js_backend::TsJsParseStatus};
 
+#[cfg(any(test, feature = "test-support"))]
+use {
+    crate::resolve::ImportBinding,
+    oxc_ast::ast::{
+        ExportAllDeclaration, ExportNamedDeclaration, ImportDeclaration,
+        ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName, Statement,
+    },
+};
+
 pub(crate) fn parse_ts_js_for_status(file: &FileEntry, source: &str) -> TsJsParseStatus {
     let allocator = Allocator::default();
     let options = ParseOptions {
@@ -90,10 +99,134 @@ fn line_col(offset: u32, line_offsets: &[u32]) -> Option<(u32, u32)> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+fn parse_import_bindings(file: &FileEntry, source: &str) -> Vec<ImportBinding> {
+    let allocator = Allocator::default();
+    let options = ParseOptions {
+        allow_return_outside_function: true,
+        ..ParseOptions::default()
+    };
+    let parsed = Parser::new(&allocator, source, source_type_for_path(&file.path))
+        .with_options(options)
+        .parse();
+    if parsed.panicked {
+        return Vec::new();
+    }
+
+    let mut bindings = Vec::new();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ImportDeclaration(decl) => {
+                bindings.extend(import_bindings_from_decl(decl));
+            }
+            Statement::ExportNamedDeclaration(decl) => {
+                bindings.extend(import_bindings_from_named_export(decl));
+            }
+            Statement::ExportAllDeclaration(decl) => {
+                bindings.push(import_binding_from_export_all(decl));
+            }
+            _ => {}
+        }
+    }
+    bindings
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn import_bindings_from_decl(decl: &ImportDeclaration<'_>) -> Vec<ImportBinding> {
+    let source = decl.source.value.to_string();
+    let is_type_only = decl.import_kind == ImportOrExportKind::Type;
+    decl.specifiers
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|specifier| match specifier {
+            ImportDeclarationSpecifier::ImportSpecifier(specifier) => ImportBinding {
+                local_name: specifier.local.name.to_string(),
+                imported_name: Some(module_export_name(&specifier.imported)),
+                source: source.clone(),
+                resolved_path: None,
+                is_default: false,
+                is_namespace: false,
+                is_type_only: is_type_only || specifier.import_kind == ImportOrExportKind::Type,
+            },
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => ImportBinding {
+                local_name: specifier.local.name.to_string(),
+                imported_name: None,
+                source: source.clone(),
+                resolved_path: None,
+                is_default: true,
+                is_namespace: false,
+                is_type_only,
+            },
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => ImportBinding {
+                local_name: specifier.local.name.to_string(),
+                imported_name: None,
+                source: source.clone(),
+                resolved_path: None,
+                is_default: false,
+                is_namespace: true,
+                is_type_only,
+            },
+        })
+        .collect()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn import_bindings_from_named_export(decl: &ExportNamedDeclaration<'_>) -> Vec<ImportBinding> {
+    let Some(source) = decl.source.as_ref().map(|source| source.value.to_string()) else {
+        return Vec::new();
+    };
+    let is_type_only = decl.export_kind == ImportOrExportKind::Type;
+    decl.specifiers
+        .iter()
+        .map(|specifier| {
+            let local_name = module_export_name(&specifier.exported);
+            let imported_name = module_export_name(&specifier.local);
+            ImportBinding {
+                local_name,
+                imported_name: Some(imported_name),
+                source: source.clone(),
+                resolved_path: None,
+                is_default: false,
+                is_namespace: false,
+                is_type_only: is_type_only || specifier.export_kind == ImportOrExportKind::Type,
+            }
+        })
+        .collect()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn import_binding_from_export_all(decl: &ExportAllDeclaration<'_>) -> ImportBinding {
+    ImportBinding {
+        local_name: decl
+            .exported
+            .as_ref()
+            .map_or_else(|| "*".to_owned(), module_export_name),
+        imported_name: Some("*".to_owned()),
+        source: decl.source.value.to_string(),
+        resolved_path: None,
+        is_default: false,
+        is_namespace: true,
+        is_type_only: decl.export_kind == ImportOrExportKind::Type,
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn module_export_name(name: &ModuleExportName<'_>) -> String {
+    match name {
+        ModuleExportName::IdentifierName(name) => name.name.to_string(),
+        ModuleExportName::IdentifierReference(name) => name.name.to_string(),
+        ModuleExportName::StringLiteral(value) => value.value.to_string(),
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub mod oxc_test_support {
     use std::path::{Path, PathBuf};
 
-    use crate::traverse::{FileEntry, Language};
+    use crate::{
+        resolve::ImportBinding,
+        traverse::{FileEntry, Language},
+    };
 
     pub fn parse_recovery_status_for_path(path: &Path, source: &str) -> &'static str {
         let file = FileEntry {
@@ -109,6 +242,17 @@ pub mod oxc_test_support {
     pub fn parse_recovery_status_for_extension(ext: &str, source: &str) -> &'static str {
         let path = PathBuf::from(format!("status.{ext}"));
         parse_recovery_status_for_path(&path, source)
+    }
+
+    pub fn parse_import_bindings_for_path(path: &Path, source: &str) -> Vec<ImportBinding> {
+        let file = FileEntry {
+            path: path.to_path_buf(),
+            language: Language::TypeScript,
+            size_bytes: source.len() as u64,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+        super::parse_import_bindings(&file, source)
     }
 }
 
