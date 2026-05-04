@@ -1,5 +1,6 @@
 ---
 source: crates/gather-step-parser/tests/extraction_fidelity.rs
+assertion_line: 573
 expression: summarize(&route_controller)
 ---
 ParsedSummary {
@@ -68,7 +69,7 @@ ParsedSummary {
             ),
             external_id: None,
             signature: Some(
-                "details(RouteConstants.v2.accounts.details)",
+                "details()",
             ),
             is_virtual: false,
         },

@@ -1,14 +1,15 @@
 //! Backend boundary for TypeScript/JavaScript parsing.
 //!
-//! Oxc migration work should stay behind this module so Oxc AST types do not
-//! leak into the parser crate's public surfaces or framework augmenters.
+//! v3.1 ships Oxc as the default and only production backend for TS/JS
+//! sources. Oxc AST types stay inside `ts_js_oxc` so they cannot leak into
+//! the parser crate's public surfaces or framework augmenters.
 
 use std::path::Path;
 
 use crate::{
     traverse::FileEntry,
     tree_sitter::ParseState,
-    ts_js_swc::{self, SwcParseStatus},
+    ts_js_oxc::{self, OxcParseStatus},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,25 +30,25 @@ impl TsJsParseStatus {
     }
 }
 
-impl From<SwcParseStatus> for TsJsParseStatus {
-    fn from(status: SwcParseStatus) -> Self {
+impl From<OxcParseStatus> for TsJsParseStatus {
+    fn from(status: OxcParseStatus) -> Self {
         match status {
-            SwcParseStatus::Parsed => Self::Parsed,
-            SwcParseStatus::Recovered => Self::Recovered,
-            SwcParseStatus::Unrecoverable => Self::Unrecoverable,
+            OxcParseStatus::Parsed => Self::Parsed,
+            OxcParseStatus::Recovered => Self::Recovered,
+            OxcParseStatus::Unrecoverable => Self::Unrecoverable,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TsJsParserBackend {
-    Swc,
+    Oxc,
 }
 
 impl TsJsParserBackend {
     #[must_use]
     pub(crate) const fn current() -> Self {
-        Self::Swc
+        Self::Oxc
     }
 }
 
@@ -59,8 +60,8 @@ pub(crate) fn parse_ts_js_with_backend(
     absolute_path: &Path,
 ) -> TsJsParseStatus {
     match backend {
-        TsJsParserBackend::Swc => {
-            ts_js_swc::parse_ts_js_with_swc_with_status(file, state, source, absolute_path).into()
+        TsJsParserBackend::Oxc => {
+            ts_js_oxc::parse_ts_js_with_oxc_with_status(file, state, source, absolute_path).into()
         }
     }
 }
