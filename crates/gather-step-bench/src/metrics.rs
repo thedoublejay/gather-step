@@ -177,7 +177,7 @@ fn capture_open_fds_impl() -> Option<u64> {
         let Ok(entries) = std::fs::read_dir(path) else {
             continue;
         };
-        let count = entries.filter(Result::is_ok).count();
+        let count = entries.flatten().count();
         return Some(u64::try_from(count).unwrap_or(u64::MAX));
     }
     None

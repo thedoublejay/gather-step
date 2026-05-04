@@ -61,7 +61,7 @@ export function loadConfig() {{
     fs::write(
         repo_root.join("compose.yaml"),
         format!(
-            r#"
+            r"
 services:
   api:
     image: example/api
@@ -70,14 +70,14 @@ services:
     environment:
       API_TOKEN: {DEPLOYMENT_FAKE_TOKEN}
       DATABASE_URL: postgres://{DEPLOYMENT_FAKE_TOKEN}@postgres/app
-"#
+"
         ),
     )
     .expect("compose fixture");
     fs::write(
         repo_root.join("deploy/api.yaml"),
         format!(
-            r#"
+            r"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -90,7 +90,7 @@ spec:
           env:
             - name: K8S_API_TOKEN
               value: {DEPLOYMENT_FAKE_TOKEN}
-"#
+"
         ),
     )
     .expect("kubernetes fixture");

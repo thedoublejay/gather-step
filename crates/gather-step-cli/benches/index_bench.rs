@@ -87,6 +87,7 @@ fn stage_fixture_workspace(name: &str) -> TempDir {
 }
 
 fn stage_synthetic_workspace(name: &str, repo_count: usize) -> TempDir {
+    use std::fmt::Write as _;
     const FIXTURE_REPOS: &[&str] = &[
         "backend_standard",
         "frontend_standard",
@@ -113,9 +114,10 @@ fn stage_synthetic_workspace(name: &str, repo_count: usize) -> TempDir {
             &fixture_workspace.join(source_repo),
             &target_workspace.join(&target_repo),
         );
-        config.push_str(&format!(
-            "  - name: {target_repo}\n    path: workspace/{target_repo}\n"
-        ));
+        let _ = writeln!(
+            config,
+            "  - name: {target_repo}\n    path: workspace/{target_repo}"
+        );
     }
     config.push_str("indexing:\n  workspace_concurrency: 4\n");
     fs::write(temp.path().join("gather-step.config.yaml"), config)

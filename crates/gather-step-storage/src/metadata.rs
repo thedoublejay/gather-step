@@ -960,7 +960,7 @@ pub enum MetadataStoreError {
 
 /// Current metadata schema version.
 ///
-/// v3.1 is a fresh generated-state release. SQLite metadata starts at user
+/// v3.1 is a fresh generated-state release. `SQLite` metadata starts at user
 /// version zero and does not carry migration or upgrade branches.
 pub const METADATA_SCHEMA_VERSION: i64 = 0;
 

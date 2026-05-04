@@ -116,6 +116,10 @@ fn render_graph_tables(report: &StorageFootprintReport) -> String {
     table.to_string()
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "byte counts are formatted for display only; lossy conversion to f64 is acceptable"
+)]
 fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB"];
     let mut value = bytes as f64;

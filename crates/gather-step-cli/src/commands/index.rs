@@ -273,6 +273,10 @@ struct CommittedRepo {
     result: WorkspaceRepoResult,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "shared `repo_` prefix mirrors the AnalyticsRepoResult/CommittedRepo job pairing across the indexing pipeline"
+)]
 struct AnalyticsJob {
     repo_idx: usize,
     repo_name: String,
@@ -489,7 +493,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 };
                 timings.recv_wait = timings.recv_wait.saturating_add(elapsed_ms(recv_start));
                 let analytics_start = Instant::now();
-                let status = sync_repo_analytics(
+                let analytics_status = sync_repo_analytics(
                     indexer_ref,
                     &job.repo_name,
                     &job.repo_root,
@@ -501,7 +505,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 if analytics_result_tx
                     .send(AnalyticsRepoResult {
                         repo_idx: job.repo_idx,
-                        status,
+                        status: analytics_status,
                     })
                     .is_err()
                 {

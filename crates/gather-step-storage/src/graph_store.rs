@@ -557,7 +557,7 @@ impl GraphStoreDb {
                     Ok(table) => {
                         let stats = table.stats().map_err(GraphStoreError::storage)?;
                         let entries = table.len().map_err(GraphStoreError::storage)?;
-                        tables.push(graph_table_footprint($name, $kind, entries, stats));
+                        tables.push(graph_table_footprint($name, $kind, entries, &stats));
                     }
                     Err(error) if Self::is_missing_table_error(&error) => {}
                     Err(error) => return Err(GraphStoreError::storage(error)),
@@ -2976,7 +2976,7 @@ fn graph_table_footprint(
     name: &str,
     table_kind: &str,
     entries: u64,
-    stats: redb::TableStats,
+    stats: &redb::TableStats,
 ) -> GraphTableFootprint {
     GraphTableFootprint {
         name: name.to_owned(),
