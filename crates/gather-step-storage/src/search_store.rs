@@ -25,13 +25,21 @@ use tantivy::{
         BytesOptions, FAST, Field, IndexRecordOption, NumericOptions, STORED, STRING, Schema,
         TextFieldIndexing, TextOptions, document::Value as _,
     },
-    tokenizer::{RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer},
+    tokenizer::{
+        LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
+    },
 };
 use thiserror::Error;
 use tracing::warn;
 
 const CODE_TOKENIZER_NAME: &str = "code";
 const PATH_TOKENIZER_NAME: &str = "path";
+/// Word tokenizer used for `qualified_name` indexing: splits at
+/// non-alphanumeric characters but does not split CamelCase, then lowercases.
+/// Lets queries like `createorder` find `createOrder` and `service-a` find
+/// any document whose qualified name embeds the repo segment, without paying
+/// for stemming or natural-language analysis.
+const WORD_TOKENIZER_NAME: &str = "word";
 /// Minimum heap the tantivy index writer will accept (50 MiB).
 const MIN_WRITER_HEAP_BYTES: usize = 50 * 1024 * 1024;
 /// Heap budget for one-shot CLI runs: 64 MiB.  Lower is fine because the
@@ -48,8 +56,9 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 ///
 /// v3.1 is a fresh generated-state release. Search schema stamping starts at
 /// zero and does not carry migration or upgrade branches for older development
-/// indexes.
-pub const SEARCH_INDEX_VERSION: u32 = 0;
+/// indexes. Bumped to 1 when the `qualified_name` field was added so that
+/// indexes built before the field was reintroduced are rejected at open time.
+pub const SEARCH_INDEX_VERSION: u32 = 1;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -61,6 +70,11 @@ const FIELD_SYMBOL_NAME: &str = "symbol_name";
 const FIELD_CONTENT: &str = "content";
 const FIELD_FILE_NAME: &str = "file_name";
 const FIELD_FILE_PATH_TOKENS: &str = "file_path_tokens";
+/// Lowercased word-token view of the node's `qualified_name` (typically
+/// `repo::path::name`). Indexed only — not stored — and used by the query
+/// parser so users can find symbols by repo prefix or by typing a CamelCase
+/// identifier in lowercase.
+const FIELD_QUALIFIED_NAME: &str = "qualified_name";
 const FIELD_NODE_KIND: &str = "node_kind";
 const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
@@ -216,6 +230,7 @@ struct SearchFields {
     content: Field,
     file_name: Field,
     file_path_tokens: Field,
+    qualified_name: Field,
     node_kind: Field,
     last_modified: Field,
     is_exported: Field,
@@ -526,6 +541,9 @@ impl TantivySearchStore {
         }
         tantivy_doc.add_text(self.fields.file_name, file_name(&document.file_path));
         tantivy_doc.add_text(self.fields.file_path_tokens, &document.file_path);
+        if !document.description.is_empty() {
+            tantivy_doc.add_text(self.fields.qualified_name, &document.description);
+        }
         // Stored (not indexed) copy of the path for query-aware rerank.
         tantivy_doc.add_text(self.fields.file_path_stored, &document.file_path);
         tantivy_doc.add_u64(self.fields.node_kind, u64::from(document.node_kind.as_u8()));
@@ -544,6 +562,7 @@ impl TantivySearchStore {
                 self.fields.content,
                 self.fields.file_name,
                 self.fields.file_path_tokens,
+                self.fields.qualified_name,
             ],
         );
         parser.set_conjunction_by_default();
@@ -555,6 +574,7 @@ impl TantivySearchStore {
                 self.fields.content,
                 self.fields.file_name,
                 self.fields.file_path_tokens,
+                self.fields.qualified_name,
             ] {
                 parser.set_field_fuzzy(field, false, 1, true);
             }
@@ -794,6 +814,7 @@ fn build_schema() -> Schema {
     builder.add_text_field(FIELD_CONTENT, code_text_options(false, true));
     builder.add_text_field(FIELD_FILE_NAME, code_text_options(false, false));
     builder.add_text_field(FIELD_FILE_PATH_TOKENS, path_text_options(false, false));
+    builder.add_text_field(FIELD_QUALIFIED_NAME, word_text_options());
     builder.add_u64_field(FIELD_NODE_KIND, fast_numeric_options(false));
     builder.add_u64_field(FIELD_LAST_MODIFIED, fast_numeric_options(false));
     builder.add_bool_field(FIELD_IS_EXPORTED, FAST);
@@ -835,6 +856,17 @@ fn path_text_options(stored: bool, with_positions: bool) -> TextOptions {
     options
 }
 
+/// Text options for the `qualified_name` field. Indexed only, frequencies
+/// without positions (no phrase queries land here), tokenizer keeps each
+/// alphanumeric chunk intact and lowercases it so a query like `createorder`
+/// hits a stored `createOrder`.
+fn word_text_options() -> TextOptions {
+    let indexing = TextFieldIndexing::default()
+        .set_tokenizer(WORD_TOKENIZER_NAME)
+        .set_index_option(IndexRecordOption::WithFreqs);
+    TextOptions::default().set_indexing_options(indexing)
+}
+
 fn fast_numeric_options(stored: bool) -> NumericOptions {
     let mut options = NumericOptions::default().set_fast().set_indexed();
     if stored {
@@ -854,6 +886,13 @@ fn register_tokenizers(index: &mut Index) {
         PATH_TOKENIZER_NAME,
         TextAnalyzer::builder(PathTokenizer)
             .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
+            .build(),
+    );
+    index.tokenizers().register(
+        WORD_TOKENIZER_NAME,
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
+            .filter(LowerCaser)
             .build(),
     );
 }
@@ -1236,6 +1275,7 @@ impl SearchFields {
             content: field(FIELD_CONTENT)?,
             file_name: field(FIELD_FILE_NAME)?,
             file_path_tokens: field(FIELD_FILE_PATH_TOKENS)?,
+            qualified_name: field(FIELD_QUALIFIED_NAME)?,
             node_kind: field(FIELD_NODE_KIND)?,
             last_modified: field(FIELD_LAST_MODIFIED)?,
             is_exported: field(FIELD_IS_EXPORTED)?,
@@ -2047,7 +2087,7 @@ mod tests {
     /// A directory with no version file is treated as a fresh index: the
     /// current version is stamped and `Ok(())` is returned.
     #[test]
-    fn schema_version_stamp_writes_zero_for_fresh_directory() {
+    fn schema_version_stamp_writes_current_for_fresh_directory() {
         use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
@@ -2059,8 +2099,7 @@ mod tests {
         let written = fs::read_to_string(dir.join(SEARCH_VERSION_FILE))
             .expect("version file should have been created");
         let parsed: u32 = written.trim().parse().expect("version should be numeric");
-        assert_eq!(parsed, 0);
-        assert_eq!(SEARCH_INDEX_VERSION, 0);
+        assert_eq!(parsed, SEARCH_INDEX_VERSION);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2086,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_stamp_writes_zero_in_non_empty_directory() {
+    fn schema_version_stamp_writes_current_in_non_empty_directory() {
         use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
@@ -2098,7 +2137,6 @@ mod tests {
 
         let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
         assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());
-        assert_eq!(SEARCH_INDEX_VERSION, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }

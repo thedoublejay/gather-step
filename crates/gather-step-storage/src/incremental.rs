@@ -16,7 +16,10 @@ use gather_step_parser::{
 use ignore::WalkBuilder;
 use thiserror::Error;
 
-use crate::{MetadataStoreDb, metadata::MetadataStoreError};
+use crate::{
+    MetadataStoreDb,
+    metadata::{MetadataStoreError, stored_content_hash},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncrementalFileEntry {
@@ -481,7 +484,9 @@ pub fn classify_changes(
     let mut changed = ChangedSet::default();
     for (path_id, entry) in &snapshot.files_by_path {
         match stored_by_path.remove(path_id) {
-            Some(existing_state) if existing_state.content_hash == entry.content_hash => {
+            Some(existing_state)
+                if existing_state.content_hash == stored_content_hash(&entry.content_hash) =>
+            {
                 changed.unchanged_count += 1;
             }
             Some(_) => changed.modified.push(entry.clone()),
@@ -544,7 +549,7 @@ pub fn classify_selected_changes(
             stored_by_path.get(path),
         ) {
             (Some(entry), Some(existing_state))
-                if existing_state.content_hash == entry.content_hash =>
+                if existing_state.content_hash == stored_content_hash(&entry.content_hash) =>
             {
                 changed.unchanged_count += 1;
             }

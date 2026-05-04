@@ -508,7 +508,7 @@ const UPSERT_FILE_STATE_SQL: &str = r"
         parse_ms = excluded.parse_ms
 ";
 
-const STORED_CONTENT_HASH_BYTES: usize = 16;
+pub(crate) const STORED_CONTENT_HASH_BYTES: usize = 16;
 const CONTEXT_PACK_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Store only a 128-bit BLAKE3 prefix for per-file change detection.
@@ -517,7 +517,7 @@ const CONTEXT_PACK_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// keeps collision risk negligible for this rebuildable cache while halving
 /// the hottest `file_index_state.content_hash` BLOB. Tests sometimes use
 /// deliberately tiny fixture hashes; those stay unchanged.
-fn stored_content_hash(hash: &[u8]) -> &[u8] {
+pub(crate) fn stored_content_hash(hash: &[u8]) -> &[u8] {
     if hash.len() > STORED_CONTENT_HASH_BYTES {
         &hash[..STORED_CONTENT_HASH_BYTES]
     } else {
