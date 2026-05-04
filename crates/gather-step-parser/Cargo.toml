@@ -17,14 +17,11 @@ tree-sitter-python.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-java.workspace = true
-# swc-based TS/JS parser — replaces tree-sitter-{typescript,javascript}
-# for the TS/JS path. swc is a recursive-descent parser without the
+# Oxc-based TS/JS parser. Replaces tree-sitter-{typescript,javascript}
+# for the TS/JS path; recursive-descent parser without the
 # exponential-backtracking edge cases that tree-sitter-typescript hits on
-# certain multi-line `as` union-type assertions.
-# Versions pinned per workspace convention (CLAUDE.md §4).
-swc_common = "=21.0.1"
-swc_ecma_ast = "=23.0.0"
-swc_ecma_parser = { version = "=39.0.2", features = ["typescript"] }
+# certain multi-line `as` union-type assertions. Versions pinned per
+# workspace convention.
 oxc_allocator = "=0.128.0"
 oxc_ast = "=0.128.0"
 oxc_parser = "=0.128.0"

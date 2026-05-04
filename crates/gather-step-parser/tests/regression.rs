@@ -48,7 +48,7 @@ fn parse_ts_js_with_swc_survives_rayon_parallel_calls() {
                 // which are not code-intelligence symbols).
                 let marker = format!("run_{i}");
                 let found =
-                    gather_step_parser::swc_test_support::parse_full_pipeline_contains_symbol(
+                    gather_step_parser::oxc_test_support::parse_full_pipeline_contains_symbol(
                         "ts", source, &marker,
                     );
                 assert!(
@@ -97,7 +97,7 @@ fn swc_parser_survives_rayon_parallel_calls() {
                 // `parse_ts_js_with_swc_survives_rayon_parallel_calls` covers the full
                 // `visit_module` pipeline with function-name markers.
                 let marker = format!("value_{i}");
-                let ok = gather_step_parser::swc_test_support::parse_source_contains_ident(
+                let ok = gather_step_parser::oxc_test_support::parse_source_contains_ident(
                     source, &marker,
                 );
                 assert!(

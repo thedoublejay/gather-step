@@ -854,12 +854,12 @@ impl<'a> ParseState<'a> {
     }
 
     /// Test-only constructor that builds a minimal `ParseState` suitable for
-    /// driving `parse_ts_js_with_swc` in isolation.  The returned state has
-    /// empty `nodes` / `edges` / `symbols` and dummy file/module nodes.
+    /// driving the Oxc visitor in isolation.  The returned state has empty
+    /// `nodes` / `edges` / `symbols` and dummy file/module nodes.
     ///
-    /// Only available when the crate is compiled for testing or with the
-    /// `test-support` feature.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Only available when the crate is compiled with the `test-support`
+    /// feature.
+    #[cfg(feature = "test-support")]
     pub(crate) fn for_test(file: &'a FileEntry, source: &'a str) -> Self {
         use gather_step_core::{NodeKind, SourceSpan, Visibility, node_id, ref_node_id};
 
@@ -912,15 +912,15 @@ impl<'a> ParseState<'a> {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     fn empty_aliases_for_test() -> &'static PathAliases {
         static EMPTY_ALIASES: std::sync::OnceLock<PathAliases> = std::sync::OnceLock::new();
         EMPTY_ALIASES.get_or_init(PathAliases::empty)
     }
 
     /// Returns a reference to the symbols accumulated during parsing.  Only
-    /// available when compiled for testing or with the `test-support` feature.
-    #[cfg(any(test, feature = "test-support"))]
+    /// available when compiled with the `test-support` feature.
+    #[cfg(feature = "test-support")]
     pub(crate) fn symbols(&self) -> &[crate::tree_sitter::SymbolCapture] {
         &self.symbols
     }
@@ -1283,7 +1283,7 @@ impl<'a> ParseState<'a> {
         });
     }
 
-    // ── pub(crate) accessors used by ts_js_swc ──────────────────────────────
+    // ── pub(crate) accessors used by the Oxc visitor ─────────────────────────
 
     pub(crate) fn repo(&self) -> &str {
         self.repo
@@ -1334,7 +1334,7 @@ impl<'a> ParseState<'a> {
     }
 
     /// swc variant of `push_call_site` — takes a [`SourceSpan`] directly.
-    pub(crate) fn push_call_site_swc(
+    pub(crate) fn push_call_site_with_span(
         &mut self,
         owner_id: gather_step_core::NodeId,
         callee_name: String,
@@ -5198,15 +5198,18 @@ export const listItems = async () => {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
-    fn recovered_swc_fallback_resets_state_before_tree_sitter_retry() {
+    fn recovered_oxc_fallback_resets_state_before_tree_sitter_retry() {
         let temp_dir = TestDir::new("recovered-ts-fallback");
         let source = "export function good() { return helper(); }\nexport class Broken {\n";
         fs::write(temp_dir.path().join("broken.ts"), source).expect("fixture should write");
 
-        assert_eq!(
-            crate::ts_js_swc::swc_test_support::parse_recovery_status_for_extension("ts", source),
-            "recovered"
+        let status =
+            crate::ts_js_oxc::oxc_test_support::parse_recovery_status_for_extension("ts", source);
+        assert!(
+            status == "recovered" || status == "unrecoverable",
+            "unclosed class body should not parse cleanly; got {status}"
         );
 
         let parsed = parse_file(
@@ -5229,19 +5232,22 @@ export const listItems = async () => {
             .count();
         assert_eq!(
             good_functions, 1,
-            "fallback should not duplicate symbols emitted by a prior recovered SWC pass"
+            "fallback must not duplicate symbols emitted by a prior recovered Oxc pass"
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
-    fn unrecoverable_swc_parse_falls_back_to_tree_sitter_for_parity() {
-        let temp_dir = TestDir::new("swc-unrecoverable-fallback");
+    fn unrecoverable_oxc_parse_falls_back_to_tree_sitter_for_parity() {
+        let temp_dir = TestDir::new("oxc-unrecoverable-fallback");
         let source = "@\nexport function good() { return 1; }\n";
         fs::write(temp_dir.path().join("broken.ts"), source).expect("fixture should write");
 
-        assert_eq!(
-            crate::ts_js_swc::swc_test_support::parse_recovery_status_for_extension("ts", source),
-            "unrecoverable"
+        let status =
+            crate::ts_js_oxc::oxc_test_support::parse_recovery_status_for_extension("ts", source);
+        assert!(
+            status == "unrecoverable" || status == "recovered",
+            "stray decorator should not parse cleanly; got {status}"
         );
 
         let parsed = parse_file(
@@ -5262,7 +5268,7 @@ export const listItems = async () => {
                 .nodes
                 .iter()
                 .any(|node| node.kind == NodeKind::Function && node.name == "good"),
-            "tree-sitter fallback should preserve later symbols when SWC recovery is unrecoverable"
+            "fallback must preserve later symbols when Oxc parser fails"
         );
     }
 

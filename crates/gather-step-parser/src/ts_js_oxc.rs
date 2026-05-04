@@ -12,6 +12,8 @@ use std::{ffi::OsStr, path::Path};
 
 use gather_step_core::{NodeData, NodeKind, SourceSpan, Visibility};
 use oxc_allocator::Allocator;
+#[cfg(feature = "test-support")]
+use oxc_ast::ast::TSModuleDeclarationName;
 use oxc_ast::ast::{
     Argument, ArrayAssignmentTarget, ArrowFunctionExpression, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, CallExpression,
@@ -22,17 +24,18 @@ use oxc_ast::ast::{
     JSXElement, JSXExpression, MemberExpression, MethodDefinition, MethodDefinitionKind,
     ModuleExportName, NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPropertyKind,
     PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, TSAccessibility,
-    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclarationBody, TSModuleDeclarationName,
-    TSTypeName, VariableDeclaration, VariableDeclarator,
+    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclarationBody, TSTypeName,
+    VariableDeclaration, VariableDeclarator,
 };
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
 
+#[cfg(feature = "test-support")]
+use crate::ts_js_backend::TsJsParseStatus;
 use crate::{
     resolve::ImportBinding,
     traverse::FileEntry,
     tree_sitter::{DecoratorCapture, ParseState},
-    ts_js_backend::TsJsParseStatus,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +90,7 @@ pub(crate) fn parse_ts_js_with_oxc_with_status(
     status
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub fn parse_ts_js_with_oxc(
     file: &FileEntry,
     state: &mut ParseState<'_>,
@@ -124,6 +127,7 @@ fn build_line_offsets(source: &str) -> Vec<u32> {
     offsets
 }
 
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn line_offsets(source: &str) -> Vec<u32> {
     build_line_offsets(source)
 }
@@ -147,6 +151,7 @@ fn byte_to_line_col(offset: u32, offsets: &[u32]) -> (u32, u32) {
 }
 
 /// Optional helper retained for the test-only span parity helper.
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn span_to_source_span(span: Span, offsets: &[u32]) -> Option<SourceSpan> {
     if span.end < span.start || offsets.is_empty() {
         return None;
@@ -448,11 +453,7 @@ fn visit_statement(stmt: &Statement<'_>, state: &mut ParseState<'_>, ctx: &mut V
     }
 }
 
-fn visit_for_left(
-    left: &ForStatementLeft<'_>,
-    state: &mut ParseState<'_>,
-    ctx: &mut VisitCtx<'_>,
-) {
+fn visit_for_left(left: &ForStatementLeft<'_>, state: &mut ParseState<'_>, ctx: &mut VisitCtx<'_>) {
     if let ForStatementLeft::VariableDeclaration(var) = left {
         for declarator in &var.declarations {
             visit_variable_declarator(declarator, state, ctx);
@@ -818,11 +819,7 @@ fn visit_class_declaration_default(
     }
 }
 
-fn visit_nested_class_body(
-    class: &Class<'_>,
-    state: &mut ParseState<'_>,
-    ctx: &mut VisitCtx<'_>,
-) {
+fn visit_nested_class_body(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &mut VisitCtx<'_>) {
     if ctx.depth >= MAX_DEPTH {
         return;
     }
@@ -887,11 +884,25 @@ fn visit_class_element(
             {
                 match value {
                     Expression::ArrowFunctionExpression(arrow) => {
-                        visit_arrow_property(&key_text, prop.span, arrow, prop.accessibility, state, ctx);
+                        visit_arrow_property(
+                            &key_text,
+                            prop.span,
+                            arrow,
+                            prop.accessibility,
+                            state,
+                            ctx,
+                        );
                         return;
                     }
                     Expression::FunctionExpression(func) => {
-                        visit_function_property(&key_text, prop.span, func, prop.accessibility, state, ctx);
+                        visit_function_property(
+                            &key_text,
+                            prop.span,
+                            func,
+                            prop.accessibility,
+                            state,
+                            ctx,
+                        );
                         return;
                     }
                     _ => {}
@@ -1004,9 +1015,8 @@ fn visit_constructor_method(
     state: &mut ParseState<'_>,
     ctx: &mut VisitCtx<'_>,
 ) {
-    let parent_class = match ctx.parent_class.clone() {
-        Some(parent) => parent,
-        None => return,
+    let Some(parent_class) = ctx.parent_class.clone() else {
+        return;
     };
 
     let name = "constructor".to_owned();
@@ -1054,7 +1064,8 @@ fn visit_arrow_property(
         .parent_class
         .as_ref()
         .map_or_else(|| name.to_owned(), |c| format!("{}.{}", c.name, name));
-    let signature = function_signature_from_arrow(name, arrow, ctx.source).unwrap_or_else(|| name.to_owned());
+    let signature =
+        function_signature_from_arrow(name, arrow, ctx.source).unwrap_or_else(|| name.to_owned());
     let visibility = visibility_from_accessibility(accessibility);
     let func_node = state.push_symbol(
         NodeKind::Function,
@@ -1131,7 +1142,8 @@ fn visit_variable_declarator(
     state: &mut ParseState<'_>,
     ctx: &VisitCtx<'_>,
 ) {
-    let name = pattern_name_from_source(&declarator.id, ctx.source).unwrap_or_else(|| "anonymous".to_owned());
+    let name = pattern_name_from_source(&declarator.id, ctx.source)
+        .unwrap_or_else(|| "anonymous".to_owned());
 
     let Some(init) = declarator.init.as_ref() else {
         return;
@@ -1334,9 +1346,10 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
             // Dynamic `import('m')` — emit a call site named `import` so the
             // module-resolution side of augmentation can pick it up.
             if let Some(owner) = ctx.owner {
-                let literal_argument = first_literal_argument_from_expression(&imp.source, ctx.source);
+                let literal_argument =
+                    first_literal_argument_from_expression(&imp.source, ctx.source);
                 let raw_arguments = expr_raw_text(&imp.source, ctx.source);
-                state.push_call_site_swc(
+                state.push_call_site_with_span(
                     owner,
                     "import".to_owned(),
                     Some("import".to_owned()),
@@ -1435,11 +1448,7 @@ fn visit_object_expression(
     }
 }
 
-fn walk_member_object(
-    object: &Expression<'_>,
-    state: &mut ParseState<'_>,
-    ctx: &mut VisitCtx<'_>,
-) {
+fn walk_member_object(object: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut VisitCtx<'_>) {
     let mut current = object;
     let mut limit = 10_000_usize;
     loop {
@@ -1491,9 +1500,10 @@ fn visit_call_expression(
     if let Some(owner) = ctx.owner {
         let (callee_name, qualified_hint) = expression_name_from_expr(&call.callee);
         if !callee_name.is_empty() {
-            let literal_argument = first_literal_argument_from_arguments(&call.arguments, ctx.source);
+            let literal_argument =
+                first_literal_argument_from_arguments(&call.arguments, ctx.source);
             let raw_arguments = raw_arguments_from_arguments(&call.arguments, ctx.source);
-            state.push_call_site_swc(
+            state.push_call_site_with_span(
                 owner,
                 callee_name,
                 qualified_hint,
@@ -1519,8 +1529,11 @@ fn visit_new_expression(
         if !callee_name.is_empty() {
             let literal_argument =
                 first_literal_argument_from_arguments(&new_expr.arguments, ctx.source);
-            let raw_arguments = Some(raw_arguments_from_arguments(&new_expr.arguments, ctx.source));
-            state.push_call_site_swc(
+            let raw_arguments = Some(raw_arguments_from_arguments(
+                &new_expr.arguments,
+                ctx.source,
+            ));
+            state.push_call_site_with_span(
                 owner,
                 callee_name,
                 qualified_hint,
@@ -1563,8 +1576,12 @@ fn visit_assignment_target(
         AssignmentTarget::TSSatisfiesExpression(t) => visit_expression(&t.expression, state, ctx),
         AssignmentTarget::TSNonNullExpression(t) => visit_expression(&t.expression, state, ctx),
         AssignmentTarget::TSTypeAssertion(t) => visit_expression(&t.expression, state, ctx),
-        AssignmentTarget::ArrayAssignmentTarget(arr) => visit_array_assignment_target(arr, state, ctx),
-        AssignmentTarget::ObjectAssignmentTarget(obj) => visit_object_assignment_target(obj, state, ctx),
+        AssignmentTarget::ArrayAssignmentTarget(arr) => {
+            visit_array_assignment_target(arr, state, ctx);
+        }
+        AssignmentTarget::ObjectAssignmentTarget(obj) => {
+            visit_object_assignment_target(obj, state, ctx);
+        }
         AssignmentTarget::AssignmentTargetIdentifier(_) => {}
     }
 }
@@ -1579,11 +1596,19 @@ fn visit_simple_assign_target(
             walk_member_object(&m.object, state, ctx);
             visit_expression(&m.expression, state, ctx);
         }
-        SimpleAssignmentTarget::StaticMemberExpression(m) => walk_member_object(&m.object, state, ctx),
-        SimpleAssignmentTarget::PrivateFieldExpression(m) => walk_member_object(&m.object, state, ctx),
+        SimpleAssignmentTarget::StaticMemberExpression(m) => {
+            walk_member_object(&m.object, state, ctx);
+        }
+        SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+            walk_member_object(&m.object, state, ctx);
+        }
         SimpleAssignmentTarget::TSAsExpression(t) => visit_expression(&t.expression, state, ctx),
-        SimpleAssignmentTarget::TSSatisfiesExpression(t) => visit_expression(&t.expression, state, ctx),
-        SimpleAssignmentTarget::TSNonNullExpression(t) => visit_expression(&t.expression, state, ctx),
+        SimpleAssignmentTarget::TSSatisfiesExpression(t) => {
+            visit_expression(&t.expression, state, ctx);
+        }
+        SimpleAssignmentTarget::TSNonNullExpression(t) => {
+            visit_expression(&t.expression, state, ctx);
+        }
         SimpleAssignmentTarget::TSTypeAssertion(t) => visit_expression(&t.expression, state, ctx),
         SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => {}
     }
@@ -1963,7 +1988,7 @@ fn emit_decorator_call_site(
         } else {
             (None, None)
         };
-    state.push_call_site_swc(
+    state.push_call_site_with_span(
         owner_id,
         callee_name,
         qualified_hint,
@@ -1991,10 +2016,7 @@ fn args_text(args: &[Argument<'_>], source: &str) -> Vec<String> {
         .collect()
 }
 
-fn first_literal_argument_from_arguments(
-    args: &[Argument<'_>],
-    source: &str,
-) -> Option<String> {
+fn first_literal_argument_from_arguments(args: &[Argument<'_>], source: &str) -> Option<String> {
     for arg in args {
         if matches!(arg, Argument::SpreadElement(_)) {
             continue;
@@ -2017,22 +2039,20 @@ fn first_literal_argument_from_expression(expr: &Expression<'_>, source: &str) -
             let stripped = raw.trim().trim_matches('[').trim_matches(']').trim();
             Some(stripped.to_owned())
         }
-        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => tpl
-            .quasis
-            .first()
-            .map(|q| q.value.raw.to_string()),
+        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
+            tpl.quasis.first().map(|q| q.value.raw.to_string())
+        }
         _ => None,
     }
 }
 
 fn first_raw_arg_text(args: &[Argument<'_>], source: &str) -> Option<String> {
-    args.iter()
-        .find_map(|arg| match arg {
-            Argument::SpreadElement(_) => None,
-            other => other
-                .as_expression()
-                .map(|expr| source_slice(source, expr.span()).trim().to_owned()),
-        })
+    args.iter().find_map(|arg| match arg {
+        Argument::SpreadElement(_) => None,
+        other => other
+            .as_expression()
+            .map(|expr| source_slice(source, expr.span()).trim().to_owned()),
+    })
 }
 
 fn raw_arguments_from_arguments(args: &[Argument<'_>], source: &str) -> String {
@@ -2044,9 +2064,9 @@ fn raw_arguments_from_arguments(args: &[Argument<'_>], source: &str) -> String {
             Argument::SpreadElement(spread) => {
                 format!("...{}", source_slice(source, spread.argument.span()))
             }
-            other => other
-                .as_expression()
-                .map_or_else(String::new, |expr| source_slice(source, expr.span()).to_owned()),
+            other => other.as_expression().map_or_else(String::new, |expr| {
+                source_slice(source, expr.span()).to_owned()
+            }),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -2056,24 +2076,27 @@ fn expr_raw_text(expr: &Expression<'_>, source: &str) -> String {
     source_slice(source, expr.span()).to_owned()
 }
 
+fn member_property_text(member: &MemberExpression<'_>) -> String {
+    match member {
+        MemberExpression::StaticMemberExpression(m) => m.property.name.to_string(),
+        MemberExpression::PrivateFieldExpression(m) => m.field.name.to_string(),
+        MemberExpression::ComputedMemberExpression(_) => String::new(),
+    }
+}
+
+enum NameCursor<'a> {
+    Expr(&'a Expression<'a>),
+    #[expect(
+        dead_code,
+        reason = "constructed by future overloads of expression_name_from_expr that traverse standalone MemberExpression nodes"
+    )]
+    Member(&'a MemberExpression<'a>),
+}
+
 fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) {
     let mut parts: Vec<String> = Vec::new();
     let mut limit = 10_000_usize;
-
-    fn member_property_text(member: &MemberExpression<'_>) -> String {
-        match member {
-            MemberExpression::StaticMemberExpression(m) => m.property.name.to_string(),
-            MemberExpression::PrivateFieldExpression(m) => m.field.name.to_string(),
-            MemberExpression::ComputedMemberExpression(_) => String::new(),
-        }
-    }
-
-    enum Cur<'a> {
-        Expr(&'a Expression<'a>),
-        Member(&'a MemberExpression<'a>),
-    }
-
-    let mut current = Cur::Expr(expr);
+    let mut current = NameCursor::Expr(expr);
 
     loop {
         if limit == 0 {
@@ -2081,25 +2104,25 @@ fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) 
         }
         limit -= 1;
         match current {
-            Cur::Expr(expr) => match expr {
+            NameCursor::Expr(expr) => match expr {
                 Expression::StaticMemberExpression(m) => {
                     let prop = m.property.name.to_string();
                     if !prop.is_empty() {
                         parts.push(prop);
                     }
-                    current = Cur::Expr(&m.object);
+                    current = NameCursor::Expr(&m.object);
                 }
                 Expression::PrivateFieldExpression(m) => {
                     let prop = m.field.name.to_string();
                     if !prop.is_empty() {
                         parts.push(prop);
                     }
-                    current = Cur::Expr(&m.object);
+                    current = NameCursor::Expr(&m.object);
                 }
                 Expression::ComputedMemberExpression(m) => {
-                    current = Cur::Expr(&m.object);
+                    current = NameCursor::Expr(&m.object);
                 }
-                Expression::CallExpression(call) => current = Cur::Expr(&call.callee),
+                Expression::CallExpression(call) => current = NameCursor::Expr(&call.callee),
                 Expression::Identifier(ident) => {
                     parts.push(ident.name.to_string());
                     break;
@@ -2108,34 +2131,40 @@ fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) 
                     parts.push("this".to_owned());
                     break;
                 }
-                Expression::ParenthesizedExpression(p) => current = Cur::Expr(&p.expression),
+                Expression::ParenthesizedExpression(p) => current = NameCursor::Expr(&p.expression),
                 Expression::ChainExpression(chain) => match &chain.expression {
-                    ChainElement::CallExpression(call) => current = Cur::Expr(&call.callee),
-                    ChainElement::ComputedMemberExpression(m) => current = Cur::Expr(&m.object),
+                    ChainElement::CallExpression(call) => current = NameCursor::Expr(&call.callee),
+                    ChainElement::ComputedMemberExpression(m) => {
+                        current = NameCursor::Expr(&m.object)
+                    }
                     ChainElement::StaticMemberExpression(m) => {
                         let prop = m.property.name.to_string();
                         if !prop.is_empty() {
                             parts.push(prop);
                         }
-                        current = Cur::Expr(&m.object);
+                        current = NameCursor::Expr(&m.object);
                     }
                     ChainElement::PrivateFieldExpression(m) => {
                         let prop = m.field.name.to_string();
                         if !prop.is_empty() {
                             parts.push(prop);
                         }
-                        current = Cur::Expr(&m.object);
+                        current = NameCursor::Expr(&m.object);
                     }
-                    ChainElement::TSNonNullExpression(t) => current = Cur::Expr(&t.expression),
+                    ChainElement::TSNonNullExpression(t) => {
+                        current = NameCursor::Expr(&t.expression)
+                    }
                 },
-                Expression::TSAsExpression(t) => current = Cur::Expr(&t.expression),
-                Expression::TSSatisfiesExpression(t) => current = Cur::Expr(&t.expression),
-                Expression::TSNonNullExpression(t) => current = Cur::Expr(&t.expression),
-                Expression::TSTypeAssertion(t) => current = Cur::Expr(&t.expression),
-                Expression::TSInstantiationExpression(t) => current = Cur::Expr(&t.expression),
+                Expression::TSAsExpression(t) => current = NameCursor::Expr(&t.expression),
+                Expression::TSSatisfiesExpression(t) => current = NameCursor::Expr(&t.expression),
+                Expression::TSNonNullExpression(t) => current = NameCursor::Expr(&t.expression),
+                Expression::TSTypeAssertion(t) => current = NameCursor::Expr(&t.expression),
+                Expression::TSInstantiationExpression(t) => {
+                    current = NameCursor::Expr(&t.expression)
+                }
                 _ => break,
             },
-            Cur::Member(member) => {
+            NameCursor::Member(member) => {
                 let prop = member_property_text(member);
                 if !prop.is_empty() {
                     parts.push(prop);
@@ -2145,7 +2174,7 @@ fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) 
                     MemberExpression::StaticMemberExpression(m) => &m.object,
                     MemberExpression::PrivateFieldExpression(m) => &m.object,
                 };
-                current = Cur::Expr(object);
+                current = NameCursor::Expr(object);
             }
         }
     }
@@ -2178,9 +2207,7 @@ fn property_key_text(key: &PropertyKey<'_>) -> String {
 fn pattern_name_from_source(pattern: &BindingPattern<'_>, source: &str) -> Option<String> {
     match pattern {
         BindingPattern::BindingIdentifier(binding) => Some(binding.name.to_string()),
-        BindingPattern::AssignmentPattern(assign) => {
-            pattern_name_from_source(&assign.left, source)
-        }
+        BindingPattern::AssignmentPattern(assign) => pattern_name_from_source(&assign.left, source),
         BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
             Some(source_slice(source, pattern.span()).to_owned())
         }
@@ -2467,9 +2494,7 @@ fn extract_constant_string_value(
     expr: &Expression<'_>,
 ) -> Option<Vec<(String, String)>> {
     match expr {
-        Expression::StringLiteral(s) => {
-            Some(vec![(base_name.to_owned(), s.value.to_string())])
-        }
+        Expression::StringLiteral(s) => Some(vec![(base_name.to_owned(), s.value.to_string())]),
         Expression::ObjectExpression(obj) => {
             let mut constants = Vec::new();
             extract_object_constants(base_name, obj, &mut constants);
@@ -2528,7 +2553,7 @@ fn push_type_symbol(
 
 // ── Test-support module (preserved for cross-backend parity tests) ──────────
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub(crate) fn parse_ts_js_for_status(file: &FileEntry, source: &str) -> TsJsParseStatus {
     let allocator = Allocator::default();
     let options = ParseOptions {
@@ -2547,7 +2572,7 @@ pub(crate) fn parse_ts_js_for_status(file: &FileEntry, source: &str) -> TsJsPars
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn parse_import_bindings_for_test(file: &FileEntry, source: &str) -> Vec<ImportBinding> {
     let allocator = Allocator::default();
     let options = ParseOptions {
@@ -2590,7 +2615,7 @@ fn parse_import_bindings_for_test(file: &FileEntry, source: &str) -> Vec<ImportB
     bindings
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn parse_top_level_declared_names(file: &FileEntry, source: &str) -> Vec<String> {
     use std::collections::BTreeSet;
 
@@ -2640,7 +2665,7 @@ fn parse_top_level_declared_names(file: &FileEntry, source: &str) -> Vec<String>
     names.into_iter().collect()
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 fn collect_declaration_names(
     declaration: &Declaration<'_>,
     names: &mut std::collections::BTreeSet<String>,
@@ -2681,7 +2706,7 @@ fn collect_declaration_names(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "test-support")]
 pub mod oxc_test_support {
     use std::path::{Path, PathBuf};
 
@@ -2727,9 +2752,61 @@ pub mod oxc_test_support {
         };
         super::parse_top_level_declared_names(&file, source)
     }
+
+    /// Drive the full parse + visit pipeline through an extension-routed
+    /// `FileEntry` and return whether the extracted `ParseState` exposes at
+    /// least one symbol. Used by extension-classification regression tests
+    /// that pin `.mts`, `.cts`, and uppercase variants to the TypeScript
+    /// parser.
+    pub fn parse_ts_file_via_extension(ext: &str, source: &str) -> bool {
+        use crate::tree_sitter::ParseState;
+
+        let path = PathBuf::from(format!("test_file.{ext}"));
+        let file = FileEntry {
+            path,
+            language: Language::TypeScript,
+            size_bytes: source.len() as u64,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+        let mut state = ParseState::for_test(&file, source);
+        super::parse_ts_js_with_oxc(&file, &mut state, source, std::path::Path::new("/tmp"));
+        !state.symbols().is_empty()
+    }
+
+    /// Drive the full pipeline and report whether the extracted symbols
+    /// contain a node whose name equals `ident_name`. Used by parallel-parse
+    /// regression tests to assert per-source identity under rayon load.
+    pub fn parse_full_pipeline_contains_symbol(ext: &str, source: &str, ident_name: &str) -> bool {
+        use crate::tree_sitter::ParseState;
+
+        let path = PathBuf::from(format!("test.{ext}"));
+        let file = FileEntry {
+            path,
+            language: Language::TypeScript,
+            size_bytes: source.len() as u64,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+        let mut state = ParseState::for_test(&file, source);
+        super::parse_ts_js_with_oxc(&file, &mut state, source, std::path::Path::new("/tmp"));
+        state
+            .symbols()
+            .iter()
+            .any(|s| s.node.name.as_str() == ident_name)
+    }
+
+    /// Drive the raw parse path (no visitor) and return whether any
+    /// top-level declared name matches `ident_name`. The companion to
+    /// [`parse_full_pipeline_contains_symbol`] that exercises only the
+    /// parser layer for span-cross-talk tests.
+    pub fn parse_source_contains_ident(source: &str, ident_name: &str) -> bool {
+        let names = top_level_declared_names_for_path(std::path::Path::new("source.ts"), source);
+        names.iter().any(|n| n == ident_name)
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use std::path::{Path, PathBuf};
 
