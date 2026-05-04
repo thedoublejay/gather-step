@@ -3151,11 +3151,140 @@ pub mod swc_test_support {
         }
     }
 
+    /// Apply the SWC parser to `source`, then walk the parsed module body and
+    /// collect the set of top-level declared identifier names — function and
+    /// class declarations, simple `Pat::Ident` variable bindings, type
+    /// aliases, interfaces, enums, namespaces, and the same forms wrapped in
+    /// `export` declarations or named default exports.
+    ///
+    /// The extension picks between TS/TSX/JS syntax flavours; declarations
+    /// inside TSX-only or JSX-only sources would otherwise be silently dropped
+    /// because `try_parse` would refuse to parse them. The result is sorted
+    /// and deduplicated to make set comparison stable across parser
+    /// implementations.
+    pub fn top_level_declared_names_for_extension(ext: &str, source: &str) -> Vec<String> {
+        use std::collections::BTreeSet;
+
+        use swc_ecma_ast::{
+            ClassDecl, Decl, DefaultDecl, ExportDecl, ExportDefaultDecl, FnDecl, ModuleDecl, Pat,
+            VarDeclarator,
+        };
+
+        fn collect_decl_names(decl: &Decl, names: &mut BTreeSet<String>) {
+            match decl {
+                Decl::Class(ClassDecl { ident, .. }) | Decl::Fn(FnDecl { ident, .. }) => {
+                    names.insert(ident.sym.as_ref().to_owned());
+                }
+                Decl::Var(var) => {
+                    for VarDeclarator { name, .. } in &var.decls {
+                        if let Pat::Ident(binding) = name {
+                            names.insert(binding.sym.as_ref().to_owned());
+                        }
+                    }
+                }
+                Decl::TsInterface(ts) => {
+                    names.insert(ts.id.sym.as_ref().to_owned());
+                }
+                Decl::TsTypeAlias(ts) => {
+                    names.insert(ts.id.sym.as_ref().to_owned());
+                }
+                Decl::TsEnum(ts) => {
+                    names.insert(ts.id.sym.as_ref().to_owned());
+                }
+                Decl::TsModule(ts) => {
+                    if let swc_ecma_ast::TsModuleName::Ident(ident) = &ts.id {
+                        names.insert(ident.sym.as_ref().to_owned());
+                    }
+                }
+                Decl::Using(_) => {}
+            }
+        }
+
+        let syntax = syntax_for_extension(ext);
+        let mut names: BTreeSet<String> = BTreeSet::new();
+
+        GLOBALS.set(&Globals::new(), || {
+            let Some(module) = try_parse(source, syntax) else {
+                return;
+            };
+            for item in &module.body {
+                match item {
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl, .. })) => {
+                        collect_decl_names(decl, &mut names);
+                    }
+                    ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+                        decl,
+                        ..
+                    })) => match decl {
+                        DefaultDecl::Class(c) => {
+                            if let Some(ident) = c.ident.as_ref() {
+                                names.insert(ident.sym.as_ref().to_owned());
+                            }
+                        }
+                        DefaultDecl::Fn(f) => {
+                            if let Some(ident) = f.ident.as_ref() {
+                                names.insert(ident.sym.as_ref().to_owned());
+                            }
+                        }
+                        DefaultDecl::TsInterfaceDecl(ts) => {
+                            names.insert(ts.id.sym.as_ref().to_owned());
+                        }
+                    },
+                    ModuleItem::Stmt(Stmt::Decl(decl)) => collect_decl_names(decl, &mut names),
+                    _ => {}
+                }
+            }
+        });
+
+        names.into_iter().collect()
+    }
+
+    /// Pick a permissive [`swc_ecma_parser::Syntax`] flavour from a file
+    /// extension so the helper can parse `.tsx`/`.jsx` fixtures without
+    /// losing their default exported components or hooks.
+    fn syntax_for_extension(ext: &str) -> swc_ecma_parser::Syntax {
+        use swc_ecma_parser::{EsSyntax, Syntax, TsSyntax};
+
+        if ext.eq_ignore_ascii_case("tsx") {
+            Syntax::Typescript(TsSyntax {
+                tsx: true,
+                decorators: true,
+                dts: false,
+                no_early_errors: false,
+                disallow_ambiguous_jsx_like: false,
+            })
+        } else if ext.eq_ignore_ascii_case("ts")
+            || ext.eq_ignore_ascii_case("mts")
+            || ext.eq_ignore_ascii_case("cts")
+        {
+            Syntax::Typescript(TsSyntax {
+                tsx: false,
+                decorators: true,
+                dts: false,
+                no_early_errors: false,
+                disallow_ambiguous_jsx_like: false,
+            })
+        } else if ext.eq_ignore_ascii_case("jsx")
+            || ext.eq_ignore_ascii_case("js")
+            || ext.eq_ignore_ascii_case("mjs")
+            || ext.eq_ignore_ascii_case("cjs")
+        {
+            Syntax::Es(EsSyntax {
+                jsx: true,
+                decorators: true,
+                ..EsSyntax::default()
+            })
+        } else {
+            default_typescript_syntax_for_tests()
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::{
             parse_full_pipeline_contains_symbol, parse_source_contains_ident,
             parse_ts_file_via_extension, parse_yields_non_empty_module,
+            top_level_declared_names_for_extension,
         };
 
         /// Verify that `parse_yields_non_empty_module` opens its own `GLOBALS`
@@ -3205,6 +3334,49 @@ pub mod swc_test_support {
             assert!(
                 parse_full_pipeline_contains_symbol("ts", source, "PipelineVisible"),
                 "full pipeline helper should observe symbols emitted by visit_module"
+            );
+        }
+
+        /// Top-level declared-names helper covers exports, plain decls, and
+        /// the TS-only forms (interface/type/enum/namespace) and routes JSX
+        /// extensions through the right syntax flavour.
+        #[test]
+        fn top_level_declared_names_helper_covers_export_and_ts_only_forms() {
+            let typescript_source = "\
+                export const value = 1;\n\
+                export function plain() {}\n\
+                export class Widget {}\n\
+                export interface Shape { kind: string }\n\
+                export type Maybe<T> = T | undefined;\n\
+                export enum Color { Red, Blue }\n\
+                export default function defaultFn() {}\n\
+                namespace Outer { export const inner = 0 }\n\
+            ";
+            let names = top_level_declared_names_for_extension("ts", typescript_source);
+            assert_eq!(
+                names,
+                vec![
+                    "Color".to_owned(),
+                    "Maybe".to_owned(),
+                    "Outer".to_owned(),
+                    "Shape".to_owned(),
+                    "Widget".to_owned(),
+                    "defaultFn".to_owned(),
+                    "plain".to_owned(),
+                    "value".to_owned(),
+                ],
+                "ts source should expose plain decls, exports, and TS-only forms"
+            );
+
+            let react_source = "\
+                export default function ProjectionSummary() { return null }\n\
+                export interface Props {}\n\
+            ";
+            let react_names = top_level_declared_names_for_extension("tsx", react_source);
+            assert_eq!(
+                react_names,
+                vec!["ProjectionSummary".to_owned(), "Props".to_owned()],
+                "tsx source should be parsed under the JSX-aware syntax flavour"
             );
         }
     }

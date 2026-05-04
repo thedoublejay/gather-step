@@ -44,6 +44,34 @@ fn oxc_parse_status_is_not_worse_than_swc_on_extraction_fixtures() {
 }
 
 #[test]
+fn oxc_top_level_declared_names_match_swc_on_extraction_fixtures() {
+    let root = fixture_root();
+    let fixtures = collect_ts_js_fixtures(&root);
+    let mut mismatches = Vec::new();
+
+    for fixture in fixtures {
+        let source = fs::read_to_string(&fixture)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture.display()));
+        let ext = fixture
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let oxc = oxc_test_support::top_level_declared_names_for_path(&fixture, &source);
+        let swc = swc_test_support::top_level_declared_names_for_extension(ext, &source);
+        if oxc != swc {
+            let relative = fixture.strip_prefix(&root).unwrap_or(&fixture).display();
+            mismatches.push(format!("{relative}: swc={swc:?}, oxc={oxc:?}"));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "Oxc top-level declaration extraction diverged from SWC:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
 fn oxc_import_bindings_match_swc_on_extraction_fixtures() {
     let root = fixture_root();
     let fixtures = collect_ts_js_fixtures(&root);

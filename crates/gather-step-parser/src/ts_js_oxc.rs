@@ -21,8 +21,9 @@ use crate::{traverse::FileEntry, ts_js_backend::TsJsParseStatus};
 use {
     crate::resolve::ImportBinding,
     oxc_ast::ast::{
-        ExportAllDeclaration, ExportNamedDeclaration, ImportDeclaration,
-        ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName, Statement,
+        BindingPattern, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind,
+        ModuleExportName, Statement, TSModuleDeclarationName,
     },
 };
 
@@ -219,6 +220,102 @@ fn module_export_name(name: &ModuleExportName<'_>) -> String {
     }
 }
 
+/// Walk the parsed module body and collect the set of top-level declared
+/// identifier names — function/class/var declarations, type aliases,
+/// interfaces, enums, namespaces, and the same forms wrapped in `export`
+/// declarations. Mirrors `swc_test_support::top_level_declared_names` so the
+/// parity test can compare backends with one set comparison.
+#[cfg(any(test, feature = "test-support"))]
+fn parse_top_level_declared_names(file: &FileEntry, source: &str) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let allocator = Allocator::default();
+    let options = ParseOptions {
+        allow_return_outside_function: true,
+        ..ParseOptions::default()
+    };
+    let parsed = Parser::new(&allocator, source, source_type_for_path(&file.path))
+        .with_options(options)
+        .parse();
+    if parsed.panicked {
+        return Vec::new();
+    }
+
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(decl) => {
+                if let Some(declaration) = decl.declaration.as_ref() {
+                    collect_declaration_names(declaration, &mut names);
+                }
+            }
+            Statement::ExportDefaultDeclaration(decl) => match &decl.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                    if let Some(ident) = func.id.as_ref() {
+                        names.insert(ident.name.to_string());
+                    }
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    if let Some(ident) = class.id.as_ref() {
+                        names.insert(ident.name.to_string());
+                    }
+                }
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(ts) => {
+                    names.insert(ts.id.name.to_string());
+                }
+                _ => {}
+            },
+            other => {
+                if let Some(declaration) = other.as_declaration() {
+                    collect_declaration_names(declaration, &mut names);
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn collect_declaration_names(
+    declaration: &Declaration<'_>,
+    names: &mut std::collections::BTreeSet<String>,
+) {
+    match declaration {
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(ident) = func.id.as_ref() {
+                names.insert(ident.name.to_string());
+            }
+        }
+        Declaration::ClassDeclaration(class) => {
+            if let Some(ident) = class.id.as_ref() {
+                names.insert(ident.name.to_string());
+            }
+        }
+        Declaration::VariableDeclaration(var) => {
+            for declarator in &var.declarations {
+                if let BindingPattern::BindingIdentifier(binding) = &declarator.id {
+                    names.insert(binding.name.to_string());
+                }
+            }
+        }
+        Declaration::TSTypeAliasDeclaration(decl) => {
+            names.insert(decl.id.name.to_string());
+        }
+        Declaration::TSInterfaceDeclaration(decl) => {
+            names.insert(decl.id.name.to_string());
+        }
+        Declaration::TSEnumDeclaration(decl) => {
+            names.insert(decl.id.name.to_string());
+        }
+        Declaration::TSModuleDeclaration(decl) => {
+            if let TSModuleDeclarationName::Identifier(ident) = &decl.id {
+                names.insert(ident.name.to_string());
+            }
+        }
+        Declaration::TSImportEqualsDeclaration(_) | Declaration::TSGlobalDeclaration(_) => {}
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod oxc_test_support {
     use std::path::{Path, PathBuf};
@@ -254,6 +351,17 @@ pub mod oxc_test_support {
         };
         super::parse_import_bindings(&file, source)
     }
+
+    pub fn top_level_declared_names_for_path(path: &Path, source: &str) -> Vec<String> {
+        let file = FileEntry {
+            path: path.to_path_buf(),
+            language: Language::TypeScript,
+            size_bytes: source.len() as u64,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+        super::parse_top_level_declared_names(&file, source)
+    }
 }
 
 #[cfg(test)]
@@ -265,7 +373,10 @@ mod tests {
 
     use crate::{FileEntry, Language, ts_js_backend::TsJsParseStatus};
 
-    use super::{line_offsets, parse_ts_js_for_status, source_type_for_path, span_to_source_span};
+    use super::{
+        line_offsets, parse_top_level_declared_names, parse_ts_js_for_status, source_type_for_path,
+        span_to_source_span,
+    };
 
     fn file(path: &str) -> FileEntry {
         FileEntry {
@@ -302,5 +413,47 @@ mod tests {
         assert_eq!(span.line_len, 0);
         assert_eq!(span.column_start, 0);
         assert_eq!(span.column_len, 2);
+    }
+
+    /// Top-level declared-names parity helper covers exports, plain decls,
+    /// the TS-only forms (interface/type/enum/namespace), and JSX-aware
+    /// extensions so the parity guard against SWC has a concrete shape it
+    /// can compare against.
+    #[test]
+    fn oxc_top_level_declared_names_covers_export_and_ts_only_forms() {
+        let typescript_source = "\
+            export const value = 1;\n\
+            export function plain() {}\n\
+            export class Widget {}\n\
+            export interface Shape { kind: string }\n\
+            export type Maybe<T> = T | undefined;\n\
+            export enum Color { Red, Blue }\n\
+            export default function defaultFn() {}\n\
+            namespace Outer { export const inner = 0 }\n\
+        ";
+        let names = parse_top_level_declared_names(&file("decls.ts"), typescript_source);
+        assert_eq!(
+            names,
+            vec![
+                "Color".to_owned(),
+                "Maybe".to_owned(),
+                "Outer".to_owned(),
+                "Shape".to_owned(),
+                "Widget".to_owned(),
+                "defaultFn".to_owned(),
+                "plain".to_owned(),
+                "value".to_owned(),
+            ],
+        );
+
+        let react_source = "\
+            export default function ProjectionSummary() { return null }\n\
+            export interface Props {}\n\
+        ";
+        let react_names = parse_top_level_declared_names(&file("ui.tsx"), react_source);
+        assert_eq!(
+            react_names,
+            vec!["ProjectionSummary".to_owned(), "Props".to_owned()],
+        );
     }
 }
