@@ -2135,7 +2135,7 @@ fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) 
                 Expression::ChainExpression(chain) => match &chain.expression {
                     ChainElement::CallExpression(call) => current = NameCursor::Expr(&call.callee),
                     ChainElement::ComputedMemberExpression(m) => {
-                        current = NameCursor::Expr(&m.object)
+                        current = NameCursor::Expr(&m.object);
                     }
                     ChainElement::StaticMemberExpression(m) => {
                         let prop = m.property.name.to_string();
@@ -2152,7 +2152,7 @@ fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) 
                         current = NameCursor::Expr(&m.object);
                     }
                     ChainElement::TSNonNullExpression(t) => {
-                        current = NameCursor::Expr(&t.expression)
+                        current = NameCursor::Expr(&t.expression);
                     }
                 },
                 Expression::TSAsExpression(t) => current = NameCursor::Expr(&t.expression),
@@ -2160,7 +2160,7 @@ fn expression_name_from_expr(expr: &Expression<'_>) -> (String, Option<String>) 
                 Expression::TSNonNullExpression(t) => current = NameCursor::Expr(&t.expression),
                 Expression::TSTypeAssertion(t) => current = NameCursor::Expr(&t.expression),
                 Expression::TSInstantiationExpression(t) => {
-                    current = NameCursor::Expr(&t.expression)
+                    current = NameCursor::Expr(&t.expression);
                 }
                 _ => break,
             },

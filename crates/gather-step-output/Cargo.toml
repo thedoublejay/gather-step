@@ -10,7 +10,7 @@ description = "Output formatters for Gather Step"
 
 [dependencies]
 chrono.workspace = true
-gather-step-analysis = { path = "../gather-step-analysis", version = "3.0.0" }
+gather-step-analysis = { path = "../gather-step-analysis", version = "3.1.0" }
 gather-step-core.workspace = true
 gather-step-storage.workspace = true
 thiserror.workspace = true

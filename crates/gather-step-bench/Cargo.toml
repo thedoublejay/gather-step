@@ -30,7 +30,7 @@ harness = false
 
 [dependencies]
 gather-step-core.workspace = true
-gather-step = { path = "../gather-step-cli", version = "3.0.0" }
+gather-step = { path = "../gather-step-cli", version = "3.1.0" }
 gather-step-mcp.workspace = true
 gather-step-storage.workspace = true
 anyhow.workspace = true

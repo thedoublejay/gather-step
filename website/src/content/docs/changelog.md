@@ -9,6 +9,61 @@ This changelog lists significant user-visible changes. It is maintained manually
 
 No unreleased changes yet.
 
+## v3.1.0
+
+Release status: **draft**.
+
+Indexing-performance, storage, and security release. Replaces the SWC-based TypeScript and JavaScript visitor with an Oxc-driven implementation, lands a series of throughput and footprint compactions, and hardens the watch and config surface against symlink and oversize-file abuse.
+
+### Highlights — TypeScript and JavaScript parser
+
+- Replaced the SWC visitor with an Oxc-driven implementation. Same `ParseState` writes (NodeIds, edges, decorators, call sites, constant strings) as the previous backend so downstream consumers see no behavioural change beyond a function-signature accuracy fix.
+- Removed `swc_common`, `swc_ecma_ast`, and `swc_ecma_parser` from the dependency tree (~3.4k lines and a sizeable transitive dependency graph).
+- Added an `oxc_test_support` surface that mirrors the helpers test suites previously imported from `swc_test_support` (status checks, full-pipeline symbol probes, raw identifier scans, top-level declaration extraction).
+- Function signatures emitted for zero-parameter methods are now precise (`handle()` instead of accidentally swallowing a preceding decorator argument such as `('build')`).
+
+### Highlights — Indexing performance
+
+- Bounded context-pack precompute and pack-target selection by repo count.
+- Cached path-alias discovery for the duration of an index run.
+- Gated framework augmenters by language so non-TS/JS repos do not pay for them.
+- Skipped the size-only filesystem walk on the default index path.
+- Avoided cloning traversal source bytes on the hot path.
+- Moved git analytics off the writer hot path and bounded its queue depth by repo count.
+
+### Highlights — Storage compactions
+
+- Dropped the redundant search `description` text field; reintroduced `qualified_name` as a dedicated indexed-only field with a lighter tokenizer chain. `SEARCH_INDEX_VERSION` is bumped to `1`.
+- Decoded `is_exported` and `lang` from search fast fields instead of stored fields.
+- Replaced the `edges_by_kind` projection with counters and compacted edge-metadata tags.
+- Truncated `file_index_state.content_hash` to a 128-bit BLAKE3 prefix for the per-file change-detection cache.
+- Pruned stale context packs on write and salted cache keys by compatibility.
+
+### Highlights — Security
+
+- Watcher now ignores symlinked event paths.
+- `gather-step.local.yaml` and other local config reads are capped at a bounded byte budget.
+- `git worktree add` arguments are passed positionally rather than glued into one shell string.
+- Deployment topology config rejects symlinked paths.
+
+### Bug fixes
+
+- Search queries split identifier separators (`-`, `_`, `.`, `/`) before parsing so snake-case and slash-bearing repo names tokenize the same way they index.
+- Qualified impact queries fall back to the tail segment when the qualified form does not hit the search index.
+- Workspace registry counts are refreshed from the final graph at the end of an index run so the registry never drifts behind the graph.
+- Incremental classification truncates new content hashes to the stored prefix length before comparing, so the 16-byte hash prefix store does not flag every previously-indexed file as modified.
+
+### Test coverage
+
+- Oxc parser self-validation tests across every TS/JS extraction fixture: status, top-level declared names, and import-binding shape.
+- Secret-surface MCP smoke test exercises the redaction surface end-to-end.
+- Deployment-topology MCP tools test pins the public response shape.
+- Benchmark harness samples resource peaks (max RSS, peak memory footprint, open FDs on Unix).
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.1.0`.
+
 ## v3.0.0 (Draft)
 
 Release status: **draft**.
