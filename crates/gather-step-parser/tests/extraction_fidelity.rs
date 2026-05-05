@@ -601,9 +601,10 @@ fn imported_route_constants_and_barrel_reexports_remain_visible() {
             .any(|binding| { binding.source == "./y" && binding.local_name == "Y" })
     );
     // Finding 8 — re-export sources (`export * from './x'`, `export { Y } from './y'`)
-    // are recorded as import_bindings but their resolved_path is left None by the SWC
-    // visitor (only direct imports get path resolution at parse time). This is a known
-    // depth gap documented in the review. The snapshot captures the current state.
+    // are recorded as import_bindings but their resolved_path is left None by the
+    // TS/JS visitor (only direct imports get path resolution at parse time). This is
+    // a known depth gap documented in the review. The snapshot captures the current
+    // state.
     assert_debug_snapshot!("barrel_reexports", summarize(&barrel));
 }
 
@@ -651,7 +652,7 @@ fn jsdoc_decorators_are_ignored_and_processor_without_args_is_safe() {
 fn javascript_file_extracts_imports_and_functions() {
     let parsed = parse_fixture("js_imports.js", &[]);
     // Import bindings must be extracted from plain .js files through the
-    // full SWC → visit_module pipeline (not just tree-sitter).
+    // full TS/JS visitor pipeline (not just tree-sitter).
     assert!(
         parsed
             .import_bindings
@@ -824,10 +825,10 @@ fn parse_file_with_packs_activates_nestjs_extraction() {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 9 — SWC traversal skips computed-property subexpressions (#[ignore])
+// Finding 9 — visitor traversal of computed-property subexpressions
 // ---------------------------------------------------------------------------
 
-// Helper used by the SWC traversal gap tests: writes `source` to a unique
+// Helper used by the visitor-traversal gap tests: writes `source` to a unique
 // temp dir (isolated from the shared fixture root to avoid races under
 // parallel test execution), parses it, and returns the ParsedFile.
 fn parse_ts_source_in_tempdir(source: &str, filename: &str) -> ParsedFile {
@@ -852,7 +853,7 @@ fn parse_ts_source_in_tempdir(source: &str, filename: &str) -> ParsedFile {
 }
 
 #[test]
-fn swc_traversal_captures_call_inside_computed_member_property() {
+fn ts_js_visitor_captures_call_inside_computed_member_property() {
     let parsed = parse_ts_source_in_tempdir(
         "export function run(obj: any) { return obj[getKey()]?.value; }\n\
          function getKey(): string { return 'k'; }\n",
@@ -873,7 +874,7 @@ fn swc_traversal_captures_call_inside_computed_member_property() {
 }
 
 #[test]
-fn swc_traversal_captures_call_inside_optional_computed_member_property() {
+fn ts_js_visitor_captures_call_inside_optional_computed_member_property() {
     let parsed = parse_ts_source_in_tempdir(
         "export function run(obj: any) { return obj?.[getName()]?.fn(); }\n\
          function getName(): string { return 'k'; }\n",
@@ -889,11 +890,11 @@ fn swc_traversal_captures_call_inside_optional_computed_member_property() {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 10 — SWC traversal skips destructuring-assignment expressions (#[ignore])
+// Finding 10 — visitor traversal of destructuring-assignment expressions
 // ---------------------------------------------------------------------------
 
 #[test]
-fn swc_traversal_captures_call_inside_destructuring_default() {
+fn ts_js_visitor_captures_call_inside_destructuring_default() {
     let parsed = parse_ts_source_in_tempdir(
         "function buildDefault(): number { return 0; }\n\
          export function run(arr: number[]) { let x: number; ([x = buildDefault()] = arr); return x; }\n",

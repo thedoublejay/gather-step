@@ -4,12 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind, VIRTUAL_NODE_REPO};
+use gather_step_core::{
+    EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId,
+    NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO,
+};
 use redb::{
     Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadableDatabase,
     ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
 };
 use rustc_hash::FxHashSet;
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::StorageDaemonMetadata;
@@ -32,7 +36,111 @@ struct StoredEdge {
     target: NodeId,
     kind: gather_step_core::EdgeKind,
     owner_file: NodeId,
-    metadata: gather_step_core::EdgeMetadata,
+    metadata: StoredEdgeMetadata,
+}
+
+/// Compact on-disk mirror of [`EdgeMetadata`].
+///
+/// The public metadata type stays serde-friendly and string-based. The graph
+/// store is a fresh/rebuildable index, so it can encode known high-repeat
+/// strings as enum tags while preserving unknown producer strings.
+#[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
+struct StoredEdgeMetadata {
+    weight: Option<u32>,
+    confidence: Option<u16>,
+    timestamp_unix: Option<i64>,
+    drift_kind: Option<StoredDriftKind>,
+    resolver: Option<StoredResolver>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
+enum StoredResolver {
+    Known(ResolverStrategy),
+    Other(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
+enum StoredDriftKind {
+    Shape,
+    Type,
+    Optionality,
+    MissingField,
+    ExtraField,
+    MigrationFilters(String),
+    Other(String),
+}
+
+impl StoredEdgeMetadata {
+    fn from_public(metadata: &EdgeMetadata) -> Self {
+        Self {
+            weight: metadata.weight,
+            confidence: metadata.confidence,
+            timestamp_unix: metadata.timestamp_unix,
+            drift_kind: metadata
+                .drift_kind
+                .as_deref()
+                .map(StoredDriftKind::from_public),
+            resolver: metadata
+                .resolver
+                .as_deref()
+                .map(StoredResolver::from_public),
+        }
+    }
+
+    fn into_public(self) -> EdgeMetadata {
+        EdgeMetadata {
+            weight: self.weight,
+            confidence: self.confidence,
+            timestamp_unix: self.timestamp_unix,
+            drift_kind: self.drift_kind.map(StoredDriftKind::into_public),
+            resolver: self.resolver.map(StoredResolver::into_public),
+        }
+    }
+}
+
+impl StoredResolver {
+    fn from_public(value: &str) -> Self {
+        ResolverStrategy::from_str(value).map_or_else(|| Self::Other(value.to_owned()), Self::Known)
+    }
+
+    fn into_public(self) -> String {
+        match self {
+            Self::Known(strategy) => strategy.as_str().to_owned(),
+            Self::Other(value) => value,
+        }
+    }
+}
+
+impl StoredDriftKind {
+    fn from_public(value: &str) -> Self {
+        match value {
+            "shape" => Self::Shape,
+            "type" => Self::Type,
+            "optionality" => Self::Optionality,
+            "missing_field" => Self::MissingField,
+            "extra_field" => Self::ExtraField,
+            value => value
+                .strip_prefix(MIGRATION_FILTERS_METADATA_PREFIX)
+                .map_or_else(
+                    || Self::Other(value.to_owned()),
+                    |filters| Self::MigrationFilters(filters.to_owned()),
+                ),
+        }
+    }
+
+    fn into_public(self) -> String {
+        match self {
+            Self::Shape => "shape".to_owned(),
+            Self::Type => "type".to_owned(),
+            Self::Optionality => "optionality".to_owned(),
+            Self::MissingField => "missing_field".to_owned(),
+            Self::ExtraField => "extra_field".to_owned(),
+            Self::MigrationFilters(filters) => {
+                format!("{MIGRATION_FILTERS_METADATA_PREFIX}{filters}")
+            }
+            Self::Other(value) => value,
+        }
+    }
 }
 
 /// On-disk node representation. Signatures are interned in the `SIGNATURES`
@@ -72,7 +180,7 @@ struct EdgeIndexTables<'txn> {
     edges_out: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edges_in: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edges_by_owner: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
-    edges_by_kind: MultimapTable<'txn, u8, EdgeIdBytes>,
+    edge_kind_counts: redb::Table<'txn, u8, u64>,
 }
 
 const NODES: TableDefinition<NodeIdBytes, &[u8]> = TableDefinition::new("nodes");
@@ -83,8 +191,7 @@ const EDGES_IN: MultimapTableDefinition<NodeIdBytes, EdgeIdBytes> =
     MultimapTableDefinition::new("edges_in");
 const EDGES_BY_OWNER: MultimapTableDefinition<NodeIdBytes, EdgeIdBytes> =
     MultimapTableDefinition::new("edges_by_owner");
-const EDGES_BY_KIND: MultimapTableDefinition<u8, EdgeIdBytes> =
-    MultimapTableDefinition::new("edges_by_kind");
+const EDGE_KIND_COUNTS: TableDefinition<u8, u64> = TableDefinition::new("edge_kind_counts");
 const BY_FILE: MultimapTableDefinition<&[u8], NodeIdBytes> =
     MultimapTableDefinition::new("by_file");
 const BY_REPO: MultimapTableDefinition<u32, NodeIdBytes> = MultimapTableDefinition::new("by_repo");
@@ -151,9 +258,10 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 
 /// Current graph-store schema version.
 ///
-/// Bump this when node/edge discriminants or graph-derived evidence semantics
-/// change in a way that requires rebuilding `.gather-step/storage/graph.redb`.
-pub const GRAPH_SCHEMA_VERSION: u32 = 3;
+/// v3.1 is a fresh generated-state release. There are no production users for
+/// older graph store layouts, so the physical schema baseline starts at zero
+/// and does not carry migration or upgrade branches.
+pub const GRAPH_SCHEMA_VERSION: u32 = 0;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -172,6 +280,19 @@ pub struct EdgeCountSummary {
     pub history_ownership_edges: usize,
     /// Edges whose target is a virtual non-`Author` node.
     pub virtual_other_cross_repo_edges: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphTableFootprint {
+    pub name: String,
+    pub table_kind: String,
+    pub entries: u64,
+    pub stored_bytes: u64,
+    pub metadata_bytes: u64,
+    pub fragmented_bytes: u64,
+    pub leaf_pages: u64,
+    pub branch_pages: u64,
+    pub tree_height: u32,
 }
 
 pub trait GraphStore {
@@ -290,10 +411,6 @@ pub enum GraphStoreError {
     )]
     Corrupt { path: PathBuf },
     #[error(
-        "your local graph index uses an unsupported schema; run `gather-step clean --storage && gather-step index` to rebuild"
-    )]
-    SchemaVersionMismatch { stored: u32, expected: u32 },
-    #[error(
         "graph storage `{path}` is already locked by another gather-step process; \
          if `watch` or `serve --watch` is running, stop it or wait for it to exit before retrying"
     )]
@@ -307,6 +424,14 @@ pub enum GraphStoreError {
     MissingNode(NodeId),
     #[error("edge owner node is not a file: {0:?}")]
     OwnerNotAFile(NodeId),
+    #[error(
+        "graph schema version mismatch at `{path}`: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
+    )]
+    SchemaVersionMismatch {
+        path: PathBuf,
+        stored: u32,
+        expected: u32,
+    },
 }
 
 impl GraphStoreError {
@@ -363,38 +488,12 @@ impl GraphStoreDb {
             path,
             bulk_mode: std::sync::atomic::AtomicBool::new(false),
         };
-        store.check_or_write_schema_version(is_new)?;
-        Ok(store)
-    }
-
-    fn check_or_write_schema_version(&self, is_new: bool) -> Result<(), GraphStoreError> {
         if is_new {
-            self.write_schema_version()?;
-            return Ok(());
+            store.write_schema_version()?;
+        } else {
+            store.validate_schema_version()?;
         }
-
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
-        let table = match read_txn.open_table(GRAPH_SCHEMA) {
-            Ok(table) => table,
-            Err(error) if Self::is_missing_table_error(&error) => {
-                return Err(GraphStoreError::SchemaVersionMismatch {
-                    stored: 0,
-                    expected: GRAPH_SCHEMA_VERSION,
-                });
-            }
-            Err(error) => return Err(GraphStoreError::storage(error)),
-        };
-        let stored = table
-            .get(GRAPH_SCHEMA_VERSION_KEY)
-            .map_err(GraphStoreError::storage)?
-            .map_or(0, |value| value.value());
-        if stored != GRAPH_SCHEMA_VERSION {
-            return Err(GraphStoreError::SchemaVersionMismatch {
-                stored,
-                expected: GRAPH_SCHEMA_VERSION,
-            });
-        }
-        Ok(())
+        Ok(store)
     }
 
     fn write_schema_version(&self) -> Result<(), GraphStoreError> {
@@ -408,6 +507,39 @@ impl GraphStoreDb {
                 .map_err(GraphStoreError::storage)?;
         }
         write_txn.commit().map_err(GraphStoreError::storage)
+    }
+
+    /// Read the persisted schema version and reject the open when it does not
+    /// match [`GRAPH_SCHEMA_VERSION`]. A missing version row is treated as
+    /// version 0 (the v3.1 baseline) so unstamped fresh stores keep opening
+    /// cleanly. Stamped stores from a future schema fail with a typed
+    /// [`GraphStoreError::SchemaVersionMismatch`] instead of producing
+    /// shape-incompatible reads.
+    fn validate_schema_version(&self) -> Result<(), GraphStoreError> {
+        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let table = match read_txn.open_table(GRAPH_SCHEMA) {
+            Ok(t) => t,
+            // Missing schema table means the on-disk version is the implicit
+            // baseline (0); a future bump can require the table to exist.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let stored = match table
+            .get(GRAPH_SCHEMA_VERSION_KEY)
+            .map_err(GraphStoreError::storage)?
+        {
+            Some(v) => v.value(),
+            None => GRAPH_SCHEMA_VERSION, // baseline assumption
+        };
+        if stored == GRAPH_SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(GraphStoreError::SchemaVersionMismatch {
+                path: self.path.clone(),
+                stored,
+                expected: GRAPH_SCHEMA_VERSION,
+            })
+        }
     }
 
     /// Run redb's integrity check.
@@ -456,6 +588,96 @@ impl GraphStoreDb {
     /// Return database file size in bytes for diagnostic logging.
     pub fn file_size_bytes(&self) -> u64 {
         std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub fn table_footprints(&self) -> Result<Vec<GraphTableFootprint>, GraphStoreError> {
+        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let mut tables = Vec::new();
+
+        macro_rules! record_table {
+            ($name:literal, $kind:literal, $open:expr) => {
+                match $open {
+                    Ok(table) => {
+                        let stats = table.stats().map_err(GraphStoreError::storage)?;
+                        let entries = table.len().map_err(GraphStoreError::storage)?;
+                        tables.push(graph_table_footprint($name, $kind, entries, &stats));
+                    }
+                    Err(error) if Self::is_missing_table_error(&error) => {}
+                    Err(error) => return Err(GraphStoreError::storage(error)),
+                }
+            };
+        }
+
+        record_table!("nodes", "table", read_txn.open_table(NODES));
+        record_table!("edges", "table", read_txn.open_table(EDGES));
+        record_table!(
+            "edges_out",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_OUT)
+        );
+        record_table!(
+            "edges_in",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_IN)
+        );
+        record_table!(
+            "edges_by_owner",
+            "multimap",
+            read_txn.open_multimap_table(EDGES_BY_OWNER)
+        );
+        record_table!(
+            "edge_kind_counts",
+            "table",
+            read_txn.open_table(EDGE_KIND_COUNTS)
+        );
+        record_table!("by_file", "multimap", read_txn.open_multimap_table(BY_FILE));
+        record_table!("by_repo", "multimap", read_txn.open_multimap_table(BY_REPO));
+        record_table!("by_type", "multimap", read_txn.open_multimap_table(BY_TYPE));
+        record_table!(
+            "by_external_id",
+            "multimap",
+            read_txn.open_multimap_table(BY_EXTERNAL_ID)
+        );
+        record_table!(
+            "cross_file_candidates",
+            "multimap",
+            read_txn.open_multimap_table(CROSS_FILE_CANDIDATES)
+        );
+        record_table!(
+            "event_family_index",
+            "multimap",
+            read_txn.open_multimap_table(EVENT_FAMILY_INDEX)
+        );
+        record_table!(
+            "route_key_index",
+            "multimap",
+            read_txn.open_multimap_table(ROUTE_KEY_INDEX)
+        );
+        record_table!(
+            "shared_symbol_name_index",
+            "multimap",
+            read_txn.open_multimap_table(SHARED_SYMBOL_NAME_INDEX)
+        );
+        record_table!("repo_ids", "table", read_txn.open_table(REPO_IDS));
+        record_table!("repos", "table", read_txn.open_table(REPOS));
+        record_table!("file_path_ids", "table", read_txn.open_table(FILE_PATH_IDS));
+        record_table!("file_paths", "table", read_txn.open_table(FILE_PATHS));
+        record_table!("signature_ids", "table", read_txn.open_table(SIGNATURE_IDS));
+        record_table!("signatures", "table", read_txn.open_table(SIGNATURES));
+        record_table!(
+            "string_metadata",
+            "table",
+            read_txn.open_table(STRING_METADATA)
+        );
+        record_table!("graph_schema", "table", read_txn.open_table(GRAPH_SCHEMA));
+
+        tables.sort_by(|left, right| {
+            right
+                .stored_bytes
+                .cmp(&left.stored_bytes)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(tables)
     }
 
     /// Compact the database to reclaim dead space from delete/rewrite cycles.
@@ -1138,7 +1360,7 @@ impl GraphStoreDb {
             target: edge.target,
             kind: edge.kind,
             owner_file: edge.owner_file,
-            metadata: edge.metadata.clone(),
+            metadata: StoredEdgeMetadata::from_public(&edge.metadata),
         })
     }
 
@@ -1152,9 +1374,44 @@ impl GraphStoreDb {
             target: stored.target,
             kind: stored.kind,
             owner_file: stored.owner_file,
-            metadata: stored.metadata,
+            metadata: stored.metadata.into_public(),
             is_cross_file: false,
         })
+    }
+
+    fn increment_edge_kind_count(
+        counts: &mut redb::Table<'_, u8, u64>,
+        kind: EdgeKind,
+    ) -> Result<(), GraphStoreError> {
+        let key = kind.as_u8();
+        let next = counts
+            .get(key)
+            .map_err(GraphStoreError::storage)?
+            .map_or(1, |current| current.value().saturating_add(1));
+        counts.insert(key, next).map_err(GraphStoreError::storage)?;
+        Ok(())
+    }
+
+    fn decrement_edge_kind_count(
+        counts: &mut redb::Table<'_, u8, u64>,
+        kind: EdgeKind,
+    ) -> Result<(), GraphStoreError> {
+        let key = kind.as_u8();
+        let Some(current) = counts
+            .get(key)
+            .map_err(GraphStoreError::storage)?
+            .map(|current| current.value())
+        else {
+            return Ok(());
+        };
+        if current <= 1 {
+            let _ = counts.remove(key).map_err(GraphStoreError::storage)?;
+        } else {
+            counts
+                .insert(key, current - 1)
+                .map_err(GraphStoreError::storage)?;
+        }
+        Ok(())
     }
 
     fn edge_id(edge: &EdgeData) -> EdgeIdBytes {
@@ -1683,12 +1940,10 @@ impl GraphStoreDb {
         }
 
         {
-            let mut edges_by_kind = write_txn
-                .open_multimap_table(EDGES_BY_KIND)
+            let mut edge_kind_counts = write_txn
+                .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?;
-            edges_by_kind
-                .insert(edge.kind.as_u8(), edge_id)
-                .map_err(GraphStoreError::storage)?;
+            Self::increment_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
         }
 
         Ok(())
@@ -1713,8 +1968,8 @@ impl GraphStoreDb {
             edges_by_owner: write_txn
                 .open_multimap_table(EDGES_BY_OWNER)
                 .map_err(GraphStoreError::storage)?,
-            edges_by_kind: write_txn
-                .open_multimap_table(EDGES_BY_KIND)
+            edge_kind_counts: write_txn
+                .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?,
         })
     }
@@ -1784,10 +2039,7 @@ impl GraphStoreDb {
                 .edges_by_owner
                 .insert(edge.owner_file.as_bytes(), edge_id)
                 .map_err(GraphStoreError::storage)?;
-            tables
-                .edges_by_kind
-                .insert(edge.kind.as_u8(), edge_id)
-                .map_err(GraphStoreError::storage)?;
+            Self::increment_edge_kind_count(&mut tables.edge_kind_counts, edge.kind)?;
         }
 
         let encoded = Self::encode_edge(edge);
@@ -1831,12 +2083,10 @@ impl GraphStoreDb {
         }
 
         {
-            let mut edges_by_kind = write_txn
-                .open_multimap_table(EDGES_BY_KIND)
+            let mut edge_kind_counts = write_txn
+                .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?;
-            edges_by_kind
-                .remove(edge.kind.as_u8(), edge_id)
-                .map_err(GraphStoreError::storage)?;
+            Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
         }
 
         Ok(())
@@ -2064,12 +2314,10 @@ impl GraphStoreDb {
                         .map_err(GraphStoreError::storage)?;
                 }
                 {
-                    let mut edges_by_kind = write_txn
-                        .open_multimap_table(EDGES_BY_KIND)
+                    let mut edge_kind_counts = write_txn
+                        .open_table(EDGE_KIND_COUNTS)
                         .map_err(GraphStoreError::storage)?;
-                    edges_by_kind
-                        .remove(edge.kind.as_u8(), edge_id)
-                        .map_err(GraphStoreError::storage)?;
+                    Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
                 }
                 Self::delete_canonical_edge(write_txn, edge_id)?;
             }
@@ -2108,12 +2356,10 @@ impl GraphStoreDb {
                         .map_err(GraphStoreError::storage)?;
                 }
                 {
-                    let mut edges_by_kind = write_txn
-                        .open_multimap_table(EDGES_BY_KIND)
+                    let mut edge_kind_counts = write_txn
+                        .open_table(EDGE_KIND_COUNTS)
                         .map_err(GraphStoreError::storage)?;
-                    edges_by_kind
-                        .remove(edge.kind.as_u8(), edge_id)
-                        .map_err(GraphStoreError::storage)?;
+                    Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
                 }
                 Self::delete_canonical_edge(write_txn, edge_id)?;
             }
@@ -2254,12 +2500,10 @@ impl GraphStoreDb {
                         .map_err(GraphStoreError::storage)?;
                 }
                 {
-                    let mut edges_by_kind = write_txn
-                        .open_multimap_table(EDGES_BY_KIND)
+                    let mut edge_kind_counts = write_txn
+                        .open_table(EDGE_KIND_COUNTS)
                         .map_err(GraphStoreError::storage)?;
-                    edges_by_kind
-                        .remove(edge.kind.as_u8(), edge_id)
-                        .map_err(GraphStoreError::storage)?;
+                    Self::decrement_edge_kind_count(&mut edge_kind_counts, edge.kind)?;
                 }
                 Self::delete_canonical_edge(write_txn, edge_id)?;
             }
@@ -2771,6 +3015,25 @@ impl GraphStoreDb {
     }
 }
 
+fn graph_table_footprint(
+    name: &str,
+    table_kind: &str,
+    entries: u64,
+    stats: &redb::TableStats,
+) -> GraphTableFootprint {
+    GraphTableFootprint {
+        name: name.to_owned(),
+        table_kind: table_kind.to_owned(),
+        entries,
+        stored_bytes: stats.stored_bytes(),
+        metadata_bytes: stats.metadata_bytes(),
+        fragmented_bytes: stats.fragmented_bytes(),
+        leaf_pages: stats.leaf_pages(),
+        branch_pages: stats.branch_pages(),
+        tree_height: stats.tree_height(),
+    }
+}
+
 impl GraphStore for GraphStoreDb {
     fn insert_node(&self, node: &NodeData) -> Result<(), GraphStoreError> {
         self.with_write_txn(|write_txn| Self::insert_node_in_txn(write_txn, node))
@@ -3118,15 +3381,17 @@ impl GraphStore for GraphStoreDb {
 
     fn count_edges_by_kind(&self, kind: EdgeKind) -> Result<usize, GraphStoreError> {
         let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
-        let by_kind = match read_txn.open_multimap_table(EDGES_BY_KIND) {
-            Ok(by_kind) => by_kind,
+        let edge_kind_counts = match read_txn.open_table(EDGE_KIND_COUNTS) {
+            Ok(edge_kind_counts) => edge_kind_counts,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
             Err(error) => return Err(GraphStoreError::storage(error)),
         };
-        Ok(by_kind
+        Ok(edge_kind_counts
             .get(kind.as_u8())
             .map_err(GraphStoreError::storage)?
-            .count())
+            .map_or(0, |count| {
+                usize::try_from(count.value()).unwrap_or(usize::MAX)
+            }))
     }
 
     fn nodes_by_event_family_name(
@@ -3217,12 +3482,16 @@ mod tests {
     };
 
     use gather_step_core::{
-        EdgeKind, EdgeMetadata, ResolverStrategy, SourceSpan, Visibility, node_id,
+        EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, ResolverStrategy, SourceSpan,
+        Visibility, node_id,
     };
     use pretty_assertions::assert_eq;
     use redb::ReadableDatabase;
 
-    use super::{BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGES_BY_KIND, GraphStore, GraphStoreDb};
+    use super::{
+        BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGE_KIND_COUNTS, GraphStore, GraphStoreDb,
+        StoredDriftKind, StoredEdgeMetadata, StoredResolver,
+    };
     use crate::{StorageDaemonMetadata, StorageDaemonMetadataGuard};
     use gather_step_core::{EdgeData, NodeData, NodeId, NodeKind};
 
@@ -3378,67 +3647,25 @@ mod tests {
     }
 
     #[test]
-    fn open_reports_schema_mismatch_when_schema_table_missing() {
-        let graph_path = temp_db_path("missing-graph-schema");
-        let db = redb::Database::create(&graph_path).expect("legacy graph db should create");
-        let write_txn = db
-            .begin_write()
-            .expect("legacy graph write txn should begin");
-        {
-            let _nodes = write_txn
-                .open_table(super::NODES)
-                .expect("legacy nodes table should create");
-        }
-        write_txn
-            .commit()
-            .expect("legacy graph write txn should commit");
+    fn open_stamps_fresh_schema_version_zero() {
+        let graph_path = temp_db_path("fresh-graph-schema");
+        let store = GraphStoreDb::open(&graph_path).expect("fresh graph db should open");
+        drop(store);
+
+        let db = redb::Database::open(&graph_path).expect("graph db should reopen");
+        let read_txn = db.begin_read().expect("read txn should begin");
+        let schema = read_txn
+            .open_table(super::GRAPH_SCHEMA)
+            .expect("schema table should exist");
+        let version = schema
+            .get(super::GRAPH_SCHEMA_VERSION_KEY)
+            .expect("schema version should read")
+            .expect("schema version should be stamped")
+            .value();
+        assert_eq!(version, 0);
+        drop(schema);
+        drop(read_txn);
         drop(db);
-
-        let Err(err) = GraphStoreDb::open(&graph_path) else {
-            panic!("legacy db missing schema table should fail");
-        };
-
-        assert!(matches!(
-            err,
-            super::GraphStoreError::SchemaVersionMismatch {
-                stored: 0,
-                expected
-            } if expected == super::GRAPH_SCHEMA_VERSION
-        ));
-        fs::remove_file(graph_path).ok();
-    }
-
-    #[test]
-    fn open_reports_schema_mismatch_when_schema_version_is_old() {
-        let graph_path = temp_db_path("old-graph-schema");
-        let db = redb::Database::create(&graph_path).expect("legacy graph db should create");
-        let write_txn = db
-            .begin_write()
-            .expect("legacy graph write txn should begin");
-        {
-            let mut schema = write_txn
-                .open_table(super::GRAPH_SCHEMA)
-                .expect("schema table should create");
-            schema
-                .insert(super::GRAPH_SCHEMA_VERSION_KEY, 0)
-                .expect("old schema version should insert");
-        }
-        write_txn
-            .commit()
-            .expect("legacy graph write txn should commit");
-        drop(db);
-
-        let Err(err) = GraphStoreDb::open(&graph_path) else {
-            panic!("legacy db with old schema version should fail");
-        };
-
-        assert!(matches!(
-            err,
-            super::GraphStoreError::SchemaVersionMismatch {
-                stored: 0,
-                expected
-            } if expected == super::GRAPH_SCHEMA_VERSION
-        ));
         fs::remove_file(graph_path).ok();
     }
 
@@ -3647,6 +3874,31 @@ mod tests {
         let outgoing = store.get_outgoing(source.id).expect("outgoing should load");
         assert_eq!(outgoing, vec![updated]);
         assert_eq!(store.count_edges().expect("edge count should load"), 1);
+    }
+
+    #[test]
+    fn stored_edge_metadata_compacts_known_strings_and_round_trips() {
+        let metadata = EdgeMetadata {
+            weight: Some(7),
+            confidence: Some(88),
+            timestamp_unix: Some(1_700_000_123),
+            drift_kind: Some(format!("{MIGRATION_FILTERS_METADATA_PREFIX}[\"tenantId\"]")),
+            resolver: Some(ResolverStrategy::ImportMap.as_str().to_owned()),
+        };
+
+        let stored = StoredEdgeMetadata::from_public(&metadata);
+
+        assert_eq!(
+            stored.drift_kind,
+            Some(StoredDriftKind::MigrationFilters(
+                "[\"tenantId\"]".to_owned()
+            ))
+        );
+        assert_eq!(
+            stored.resolver,
+            Some(StoredResolver::Known(ResolverStrategy::ImportMap))
+        );
+        assert_eq!(stored.into_public(), metadata);
     }
 
     #[test]
@@ -4372,15 +4624,15 @@ mod tests {
         );
 
         let read_txn = store.db.begin_read().expect("read txn should open");
-        let by_kind = read_txn
-            .open_multimap_table(EDGES_BY_KIND)
-            .expect("by kind table should open");
+        let edge_kind_counts = read_txn
+            .open_table(EDGE_KIND_COUNTS)
+            .expect("edge kind counts table should open");
         assert_eq!(
-            by_kind
+            edge_kind_counts
                 .get(EdgeKind::Calls.as_u8())
                 .expect("lookup should work")
-                .count(),
-            1
+                .map(|count| count.value()),
+            Some(1)
         );
     }
 

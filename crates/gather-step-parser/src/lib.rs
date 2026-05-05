@@ -8,12 +8,12 @@ pub(crate) mod projection;
 pub mod resolve;
 pub mod traverse;
 pub mod tree_sitter;
-pub(crate) mod ts_js_swc;
+pub(crate) mod ts_js_oxc;
 pub mod tsconfig;
 pub mod workspace_manifest;
 
 #[cfg(feature = "test-support")]
-pub use ts_js_swc::swc_test_support;
+pub use ts_js_oxc::oxc_test_support;
 
 pub use manifests::{
     ManifestDependency, ManifestError, ManifestExtraction, ParsedPackageManifest, VersionMismatch,

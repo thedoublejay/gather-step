@@ -74,40 +74,40 @@ pub fn queue_qn(protocol: &str, name: &str) -> String {
 
 #[must_use]
 pub fn deployment_qn(repo: &str, name: &str) -> String {
-    let repo = canonical_topology_part(repo, "unknown_repo");
-    let name = canonical_topology_part(name, "unknown_deployment");
+    let repo = canonical_topology_part_or(repo, "unknown_repo");
+    let name = canonical_topology_part_or(name, "unknown_deployment");
     format!("__deployment__{repo}__{name}")
 }
 
 #[must_use]
 pub fn env_var_qn(name: &str) -> String {
-    let name = canonical_topology_part(name, "unknown_env");
+    let name = canonical_topology_part_or(name, "unknown_env");
     format!("__env_var__{name}")
 }
 
 #[must_use]
 pub fn secret_qn(name: &str) -> String {
-    let name = canonical_topology_part(name, "unknown_secret");
+    let name = canonical_topology_part_or(name, "unknown_secret");
     format!("__secret__{name}")
 }
 
 #[must_use]
 pub fn config_map_qn(name: &str) -> String {
-    let name = canonical_topology_part(name, "unknown_config_map");
+    let name = canonical_topology_part_or(name, "unknown_config_map");
     format!("__config_map__{name}")
 }
 
 #[must_use]
 pub fn broker_qn(kind: &str, endpoint_or_name: &str) -> String {
-    let kind = canonical_topology_part(kind, "unknown");
-    let endpoint_or_name = canonical_topology_part(endpoint_or_name, "unknown");
+    let kind = canonical_topology_part_or(kind, "unknown");
+    let endpoint_or_name = canonical_topology_part_or(endpoint_or_name, "unknown");
     format!("__broker__{kind}__{endpoint_or_name}")
 }
 
 #[must_use]
 pub fn database_qn(kind: &str, endpoint_or_name: &str) -> String {
-    let kind = canonical_topology_part(kind, "unknown");
-    let endpoint_or_name = canonical_topology_part(endpoint_or_name, "unknown");
+    let kind = canonical_topology_part_or(kind, "unknown");
+    let endpoint_or_name = canonical_topology_part_or(endpoint_or_name, "unknown");
     format!("__database__{kind}__{endpoint_or_name}")
 }
 
@@ -285,7 +285,17 @@ fn split_shared_symbol_package_version(value: &str) -> (&str, Option<&str>) {
     (package, Some(version))
 }
 
-fn canonical_topology_part(value: &str, fallback: &str) -> String {
+/// Normalize a value into a canonical topology identifier component:
+/// lowercase ASCII alphanumerics and `.`, `-`, `:` are kept verbatim; every
+/// other run of characters collapses to a single `_`. Returns the empty
+/// string when the input contains no canonicalizable characters; callers
+/// that need a fallback should use [`canonical_topology_part_or`].
+///
+/// Used by both this crate (to mint stable virtual-node qualified names)
+/// and `gather-step-analysis::deployment_topology` (to match user-supplied
+/// targets against those same names) so they cannot drift.
+#[must_use]
+pub fn canonical_topology_part(value: &str) -> String {
     let mut normalized = String::new();
     let mut previous_was_separator = false;
     for ch in value.trim().chars() {
@@ -304,11 +314,19 @@ fn canonical_topology_part(value: &str, fallback: &str) -> String {
         normalized.push(next);
     }
 
-    let normalized = normalized.trim_matches('_');
-    if normalized.is_empty() {
+    normalized.trim_matches('_').replace("__", "_")
+}
+
+/// Like [`canonical_topology_part`] but returns `fallback.to_owned()` when
+/// normalization produces an empty string (e.g. the input was whitespace or
+/// only non-canonicalizable characters).
+#[must_use]
+pub fn canonical_topology_part_or(value: &str, fallback: &str) -> String {
+    let canonical = canonical_topology_part(value);
+    if canonical.is_empty() {
         fallback.to_owned()
     } else {
-        normalized.replace("__", "_")
+        canonical
     }
 }
 

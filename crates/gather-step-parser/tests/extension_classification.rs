@@ -1,12 +1,12 @@
 //! Extension-classification regression tests.
 //!
-//! Verifies that `parse_ts_js_with_swc` routes `.mts`, `.cts`, and uppercase
+//! Verifies that the TS/JS visitor routes `.mts`, `.cts`, and uppercase
 //! variants (`.TS`, `.TSX`) through the TypeScript parser rather than the
 //! JavaScript parser.
 //!
 //! Prior to the fix, the extension gate matched only lowercase `ts` and `tsx`
-//! exactly, so these extensions fell through to `Syntax::Es(...)`.  A source
-//! file containing type annotations would then either trigger a parse error or
+//! exactly, so these extensions fell through to the JS parser. A source file
+//! containing type annotations would then either trigger a parse error or
 //! produce an empty / recovered module, both of which this test detects.
 
 /// Sources that are only valid as TypeScript (contain type annotations).
@@ -19,7 +19,7 @@ const TS_ONLY_SOURCE: &str = "export interface User { name: string; id: number; 
 #[test]
 fn mts_extension_parses_as_typescript() {
     let found =
-        gather_step_parser::swc_test_support::parse_ts_file_via_extension("mts", TS_ONLY_SOURCE);
+        gather_step_parser::oxc_test_support::parse_ts_file_via_extension("mts", TS_ONLY_SOURCE);
     assert!(
         found,
         ".mts extension must route to the TypeScript parser; \
@@ -30,7 +30,7 @@ fn mts_extension_parses_as_typescript() {
 #[test]
 fn cts_extension_parses_as_typescript() {
     let found =
-        gather_step_parser::swc_test_support::parse_ts_file_via_extension("cts", TS_ONLY_SOURCE);
+        gather_step_parser::oxc_test_support::parse_ts_file_via_extension("cts", TS_ONLY_SOURCE);
     assert!(
         found,
         ".cts extension must route to the TypeScript parser; \
@@ -41,7 +41,7 @@ fn cts_extension_parses_as_typescript() {
 #[test]
 fn uppercase_ts_extension_parses_as_typescript() {
     let found =
-        gather_step_parser::swc_test_support::parse_ts_file_via_extension("TS", TS_ONLY_SOURCE);
+        gather_step_parser::oxc_test_support::parse_ts_file_via_extension("TS", TS_ONLY_SOURCE);
     assert!(
         found,
         ".TS extension must be treated case-insensitively and route to the TypeScript parser"
@@ -53,7 +53,7 @@ fn uppercase_tsx_extension_parses_as_typescript_with_jsx() {
     // This source requires both TypeScript (type assertion) and JSX parsing.
     const TSX_SOURCE: &str = "export const X: React.FC = () => <div>{(42 as number)}</div>;\n";
     let found =
-        gather_step_parser::swc_test_support::parse_ts_file_via_extension("TSX", TSX_SOURCE);
+        gather_step_parser::oxc_test_support::parse_ts_file_via_extension("TSX", TSX_SOURCE);
     assert!(
         found,
         ".TSX extension must be treated case-insensitively and enable tsx mode in the TypeScript parser"

@@ -1,4 +1,6 @@
 use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -9,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use console::style;
 use gather_step_core::{
-    GatherStepConfig, NodeKind, RegistryStore, RepoIndexMetadata, WorkspaceRepoResult,
+    GatherStepConfig, NodeData, NodeKind, RegistryStore, RepoIndexMetadata, WorkspaceRepoResult,
     WorkspaceStats,
 };
 use gather_step_git::{
@@ -78,7 +80,8 @@ struct IndexOutput {
     config_path: String,
     registry_path: String,
     storage_root: String,
-    index_size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_size_bytes: Option<u64>,
     stats: IndexStatsOutput,
     timings: IndexTimingOutput,
     warnings: Vec<String>,
@@ -118,6 +121,9 @@ struct IndexTimingOutput {
     writer_storage_commit: u64,
     #[serde(rename = "writer_analytics_total_ms")]
     writer_analytics: u64,
+    analytics_total_ms: u64,
+    analytics_max_ms: u64,
+    analytics_recv_wait_total_ms: u64,
     #[serde(rename = "writer_authoritative_count_total_ms")]
     writer_authoritative_count: u64,
     #[serde(rename = "producer_send_wait_total_ms")]
@@ -265,8 +271,28 @@ struct PreparedRepo {
 struct CommittedRepo {
     repo_idx: usize,
     result: WorkspaceRepoResult,
-    analytics_warning: Option<String>,
-    analytics_status_label: &'static str,
+}
+
+#[expect(
+    clippy::struct_field_names,
+    reason = "shared `repo_` prefix mirrors the AnalyticsRepoResult/CommittedRepo job pairing across the indexing pipeline"
+)]
+struct AnalyticsJob {
+    repo_idx: usize,
+    repo_name: String,
+    repo_root: PathBuf,
+}
+
+struct AnalyticsRepoResult {
+    repo_idx: usize,
+    status: RepoAnalyticsStatus,
+}
+
+#[derive(Clone, Copy)]
+struct RepoGraphCounts {
+    files: u64,
+    symbols: u64,
+    edges: u64,
 }
 
 #[derive(Default)]
@@ -279,14 +305,22 @@ struct ProducerTimings {
 #[derive(Default)]
 struct WriterTimings {
     storage_commit: u64,
-    analytics: u64,
     authoritative_count: u64,
+    recv_wait: u64,
+}
+
+#[derive(Default)]
+struct AnalyticsTimings {
+    total: u64,
+    max: u64,
     recv_wait: u64,
 }
 
 struct PipelineOutput {
     committed: Vec<CommittedRepo>,
+    analytics_results: Vec<AnalyticsRepoResult>,
     writer_timings: WriterTimings,
+    analytics_timings: AnalyticsTimings,
     producer_timings: ProducerTimings,
 }
 
@@ -329,6 +363,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
 
     let mut config = GatherStepConfig::from_yaml_file(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
+    let configured_repos = config.repos.clone();
     apply_repo_filter(&mut config, app.repo_filter.as_deref())?;
     apply_depth_override(&mut config, args.depth);
 
@@ -385,7 +420,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // this collapses ~250 segment commits (one per repo × batch) into 1 and
     // eliminates the `segment_manager "couldn't find segment"` warnings
     // caused by the background merge thread racing per-batch reader reloads.
-    indexer.storage().search().set_deferred_commit(true);
+    let search_deferred_commit = indexer.storage().search().begin_deferred_commit();
 
     // Both the workspace-level bar and per-repo spinners are registered on the
     // shared MultiProgress so they draw cleanly together and coordinate with
@@ -408,10 +443,11 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // ── Streaming parse → write pipeline ────────────────────────────────────
     // Serial producer prepares one repo at a time on the main thread; a
     // dedicated writer thread drains a bounded `crossbeam-channel` and runs
-    // `commit_repo_payload` + git analytics for each received payload.  This
-    // pipelines prepare(N+1) with commit(N) without running multiple whole-repo
-    // prepares concurrently, which would split the inner file-level rayon pool
-    // and spike peak RSS.
+    // `commit_repo_payload` for each received payload. Git analytics runs on a
+    // separate scoped worker fed by the writer after each repo storage commit.
+    // This pipelines prepare(N+1) with commit(N) without running multiple
+    // whole-repo prepares concurrently, which would split the inner file-level
+    // rayon pool and spike peak RSS.
     //
     // Outer repo-level `par_iter()` is explicitly avoided: `prepare_repo_files`
     // wraps its file-level `par_iter()` inside `std::thread::scope(...)`, so
@@ -432,6 +468,14 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bulk = indexer.begin_workspace_bulk_session();
 
     let (tx, rx) = crossbeam_channel::bounded::<PreparedRepo>(PHASE_CHANNEL_DEPTH);
+    // One analytics job is produced per repo after its storage commit. Capacity
+    // equal to the run's repo count bounds retained jobs while avoiding writer
+    // backpressure when analytics is slower than storage commits.
+    let analytics_queue_depth = config.repos.len().max(1);
+    let (analytics_tx, analytics_rx) =
+        crossbeam_channel::bounded::<AnalyticsJob>(analytics_queue_depth);
+    let (analytics_result_tx, analytics_result_rx) =
+        crossbeam_channel::unbounded::<AnalyticsRepoResult>();
     let indexer_ref = &indexer;
     let config_ref = &config;
     let config_root_ref = &config_root;
@@ -439,7 +483,40 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let workspace_bar_ref = &workspace_bar;
 
     let pipeline = std::thread::scope(|scope| -> Result<PipelineOutput> {
-        // Writer thread: drains the channel, commits + analytics per repo.
+        let analytics_worker = scope.spawn(move || -> AnalyticsTimings {
+            let mut timings = AnalyticsTimings::default();
+            loop {
+                let recv_start = Instant::now();
+                let Ok(job) = analytics_rx.recv() else {
+                    timings.recv_wait = timings.recv_wait.saturating_add(elapsed_ms(recv_start));
+                    break;
+                };
+                timings.recv_wait = timings.recv_wait.saturating_add(elapsed_ms(recv_start));
+                let analytics_start = Instant::now();
+                let analytics_status = sync_repo_analytics(
+                    indexer_ref,
+                    &job.repo_name,
+                    &job.repo_root,
+                    current_unix_timestamp_i64(),
+                );
+                let analytics_ms = elapsed_ms(analytics_start);
+                timings.total = timings.total.saturating_add(analytics_ms);
+                timings.max = timings.max.max(analytics_ms);
+                if analytics_result_tx
+                    .send(AnalyticsRepoResult {
+                        repo_idx: job.repo_idx,
+                        status: analytics_status,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            timings
+        });
+
+        // Writer thread: drains the channel, commits repos, and queues git
+        // analytics for the dedicated analytics worker.
         let writer = scope.spawn(move || -> Result<(Vec<CommittedRepo>, WriterTimings)> {
             let mut committed = Vec::with_capacity(config_ref.repos.len());
             let mut writer_timings = WriterTimings::default();
@@ -462,40 +539,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 writer_timings.storage_commit =
                     writer_timings.storage_commit.saturating_add(commit_ms);
 
-                let analytics_start = Instant::now();
-                let analytics_status = sync_repo_analytics(
-                    indexer_ref,
-                    &prep.repo_name,
-                    &prep.repo_root,
-                    current_unix_timestamp_i64(),
-                );
-                let analytics_ms = elapsed_ms(analytics_start);
-                writer_timings.analytics = writer_timings.analytics.saturating_add(analytics_ms);
-
-                // Authoritative per-repo counts from the graph state.  The
-                // per-batch accumulator inside index_repo returns deltas
-                // (zero on a warm re-run where no files changed), so the
-                // graph is the only source of truth.
-                let count_start = Instant::now();
-                let (authoritative_files, authoritative_symbols, authoritative_edges) = {
-                    let graph = indexer_ref.storage().graph();
-                    let total_nodes = graph
-                        .count_nodes_by_repo(&prep.repo_name)
-                        .with_context(|| format!("counting nodes for repo `{}`", prep.repo_name))?;
-                    let file_nodes = graph
-                        .count_nodes_by_repo_and_kind(&prep.repo_name, NodeKind::File)
-                        .with_context(|| {
-                            format!("counting file nodes for repo `{}`", prep.repo_name)
-                        })?;
-                    let edge_count = graph
-                        .count_edges_by_owner_repo(&prep.repo_name)
-                        .with_context(|| format!("counting edges for repo `{}`", prep.repo_name))?;
-                    (file_nodes, total_nodes, edge_count)
-                };
-                writer_timings.authoritative_count = writer_timings
-                    .authoritative_count
-                    .saturating_add(elapsed_ms(count_start));
-
                 let mut frameworks = prep
                     .detected_frameworks
                     .iter()
@@ -509,9 +552,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                     path = %prep.repo_root.display(),
                     prepare_ms = prep.prepare_ms,
                     commit_ms,
-                    files = authoritative_files,
-                    symbols = authoritative_symbols,
-                    edges = authoritative_edges,
                     "Indexing from directory finished.",
                 );
 
@@ -521,19 +561,27 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                     .and_then(|r| r.depth)
                     .unwrap_or(gather_step_core::DepthLevel::Full);
 
+                analytics_tx
+                    .send(AnalyticsJob {
+                        repo_idx: prep.repo_idx,
+                        repo_name: prep.repo_name.clone(),
+                        repo_root: prep.repo_root.clone(),
+                    })
+                    .with_context(|| {
+                        format!("queueing git analytics for repo `{}`", prep.repo_name)
+                    })?;
+
                 committed.push(CommittedRepo {
                     repo_idx: prep.repo_idx,
                     result: WorkspaceRepoResult {
                         repo: prep.repo_name.clone(),
                         last_indexed_at: Some(workspace_timestamp_ref.clone()),
-                        file_count: u64::try_from(authoritative_files).unwrap_or(u64::MAX),
-                        symbol_count: u64::try_from(authoritative_symbols).unwrap_or(u64::MAX),
-                        edge_count: authoritative_edges,
+                        file_count: 0,
+                        symbol_count: 0,
+                        edge_count: 0,
                         frameworks,
                         depth_level,
                     },
-                    analytics_warning: analytics_status.warning().map(ToOwned::to_owned),
-                    analytics_status_label: analytics_status.label(),
                 });
 
                 if let Some(bar) = workspace_bar_ref {
@@ -613,6 +661,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         let writer_result = writer
             .join()
             .map_err(|_| anyhow::anyhow!("writer thread panicked"))?;
+        let analytics_timings = analytics_worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("analytics thread panicked"))?;
+        let analytics_results = analytics_result_rx.try_iter().collect::<Vec<_>>();
 
         // Prefer the writer's error (more specific to storage) over producer's
         // secondary "send failed" symptom.
@@ -622,7 +674,9 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 producer_result?;
                 Ok(PipelineOutput {
                     committed,
+                    analytics_results,
                     writer_timings,
+                    analytics_timings,
                     producer_timings,
                 })
             }
@@ -632,13 +686,58 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // Apply committed repos to registry / stats / repo_results in config order.
     let PipelineOutput {
         committed,
-        writer_timings,
+        analytics_results,
+        mut writer_timings,
+        analytics_timings,
         producer_timings,
     } = pipeline;
+    let analytics_by_repo_idx = analytics_results
+        .into_iter()
+        .map(|result| (result.repo_idx, result.status))
+        .collect::<BTreeMap<_, _>>();
     let mut committed = committed;
     committed.sort_by_key(|c| c.repo_idx);
+    let count_start = Instant::now();
+    // Recount every CONFIGURED repo, not just the post-filter set. Cross-repo
+    // edges mean a partial reindex (`--repo foo`) can change graph totals for
+    // sibling repos that were not re-parsed — owner-reset of a foo file may
+    // remove edges whose `owner_file` belonged to the OTHER repo. The status
+    // command asserts `sum(registry_symbol_count) == sum(graph_node_count)`
+    // across all repos, so the registry must be refreshed even for filtered-
+    // out repos.
+    let final_counts_by_repo = configured_repos
+        .iter()
+        .map(|repo| {
+            count_repo_graph_totals(indexer.storage().graph(), &repo.name)
+                .map(|counts| (repo.name.clone(), counts))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    for c in &mut committed {
+        if let Some(counts) = final_counts_by_repo.get(&c.result.repo) {
+            c.result.file_count = counts.files;
+            c.result.symbol_count = counts.symbols;
+            c.result.edge_count = counts.edges;
+        }
+    }
+    writer_timings.authoritative_count = writer_timings
+        .authoritative_count
+        .saturating_add(elapsed_ms(count_start));
+    let committed_repo_names = committed
+        .iter()
+        .map(|c| c.result.repo.clone())
+        .collect::<BTreeSet<_>>();
     for c in committed {
-        if let Some(warning) = c.analytics_warning.clone() {
+        let analytics_status = analytics_by_repo_idx
+            .get(&c.repo_idx)
+            .cloned()
+            .unwrap_or_else(|| RepoAnalyticsStatus::Degraded {
+                warning: format!(
+                    "repo `{}`: git analytics did not report a result; continuing without ownership and co-change analytics",
+                    c.result.repo
+                ),
+            });
+        let analytics_warning = analytics_status.warning().map(ToOwned::to_owned);
+        if let Some(warning) = analytics_warning.clone() {
             warnings.push(warning);
         }
         registry.update_repo_metadata(
@@ -662,9 +761,35 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             symbols: c.result.symbol_count,
             edges: c.result.edge_count,
             frameworks: c.result.frameworks.clone(),
-            git_analytics_status: c.analytics_status_label,
-            git_analytics_warning: c.analytics_warning.clone(),
+            git_analytics_status: analytics_status.label(),
+            git_analytics_warning: analytics_warning,
         });
+    }
+    // For repos that did not commit through the indexer this run (filtered
+    // out, or had no indexable sources), still refresh the registry's count
+    // metadata using the freshly computed totals so it stays consistent with
+    // the live graph state — partial reindexes can shift sibling-repo counts
+    // through cross-repo edges (see `final_counts_by_repo` rationale above).
+    for repo in &configured_repos {
+        if committed_repo_names.contains(&repo.name) {
+            continue;
+        }
+        let Some(counts) = final_counts_by_repo.get(&repo.name) else {
+            continue;
+        };
+        let Some(existing) = registry.registry().repo(&repo.name).cloned() else {
+            continue;
+        };
+        registry.update_repo_metadata(
+            &repo.name,
+            RepoIndexMetadata {
+                last_indexed_at: existing.last_indexed_at,
+                file_count: counts.files,
+                symbol_count: counts.symbols,
+                frameworks: existing.frameworks,
+                depth_level: existing.depth_level,
+            },
+        )?;
     }
 
     let finalization_bar = (!output.is_json()).then(|| {
@@ -690,6 +815,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         .search()
         .flush()
         .context("finalizing search index flush")?;
+    search_deferred_commit.mark_flushed();
     let search_flush_ms = elapsed_ms(search_flush_start);
     info!(
         flush_ms = search_flush_ms,
@@ -752,27 +878,27 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         collect_precomputed_pack_targets(indexer.storage().graph(), &config)
             .context("collecting precomputed context-pack targets")?;
     let pack_target_discovery_ms = elapsed_ms(pack_target_discovery_start);
-    // Durable sync must be the first post-pipeline action. Clearing the
+    // The pipeline joins the analytics worker before returning, so no
+    // analytics writes can continue past this durable marker. Clearing the
     // derived pack cache before bulk-mode commit would let concurrent pack
     // requests repopulate cache entries from a not-yet-durable graph.
     let durable_sync_start = Instant::now();
     drop(workspace_bulk);
     let durable_sync_ms = elapsed_ms(durable_sync_start);
     info!(durable_sync_ms, "stage timing: graph durable sync complete",);
-    let cache_clear_start = Instant::now();
-    let context_pack_cache_rows_removed = indexer
-        .storage()
-        .metadata()
-        .clear_context_packs()
-        .context("clearing derived context-pack cache after index")?;
-    let context_pack_cache_clear_ms = elapsed_ms(cache_clear_start);
+    // Per-batch graph commits synchronously invalidate packs that depend on
+    // changed targets. Do not clear the whole cache here; unrelated packs can
+    // survive the index run and generation checks still reject stale rows.
+    let context_pack_cache_rows_removed = 0;
+    let context_pack_cache_clear_ms = 0;
     info!(
         context_pack_cache_clear_ms,
-        context_pack_cache_rows_removed, "stage timing: context-pack cache clear complete",
+        context_pack_cache_rows_removed, "stage timing: global context-pack cache clear skipped",
     );
     drop(indexer);
     let precompute_start = Instant::now();
-    let precompute_pack_count = hot_pack_targets.len() + precomputed_pack_targets.len();
+    let precompute_pack_count =
+        precompute_pack_call_count(&hot_pack_targets, &precomputed_pack_targets);
     if let Some(bar) = &finalization_bar {
         bar.set_message(format_pack_precompute_message(precompute_pack_count));
     }
@@ -798,8 +924,15 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     }
 
     let total_wall_ms = elapsed_ms(total_start);
-    let index_size_bytes = directory_size_bytes(&storage_root)
-        .with_context(|| format!("measuring index size under {}", storage_root.display()))?;
+    let should_measure_index_size = output.is_json() || artifact_path.is_some();
+    let index_size_bytes =
+        if should_measure_index_size {
+            Some(directory_size_bytes(&storage_root).with_context(|| {
+                format!("measuring index size under {}", storage_root.display())
+            })?)
+        } else {
+            None
+        };
     let graph_build_ms = writer_timings.storage_commit;
     let parser_augment_ms = producer_timings.prepare_total;
     let pack_precompute_ms = precompute_ms;
@@ -830,7 +963,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             prepare_total: producer_timings.prepare_total,
             prepare_max: producer_timings.prepare_max,
             writer_storage_commit: writer_timings.storage_commit,
-            writer_analytics: writer_timings.analytics,
+            writer_analytics: 0,
+            analytics_total_ms: analytics_timings.total,
+            analytics_max_ms: analytics_timings.max,
+            analytics_recv_wait_total_ms: analytics_timings.recv_wait,
             writer_authoritative_count: writer_timings.authoritative_count,
             producer_send_wait_total: producer_timings.send_wait_total,
             writer_recv_wait: writer_timings.recv_wait,
@@ -849,7 +985,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         workspace = %app.workspace_path.display(),
         storage_root = %storage_root.display(),
         duration_ms = total_wall_ms,
-        index_size_bytes,
+        ?index_size_bytes,
         "Indexing from directory finished.",
     );
 
@@ -873,11 +1009,18 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         style(payload.stats.total_edges).dim(),
         style(payload.stats.cross_repo_edges).dim()
     ));
-    output.line(format!(
-        "    Time: {}  Index size: {}",
-        style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
-        style(format_bytes(payload.index_size_bytes)).dim(),
-    ));
+    if let Some(index_size_bytes) = payload.index_size_bytes {
+        output.line(format!(
+            "    Time: {}  Index size: {}",
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
+            style(format_bytes(index_size_bytes)).dim(),
+        ));
+    } else {
+        output.line(format!(
+            "    Time: {}",
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
+        ));
+    }
     for warning in &payload.warnings {
         output.line(format!("  {} {warning}", style("Warning:").yellow().bold()));
     }
@@ -1042,10 +1185,28 @@ fn enforce_summary_invariant(stats: &WorkspaceStats) -> Result<()> {
     Ok(())
 }
 
+fn count_repo_graph_totals(graph: &impl GraphStore, repo: &str) -> Result<RepoGraphCounts> {
+    let total_nodes = graph
+        .count_nodes_by_repo(repo)
+        .with_context(|| format!("counting nodes for repo `{repo}`"))?;
+    let file_nodes = graph
+        .count_nodes_by_repo_and_kind(repo, NodeKind::File)
+        .with_context(|| format!("counting file nodes for repo `{repo}`"))?;
+    let edge_count = graph
+        .count_edges_by_owner_repo(repo)
+        .with_context(|| format!("counting edges for repo `{repo}`"))?;
+    Ok(RepoGraphCounts {
+        files: u64::try_from(file_nodes).unwrap_or(u64::MAX),
+        symbols: u64::try_from(total_nodes).unwrap_or(u64::MAX),
+        edges: edge_count,
+    })
+}
+
 const PRECOMPUTED_PACK_TARGETS_PER_REPO: usize = 2;
+const PRECOMPUTED_PACK_TARGET_LIMIT: usize = 8;
 /// Upper bound on `(target, mode)` pairs pulled from the MCP pack call log
 /// when deciding which packs to precompute at index finalize.
-const HOT_PACK_WHITELIST_LIMIT: usize = 200;
+const HOT_PACK_WHITELIST_LIMIT: usize = 32;
 
 fn collect_precomputed_pack_targets(
     graph: &impl GraphStore,
@@ -1053,37 +1214,52 @@ fn collect_precomputed_pack_targets(
 ) -> Result<Vec<String>> {
     let mut targets = Vec::new();
     for repo in &config.repos {
-        let mut candidates = graph
-            .nodes_by_repo(&repo.name)?
-            .into_iter()
-            .filter(|node| {
-                node.kind.is_search_indexable()
-                    && !node.is_virtual
-                    && node.kind != NodeKind::File
-                    && !node.name.is_empty()
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.file_path
-                .cmp(&right.file_path)
-                .then(
-                    left.span
-                        .as_ref()
-                        .map(|span| span.line_start)
-                        .cmp(&right.span.as_ref().map(|span| span.line_start)),
-                )
-                .then(left.name.cmp(&right.name))
-                .then(left.id.cmp(&right.id))
-        });
-        candidates.dedup_by(|left, right| left.id == right.id);
-        targets.extend(
-            candidates
-                .into_iter()
-                .take(PRECOMPUTED_PACK_TARGETS_PER_REPO)
-                .map(|node| encode_node_id(node.id)),
-        );
+        let remaining = PRECOMPUTED_PACK_TARGET_LIMIT.saturating_sub(targets.len());
+        if remaining == 0 {
+            break;
+        }
+        let per_repo_limit = PRECOMPUTED_PACK_TARGETS_PER_REPO.min(remaining);
+        let mut candidates = Vec::with_capacity(per_repo_limit);
+        for node in graph.nodes_by_repo(&repo.name)? {
+            if node.kind.is_search_indexable()
+                && !node.is_virtual
+                && node.kind != NodeKind::File
+                && !node.name.is_empty()
+            {
+                insert_precompute_candidate(&mut candidates, node, per_repo_limit);
+            }
+        }
+        targets.extend(candidates.into_iter().map(|node| encode_node_id(node.id)));
     }
     Ok(targets)
+}
+
+fn insert_precompute_candidate(candidates: &mut Vec<NodeData>, node: NodeData, limit: usize) {
+    if limit == 0 || candidates.iter().any(|candidate| candidate.id == node.id) {
+        return;
+    }
+    let insert_at = candidates
+        .iter()
+        .position(|candidate| precompute_candidate_cmp(&node, candidate).is_lt())
+        .unwrap_or(candidates.len());
+    if insert_at >= limit {
+        return;
+    }
+    candidates.insert(insert_at, node);
+    candidates.truncate(limit);
+}
+
+fn precompute_candidate_cmp(left: &NodeData, right: &NodeData) -> Ordering {
+    left.file_path
+        .cmp(&right.file_path)
+        .then(
+            left.span
+                .as_ref()
+                .map(|span| span.line_start)
+                .cmp(&right.span.as_ref().map(|span| span.line_start)),
+        )
+        .then(left.name.cmp(&right.name))
+        .then(left.id.cmp(&right.id))
 }
 
 fn precompute_context_packs(
@@ -1109,6 +1285,7 @@ fn precompute_context_packs(
             target: entry.target.clone(),
         };
         match entry.mode.as_str() {
+            mode if !is_precomputable_pack_mode(mode) => {}
             "planning" => {
                 planning_pack_tool(&ctx, request)?;
             }
@@ -1124,10 +1301,7 @@ fn precompute_context_packs(
             "change_impact" => {
                 change_impact_pack_tool(&ctx, request)?;
             }
-            // Unknown modes in the log are ignored rather than failing indexing.
-            // The log can pick up legacy modes after an upgrade; skipping keeps
-            // the index step forward-compatible.
-            _ => {}
+            _ => unreachable!("precomputable mode guard should cover all known modes"),
         }
     }
 
@@ -1158,6 +1332,28 @@ fn should_precompute_fallback_targets(
     hot_targets: &[gather_step_storage::PackCallLogEntry],
 ) -> bool {
     hot_targets.is_empty()
+}
+
+fn is_precomputable_pack_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "planning" | "debug" | "fix" | "review" | "change_impact"
+    )
+}
+
+fn precompute_pack_call_count(
+    hot_targets: &[gather_step_storage::PackCallLogEntry],
+    fallback_targets: &[String],
+) -> usize {
+    let hot_count = hot_targets
+        .iter()
+        .filter(|entry| is_precomputable_pack_mode(&entry.mode))
+        .count();
+    if hot_count > 0 {
+        hot_count
+    } else {
+        fallback_targets.len() * 5
+    }
 }
 
 fn apply_repo_filter(config: &mut GatherStepConfig, repo_filter: Option<&str>) -> Result<()> {
@@ -1309,13 +1505,14 @@ fn format_pack_precompute_message(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gather_step_core::WorkspaceStats;
+    use gather_step_core::{NodeData, NodeKind, SourceSpan, WorkspaceStats, node_id};
     use gather_step_storage::PackCallLogEntry;
 
     use super::{
         CROSS_REPO_COUNT_MESSAGE, SEARCH_FLUSH_MESSAGE, enforce_summary_invariant, format_bytes,
-        format_duration_hh_mm_ss, format_pack_precompute_message,
-        should_precompute_fallback_targets, should_update_numeric_progress,
+        format_duration_hh_mm_ss, format_pack_precompute_message, insert_precompute_candidate,
+        precompute_pack_call_count, should_precompute_fallback_targets,
+        should_update_numeric_progress,
     };
 
     #[test]
@@ -1355,6 +1552,68 @@ mod tests {
             call_count: 3,
             last_called_at: 42,
         }]));
+    }
+
+    #[test]
+    fn precompute_pack_count_tracks_actual_work() {
+        let hot_targets = vec![
+            PackCallLogEntry {
+                target: "target-a".to_owned(),
+                mode: "planning".to_owned(),
+                call_count: 3,
+                last_called_at: 42,
+            },
+            PackCallLogEntry {
+                target: "legacy".to_owned(),
+                mode: "legacy_mode".to_owned(),
+                call_count: 9,
+                last_called_at: 50,
+            },
+        ];
+        assert_eq!(
+            precompute_pack_call_count(&hot_targets, &["fallback".to_owned()]),
+            1
+        );
+        assert_eq!(
+            precompute_pack_call_count(&[], &["a".to_owned(), "b".to_owned()]),
+            10
+        );
+    }
+
+    #[test]
+    fn precompute_candidate_selection_keeps_stable_top_k() {
+        let mut candidates = Vec::new();
+        insert_precompute_candidate(&mut candidates, candidate_node("later", "src/z.ts", 1), 2);
+        insert_precompute_candidate(&mut candidates, candidate_node("second", "src/a.ts", 20), 2);
+        insert_precompute_candidate(&mut candidates, candidate_node("first", "src/a.ts", 10), 2);
+        insert_precompute_candidate(&mut candidates, candidate_node("first", "src/a.ts", 10), 2);
+
+        let names = candidates
+            .into_iter()
+            .map(|node| node.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["first", "second"]);
+    }
+
+    fn candidate_node(name: &str, file_path: &str, line_start: u32) -> NodeData {
+        NodeData {
+            id: node_id("repo", file_path, NodeKind::Function, name),
+            kind: NodeKind::Function,
+            repo: "repo".to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(name.to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: Some(SourceSpan {
+                line_start,
+                line_len: 0,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+        }
     }
 
     fn stats(files: u64, symbols: u64, edges: u64) -> WorkspaceStats {

@@ -2,9 +2,9 @@ use std::io::ErrorKind;
 
 use anyhow::Error;
 use gather_step_core::ConfigError;
-use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError};
+use gather_step_storage::{GraphStoreError, SearchStoreError};
 
-const UNSUPPORTED_SCHEMA_MESSAGE: &str = "Generated index state uses an unsupported schema. Run `gather-step index --auto-recover` to rebuild from source repos.";
+const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
 #[must_use]
 pub fn format_operator_error(error: &Error) -> String {
@@ -13,15 +13,6 @@ pub fn format_operator_error(error: &Error) -> String {
     for cause in error.chain() {
         if let Some(config_error) = cause.downcast_ref::<ConfigError>() {
             return format_config_error(config_error);
-        }
-        if cause
-            .downcast_ref::<MetadataStoreError>()
-            .is_some_and(|err| matches!(err, MetadataStoreError::SchemaVersionMismatch { .. }))
-            || cause
-                .downcast_ref::<SearchStoreError>()
-                .is_some_and(|err| matches!(err, SearchStoreError::VersionMismatch { .. }))
-        {
-            return UNSUPPORTED_SCHEMA_MESSAGE.to_owned();
         }
         if let Some(graph_error) = cause.downcast_ref::<GraphStoreError>() {
             match graph_error {
@@ -33,10 +24,15 @@ pub fn format_operator_error(error: &Error) -> String {
                     return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
                 }
                 GraphStoreError::SchemaVersionMismatch { .. } => {
-                    return UNSUPPORTED_SCHEMA_MESSAGE.to_owned();
+                    return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
                 }
                 _ => {}
             }
+        }
+        if let Some(search_error) = cause.downcast_ref::<SearchStoreError>()
+            && matches!(search_error, SearchStoreError::SchemaVersionMismatch { .. })
+        {
+            return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
         }
     }
 
@@ -57,9 +53,13 @@ pub fn format_operator_error(error: &Error) -> String {
     if contains_ascii_case_insensitive(&full, "db corrupted")
         || contains_ascii_case_insensitive(&full, "corrupt")
         || contains_ascii_case_insensitive(&full, "repair aborted")
-        || contains_ascii_case_insensitive(&full, "manual upgrade required")
     {
         return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
+    }
+    if contains_ascii_case_insensitive(&full, "schema version mismatch")
+        || contains_ascii_case_insensitive(&full, "manual upgrade required")
+    {
+        return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
     }
 
     one_line(error.to_string())
@@ -126,21 +126,38 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use gather_step_storage::GraphStoreError;
+    use std::path::PathBuf;
 
-    use super::format_operator_error;
+    use super::{SCHEMA_VERSION_MISMATCH_MESSAGE, format_operator_error};
 
     #[test]
-    fn graph_schema_mismatch_reports_auto_recover() {
-        let error = anyhow::Error::new(GraphStoreError::SchemaVersionMismatch {
-            stored: 0,
+    fn graph_store_schema_mismatch_maps_to_friendly_message() {
+        let raw = gather_step_storage::GraphStoreError::SchemaVersionMismatch {
+            path: PathBuf::from("/tmp/graph.redb"),
+            stored: 99,
+            expected: 0,
+        };
+        let err: anyhow::Error = anyhow::Error::new(raw);
+        assert_eq!(format_operator_error(&err), SCHEMA_VERSION_MISMATCH_MESSAGE);
+    }
+
+    #[test]
+    fn search_store_schema_mismatch_maps_to_friendly_message() {
+        let raw = gather_step_storage::SearchStoreError::SchemaVersionMismatch {
+            stored: "99".to_owned(),
             expected: 1,
-        })
-        .context("opening storage at /tmp/workspace/.gather-step/storage");
+        };
+        let err: anyhow::Error = anyhow::Error::new(raw);
+        assert_eq!(format_operator_error(&err), SCHEMA_VERSION_MISMATCH_MESSAGE);
+    }
 
-        let message = format_operator_error(&error);
-
-        assert!(message.contains("unsupported schema"));
-        assert!(message.contains("gather-step index --auto-recover"));
+    #[test]
+    fn unrelated_io_error_is_not_remapped_to_schema_message() {
+        let err: anyhow::Error = anyhow::Error::msg("read /tmp/foo: permission denied");
+        let msg = format_operator_error(&err);
+        assert!(
+            !msg.contains("schema version mismatch"),
+            "permission-denied error must not be remapped to schema-mismatch message: {msg}"
+        );
     }
 }

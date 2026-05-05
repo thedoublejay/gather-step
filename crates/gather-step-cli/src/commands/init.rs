@@ -92,7 +92,11 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
         let repos = load_existing_config_repos(&config_path)?;
         emit_config_summary(app, &config_path, &repos, "Using existing config")?;
     } else {
-        write_default_config(app, &args)?;
+        // Discover repos exactly once on the cold path. Both this branch
+        // and `write_default_config` previously walked the workspace, which
+        // is O(workspace) and grew noticeable on large monorepos.
+        let repos = discover_git_repos(&app.workspace_path)?;
+        write_default_config_with_repos(app, &args, &repos, None)?;
     }
     let output = app.output();
 
@@ -218,11 +222,6 @@ fn init_config_path(app: &AppContext, args: &InitArgs) -> PathBuf {
     args.config
         .clone()
         .unwrap_or_else(|| app.workspace_paths().config_path)
-}
-
-fn write_default_config(app: &AppContext, args: &InitArgs) -> Result<()> {
-    let repos = discover_git_repos(&app.workspace_path)?;
-    write_default_config_with_repos(app, args, &repos, None)
 }
 
 fn write_default_config_with_repos(

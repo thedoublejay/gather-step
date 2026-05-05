@@ -34,3 +34,10 @@ release-notes/
 # Local-only Python private corpus benchmark inputs/results
 benchmark/python/private-corpus.local.yaml
 benchmark/python/private-results/
+
+# dhat heap profiler output (emitted by `gather-step` runs that link dhat)
+dhat-heap.json
+
+# Local-only Claude Code memory file (project-specific agent instructions
+# for individual contributors; not part of the published repo).
+CLAUDE.md

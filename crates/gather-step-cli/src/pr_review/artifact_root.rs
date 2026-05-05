@@ -20,7 +20,8 @@
 //! removing any directory.
 //!
 //! Phase 1 Task 3 of the PR review mode plan.
-//! Phase 4 Task 1 adds [`CacheKey`] and bumps the schema to v2.
+//! v3.1 is a fresh generated-state release; marker schema stamping starts at
+//! zero and carries no migration or upgrade branches.
 
 use std::path::{Path, PathBuf};
 
@@ -32,11 +33,8 @@ use crate::storage_context::{ReviewSafetyError, StorageContext};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// Schema version for the marker file.  Bump on incompatible changes.
-///
-/// v1 — original schema (no `cache_key` field).
-/// v2 — added `cache_key` field for branch-scoped cache reuse (Phase 4 Task 1).
-pub const MARKER_SCHEMA_VERSION: u32 = 2;
+/// Schema version for the marker file.
+pub const MARKER_SCHEMA_VERSION: u32 = 0;
 
 /// Filename of the review marker written at the root of every artifact tree.
 pub const MARKER_FILENAME: &str = "review-marker.json";
@@ -65,7 +63,7 @@ pub struct CacheKey {
     /// First 16 hex chars of blake3(`gather-step.config.yaml` bytes).
     /// Empty string when the config file is absent.
     pub config_hash: String,
-    /// Marker schema version at time of caching (currently 2).
+    /// Marker schema version at time of caching.
     pub schema_version: u32,
     /// `CARGO_PKG_VERSION` at build time.
     pub gather_step_version: String,
@@ -94,9 +92,8 @@ impl CacheKey {
 
 /// Contents of `review-marker.json`.
 ///
-/// Every field is required in v2 markers; [`read_marker`] accepts both v1 and
-/// v2 markers (back-compat shim).  V1 markers have no `cache_key` and are not
-/// eligible for cache reuse, but remain valid for `pr-review clean` purposes.
+/// Every field is required for v3.1 markers except optional cache/access
+/// metadata fields used by branch-scoped cache reuse.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewMarker {
     pub schema_version: u32,
@@ -114,8 +111,7 @@ pub struct ReviewMarker {
     /// RFC 3339 UTC timestamp of when the artifact root was created.
     pub created_at: String,
     pub status: ReviewStatus,
-    /// Cache key for branch-scoped reuse (v2+).  `None` for v1 markers read
-    /// via the back-compat shim.
+    /// Cache key for branch-scoped reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<CacheKey>,
     /// RFC 3339 UTC timestamp of the last time this artifact was accessed via a
@@ -214,7 +210,8 @@ pub fn workspace_hash(workspace_root: &Path) -> String {
 
 /// Generate a unique run id of the form `review-<utc-yyyymmdd-hhmmss>-<rand6>`.
 pub fn generate_run_id() -> String {
-    use rand::Rng as _;
+    // rand 0.10 split sample_iter onto the `RngExt` trait.
+    use rand::RngExt as _;
     let ts = Utc::now().format("%Y%m%d-%H%M%S");
     let suffix: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
@@ -267,8 +264,8 @@ pub fn plan_artifact_root(
 
 /// Materialize a previously planned artifact root and write its initial marker.
 ///
-/// The `cache_key` parameter is `Some` for v2+ markers (branch-scoped cache)
-/// and `None` only in tests that pre-date the cache feature.
+/// The `cache_key` parameter is `Some` for branch-scoped cache reuse and
+/// `None` for uncached review runs.
 pub fn materialize_artifact_root(
     artifact: &ReviewArtifactRoot,
     base_sha: &str,

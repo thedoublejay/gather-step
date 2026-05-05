@@ -20,11 +20,37 @@
 //! contracts and richer deployment change reasons; `schema_version` is bumped
 //! to 7.
 
-use std::{fmt::Write as _, path::PathBuf};
+use std::{
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
+
+/// Serialize a [`PathBuf`] as a forward-slash-normalized UTF-8 string so JSON
+/// consumers see the same shape on macOS, Linux, and Windows. Falls back to a
+/// lossy conversion if the path contains non-UTF-8 bytes (rare on user
+/// workspaces; the fallback keeps the field renderable rather than failing the
+/// entire serialization).
+fn serialize_path_forward_slash<S: Serializer>(
+    path: &Path,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let s = path.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '\\' && s.contains('\\') {
+        serializer.serialize_str(&s.replace('\\', "/"))
+    } else {
+        serializer.serialize_str(&s)
+    }
+}
 
 // ─── Public types ─────────────────────────────────────────────────────────────
+
+/// Single source of truth for the `schema_version` emitted in every
+/// [`DeltaReport`] (JSON + Markdown + Braingent frontmatter). Bump this when
+/// the report shape changes; callers must reference it instead of hard-coding
+/// the literal so the JSON, Markdown, frontmatter, and tests stay aligned.
+pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 7;
 
 /// Top-level output struct for `gather-step pr-review`.
 #[derive(Debug, Clone, Serialize)]
@@ -540,6 +566,7 @@ pub struct WorkflowJobDelta {
 /// Review run metadata emitted in every delta report.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewMetadata {
+    #[serde(serialize_with = "serialize_path_forward_slash")]
     pub workspace: PathBuf,
     /// The base ref as supplied by the user (branch name, SHA, …).
     pub base_input: String,
@@ -574,14 +601,19 @@ pub struct ReviewMetadata {
 #[derive(Debug, Clone, Serialize)]
 pub struct SafetyMetadata {
     /// `.gather-step/registry.json` in the source workspace.
+    #[serde(serialize_with = "serialize_path_forward_slash")]
     pub baseline_registry_path: PathBuf,
     /// `.gather-step/storage` in the source workspace.
+    #[serde(serialize_with = "serialize_path_forward_slash")]
     pub baseline_storage_path: PathBuf,
     /// `<review_root>/registry.json`
+    #[serde(serialize_with = "serialize_path_forward_slash")]
     pub review_registry_path: PathBuf,
     /// `<review_root>/storage`
+    #[serde(serialize_with = "serialize_path_forward_slash")]
     pub review_storage_path: PathBuf,
     /// `<cache_root>/<workspace_hash>/<run_id>/`
+    #[serde(serialize_with = "serialize_path_forward_slash")]
     pub review_root: PathBuf,
     pub run_id: String,
     pub cleanup_policy: CleanupPolicy,
@@ -786,7 +818,7 @@ impl DeltaReport {
         let _ = writeln!(buf, "head: {} ({})", m.head_input, m.head_sha);
         let _ = writeln!(buf, "reviewed_at: {reviewed_at}");
         let _ = writeln!(buf, "gather_step_version: {}", env!("CARGO_PKG_VERSION"));
-        buf.push_str("schema_version: 7\n");
+        let _ = writeln!(buf, "schema_version: {}", self.schema_version);
         let _ = writeln!(buf, "risk_count_high: {high_count}");
         let _ = writeln!(buf, "risk_count_medium: {medium_count}");
         let _ = writeln!(buf, "risk_count_low: {low_count}");
@@ -1793,17 +1825,17 @@ mod tests {
         assert_eq!(json["schema_version"], 3);
     }
 
-    /// The canonical schema version is 7 (changed payload impact and deployment
-    /// change reasons added).
+    /// The canonical schema version is `DELTA_REPORT_SCHEMA_VERSION` (changed
+    /// payload impact and deployment change reasons added at v7).
     #[test]
-    fn schema_version_is_7() {
-        let report = make_empty_report(7);
+    fn schema_version_matches_constant() {
+        let report = make_empty_report(super::DELTA_REPORT_SCHEMA_VERSION);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 7);
-        // Confirm the `deployment` key is present.
+        assert_eq!(json["schema_version"], super::DELTA_REPORT_SCHEMA_VERSION);
+        // Confirm the `deployment` key is present (added in v7).
         assert!(
             json.as_object().unwrap().contains_key("deployment"),
-            "schema_version 7 report must include the `deployment` key"
+            "current-version report must include the `deployment` key"
         );
     }
 
@@ -1991,7 +2023,7 @@ mod tests {
     /// Used to pin the schema and section order against accidental regression.
     fn fully_populated_report() -> DeltaReport {
         DeltaReport {
-            schema_version: 7,
+            schema_version: super::DELTA_REPORT_SCHEMA_VERSION,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -2364,7 +2396,7 @@ mod tests {
     /// Braingent output starts with YAML frontmatter and contains required fields.
     #[test]
     fn braingent_renders_yaml_frontmatter() {
-        let r = make_empty_report(5);
+        let r = make_empty_report(super::DELTA_REPORT_SCHEMA_VERSION);
         let out = r.render_braingent();
         assert!(
             out.starts_with("---\n"),
@@ -2374,9 +2406,23 @@ mod tests {
             out.contains("type: code-review"),
             "braingent frontmatter must include type: code-review"
         );
+        let expected_line = format!("schema_version: {}", super::DELTA_REPORT_SCHEMA_VERSION);
         assert!(
-            out.contains("schema_version: 7"),
-            "braingent frontmatter must include schema_version"
+            out.contains(&expected_line),
+            "braingent frontmatter must include `{expected_line}`"
+        );
+    }
+
+    /// The braingent renderer reflects the in-memory `schema_version` field
+    /// rather than baking in a literal — locking this in prevents future
+    /// drift between the JSON `schema_version` and the markdown frontmatter.
+    #[test]
+    fn braingent_schema_version_follows_report_field() {
+        let r = make_empty_report(42);
+        let out = r.render_braingent();
+        assert!(
+            out.contains("schema_version: 42"),
+            "braingent frontmatter must echo the report's schema_version field, got:\n{out}"
         );
     }
 

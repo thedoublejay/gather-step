@@ -83,7 +83,7 @@ pub fn try_reuse_cache(cache_root: &Path, key: &CacheKey) -> Result<Option<Revie
             continue;
         }
 
-        // Must have a v2 cache key with a matching fingerprint.
+        // Must have a cache key with a matching fingerprint.
         let Some(cached_key) = &marker.cache_key else {
             continue;
         };
@@ -311,11 +311,17 @@ fn try_clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        let status = Command::new("cp")
-            .arg("--reflink=auto")
-            .arg(src)
-            .arg(dst)
-            .status();
+        // Pin to the absolute path so a tampered $PATH cannot substitute a
+        // malicious `cp`. macOS uses /bin/cp directly; on Linux the canonical
+        // location is the same, but we fall back to a $PATH lookup when
+        // /bin/cp is missing (e.g. minimal containers).
+        let bin = std::path::Path::new("/bin/cp");
+        let mut cmd = if bin.exists() {
+            Command::new(bin)
+        } else {
+            Command::new("cp")
+        };
+        let status = cmd.arg("--reflink=auto").arg(src).arg(dst).status();
         match status {
             Ok(status) if status.success() => Ok(true),
             Ok(_) => Ok(false),
@@ -533,26 +539,26 @@ mod tests {
     }
 
     #[test]
-    fn try_reuse_cache_ignores_v1_markers_without_cache_key() {
+    fn try_reuse_cache_ignores_markers_without_cache_key() {
         let ws_tmp = TempDir::new("ws4");
         let cache_tmp = TempDir::new("cache4");
         let ws = ws_tmp.path();
         let cache = cache_tmp.path();
 
         let hash = workspace_hash(ws);
-        let root = cache.join(&hash).join("review-v1-run");
+        let root = cache.join(&hash).join("review-no-cache-key-run");
         fs::create_dir_all(root.join("storage")).unwrap();
         fs::create_dir_all(root.join("worktree")).unwrap();
         fs::write(root.join("registry.json"), b"{}").unwrap();
 
-        // V1 marker: no cache_key field.
+        // Uncached marker: no cache_key field.
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash.clone(),
             workspace_root: ws.to_path_buf(),
             base_sha: "base000".to_owned(),
             head_sha: "head000".to_owned(),
-            run_id: "review-v1-run".to_owned(),
+            run_id: "review-no-cache-key-run".to_owned(),
             storage_path: root.join("storage"),
             registry_path: root.join("registry.json"),
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -566,10 +572,7 @@ mod tests {
 
         let key = compute_cache_key(ws, "base000", "head000", b"cfg");
         let result = try_reuse_cache(cache, &key).expect("must not err");
-        assert!(
-            result.is_none(),
-            "v1 marker without cache_key must not match"
-        );
+        assert!(result.is_none(), "marker without cache_key must not match");
     }
 
     #[test]

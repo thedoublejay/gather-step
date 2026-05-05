@@ -146,7 +146,9 @@ pub struct NodeData {
 ///
 /// The `resolver` field stores a resolver strategy tag. Production code should
 /// use [`Self::set_resolver_strategy`] and [`Self::resolver_strategy`] rather
-/// than reading/writing the raw `resolver` string directly.
+/// than reading/writing the raw `resolver` string directly. Graph storage uses
+/// a private compact envelope for known resolver tags; the public API remains
+/// string-based for serde output compatibility.
 #[derive(
     Clone,
     Debug,

@@ -240,6 +240,27 @@ impl GatherStepConfig {
                     reason: format!("repo `{}` path resolves outside the config root", repo.name),
                 });
             }
+
+            for root in &self.deployment.gitops_roots {
+                validate_configured_deployment_path_against_repo_root(
+                    &root_display,
+                    &repo.name,
+                    "deployment.gitops_roots",
+                    &repo_root,
+                    &canonical_repo,
+                    root,
+                )?;
+            }
+            for env_file in &self.deployment.env_files {
+                validate_configured_deployment_path_against_repo_root(
+                    &root_display,
+                    &repo.name,
+                    "deployment.env_files",
+                    &repo_root,
+                    &canonical_repo,
+                    env_file,
+                )?;
+            }
         }
 
         Ok(())
@@ -392,6 +413,62 @@ fn validate_deployment_pattern(
             reason: format!("{field} entries must not escape the config root"),
         });
     }
+    Ok(())
+}
+
+fn validate_configured_deployment_path_against_repo_root(
+    config_path: &str,
+    repo_name: &str,
+    field: &str,
+    repo_root: &Path,
+    canonical_repo: &Path,
+    value: &str,
+) -> Result<(), ConfigError> {
+    let relative = Path::new(value);
+    let mut cursor = repo_root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => cursor.push(part),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(ConfigError::Validation {
+                    path: config_path.to_owned(),
+                    reason: format!("{field} entries must not escape the config root"),
+                });
+            }
+        }
+
+        let metadata = match fs::symlink_metadata(&cursor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: cursor.display().to_string(),
+                    source,
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(ConfigError::Validation {
+                path: config_path.to_owned(),
+                reason: format!(
+                    "{field} entry `{value}` for repo `{repo_name}` resolves through a symlinked path"
+                ),
+            });
+        }
+    }
+
+    if let Ok(canonical_path) = fs::canonicalize(&cursor)
+        && !canonical_path.starts_with(canonical_repo)
+    {
+        return Err(ConfigError::Validation {
+            path: config_path.to_owned(),
+            reason: format!(
+                "{field} entry `{value}` for repo `{repo_name}` resolves outside the repo root"
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -678,6 +755,103 @@ repos:
             .expect_err("symlink repo root should fail");
 
         assert!(matches!(error, ConfigError::Validation { .. }));
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_symlinked_deployment_roots_inside_repo() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should work")
+            .as_nanos();
+        let temp =
+            std::env::temp_dir().join(format!("gather-step-config-deployment-symlink-{unique}"));
+        let workspace_root = temp.join("workspace");
+        let repo_root = workspace_root.join("repos/backend");
+        let external_root = temp.join("external");
+        fs::create_dir_all(&repo_root).expect("repo root");
+        fs::create_dir_all(&external_root).expect("external root");
+        symlink(&external_root, repo_root.join("deploy")).expect("deployment root symlink");
+
+        let config = GatherStepConfig::from_yaml_str(
+            r"
+repos:
+  - name: backend_standard
+    path: repos/backend
+deployment:
+  gitops_roots:
+    - deploy
+",
+        )
+        .expect("config should parse");
+
+        let error = config
+            .validate_repo_roots_against_config_root(&workspace_root)
+            .expect_err("symlink deployment root should fail");
+
+        match error {
+            ConfigError::Validation { reason, .. } => {
+                assert!(reason.contains("deployment.gitops_roots"));
+                assert!(reason.contains("symlinked path"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_symlinked_deployment_env_files_inside_repo() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should work")
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "gather-step-config-deployment-env-symlink-{unique}"
+        ));
+        let workspace_root = temp.join("workspace");
+        let repo_root = workspace_root.join("repos/backend");
+        let external_root = temp.join("external");
+        fs::create_dir_all(repo_root.join("config")).expect("repo config dir");
+        fs::create_dir_all(&external_root).expect("external root");
+        fs::write(external_root.join("runtime.env"), "API_TOKEN=secret\n")
+            .expect("external env file");
+        symlink(
+            external_root.join("runtime.env"),
+            repo_root.join("config/runtime.env"),
+        )
+        .expect("env file symlink");
+
+        let config = GatherStepConfig::from_yaml_str(
+            r"
+repos:
+  - name: backend_standard
+    path: repos/backend
+deployment:
+  env_files:
+    - config/runtime.env
+",
+        )
+        .expect("config should parse");
+
+        let error = config
+            .validate_repo_roots_against_config_root(&workspace_root)
+            .expect_err("symlink deployment env file should fail");
+
+        match error {
+            ConfigError::Validation { reason, .. } => {
+                assert!(reason.contains("deployment.env_files"));
+                assert!(reason.contains("symlinked path"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
         let _ = fs::remove_dir_all(&temp);
     }
 

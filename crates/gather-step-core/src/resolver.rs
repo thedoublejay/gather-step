@@ -4,15 +4,17 @@
 //! Producers MUST set `EdgeMetadata.resolver` to the output of
 //! [`ResolverStrategy::as_str`] so no new undocumented strategy names creep in
 //! between producers and consumers. The field type remains `Option<String>`
-//! for on-disk serde compatibility; [`ResolverStrategy::from_str`] parses a
-//! stored string back into the enum for ranking and display.
+//! for serde compatibility; [`ResolverStrategy::from_str`] parses a
+//! stored string back into the enum for ranking and display. Private graph
+//! storage may encode known values as enum tags, but serde-facing APIs keep the
+//! string field.
 //!
 //! `strategy_weight` returns the ordering weight used as the second tuple in
 //! the deterministic sort contract
 //! `(confidence desc, strategy_weight desc, repo asc, file asc, line asc, qn asc)`.
 
 /// Closed set of known values for `EdgeMetadata.resolver`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, bitcode::Encode, bitcode::Decode)]
 #[non_exhaustive]
 pub enum ResolverStrategy {
     // --- parser call resolution strategies (mirror gather_step_parser::ResolutionStrategy) ---

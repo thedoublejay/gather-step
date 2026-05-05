@@ -155,10 +155,7 @@ pub fn execute(
         }
     }
 
-    let hits = storage
-        .search()
-        .search(&args.symbol, args.limit.max(1))
-        .with_context(|| format!("searching for `{}`", args.symbol))?;
+    let hits = search_impact_hits(storage.search(), &args.symbol, args.limit.max(1))?;
 
     let strict_hits = hits
         .iter()
@@ -184,6 +181,12 @@ pub fn execute(
             // `repo` is not stored in Tantivy (S6); rehydrate from node and
             // apply the caller-supplied repo filter after the graph lookup.
             if repo_filter.is_some_and(|r| node.repo.as_str() != r) {
+                return Ok(None);
+            }
+            if is_qualified_impact_query(&args.symbol)
+                && !node_qualified_name_matches_query(&node, &args.symbol)
+                && hit.symbol_name != args.symbol
+            {
                 return Ok(None);
             }
             let shared_contract_result = shared_contract_match(storage.graph(), &node, shape)?;
@@ -730,8 +733,56 @@ fn node_kind_matches_shape(kind: NodeKind, shape: QueryShape) -> bool {
 }
 
 fn is_strict_impact_match(hit: &gather_step_storage::SearchHit, query: &str) -> bool {
-    let tail = query.rsplit(['.', ':']).next().unwrap_or(query);
+    let tail = impact_query_tail(query);
     hit.symbol_name == query || hit.symbol_name == tail
+}
+
+fn search_impact_hits(
+    search: &impl SearchStore,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<gather_step_storage::SearchHit>> {
+    let hits = search
+        .search(query, limit)
+        .with_context(|| format!("searching for `{query}`"))?;
+    if !hits.is_empty() {
+        return Ok(hits);
+    }
+
+    let tail = impact_query_tail(query);
+    if tail == query {
+        return Ok(hits);
+    }
+
+    search
+        .search(tail, limit)
+        .with_context(|| format!("searching for `{tail}` as fallback for `{query}`"))
+}
+
+fn impact_query_tail(query: &str) -> &str {
+    query.rsplit(['.', ':']).next().unwrap_or(query)
+}
+
+fn is_qualified_impact_query(query: &str) -> bool {
+    impact_query_tail(query) != query
+}
+
+fn node_qualified_name_matches_query(node: &gather_step_core::NodeData, query: &str) -> bool {
+    node.qualified_name
+        .as_deref()
+        .is_some_and(|qualified_name| qualified_name_matches_query(qualified_name, query))
+}
+
+fn qualified_name_matches_query(qualified_name: &str, query: &str) -> bool {
+    let qualified_name = qualified_name.trim_end_matches(['(', ')']);
+    if qualified_name == query {
+        return true;
+    }
+
+    qualified_name
+        .strip_suffix(query)
+        .and_then(|prefix| prefix.as_bytes().last().copied())
+        .is_some_and(|byte| matches!(byte, b'.' | b':' | b'/' | b'\\'))
 }
 
 /// Compute a bonus score for repos that are canonical shared-contract sources.
@@ -981,7 +1032,7 @@ mod tests {
     use super::{
         CandidateKey, ImpactCandidate, ImpactMatchOutput, VirtualImpactOutput,
         canonical_source_bonus, impact_candidate_key, is_strict_impact_match,
-        rerank_impact_candidates, shared_contract_match,
+        node_qualified_name_matches_query, rerank_impact_candidates, shared_contract_match,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1274,6 +1325,35 @@ mod tests {
         assert!(is_strict_impact_match(&hit, "AuditUser"));
         assert!(is_strict_impact_match(&hit, "UserAuthGuard.AuditUser"));
         assert!(!is_strict_impact_match(&hit, "Input"));
+    }
+
+    #[test]
+    fn qualified_impact_query_matches_graph_qualified_name() {
+        let mut method = node(
+            "shared_contracts",
+            "src/auth.guard.ts",
+            NodeKind::Function,
+            "canActivate",
+            0,
+        );
+        method.qualified_name = Some("UserAuthGuard.canActivate".to_owned());
+
+        assert!(node_qualified_name_matches_query(
+            &method,
+            "UserAuthGuard.canActivate"
+        ));
+
+        method.qualified_name = Some("shared_contracts::UserAuthGuard.canActivate".to_owned());
+        assert!(node_qualified_name_matches_query(
+            &method,
+            "UserAuthGuard.canActivate"
+        ));
+
+        method.qualified_name = Some("OtherUserAuthGuard.canActivate".to_owned());
+        assert!(!node_qualified_name_matches_query(
+            &method,
+            "UserAuthGuard.canActivate"
+        ));
     }
 
     #[test]

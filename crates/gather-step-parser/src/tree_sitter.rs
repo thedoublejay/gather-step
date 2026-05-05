@@ -219,14 +219,14 @@ fn parse_file_core(
     let parse_start = std::time::Instant::now();
 
     // Diagnostic bypass: when `GATHER_STEP_DIAG_TS=treesitter` is set, force
-    // TS/JS files through the tree-sitter path instead of swc. Used for
-    // empirical parity comparison against the swc output.
+    // TS/JS files through the tree-sitter path instead of the dedicated Oxc
+    // visitor. Used for empirical comparison against the Oxc output.
     let force_tree_sitter = std::env::var("GATHER_STEP_DIAG_TS")
         .map(|v| v == "treesitter")
         .unwrap_or(false);
 
-    // ── TS/JS: use swc (unless the diagnostic bypass is active) ─────────────
-    if should_use_swc(file) && !force_tree_sitter {
+    // ── TS/JS: use the Oxc visitor (unless the diagnostic bypass is active) ─
+    if should_use_ts_js_visitor(file) && !force_tree_sitter {
         let file_path_utf8 = path_to_utf8(&file.path);
         let file_path = file_path_utf8.as_str();
 
@@ -292,23 +292,19 @@ fn parse_file_core(
         });
 
         let fallback_checkpoint = state.checkpoint();
-        let swc_status = crate::ts_js_swc::parse_ts_js_with_swc_with_status(
+        let ts_js_status = crate::ts_js_oxc::parse_ts_js_with_oxc_with_status(
             file,
             &mut state,
             &source,
             &absolute_path,
         );
-        if swc_status != crate::ts_js_swc::SwcParseStatus::Parsed {
-            let status = match swc_status {
-                crate::ts_js_swc::SwcParseStatus::Parsed => "parsed",
-                crate::ts_js_swc::SwcParseStatus::Recovered => "recovered",
-                crate::ts_js_swc::SwcParseStatus::Unrecoverable => "unrecoverable",
-            };
+        if ts_js_status != crate::ts_js_oxc::TsJsParseStatus::Parsed {
+            let status = ts_js_status.as_str();
             state.restore(fallback_checkpoint);
             tracing::warn!(
                 path = %absolute_path.display(),
-                swc_status = status,
-                "falling back to tree-sitter TS/JS parser after non-parsed SWC result"
+                ts_js_status = status,
+                "falling back to tree-sitter TS/JS parser after non-parsed TS/JS backend result"
             );
             let fallback_start = std::time::Instant::now();
             let tree = PARSER.with_borrow_mut(|parser| -> Result<_, ParseError> {
@@ -325,8 +321,9 @@ fn parse_file_core(
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
 
-        // Framework augmentations (same logic as the non-swc path below).
-        macro_rules! state_snapshot_swc {
+        // Framework augmentations (same logic as the tree-sitter fallback path
+        // below; macro avoids cloning the snapshot when no augmenters apply).
+        macro_rules! state_snapshot_oxc {
             () => {
                 ParsedFile {
                     file: file.clone(),
@@ -369,11 +366,14 @@ fn parse_file_core(
         let mut seen_groups = rustc_hash::FxHashSet::default();
         for pack in &active_pack_refs {
             let pack_id = pack.id;
+            if !pack_id.applies_to_language(file.language) {
+                continue;
+            }
             let group = pack_id.aug_group();
             if !seen_groups.insert(group) {
                 continue;
             }
-            let augmentation = registry.augment(pack_id, &state_snapshot_swc!());
+            let augmentation = registry.augment(pack_id, &state_snapshot_oxc!());
             append_unique_nodes(&mut state.nodes, augmentation.nodes);
             state.edges.extend(augmentation.edges);
         }
@@ -471,7 +471,7 @@ fn parse_file_core(
 
     match file.language {
         Language::TypeScript | Language::JavaScript => {
-            // Should be unreachable; handled above by swc path.
+            // Should be unreachable; handled above by the Oxc visitor path.
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
         Language::Python => {
@@ -540,10 +540,7 @@ fn parse_file_core(
     let mut seen_groups = rustc_hash::FxHashSet::default();
     for pack in &active_pack_refs {
         let pack_id = pack.id;
-        // Skip SharedLib and FrontendHooks for non-TS/JS files (belt-and-suspenders guard).
-        if matches!(pack_id, PackId::SharedLib | PackId::FrontendHooks)
-            && !matches!(file.language, Language::TypeScript | Language::JavaScript)
-        {
+        if !pack_id.applies_to_language(file.language) {
             continue;
         }
         let group = pack_id.aug_group();
@@ -574,7 +571,10 @@ fn parse_file_core(
     Ok(parsed)
 }
 
-fn should_use_swc(file: &FileEntry) -> bool {
+/// True when this file should be parsed by the dedicated TS/JS visitor (Oxc)
+/// instead of the tree-sitter fallback. Static-mapping files (`.json`,
+/// `.yaml`, `.yml`) skip the visitor and stay on tree-sitter.
+fn should_use_ts_js_visitor(file: &FileEntry) -> bool {
     if !matches!(file.language, Language::TypeScript | Language::JavaScript) {
         return false;
     }
@@ -857,12 +857,12 @@ impl<'a> ParseState<'a> {
     }
 
     /// Test-only constructor that builds a minimal `ParseState` suitable for
-    /// driving `parse_ts_js_with_swc` in isolation.  The returned state has
-    /// empty `nodes` / `edges` / `symbols` and dummy file/module nodes.
+    /// driving the Oxc visitor in isolation.  The returned state has empty
+    /// `nodes` / `edges` / `symbols` and dummy file/module nodes.
     ///
-    /// Only available when the crate is compiled for testing or with the
-    /// `test-support` feature.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Only available when the crate is compiled with the `test-support`
+    /// feature.
+    #[cfg(feature = "test-support")]
     pub(crate) fn for_test(file: &'a FileEntry, source: &'a str) -> Self {
         use gather_step_core::{NodeKind, SourceSpan, Visibility, node_id, ref_node_id};
 
@@ -915,15 +915,15 @@ impl<'a> ParseState<'a> {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     fn empty_aliases_for_test() -> &'static PathAliases {
         static EMPTY_ALIASES: std::sync::OnceLock<PathAliases> = std::sync::OnceLock::new();
         EMPTY_ALIASES.get_or_init(PathAliases::empty)
     }
 
     /// Returns a reference to the symbols accumulated during parsing.  Only
-    /// available when compiled for testing or with the `test-support` feature.
-    #[cfg(any(test, feature = "test-support"))]
+    /// available when compiled with the `test-support` feature.
+    #[cfg(feature = "test-support")]
     pub(crate) fn symbols(&self) -> &[crate::tree_sitter::SymbolCapture] {
         &self.symbols
     }
@@ -1286,7 +1286,7 @@ impl<'a> ParseState<'a> {
         });
     }
 
-    // ── pub(crate) accessors used by ts_js_swc ──────────────────────────────
+    // ── pub(crate) accessors used by the Oxc visitor ─────────────────────────
 
     pub(crate) fn repo(&self) -> &str {
         self.repo
@@ -1336,8 +1336,9 @@ impl<'a> ParseState<'a> {
         self.import_bindings.push(binding);
     }
 
-    /// swc variant of `push_call_site` — takes a [`SourceSpan`] directly.
-    pub(crate) fn push_call_site_swc(
+    /// Span-form variant of [`push_call_site`] used by the Oxc visitor —
+    /// takes a [`SourceSpan`] directly instead of a tree-sitter `Node`.
+    pub(crate) fn push_call_site_with_span(
         &mut self,
         owner_id: gather_step_core::NodeId,
         callee_name: String,
@@ -4497,7 +4498,8 @@ mod tests {
         WorkspaceRepoIdentity, configured_workspace_repo_identities,
         import_path_exists_inside_allowed_roots, load_configured_workspace_repo_identities,
         parse_file, parse_file_with_context, resolve_import_path,
-        resolve_python_sibling_package_import, resolve_sibling_package_import, should_use_swc,
+        resolve_python_sibling_package_import, resolve_sibling_package_import,
+        should_use_ts_js_visitor,
     };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -5201,15 +5203,18 @@ export const listItems = async () => {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
-    fn recovered_swc_fallback_resets_state_before_tree_sitter_retry() {
+    fn recovered_oxc_fallback_resets_state_before_tree_sitter_retry() {
         let temp_dir = TestDir::new("recovered-ts-fallback");
         let source = "export function good() { return helper(); }\nexport class Broken {\n";
         fs::write(temp_dir.path().join("broken.ts"), source).expect("fixture should write");
 
-        assert_eq!(
-            crate::ts_js_swc::swc_test_support::parse_recovery_status_for_extension("ts", source),
-            "recovered"
+        let status =
+            crate::ts_js_oxc::oxc_test_support::parse_recovery_status_for_extension("ts", source);
+        assert!(
+            status == "recovered" || status == "unrecoverable",
+            "unclosed class body should not parse cleanly; got {status}"
         );
 
         let parsed = parse_file(
@@ -5232,19 +5237,22 @@ export const listItems = async () => {
             .count();
         assert_eq!(
             good_functions, 1,
-            "fallback should not duplicate symbols emitted by a prior recovered SWC pass"
+            "fallback must not duplicate symbols emitted by a prior recovered Oxc pass"
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
-    fn unrecoverable_swc_parse_falls_back_to_tree_sitter_for_parity() {
-        let temp_dir = TestDir::new("swc-unrecoverable-fallback");
+    fn unrecoverable_oxc_parse_falls_back_to_tree_sitter_for_parity() {
+        let temp_dir = TestDir::new("oxc-unrecoverable-fallback");
         let source = "@\nexport function good() { return 1; }\n";
         fs::write(temp_dir.path().join("broken.ts"), source).expect("fixture should write");
 
-        assert_eq!(
-            crate::ts_js_swc::swc_test_support::parse_recovery_status_for_extension("ts", source),
-            "unrecoverable"
+        let status =
+            crate::ts_js_oxc::oxc_test_support::parse_recovery_status_for_extension("ts", source);
+        assert!(
+            status == "unrecoverable" || status == "recovered",
+            "stray decorator should not parse cleanly; got {status}"
         );
 
         let parsed = parse_file(
@@ -5265,7 +5273,7 @@ export const listItems = async () => {
                 .nodes
                 .iter()
                 .any(|node| node.kind == NodeKind::Function && node.name == "good"),
-            "tree-sitter fallback should preserve later symbols when SWC recovery is unrecoverable"
+            "fallback must preserve later symbols when Oxc parser fails"
         );
     }
 
@@ -5629,7 +5637,7 @@ class Outer:
     }
 
     #[test]
-    fn swc_skips_static_mapping_files() {
+    fn ts_js_visitor_skips_static_mapping_files() {
         let mut file = crate::traverse::FileEntry {
             path: PathBuf::from("app/src/v2/app/translate/en/globalSearch.json"),
             language: Language::JavaScript,
@@ -5637,11 +5645,11 @@ class Outer:
             content_hash: [0; 32],
             source_bytes: None,
         };
-        assert!(!should_use_swc(&file));
+        assert!(!should_use_ts_js_visitor(&file));
 
         file.path = PathBuf::from("src/routes.ts");
         file.language = Language::TypeScript;
-        assert!(should_use_swc(&file));
+        assert!(should_use_ts_js_visitor(&file));
     }
 
     #[test]

@@ -204,18 +204,73 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
         "parser_augment_ms",
         "pack_precompute_ms",
         "metadata_persist_ms",
+        "writer_analytics_total_ms",
+        "analytics_total_ms",
+        "analytics_max_ms",
+        "analytics_recv_wait_total_ms",
     ] {
         assert!(
             index_json["timings"][key].is_u64(),
             "index timings.{key} must be numeric"
         );
     }
+    assert_eq!(index_json["timings"]["writer_analytics_total_ms"], 0);
     assert_eq!(index_json["repos"][0]["git_analytics_status"], "degraded");
     assert!(
         index_json["warnings"]
             .as_array()
             .is_some_and(|warnings| !warnings.is_empty())
     );
+
+    let storage_report = run_ok(temp.path(), &["--json", "storage-report"]);
+    let storage_report_json = stdout_json(&storage_report);
+    assert_eq!(storage_report_json["event"], "storage_report_completed");
+    assert!(
+        storage_report_json["components"]
+            .as_array()
+            .is_some_and(|components| components
+                .iter()
+                .any(|component| component["name"] == "graph"))
+    );
+    assert!(
+        storage_report_json["sqlite_objects"]
+            .as_array()
+            .is_some_and(|objects| !objects.is_empty())
+    );
+    assert!(
+        storage_report_json["graph_tables"]
+            .as_array()
+            .is_some_and(|tables| !tables.is_empty())
+    );
+
+    // deployment-topology smoke: the 162-line CLI command and the 761-line
+    // analysis crate had effectively no end-to-end coverage before this test.
+    // Even with no deployment evidence in the fixture, the command must
+    // produce a stable empty-shape report rather than panicking or failing.
+    let deploy_topo = run_ok(
+        temp.path(),
+        &[
+            "--json",
+            "deployment-topology",
+            "where-deployed",
+            "--service",
+            "ServiceAController",
+        ],
+    );
+    let deploy_topo_json = stdout_json(&deploy_topo);
+    for key in [
+        "deployments",
+        "services",
+        "env_vars",
+        "shared_infra",
+        "workflow_jobs",
+        "edges",
+    ] {
+        assert!(
+            deploy_topo_json[key].is_array(),
+            "deployment-topology output missing array key `{key}`"
+        );
+    }
 
     let status = run_ok(temp.path(), &["status", "--json"]);
     let status_json = stdout_json(&status);
@@ -251,8 +306,29 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .as_str()
             .is_some_and(|path| { path.ends_with(".gather-step/storage/graph.redb") })
     );
-    assert!(compact_json["graph_size_before_bytes"].is_u64());
-    assert!(compact_json["graph_size_after_bytes"].is_u64());
+    let before_bytes = compact_json["graph_size_before_bytes"]
+        .as_u64()
+        .expect("graph_size_before_bytes must be numeric");
+    let after_bytes = compact_json["graph_size_after_bytes"]
+        .as_u64()
+        .expect("graph_size_after_bytes must be numeric");
+    assert!(
+        after_bytes <= before_bytes,
+        "compaction must not grow the graph: before={before_bytes} after={after_bytes}"
+    );
+
+    // Re-run a search post-compact to confirm the store is still readable —
+    // a broken compaction that left the graph unusable would fail here.
+    let post_compact_search = run_ok(temp.path(), &["search", "OrderList", "--json"]);
+    let post_compact_search_json = stdout_json(&post_compact_search);
+    assert!(
+        post_compact_search_json["hits"]
+            .as_array()
+            .expect("post-compact hits array")
+            .iter()
+            .any(|item| item["symbol_name"] == "OrderList"),
+        "search results must survive compaction"
+    );
 
     let conventions = run_ok(temp.path(), &["conventions", "--json"]);
     let conventions_json = stdout_json(&conventions);
@@ -555,8 +631,8 @@ fn corrupt_graph_index_reports_auto_recover_and_auto_recover_rebuilds() {
 }
 
 #[test]
-fn unsupported_metadata_schema_reports_stable_rebuild_message() {
-    let temp = TempDir::new("unsupported-metadata-schema");
+fn metadata_schema_user_version_resets_to_fresh_release_zero() {
+    let temp = TempDir::new("metadata-schema-zero");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
 
@@ -564,17 +640,18 @@ fn unsupported_metadata_schema_reports_stable_rebuild_message() {
     fs::create_dir_all(&storage_root).expect("storage dir");
     let conn = Connection::open(storage_root.join("metadata.sqlite")).expect("metadata sqlite");
     conn.pragma_update(None, "user_version", 99)
-        .expect("stamp unsupported schema");
+        .expect("stamp old development schema");
     drop(conn);
 
-    let output = run_fail(temp.path(), &["index", "--json"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unsupported schema"));
-    assert!(stderr.contains("gather-step index --auto-recover"));
+    let output = run_ok(temp.path(), &["index", "--json"]);
+    let output_json = stdout_json(&output);
+    assert_eq!(output_json["event"], "index_completed");
 
-    let recovered = run_ok(temp.path(), &["index", "--auto-recover", "--json"]);
-    let recovered_json = stdout_json(&recovered);
-    assert_eq!(recovered_json["event"], "index_completed");
+    let conn = Connection::open(storage_root.join("metadata.sqlite")).expect("metadata sqlite");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("user_version should read");
+    assert_eq!(version, 0);
 }
 
 #[test]

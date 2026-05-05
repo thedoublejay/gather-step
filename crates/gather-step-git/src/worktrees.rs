@@ -17,7 +17,7 @@ use thiserror::Error;
 /// Drop is intentionally a no-op: cleanup is explicit so callers can opt into
 /// `--keep-cache` behaviour without leaking handles.  Call [`remove_worktree`]
 /// when the worktree is no longer needed.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReviewWorktree {
     /// The source repository (the user's checkout).
     pub repo: PathBuf,
@@ -70,6 +70,10 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<String, WorktreeError> {
     run_git_raw(&full)
 }
 
+fn detached_worktree_add_args<'a>(target: &'a str, sha: &'a str) -> [&'a str; 6] {
+    ["worktree", "add", "--detach", "--", target, sha]
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -99,7 +103,8 @@ pub fn create_detached_worktree(
 
     // --- create the worktree -------------------------------------------------
     let target_str = target.to_string_lossy();
-    run_git(repo, &["worktree", "add", "--detach", &target_str, sha])?;
+    let add_args = detached_worktree_add_args(&target_str, sha);
+    run_git(repo, &add_args)?;
 
     // --- verify HEAD ---------------------------------------------------------
     // `git rev-parse HEAD` always emits lowercase 40-char hex — no case
@@ -309,6 +314,21 @@ mod tests {
         assert!(
             matches!(err, WorktreeError::RepoNotFound { .. }),
             "expected RepoNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn worktree_add_args_separate_options_from_path_and_ref() {
+        assert_eq!(
+            detached_worktree_add_args("--path-like-option", "--ref-like-option"),
+            [
+                "worktree",
+                "add",
+                "--detach",
+                "--",
+                "--path-like-option",
+                "--ref-like-option",
+            ]
         );
     }
 

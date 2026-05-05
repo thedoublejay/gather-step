@@ -20,7 +20,7 @@ gather-step.config.yaml
   Framework Detection (NestJS, React Query, manifest analysis, ...)
         |
         v
-  Source Parsing (swc for TypeScript/JavaScript, tree-sitter for Python)
+  Source Parsing (Oxc for TypeScript/JavaScript, tree-sitter for Python)
         |
         v
   Framework-Aware Extraction (routes, events, entities, decorators, ...)

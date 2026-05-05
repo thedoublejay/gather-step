@@ -117,6 +117,36 @@ pub(crate) enum AugGroup {
 }
 
 impl PackId {
+    /// Returns whether this pack has an augmentation path for `language`.
+    #[must_use]
+    pub(crate) const fn applies_to_language(self, language: Language) -> bool {
+        match self {
+            // FastAPI is detection-only today. It does not run a per-file
+            // augmentation pass, so avoid building snapshots for it.
+            Self::Fastapi => false,
+            Self::Nestjs
+            | Self::Mongoose
+            | Self::Nextjs
+            | Self::Tailwind
+            | Self::Prisma
+            | Self::Drizzle
+            | Self::TypeOrm
+            | Self::React
+            | Self::ReactRouter
+            | Self::ReactHookForm
+            | Self::Storybook
+            | Self::Azure
+            | Self::Redux
+            | Self::Zustand
+            | Self::LaunchDarkly
+            | Self::SharedLib
+            | Self::GatewayProxy
+            | Self::FrontendHooks => {
+                matches!(language, Language::TypeScript | Language::JavaScript)
+            }
+        }
+    }
+
     /// The augmentation group this pack belongs to.  Packs in the same group
     /// share one underlying augmentation function; [`PackRegistry::augment_all`]
     /// runs each group at most once.
@@ -438,13 +468,7 @@ impl PackRegistry {
         let mut output = AugmentationOutput::default();
 
         for &pack_id in pack_ids {
-            // SharedLib and FrontendHooks only run for TS/JS files.
-            if matches!(pack_id, PackId::SharedLib | PackId::FrontendHooks)
-                && !matches!(
-                    parsed.file.language,
-                    Language::TypeScript | Language::JavaScript
-                )
-            {
+            if !pack_id.applies_to_language(parsed.file.language) {
                 continue;
             }
 
@@ -475,6 +499,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{PackId, PackRegistry};
+    use crate::traverse::Language;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -506,6 +531,42 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn pack_language_gate_keeps_ts_js_augmenters_off_other_languages() {
+        let ts_js_packs = [
+            PackId::Nestjs,
+            PackId::Mongoose,
+            PackId::Nextjs,
+            PackId::Tailwind,
+            PackId::Prisma,
+            PackId::Drizzle,
+            PackId::TypeOrm,
+            PackId::React,
+            PackId::ReactRouter,
+            PackId::ReactHookForm,
+            PackId::Storybook,
+            PackId::Azure,
+            PackId::Redux,
+            PackId::Zustand,
+            PackId::LaunchDarkly,
+            PackId::SharedLib,
+            PackId::GatewayProxy,
+            PackId::FrontendHooks,
+        ];
+
+        for pack_id in ts_js_packs {
+            assert!(pack_id.applies_to_language(Language::TypeScript));
+            assert!(pack_id.applies_to_language(Language::JavaScript));
+            assert!(!pack_id.applies_to_language(Language::Python));
+            assert!(!pack_id.applies_to_language(Language::Rust));
+            assert!(!pack_id.applies_to_language(Language::Go));
+            assert!(!pack_id.applies_to_language(Language::Java));
+        }
+        assert!(!PackId::Fastapi.applies_to_language(Language::TypeScript));
+        assert!(!PackId::Fastapi.applies_to_language(Language::JavaScript));
+        assert!(!PackId::Fastapi.applies_to_language(Language::Python));
     }
 
     #[test]

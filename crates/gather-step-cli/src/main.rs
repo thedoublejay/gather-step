@@ -4,16 +4,24 @@ use std::io::Write;
 
 use anyhow::{Error, Result};
 use clap::Parser;
+#[cfg(feature = "dhat-heap")]
+use dhat::Alloc;
 use gather_step::app::{self, AppContext};
 use gather_step::commands::{self, Cli};
 use gather_step::errors::format_operator_error;
+#[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 
 // mimalloc provides a concurrent-friendly allocator; under rayon's parallel
 // parse workload it reduces contention in the default system allocator
 // (especially on macOS libmalloc) for a measurable speedup.
+#[cfg(not(feature = "dhat-heap"))]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static GLOBAL: Alloc = Alloc;
 
 // Use tokio's default multi-thread runtime (worker_threads = num_cpus).
 // An earlier revision limited it to 2 workers under the theory that rayon
@@ -29,6 +37,9 @@ async fn main() {
 }
 
 async fn run_main() -> Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    let _heap_profiler = dhat::Profiler::new_heap();
+
     let cli = Cli::parse();
     let multi_progress = app::init_tracing(&cli)?;
     let app = AppContext::from_cli(&cli, multi_progress)?;

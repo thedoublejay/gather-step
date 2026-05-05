@@ -1,5 +1,6 @@
 ---
 source: crates/gather-step-parser/tests/extraction_fidelity.rs
+assertion_line: 559
 expression: summarize(&multi)
 ---
 ParsedSummary {
@@ -68,7 +69,7 @@ ParsedSummary {
             ),
             external_id: None,
             signature: Some(
-                "handle(['user.created', 'user.updated'])",
+                "handle()",
             ),
             is_virtual: false,
         },

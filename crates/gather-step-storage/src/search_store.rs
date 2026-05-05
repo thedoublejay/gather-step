@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     fs,
     path::{Path, PathBuf},
@@ -25,15 +26,20 @@ use tantivy::{
         TextFieldIndexing, TextOptions, document::Value as _,
     },
     tokenizer::{
-        Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer, Token,
-        TokenStream, Tokenizer,
+        LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
     },
 };
 use thiserror::Error;
+use tracing::warn;
 
 const CODE_TOKENIZER_NAME: &str = "code";
 const PATH_TOKENIZER_NAME: &str = "path";
-const NL_TOKENIZER_NAME: &str = "nl";
+/// Word tokenizer used for `qualified_name` indexing: splits at
+/// non-alphanumeric characters but does not split CamelCase, then lowercases.
+/// Lets queries like `createorder` find `createOrder` and `service-a` find
+/// any document whose qualified name embeds the repo segment, without paying
+/// for stemming or natural-language analysis.
+const WORD_TOKENIZER_NAME: &str = "word";
 /// Minimum heap the tantivy index writer will accept (50 MiB).
 const MIN_WRITER_HEAP_BYTES: usize = 50 * 1024 * 1024;
 /// Heap budget for one-shot CLI runs: 64 MiB.  Lower is fine because the
@@ -48,9 +54,10 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 
 /// Current search-index schema version.
 ///
-/// Bump this constant whenever the Tantivy schema changes (fields added or
-/// removed) so that incompatible on-disk indexes are rejected at open time
-/// rather than silently producing wrong results.
+/// v3.1 is a fresh generated-state release. Search schema stamping starts at
+/// zero and does not carry migration or upgrade branches for older development
+/// indexes. Bumped to 1 when the `qualified_name` field was added so that
+/// indexes built before the field was reintroduced are rejected at open time.
 pub const SEARCH_INDEX_VERSION: u32 = 1;
 
 /// File name written into the search directory to record the schema version.
@@ -63,7 +70,11 @@ const FIELD_SYMBOL_NAME: &str = "symbol_name";
 const FIELD_CONTENT: &str = "content";
 const FIELD_FILE_NAME: &str = "file_name";
 const FIELD_FILE_PATH_TOKENS: &str = "file_path_tokens";
-const FIELD_DESCRIPTION: &str = "description";
+/// Lowercased word-token view of the node's `qualified_name` (typically
+/// `repo::path::name`). Indexed only — not stored — and used by the query
+/// parser so users can find symbols by repo prefix or by typing a CamelCase
+/// identifier in lowercase.
+const FIELD_QUALIFIED_NAME: &str = "qualified_name";
 const FIELD_NODE_KIND: &str = "node_kind";
 const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
@@ -184,6 +195,32 @@ pub struct TantivySearchStore {
     workload: Option<SearchWorkload>,
 }
 
+pub struct DeferredCommitGuard<'store> {
+    store: &'store TantivySearchStore,
+    flushed: bool,
+}
+
+impl DeferredCommitGuard<'_> {
+    pub fn mark_flushed(mut self) {
+        self.flushed = true;
+        self.store.set_deferred_commit(false);
+    }
+}
+
+impl Drop for DeferredCommitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.flushed
+            && let Err(error) = self.store.rollback()
+        {
+            warn!(
+                error = %error,
+                "failed to roll back deferred search index writes",
+            );
+        }
+        self.store.set_deferred_commit(false);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SearchFields {
     node_id: Field,
@@ -193,7 +230,7 @@ struct SearchFields {
     content: Field,
     file_name: Field,
     file_path_tokens: Field,
-    description: Field,
+    qualified_name: Field,
     node_kind: Field,
     last_modified: Field,
     is_exported: Field,
@@ -233,9 +270,9 @@ pub enum SearchStoreError {
     #[error("invalid node kind tag `{0}`")]
     InvalidNodeKind(u64),
     #[error(
-        "your local index uses an unsupported schema; run `gather-step clean && gather-step index` to rebuild"
+        "search index schema version mismatch: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
     )]
-    VersionMismatch { stored: u32, expected: u32 },
+    SchemaVersionMismatch { stored: String, expected: u32 },
 }
 
 impl TantivySearchStore {
@@ -269,11 +306,11 @@ impl TantivySearchStore {
         // Caller must have validated path via cli::path_safety before opening.
         crate::fs_mode::apply_private_dir(&path)?;
 
-        // Check (non-test) or skip (test/RamDirectory) schema version guard.
+        // Stamp (non-test) or skip (test/RamDirectory) schema version metadata.
         // RamDirectory indexes are always fresh so the version file is not
         // written or read in test builds.
         #[cfg(not(test))]
-        check_or_write_schema_version(&path)?;
+        stamp_schema_version_if_missing(&path)?;
 
         let schema = build_schema();
         #[cfg(test)]
@@ -285,7 +322,7 @@ impl TantivySearchStore {
         };
         register_tokenizers(&mut index);
 
-        let fields = SearchFields::from_schema(&index.schema());
+        let fields = SearchFields::from_schema(&index.schema())?;
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -442,6 +479,15 @@ impl TantivySearchStore {
         self.deferred_commit.store(enabled, AtomicOrdering::Release);
     }
 
+    #[must_use]
+    pub fn begin_deferred_commit(&self) -> DeferredCommitGuard<'_> {
+        self.set_deferred_commit(true);
+        DeferredCommitGuard {
+            store: self,
+            flushed: false,
+        }
+    }
+
     pub fn commit(&self) -> Result<(), SearchStoreError> {
         if self.deferred_commit.load(AtomicOrdering::Acquire) {
             return Ok(());
@@ -499,11 +545,11 @@ impl TantivySearchStore {
         }
         tantivy_doc.add_text(self.fields.file_name, file_name(&document.file_path));
         tantivy_doc.add_text(self.fields.file_path_tokens, &document.file_path);
+        if !document.description.is_empty() {
+            tantivy_doc.add_text(self.fields.qualified_name, &document.description);
+        }
         // Stored (not indexed) copy of the path for query-aware rerank.
         tantivy_doc.add_text(self.fields.file_path_stored, &document.file_path);
-        if !document.description.is_empty() {
-            tantivy_doc.add_text(self.fields.description, &document.description);
-        }
         tantivy_doc.add_u64(self.fields.node_kind, u64::from(document.node_kind.as_u8()));
         tantivy_doc.add_u64(self.fields.last_modified, document.last_modified);
         tantivy_doc.add_bool(self.fields.is_exported, document.is_exported);
@@ -520,7 +566,7 @@ impl TantivySearchStore {
                 self.fields.content,
                 self.fields.file_name,
                 self.fields.file_path_tokens,
-                self.fields.description,
+                self.fields.qualified_name,
             ],
         );
         parser.set_conjunction_by_default();
@@ -532,7 +578,7 @@ impl TantivySearchStore {
                 self.fields.content,
                 self.fields.file_name,
                 self.fields.file_path_tokens,
-                self.fields.description,
+                self.fields.qualified_name,
             ] {
                 parser.set_field_fuzzy(field, false, 1, true);
             }
@@ -555,7 +601,8 @@ impl TantivySearchStore {
             .map_err(|_| SearchStoreError::ReaderPoisoned)?;
         let searcher = reader.searcher();
         let parser = self.build_query_parser(fuzzy);
-        let (query, _) = parser.parse_query_lenient(query_text);
+        let parser_text = parser_query_text(query_text);
+        let (query, _) = parser.parse_query_lenient(parser_text.as_ref());
         let query = self.apply_filters(query, filters);
         let fetch_limit = limit.max(1).saturating_mul(5).min(MAX_RESULT_WINDOW);
         let collector = TopDocs::with_limit(fetch_limit).order_by_score();
@@ -625,8 +672,8 @@ impl TantivySearchStore {
         let symbol_name = first_text(&document, self.fields.symbol_name, FIELD_SYMBOL_NAME)?;
         let node_kind = fast_node_kind(segment_reader, address.doc_id)?;
         let last_modified = fast_u64(segment_reader, FIELD_LAST_MODIFIED, address.doc_id)?;
-        let is_exported = first_bool(&document, self.fields.is_exported, FIELD_IS_EXPORTED)?;
-        let lang = first_text(&document, self.fields.lang, FIELD_LANG)?;
+        let is_exported = fast_bool(segment_reader, FIELD_IS_EXPORTED, address.doc_id)?;
+        let lang = fast_string(segment_reader, FIELD_LANG, address.doc_id)?;
         // `file_path_stored` may be absent for documents written before the
         // field was added.  Treat absence as empty string; the path-token boost
         // is a no-op on empty paths.
@@ -734,92 +781,37 @@ impl SearchDocument {
     }
 }
 
-/// Read the schema version recorded in `SEARCH_VERSION_FILE` inside `dir`.
+/// Ensure the search directory carries the v3.1 fresh-release schema stamp.
 ///
-/// - If the file is absent this is a fresh index: write the current version
-///   and proceed.
-/// - If the file exists and its version matches [`SEARCH_INDEX_VERSION`],
-///   proceed normally.
-/// - If the file exists but the version differs, return
-///   [`SearchStoreError::VersionMismatch`] so the caller can prompt the user
-///   to rebuild generated index state.
-///
-/// The version file is a plain decimal `u32` followed by a newline.
+/// The version file is a plain decimal `u32` followed by a newline. If a stamp
+/// is present, it must match [`SEARCH_INDEX_VERSION`]; otherwise a
+/// [`SearchStoreError::SchemaVersionMismatch`] is returned so callers can
+/// surface a friendly recovery hint instead of letting Tantivy fail later with
+/// a raw schema/field error.
 ///
 /// Exposed as `pub(crate)` so the unit-test suite can exercise it directly
 /// against a real filesystem directory without needing a non-test binary.
-pub(crate) fn check_or_write_schema_version(dir: &std::path::Path) -> Result<(), SearchStoreError> {
+pub(crate) fn stamp_schema_version_if_missing(
+    dir: &std::path::Path,
+) -> Result<(), SearchStoreError> {
     let version_path = dir.join(SEARCH_VERSION_FILE);
     match fs::read_to_string(&version_path) {
-        Ok(contents) => {
-            let stored: u32 = contents.trim().parse().unwrap_or(0);
-            if stored != SEARCH_INDEX_VERSION {
-                return Err(SearchStoreError::VersionMismatch {
-                    stored,
+        Ok(stored_raw) => {
+            let stored = stored_raw.trim();
+            match stored.parse::<u32>() {
+                Ok(value) if value == SEARCH_INDEX_VERSION => Ok(()),
+                _ => Err(SearchStoreError::SchemaVersionMismatch {
+                    stored: stored.to_owned(),
                     expected: SEARCH_INDEX_VERSION,
-                });
+                }),
             }
-            Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // Stamp the version file only when the directory is genuinely
-            // empty (or contains nothing but our sentinel file).  A non-empty
-            // directory without a version file is incompatible generated
-            // state. Treating it as "fresh" would silently stamp the sentinel
-            // and the next schema-dependent lookup (`SearchFields::from_schema`)
-            // could panic on a missing field. Reject with `VersionMismatch` so
-            // the operator can run `gather-step clean --storage` and reindex.
-            if directory_has_index_artifacts(dir)? {
-                return Err(SearchStoreError::VersionMismatch {
-                    stored: 0,
-                    expected: SEARCH_INDEX_VERSION,
-                });
-            }
             fs::write(&version_path, format!("{SEARCH_INDEX_VERSION}\n"))?;
             Ok(())
         }
         Err(error) => Err(SearchStoreError::Io(error)),
     }
-}
-
-/// Returns `true` when `dir` contains recognizable Tantivy index artifacts.
-///
-/// Stray platform/editor files in an otherwise fresh directory (for example
-/// `.DS_Store`) should not force a legacy-index failure; only real index files
-/// without the schema sentinel mean we must reject and ask for a clean reindex.
-fn directory_has_index_artifacts(dir: &std::path::Path) -> Result<bool, SearchStoreError> {
-    let entries = match fs::read_dir(dir) {
-        Ok(it) => it,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(SearchStoreError::Io(error)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(SearchStoreError::Io)?;
-        let file_name = entry.file_name();
-        if file_name == SEARCH_VERSION_FILE {
-            continue;
-        }
-        if is_search_index_artifact_name(&file_name) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn is_search_index_artifact_name(file_name: &std::ffi::OsStr) -> bool {
-    let Some(name) = file_name.to_str() else {
-        return false;
-    };
-    if matches!(name, "meta.json" | ".managed.json" | "managed.json") {
-        return true;
-    }
-    let Some((_, extension)) = name.rsplit_once('.') else {
-        return false;
-    };
-    matches!(
-        extension,
-        "idx" | "term" | "pos" | "fast" | "fieldnorm" | "store" | "del"
-    )
 }
 
 fn build_schema() -> Schema {
@@ -839,11 +831,11 @@ fn build_schema() -> Schema {
     builder.add_text_field(FIELD_CONTENT, code_text_options(false, true));
     builder.add_text_field(FIELD_FILE_NAME, code_text_options(false, false));
     builder.add_text_field(FIELD_FILE_PATH_TOKENS, path_text_options(false, false));
-    builder.add_text_field(FIELD_DESCRIPTION, nl_text_options(false, true));
+    builder.add_text_field(FIELD_QUALIFIED_NAME, word_text_options());
     builder.add_u64_field(FIELD_NODE_KIND, fast_numeric_options(false));
     builder.add_u64_field(FIELD_LAST_MODIFIED, fast_numeric_options(false));
-    builder.add_bool_field(FIELD_IS_EXPORTED, FAST | STORED);
-    builder.add_text_field(FIELD_LANG, STRING | FAST | STORED);
+    builder.add_bool_field(FIELD_IS_EXPORTED, FAST);
+    builder.add_text_field(FIELD_LANG, STRING | FAST);
     // Stored (not indexed) copy of the file path for query-aware rerank.
     // Uses `STORED` only — no tokenizer, no index.
     builder.add_text_field(FIELD_FILE_PATH_STORED, STORED);
@@ -881,19 +873,15 @@ fn path_text_options(stored: bool, with_positions: bool) -> TextOptions {
     options
 }
 
-fn nl_text_options(stored: bool, with_positions: bool) -> TextOptions {
+/// Text options for the `qualified_name` field. Indexed only, frequencies
+/// without positions (no phrase queries land here), tokenizer keeps each
+/// alphanumeric chunk intact and lowercases it so a query like `createorder`
+/// hits a stored `createOrder`.
+fn word_text_options() -> TextOptions {
     let indexing = TextFieldIndexing::default()
-        .set_tokenizer(NL_TOKENIZER_NAME)
-        .set_index_option(if with_positions {
-            IndexRecordOption::WithFreqsAndPositions
-        } else {
-            IndexRecordOption::WithFreqs
-        });
-    let mut options = TextOptions::default().set_indexing_options(indexing);
-    if stored {
-        options = options.set_stored();
-    }
-    options
+        .set_tokenizer(WORD_TOKENIZER_NAME)
+        .set_index_option(IndexRecordOption::WithFreqs);
+    TextOptions::default().set_indexing_options(indexing)
 }
 
 fn fast_numeric_options(stored: bool) -> NumericOptions {
@@ -918,13 +906,40 @@ fn register_tokenizers(index: &mut Index) {
             .build(),
     );
     index.tokenizers().register(
-        NL_TOKENIZER_NAME,
+        WORD_TOKENIZER_NAME,
         TextAnalyzer::builder(SimpleTokenizer::default())
             .filter(RemoveLongFilter::limit(MAX_TOKEN_BYTES))
             .filter(LowerCaser)
-            .filter(Stemmer::new(Language::English))
             .build(),
     );
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "query expansion needs a short owned string only when a single CamelCase identifier splits"
+)]
+fn parser_query_text(query: &str) -> Cow<'_, str> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(is_identifier_query_byte) {
+        return Cow::Borrowed(query);
+    }
+
+    let spans = split_identifier_spans(trimmed);
+    if spans.len() <= 1 {
+        return Cow::Borrowed(query);
+    }
+
+    Cow::Owned(
+        spans
+            .into_iter()
+            .map(|span| trimmed[span.start..span.end].to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn is_identifier_query_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/')
 }
 
 /// Return the first code-token (split at CamelCase / underscore boundaries)
@@ -1193,17 +1208,6 @@ fn first_text(
         .ok_or(SearchStoreError::MissingField(name))
 }
 
-fn first_bool(
-    document: &TantivyDocument,
-    field: Field,
-    name: &'static str,
-) -> Result<bool, SearchStoreError> {
-    document
-        .get_first(field)
-        .and_then(|value| value.as_bool())
-        .ok_or(SearchStoreError::MissingField(name))
-}
-
 fn first_node_id(document: &TantivyDocument, field: Field) -> Result<NodeId, SearchStoreError> {
     let bytes = document
         .get_first(field)
@@ -1231,6 +1235,39 @@ fn fast_u64(
         .ok_or(SearchStoreError::MissingField(field_name))
 }
 
+fn fast_bool(
+    segment_reader: &tantivy::SegmentReader,
+    field_name: &'static str,
+    doc_id: tantivy::DocId,
+) -> Result<bool, SearchStoreError> {
+    segment_reader
+        .fast_fields()
+        .bool(field_name)?
+        .first(doc_id)
+        .ok_or(SearchStoreError::MissingField(field_name))
+}
+
+fn fast_string(
+    segment_reader: &tantivy::SegmentReader,
+    field_name: &'static str,
+    doc_id: tantivy::DocId,
+) -> Result<String, SearchStoreError> {
+    let column = segment_reader
+        .fast_fields()
+        .str(field_name)?
+        .ok_or(SearchStoreError::MissingField(field_name))?;
+    let ord = column
+        .ords()
+        .first(doc_id)
+        .ok_or(SearchStoreError::MissingField(field_name))?;
+    let mut value = String::new();
+    if column.ord_to_str(ord, &mut value)? {
+        Ok(value)
+    } else {
+        Err(SearchStoreError::MissingField(field_name))
+    }
+}
+
 fn fast_node_kind(
     segment_reader: &tantivy::SegmentReader,
     doc_id: tantivy::DocId,
@@ -1241,48 +1278,27 @@ fn fast_node_kind(
 }
 
 impl SearchFields {
-    fn from_schema(schema: &Schema) -> Self {
-        Self {
-            node_id: schema
-                .get_field(FIELD_NODE_ID)
-                .expect("node_id field should exist"),
-            repo: schema
-                .get_field(FIELD_REPO)
-                .expect("repo field should exist"),
-            file_key: schema
-                .get_field(FIELD_FILE_KEY)
-                .expect("file_key field should exist"),
-            symbol_name: schema
-                .get_field(FIELD_SYMBOL_NAME)
-                .expect("symbol_name field should exist"),
-            content: schema
-                .get_field(FIELD_CONTENT)
-                .expect("content field should exist"),
-            file_name: schema
-                .get_field(FIELD_FILE_NAME)
-                .expect("file_name field should exist"),
-            file_path_tokens: schema
-                .get_field(FIELD_FILE_PATH_TOKENS)
-                .expect("file_path_tokens field should exist"),
-            description: schema
-                .get_field(FIELD_DESCRIPTION)
-                .expect("description field should exist"),
-            node_kind: schema
-                .get_field(FIELD_NODE_KIND)
-                .expect("node_kind field should exist"),
-            last_modified: schema
-                .get_field(FIELD_LAST_MODIFIED)
-                .expect("last_modified field should exist"),
-            is_exported: schema
-                .get_field(FIELD_IS_EXPORTED)
-                .expect("is_exported field should exist"),
-            lang: schema
-                .get_field(FIELD_LANG)
-                .expect("lang field should exist"),
-            file_path_stored: schema
-                .get_field(FIELD_FILE_PATH_STORED)
-                .expect("file_path_stored field should exist"),
-        }
+    fn from_schema(schema: &Schema) -> Result<Self, SearchStoreError> {
+        let field = |name: &'static str| {
+            schema
+                .get_field(name)
+                .map_err(|_| SearchStoreError::MissingField(name))
+        };
+        Ok(Self {
+            node_id: field(FIELD_NODE_ID)?,
+            repo: field(FIELD_REPO)?,
+            file_key: field(FIELD_FILE_KEY)?,
+            symbol_name: field(FIELD_SYMBOL_NAME)?,
+            content: field(FIELD_CONTENT)?,
+            file_name: field(FIELD_FILE_NAME)?,
+            file_path_tokens: field(FIELD_FILE_PATH_TOKENS)?,
+            qualified_name: field(FIELD_QUALIFIED_NAME)?,
+            node_kind: field(FIELD_NODE_KIND)?,
+            last_modified: field(FIELD_LAST_MODIFIED)?,
+            is_exported: field(FIELD_IS_EXPORTED)?,
+            lang: field(FIELD_LANG)?,
+            file_path_stored: field(FIELD_FILE_PATH_STORED)?,
+        })
     }
 }
 
@@ -1480,21 +1496,50 @@ mod tests {
     fn indexes_symbol_and_matches_order_search() {
         let store =
             TantivySearchStore::open(temp_search_dir("index-symbol")).expect("store should open");
-        let doc = SearchDocument::from_node(
-            &node(
-                "createOrderUseCase",
-                "src/workflows/order/create-order.use-case.ts",
-            ),
-            1_713_000_000,
+        let mut symbol = node(
+            "createOrderUseCase",
+            "src/workflows/order/create-order.use-case.ts",
         );
+        symbol.signature = None;
+        let doc = SearchDocument::from_node(&symbol, 1_713_000_000);
 
         store.index_symbol(&doc).expect("document should index");
         let results = store
-            .search("service-a", 10)
+            .search("createOrderUseCase", 10)
             .expect("search should succeed");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol_name, "createOrderUseCase");
+        assert!(results[0].exact_match);
+    }
+
+    #[test]
+    fn snake_case_query_matches_split_symbol_tokens() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("snake-query")).expect("store should open");
+        let mut repo_node = node("backend_standard", "__repo__");
+        repo_node.id = node_id(
+            "backend_standard",
+            "__repo__",
+            NodeKind::Repo,
+            "backend_standard",
+        );
+        repo_node.kind = NodeKind::Repo;
+        repo_node.repo = "backend_standard".to_owned();
+        repo_node.file_path = "__repo__".to_owned();
+        repo_node.qualified_name = Some("backend_standard::__repo__".to_owned());
+        repo_node.signature = None;
+        repo_node.visibility = None;
+        let doc = SearchDocument::from_node(&repo_node, 1_713_000_000);
+
+        store.index_symbol(&doc).expect("document should index");
+        let results = store
+            .search("backend_standard", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_name, "backend_standard");
+        assert_eq!(results[0].node_kind, NodeKind::Repo);
         assert!(results[0].exact_match);
     }
 
@@ -1636,6 +1681,68 @@ mod tests {
     }
 
     #[test]
+    fn deferred_commit_guard_rolls_back_unflushed_writes_on_unwind() {
+        let store = TantivySearchStore::open(temp_search_dir("deferred-rollback"))
+            .expect("store should open");
+        let original = SearchDocument::from_node(&node("createOrderUseCase", "src/foo.ts"), 1);
+        let replacement = SearchDocument::from_node(&node("updateOrderUseCase", "src/foo.ts"), 2);
+
+        store
+            .index_symbol(&original)
+            .expect("original document should index");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.begin_deferred_commit();
+            store
+                .replace_by_files(&[("service-a", "src/foo.ts")], &[replacement])
+                .expect("deferred replacement should stage");
+            panic!("injected deferred search panic");
+        }));
+        assert!(result.is_err(), "test must exercise the unwind path");
+
+        let old_results = store
+            .search("createOrderUseCase", 10)
+            .expect("old symbol search should succeed");
+        let new_results = store
+            .search("updateOrderUseCase", 10)
+            .expect("new symbol search should succeed");
+
+        assert_eq!(old_results.len(), 1);
+        assert!(
+            new_results.is_empty(),
+            "unflushed deferred writes must not survive guard drop"
+        );
+    }
+
+    #[test]
+    fn deferred_commit_guard_keeps_flushed_writes() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("deferred-flush")).expect("store should open");
+        let original = SearchDocument::from_node(&node("createOrderUseCase", "src/foo.ts"), 1);
+        let replacement = SearchDocument::from_node(&node("updateOrderUseCase", "src/foo.ts"), 2);
+
+        store
+            .index_symbol(&original)
+            .expect("original document should index");
+        let guard = store.begin_deferred_commit();
+        store
+            .replace_by_files(&[("service-a", "src/foo.ts")], &[replacement])
+            .expect("deferred replacement should stage");
+        store.flush().expect("deferred writes should flush");
+        guard.mark_flushed();
+
+        let old_results = store
+            .search("createOrderUseCase", 10)
+            .expect("old symbol search should succeed");
+        let new_results = store
+            .search("updateOrderUseCase", 10)
+            .expect("new symbol search should succeed");
+
+        assert!(old_results.is_empty());
+        assert_eq!(new_results.len(), 1);
+    }
+
+    #[test]
     fn read_only_store_rejects_writes() {
         let store = TantivySearchStore::open_read_only(temp_search_dir("read-only"))
             .expect("store should open");
@@ -1653,8 +1760,7 @@ mod tests {
         // When the query starts with an uppercase letter the PascalCase-type
         // boost (1.2×) combined with the exact-symbol boost (1.6×) must lift
         // a matching Type node above a Function hit that only has a higher
-        // raw BM25 score due to appearing in more fields (e.g. content /
-        // description).
+        // raw BM25 score due to appearing repeatedly in content.
         let store =
             TantivySearchStore::open(temp_search_dir("pascal-boost")).expect("store should open");
 
@@ -1988,9 +2094,9 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Schema-version guard tests
+    // Schema-version stamp tests
     //
-    // These tests exercise `check_or_write_schema_version` directly against
+    // These tests exercise `stamp_schema_version_if_missing` directly against
     // a real filesystem directory because the version file is not used in
     // in-memory (RamDirectory) test indexes.
     // -------------------------------------------------------------------------
@@ -1998,14 +2104,14 @@ mod tests {
     /// A directory with no version file is treated as a fresh index: the
     /// current version is stamped and `Ok(())` is returned.
     #[test]
-    fn schema_version_check_stamps_fresh_directory() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
+    fn schema_version_stamp_writes_current_for_fresh_directory() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
         let dir = temp_search_dir("version-fresh");
         fs::create_dir_all(&dir).expect("dir should exist");
 
-        check_or_write_schema_version(&dir).expect("fresh directory should succeed");
+        stamp_schema_version_if_missing(&dir).expect("fresh directory should succeed");
 
         let written = fs::read_to_string(dir.join(SEARCH_VERSION_FILE))
             .expect("version file should have been created");
@@ -2015,13 +2121,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A directory already at the current version passes the check.
+    /// Existing stamps that match the current version are accepted and left
+    /// alone. Mismatched stamps return a typed `SchemaVersionMismatch` error
+    /// so the CLI/MCP layer can render a friendly recovery hint instead of
+    /// letting Tantivy fail later with a raw schema/field error.
     #[test]
-    fn schema_version_check_accepts_current_version() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
+    fn schema_version_stamp_accepts_matching_stamp() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
-        let dir = temp_search_dir("version-current");
+        let dir = temp_search_dir("version-matching");
         fs::create_dir_all(&dir).expect("dir should exist");
         fs::write(
             dir.join(SEARCH_VERSION_FILE),
@@ -2029,123 +2138,66 @@ mod tests {
         )
         .expect("write version file");
 
-        check_or_write_schema_version(&dir)
-            .expect("directory at current version should pass check");
+        stamp_schema_version_if_missing(&dir).expect("matching stamp should pass through");
 
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A directory stamped with a mismatched version returns `VersionMismatch`.
-    #[test]
-    fn schema_version_check_rejects_mismatched_version() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
-        use std::fs;
-
-        let dir = temp_search_dir("version-mismatch");
-        fs::create_dir_all(&dir).expect("dir should exist");
-        let mismatched_version = SEARCH_INDEX_VERSION + 1;
-        fs::write(
-            dir.join(SEARCH_VERSION_FILE),
-            format!("{mismatched_version}\n"),
-        )
-        .expect("write mismatched version file");
-
-        let err = check_or_write_schema_version(&dir)
-            .expect_err("mismatched-version directory must be rejected");
-
-        assert!(
-            matches!(
-                err,
-                SearchStoreError::VersionMismatch {
-                    stored,
-                    expected,
-                } if stored == mismatched_version && expected == SEARCH_INDEX_VERSION
-            ),
-            "expected VersionMismatch error; got: {err}"
-        );
-        assert!(
-            err.to_string()
-                .contains("gather-step clean && gather-step index"),
-            "error message should instruct the user to rebuild generated state; got: {err}"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A non-empty index directory with no version sentinel must be rejected
-    /// with `VersionMismatch { stored: 0 }`, not silently stamped as fresh.
-    /// Stamping it would let the next schema-dependent lookup panic on a
-    /// missing field.
-    #[test]
-    fn schema_version_check_rejects_unstamped_non_empty_directory() {
-        use super::{SEARCH_INDEX_VERSION, check_or_write_schema_version};
-        use std::fs;
-
-        let dir = temp_search_dir("version-unstamped");
-        fs::create_dir_all(&dir).expect("dir should exist");
-        // Simulate index artifacts without the schema-version sentinel.
-        fs::write(dir.join("meta.json"), "{}").expect("write index artifact");
-
-        let err = check_or_write_schema_version(&dir)
-            .expect_err("unstamped non-empty directory must be rejected");
-
-        assert!(
-            matches!(
-                err,
-                SearchStoreError::VersionMismatch {
-                    stored: 0,
-                    expected,
-                } if expected == SEARCH_INDEX_VERSION
-            ),
-            "expected VersionMismatch {{ stored: 0 }} for unstamped non-empty directory; got: {err}"
-        );
-
-        // Sentinel file must NOT have been written; the directory stays as-is
-        // until the operator cleans it.
-        assert!(
-            !dir.join(super::SEARCH_VERSION_FILE).exists(),
-            "version sentinel must not be stamped on unstamped non-empty directory"
-        );
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// A directory containing ONLY the schema-version sentinel (e.g. from a
-    /// prior clean run) is treated as fresh — re-stamping is a no-op when
-    /// the existing stamp matches the current version, and other branches
-    /// already cover stamped directories.  This guards against the edge case
-    /// where `directory_has_index_artifacts` would otherwise misclassify a
-    /// directory that contains only its own sentinel as having artifacts.
-    #[test]
-    fn schema_version_check_treats_sentinel_only_directory_as_fresh() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
-        use std::fs;
-
-        let dir = temp_search_dir("version-sentinel-only");
-        fs::create_dir_all(&dir).expect("dir should exist");
-        // No artifacts — directory is empty.  Stamping should succeed.
-        check_or_write_schema_version(&dir).expect("empty dir should be stampable");
-
-        // Now the sentinel exists.  A subsequent call must accept it (the
-        // current-version branch in `check_or_write_schema_version`).
         let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
         assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());
-        check_or_write_schema_version(&dir).expect("sentinel-only dir should accept current ver");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn schema_version_check_ignores_stray_non_index_files_in_fresh_directory() {
-        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, check_or_write_schema_version};
+    fn schema_version_stamp_rejects_mismatched_stamp() {
+        use super::{
+            SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, SearchStoreError,
+            stamp_schema_version_if_missing,
+        };
         use std::fs;
 
-        let dir = temp_search_dir("version-stray-file");
+        let dir = temp_search_dir("version-mismatched");
         fs::create_dir_all(&dir).expect("dir should exist");
-        fs::write(dir.join(".DS_Store"), "finder metadata").expect("write stray file");
+        fs::write(dir.join(SEARCH_VERSION_FILE), "99\n").expect("write version file");
 
-        check_or_write_schema_version(&dir)
-            .expect("stray non-index files should not be treated as legacy index artifacts");
+        let err = stamp_schema_version_if_missing(&dir).expect_err("mismatch should error");
+        match err {
+            SearchStoreError::SchemaVersionMismatch { stored, expected } => {
+                assert_eq!(stored, "99");
+                assert_eq!(expected, SEARCH_INDEX_VERSION);
+            }
+            other => panic!("expected SchemaVersionMismatch, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_stamp_rejects_garbage_stamp() {
+        use super::{SEARCH_VERSION_FILE, SearchStoreError, stamp_schema_version_if_missing};
+        use std::fs;
+
+        let dir = temp_search_dir("version-garbage");
+        fs::create_dir_all(&dir).expect("dir should exist");
+        fs::write(dir.join(SEARCH_VERSION_FILE), "not-a-number\n").expect("write version file");
+
+        let err = stamp_schema_version_if_missing(&dir).expect_err("non-numeric stamp errors");
+        assert!(matches!(
+            err,
+            SearchStoreError::SchemaVersionMismatch { .. }
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_stamp_writes_current_in_non_empty_directory() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
+        use std::fs;
+
+        let dir = temp_search_dir("version-non-empty");
+        fs::create_dir_all(&dir).expect("dir should exist");
+        fs::write(dir.join("meta.json"), "{}").expect("write index artifact");
+
+        stamp_schema_version_if_missing(&dir).expect("non-empty dir should still be stamped");
 
         let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
         assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());

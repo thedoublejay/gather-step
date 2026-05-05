@@ -187,6 +187,9 @@ Gather Step does **not** redact secrets embedded in indexed source files. The de
 
 `gather-step-output/src/sanitize.rs` is a Markdown-injection escaper — it is not a secret scrubber.
 
+Release smoke tests assert that deployment env values do not enter generated graph/search/context-pack/deployment outputs.
+They do not replace repository-level secret scanning for source code.
+
 **Before pointing Gather Step at a repository:**
 
 - Rotate any exposed credentials.

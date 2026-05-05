@@ -12,7 +12,7 @@ use gather_step_storage::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::metrics::capture_rss;
+use crate::metrics::ResourceSampler;
 
 /// Byte-size breakdown of the on-disk storage written by an index pass.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,7 +39,20 @@ pub struct IndexMetrics {
     pub graph_edges: usize,
     /// RSS growth in bytes during the index pass (after minus before), when
     /// measurement is available.
+    #[serde(default)]
     pub memory_rss_growth_bytes: Option<u64>,
+    /// Peak RSS sampled during the index pass, when measurement is available.
+    #[serde(default)]
+    pub memory_peak_rss_bytes: Option<u64>,
+    /// Open file descriptors sampled before the pass, when available.
+    #[serde(default)]
+    pub open_fd_start: Option<u64>,
+    /// Peak open file descriptors sampled during the pass, when available.
+    #[serde(default)]
+    pub open_fd_peak: Option<u64>,
+    /// Open file descriptors sampled after the pass, when available.
+    #[serde(default)]
+    pub open_fd_end: Option<u64>,
     /// On-disk storage size written during the pass.
     #[serde(default)]
     pub storage: StorageMetrics,
@@ -109,14 +122,14 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
     let storage_dir = tempdir_for_pass(fixture_path)?;
     let _guard = StorageDirGuard(storage_dir.clone());
 
-    let rss_before = capture_rss();
+    let resources = ResourceSampler::start();
 
     let t0 = Instant::now();
     let indexer = RepoIndexer::open(&storage_dir, IndexingOptions::default())?;
     indexer.index_repo(repo_name, fixture_path, None)?;
     let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let rss_after = capture_rss();
+    let resource_peaks = resources.finish();
 
     let graph = indexer.storage().graph();
     let graph_nodes = graph.count_nodes()?;
@@ -124,16 +137,15 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
     indexer.storage().metadata().finalize();
     let storage = collect_storage_metrics(&storage_dir)?;
 
-    let memory_rss_growth_bytes = match (rss_before, rss_after) {
-        (Some(before), Some(after)) => Some(after.saturating_sub(before)),
-        _ => None,
-    };
-
     Ok(IndexMetrics {
         parse_ms: elapsed_ms,
         graph_nodes,
         graph_edges,
-        memory_rss_growth_bytes,
+        memory_rss_growth_bytes: resource_peaks.rss_growth_bytes(),
+        memory_peak_rss_bytes: resource_peaks.peak_rss_bytes,
+        open_fd_start: resource_peaks.start_open_fds,
+        open_fd_peak: resource_peaks.peak_open_fds,
+        open_fd_end: resource_peaks.end_open_fds,
         storage,
         indexed_repos: None,
         indexed_files: None,
@@ -156,7 +168,7 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
     let config = GatherStepConfig::from_yaml_file(fixture_path.join("gather-step.config.yaml"))?;
     let mut registry = RegistryStore::open(storage_dir.join("registry.json"))?;
 
-    let rss_before = capture_rss();
+    let resources = ResourceSampler::start();
 
     let t0 = Instant::now();
     let stats = index_workspace_with_storage(
@@ -168,7 +180,7 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
     )?;
     let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let rss_after = capture_rss();
+    let resource_peaks = resources.finish();
 
     let indexer = RepoIndexer::open(&storage_dir, IndexingOptions::default())?;
     let graph = indexer.storage().graph();
@@ -177,16 +189,15 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
     indexer.storage().metadata().finalize();
     let storage = collect_storage_metrics(&storage_dir)?;
 
-    let memory_rss_growth_bytes = match (rss_before, rss_after) {
-        (Some(before), Some(after)) => Some(after.saturating_sub(before)),
-        _ => None,
-    };
-
     Ok(IndexMetrics {
         parse_ms: elapsed_ms,
         graph_nodes,
         graph_edges,
-        memory_rss_growth_bytes,
+        memory_rss_growth_bytes: resource_peaks.rss_growth_bytes(),
+        memory_peak_rss_bytes: resource_peaks.peak_rss_bytes,
+        open_fd_start: resource_peaks.start_open_fds,
+        open_fd_peak: resource_peaks.peak_open_fds,
+        open_fd_end: resource_peaks.end_open_fds,
         storage,
         indexed_repos: Some(stats.indexed_repos),
         indexed_files: Some(stats.total_files),
@@ -400,6 +411,29 @@ mod tests {
         .expect("legacy metrics JSON should deserialize");
 
         assert_eq!(metrics.metadata_sidecar_bytes, 30);
+    }
+
+    #[test]
+    fn index_metrics_accepts_legacy_resource_fields_absent() {
+        let metrics = serde_json::from_str::<super::IndexMetrics>(
+            r#"{
+                "parse_ms": 100,
+                "graph_nodes": 10,
+                "graph_edges": 20,
+                "memory_rss_growth_bytes": null,
+                "storage": {
+                    "graph_bytes": 10,
+                    "metadata_bytes": 20,
+                    "metadata_sidecar_bytes": 30,
+                    "search_bytes": 40,
+                    "total_bytes": 100
+                }
+            }"#,
+        )
+        .expect("legacy metrics JSON should deserialize");
+
+        assert_eq!(metrics.memory_peak_rss_bytes, None);
+        assert_eq!(metrics.open_fd_peak, None);
     }
 
     #[test]

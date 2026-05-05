@@ -3,7 +3,7 @@ use std::{
     fs,
     fs::OpenOptions,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -29,7 +29,7 @@ use gather_step_parser::{
     resolve::ResolutionInput,
     resolve_calls_with_unresolved,
     tsconfig::PathAliases,
-    workspace_manifest::{discover_workspace_packages, find_workspace_root},
+    workspace_manifest::{WorkspacePackage, discover_workspace_packages, find_workspace_root},
 };
 use rayon::prelude::*;
 use thiserror::Error;
@@ -117,6 +117,82 @@ const MAX_DEPLOYMENT_ARTIFACT_BYTES: u64 = 1024 * 1024;
 pub struct RepoIndexer {
     storage: StorageCoordinator,
     options: IndexingOptions,
+    path_alias_cache: PathAliasCache,
+}
+
+#[derive(Default)]
+struct PathAliasCache {
+    aliases_by_repo_root: Mutex<FxHashMap<PathBuf, Arc<PathAliases>>>,
+    packages_by_workspace_root: Mutex<FxHashMap<PathBuf, Arc<[WorkspacePackage]>>>,
+}
+
+impl PathAliasCache {
+    fn get(&self, repo_root: &Path) -> Arc<PathAliases> {
+        let repo_key = cache_path_key(repo_root);
+        if let Some(aliases) = self
+            .aliases_by_repo_root
+            .lock()
+            .expect("path alias cache mutex should not be poisoned")
+            .get(&repo_key)
+            .cloned()
+        {
+            return aliases;
+        }
+
+        let mut aliases = PathAliases::from_repo_root(repo_root);
+        if let Some(workspace_root) = find_workspace_root(repo_root, 3) {
+            let packages = self.workspace_packages(&workspace_root);
+            if !packages.is_empty() {
+                aliases.add_workspace_packages(packages.as_ref());
+            }
+        }
+        let aliases = Arc::new(aliases);
+
+        let mut aliases_by_repo_root = self
+            .aliases_by_repo_root
+            .lock()
+            .expect("path alias cache mutex should not be poisoned");
+        if let Some(existing) = aliases_by_repo_root.get(&repo_key) {
+            return Arc::clone(existing);
+        }
+        aliases_by_repo_root.insert(repo_key, Arc::clone(&aliases));
+        aliases
+    }
+
+    fn workspace_packages(&self, workspace_root: &Path) -> Arc<[WorkspacePackage]> {
+        let workspace_key = cache_path_key(workspace_root);
+        if let Some(packages) = self
+            .packages_by_workspace_root
+            .lock()
+            .expect("workspace package cache mutex should not be poisoned")
+            .get(&workspace_key)
+            .cloned()
+        {
+            return packages;
+        }
+
+        let packages = Arc::<[WorkspacePackage]>::from(discover_workspace_packages(workspace_root));
+        let mut packages_by_workspace_root = self
+            .packages_by_workspace_root
+            .lock()
+            .expect("workspace package cache mutex should not be poisoned");
+        if let Some(existing) = packages_by_workspace_root.get(&workspace_key) {
+            return Arc::clone(existing);
+        }
+        packages_by_workspace_root.insert(workspace_key, Arc::clone(&packages));
+        packages
+    }
+
+    fn clear(&self) {
+        self.aliases_by_repo_root
+            .lock()
+            .expect("path alias cache mutex should not be poisoned")
+            .clear();
+        self.packages_by_workspace_root
+            .lock()
+            .expect("workspace package cache mutex should not be poisoned")
+            .clear();
+    }
 }
 
 #[derive(Debug, Error)]
@@ -269,6 +345,7 @@ impl RepoIndexer {
         Ok(Self {
             storage: StorageCoordinator::from_stores(stores),
             options,
+            path_alias_cache: PathAliasCache::default(),
         })
     }
 
@@ -326,7 +403,7 @@ impl RepoIndexer {
         let repo_root = repo_root.as_ref().to_path_buf();
         let traversal = collect_repo_files(&repo_root, &self.options.traverse)?;
         let include_manifest_batch = has_indexable_manifest(&repo_root);
-        Self::prepare_repo_files(
+        self.prepare_repo_files(
             repo,
             &repo_root,
             &traversal.files,
@@ -556,7 +633,18 @@ impl RepoIndexer {
             let full_path = repo_root.join(relative_path);
             let file_path =
                 normalize_path_separators(&relative_path.to_string_lossy()).into_owned();
-            let metadata = file_metadata_stamp(&full_path)?;
+            let link_metadata = fs::symlink_metadata(&full_path)?;
+            if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+                warn!(
+                    repo,
+                    path = %relative_path.display(),
+                    "skipping symlinked or non-file deployment artifact"
+                );
+                self.storage
+                    .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
+                continue;
+            }
+            let metadata = file_stat_from_metadata(&link_metadata);
             if u64::try_from(metadata.size_bytes).unwrap_or(u64::MAX)
                 > MAX_DEPLOYMENT_ARTIFACT_BYTES
             {
@@ -693,6 +781,12 @@ impl RepoIndexer {
                 path_id_bytes: file.path_id_bytes.clone(),
             }))
             .collect::<Vec<_>>();
+        if changed_paths
+            .iter()
+            .any(|path| is_path_alias_config_path(&path.path))
+        {
+            self.path_alias_cache.clear();
+        }
         if changed_paths.is_empty() {
             let mut stats = IndexingStats {
                 duration_ms: started_at.elapsed().as_millis(),
@@ -820,6 +914,7 @@ impl RepoIndexer {
     }
 
     fn prepare_repo_files(
+        &self,
         repo: &str,
         repo_root: &Path,
         files_to_index: &[SourceFileEntry],
@@ -834,7 +929,7 @@ impl RepoIndexer {
             .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
             .unwrap_or_default();
 
-        let path_aliases = Arc::new(build_path_aliases(repo_root));
+        let path_aliases = self.path_alias_cache.get(repo_root);
         let repo_path_str = repo_root.to_string_lossy();
         let local_config = LocalConfig::load(repo_root);
 
@@ -1095,7 +1190,7 @@ impl RepoIndexer {
             });
         }
 
-        let path_aliases = Arc::new(build_path_aliases(repo_root));
+        let path_aliases = self.path_alias_cache.get(repo_root);
         let repo_path_str = repo_root.to_string_lossy();
         let local_config = LocalConfig::load(repo_root);
         let cancel = cancel.cloned();
@@ -1650,16 +1745,20 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
 
 fn file_metadata_stamp(path: impl AsRef<Path>) -> Result<FileStat, std::io::Error> {
     let metadata = fs::metadata(path)?;
+    Ok(file_stat_from_metadata(&metadata))
+}
+
+fn file_stat_from_metadata(metadata: &fs::Metadata) -> FileStat {
     let mtime_ns = metadata
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or_default();
-    Ok(FileStat {
+    FileStat {
         size_bytes: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
         mtime_ns,
-    })
+    }
 }
 
 fn collect_deployment_artifact_paths(
@@ -2022,22 +2121,22 @@ fn deployment_output_to_batch(
     }
 }
 
-/// Build `PathAliases` for a repo, injecting any workspace-local package
-/// aliases discovered by walking up from `repo_root` to find a monorepo root.
-///
-/// This is the canonical construction point used by both `prepare_repo_files`
-/// and `index_repo_files`. The workspace root walk is capped at 3 parent
-/// levels; failures at any stage are silent (the function returns plain
-/// tsconfig aliases).
-fn build_path_aliases(repo_root: &Path) -> PathAliases {
-    let mut aliases = PathAliases::from_repo_root(repo_root);
-    if let Some(workspace_root) = find_workspace_root(repo_root, 3) {
-        let packages = discover_workspace_packages(&workspace_root);
-        if !packages.is_empty() {
-            aliases.add_workspace_packages(&packages);
-        }
-    }
-    aliases
+fn cache_path_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_path_alias_config_path(path: &str) -> bool {
+    let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name == "package.json"
+        || file_name == "pnpm-workspace.yaml"
+        || file_name == "pnpm-workspace.yml"
+        || file_name == ".gather-step.local.yaml"
+        || (file_name.starts_with("tsconfig")
+            && std::path::Path::new(file_name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json")))
 }
 
 fn has_indexable_manifest(repo_root: &Path) -> bool {
@@ -2082,7 +2181,9 @@ mod tests {
 
     use crate::{GraphStore, MetadataStore, SearchStore};
 
-    use super::{DeploymentIndexingOptions, IndexingOptions, RepoIndexer};
+    use super::{
+        DeploymentIndexingOptions, IndexingOptions, RepoIndexer, is_path_alias_config_path,
+    };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -2109,6 +2210,35 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn path_alias_cache_invalidation_tracks_config_paths() {
+        for path in [
+            "package.json",
+            "apps/web/package.json",
+            "pnpm-workspace.yaml",
+            "pnpm-workspace.yml",
+            "tsconfig.json",
+            "tsconfig.base.json",
+            "apps/web/tsconfig.app.json",
+            ".gather-step.local.yaml",
+        ] {
+            assert!(is_path_alias_config_path(path), "{path} should invalidate");
+        }
+
+        for path in [
+            "src/package-reader.ts",
+            "src/tsconfig-helper.ts",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "README.md",
+        ] {
+            assert!(
+                !is_path_alias_config_path(path),
+                "{path} should not invalidate"
+            );
         }
     }
 
@@ -2637,6 +2767,58 @@ spec:
             env_vars
                 .iter()
                 .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn configured_env_file_symlinks_are_not_indexed() {
+        let repo_root = TestDir::new("deployment-symlinked-env-repo");
+        let external_root = TestDir::new("deployment-symlinked-env-external");
+        let storage_root = TestDir::new("deployment-symlinked-env-storage");
+        fs::create_dir_all(repo_root.path().join("config")).expect("config dir should exist");
+        fs::write(
+            external_root.path().join("runtime.vars"),
+            "AWS_SECRET_ACCESS_KEY=super-secret-token\n",
+        )
+        .expect("external env fixture should write");
+        symlink(
+            external_root.path().join("runtime.vars"),
+            repo_root.path().join("config/runtime.vars"),
+        )
+        .expect("env symlink should create");
+
+        let options = IndexingOptions {
+            deployment: DeploymentIndexingOptions {
+                env_files: vec!["config/runtime.vars".to_owned()],
+                ..DeploymentIndexingOptions::default()
+            },
+            ..IndexingOptions::default()
+        };
+        let indexer = RepoIndexer::open(storage_root.path(), options).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let env_vars = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::EnvVar)
+            .expect("env var nodes should load");
+        assert!(
+            !env_vars.iter().any(|node| {
+                node.qualified_name.as_deref() == Some("__env_var__aws_secret_access_key")
+            }),
+            "configured env file symlinks should not be indexed"
+        );
+        let search_hits = indexer
+            .storage()
+            .search()
+            .search("super-secret-token", 10)
+            .expect("search should succeed");
+        assert!(
+            search_hits.is_empty(),
+            "symlinked env file values should not enter search"
         );
     }
 

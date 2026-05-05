@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.0.0"
+version = "3.1.0"
 authors = ["JJ Adonis"]
 edition = "2024"
 rust-version = "1.94.1"
@@ -24,12 +24,12 @@ homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "3.0.0" }
-gather-step-core = { path = "crates/gather-step-core", version = "3.0.0" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "3.0.0" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "3.0.0" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "3.0.0" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "3.0.0" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "3.1.0" }
+gather-step-core = { path = "crates/gather-step-core", version = "3.1.0" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "3.1.0" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "3.1.0" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "3.1.0" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "3.1.0" }
 
 tree-sitter = "=0.26.8"
 tree-sitter-typescript = "0.23.2"
@@ -38,8 +38,8 @@ tree-sitter-python = "=0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-go = "0.25"
 tree-sitter-java = "0.23.5"
-redb = "4.0"
-tantivy = "0.26"
+redb = "=4.1.0"
+tantivy = "=0.26.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rayon = "1.12"
 crossbeam-channel = "0.5.15"
@@ -58,8 +58,8 @@ serde_norway = "0.9.42"
 toml = "1.1.2"
 bitcode = "0.6.9"
 blake3 = "1.8.4"
-dirs = "5"
-rand = "0.9"
+dirs = "6"
+rand = "0.10"
 subtle = "2.6.1"
 ignore = "0.4.25"
 globset = "0.4.18"
@@ -70,13 +70,14 @@ notify = "9.0.0-rc.3"
 gix = { version = "0.83", default-features = true }
 regex = "1.12.3"
 similar = "3.1.0"
-lru = "=0.17.0"
+lru = "=0.18.0"
 quick_cache = "0.6.21"
 smallvec = { version = "=1.15.1", features = ["serde"] }
 camino = "1.2.2"
 aho-corasick = "1.1.4"
 memchr = "2.8.0"
 libc = "0.2"
+dhat = "=0.3.3"
 
 [workspace.dependencies.procfs]
 version = "0.18.0"

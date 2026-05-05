@@ -80,7 +80,9 @@ mod tests {
 
     use crate::{
         commands::pr_review::{DiscoveredArtifact, delete_artifact, list_review_artifacts},
-        pr_review::artifact_root::{MARKER_FILENAME, ReviewMarker, ReviewStatus, workspace_hash},
+        pr_review::artifact_root::{
+            MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+        },
     };
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ mod tests {
 
         let storage_path = storage_path_override.unwrap_or_else(|| root.join("storage"));
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: marker_workspace_hash.to_owned(),
             workspace_root: workspace_root.to_path_buf(),
             base_sha: "aabbcc".to_owned(),
@@ -270,7 +272,7 @@ mod tests {
         // this is the most adversarial case for the overlap guard.
         let root = baseline_storage.clone();
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash.clone(),
             workspace_root: ws.path().to_path_buf(),
             base_sha: "b".to_owned(),

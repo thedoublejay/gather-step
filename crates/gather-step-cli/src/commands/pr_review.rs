@@ -39,10 +39,10 @@ use crate::{
             try_reuse_cache,
         },
         delta_report::{
-            CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, DeploymentDeltas,
-            EventDeltas, GITHUB_COMMENT_LIMIT, PayloadContractDeltas, ReviewMetadata, RiskSeverity,
-            RouteDeltas, SafetyMetadata, SymbolDeltas, build_suggested_followups,
-            synthesize_review_pack_commands,
+            CleanupPolicy, ContractAlignments, DELTA_REPORT_SCHEMA_VERSION, DecoratorDeltas,
+            DeltaReport, DeploymentDeltas, EventDeltas, GITHUB_COMMENT_LIMIT,
+            PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
+            SymbolDeltas, build_suggested_followups, synthesize_review_pack_commands,
         },
         engine::{ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
         extract::{
@@ -181,7 +181,16 @@ pub struct CleanArgs {
     /// key is currently active (i.e. both SHAs are still reachable in this
     /// workspace).  Without this flag, active artifacts are skipped so they
     /// remain available for the next review run.
-    #[arg(long, requires = "older_than")]
+    ///
+    /// Only meaningful with `--older-than`; rejected when paired with
+    /// `--all` / `--run-id` / `--base` / `--head` so users do not believe
+    /// they are protecting active artifacts that the other selectors will
+    /// delete unconditionally.
+    #[arg(
+        long,
+        requires = "older_than",
+        conflicts_with_all = ["all", "run_id", "base", "head"],
+    )]
     pub include_active: bool,
 
     /// Delete ALL review artifacts for this workspace.
@@ -392,6 +401,60 @@ enum RunOutcome {
     },
 }
 
+/// Best-effort cleanup guard for the review artifact and worktree.
+///
+/// Runs cleanup on `Drop` unless [`Self::disarm`] has been called. This keeps
+/// the disposable cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/`
+/// is removed unless `--keep-cache`) under panic, signal, and early-return
+/// paths — not just the happy-return path.
+struct ReviewCleanupGuard {
+    artifact_root_path: Option<std::path::PathBuf>,
+    worktree: Option<ReviewWorktree>,
+}
+
+impl ReviewCleanupGuard {
+    fn new() -> Self {
+        Self {
+            artifact_root_path: None,
+            worktree: None,
+        }
+    }
+
+    fn arm(&mut self, artifact_root_path: std::path::PathBuf, worktree: Option<ReviewWorktree>) {
+        self.artifact_root_path = Some(artifact_root_path);
+        self.worktree = worktree;
+    }
+
+    fn disarm(&mut self) {
+        self.artifact_root_path = None;
+        self.worktree = None;
+    }
+}
+
+impl Drop for ReviewCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(wt) = self.worktree.take()
+            && let Err(e) = remove_worktree(&wt)
+        {
+            tracing::warn!(
+                error = %e,
+                worktree = %wt.root.display(),
+                "pr-review cleanup guard: remove_worktree failed (panic/early return path)",
+            );
+        }
+        if let Some(path) = self.artifact_root_path.take()
+            && path.exists()
+            && let Err(e) = std::fs::remove_dir_all(&path)
+        {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "pr-review cleanup guard: remove_dir_all failed (panic/early return path)",
+            );
+        }
+    }
+}
+
 /// Core implementation — returns `(rendered_string, threshold_exceeded)`.
 ///
 /// `threshold_exceeded` is `true` when the effective [`SeverityMode`] is
@@ -481,6 +544,13 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         .clone()
         .unwrap_or_else(|| default_cache_root(&app.workspace_path));
 
+    // Best-effort cleanup guard. Armed on cold-run paths after the worktree is
+    // created; disarmed on the happy path before the explicit cleanup block
+    // takes over. If the function panics or returns Err between arming and
+    // disarming, the Drop impl removes the worktree and artifact root rather
+    // than leaving them as InProgress orphans in the user's OS cache.
+    let mut cleanup_guard = ReviewCleanupGuard::new();
+
     // Try to reuse a prior completed artifact with the same cache key.
     // Cache reuse is independent of `keep_cache` — `keep_cache` controls
     // whether the CURRENT run's artifact is preserved after delta extraction.
@@ -550,6 +620,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 });
             }
         };
+
+        // Arm the cleanup guard now that both the artifact root and worktree
+        // exist on disk. Any panic or `?`-propagated error after this point
+        // will trigger best-effort cleanup via Drop.
+        cleanup_guard.arm(artifact_root.root.clone(), Some(worktree.clone()));
 
         // ── 5b. Seed from baseline (Task 3) ───────────────────────────────
         // If the workspace has a normal index with a matching config hash,
@@ -1223,7 +1298,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .collect();
 
     let report = DeltaReport {
-        schema_version: 7,
+        schema_version: DELTA_REPORT_SCHEMA_VERSION,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
             base_input: args.base.clone(),
@@ -1262,8 +1337,24 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
     // ── 9. Update marker ───────────────────────────────────────────────────
     // Mark completed before cleanup so the marker is correct even if cleanup
-    // fails.
-    let _ = write_marker_completed(&artifact_root);
+    // fails. Surface the failure as a warning so an unwritable marker (which
+    // would silently disable cache reuse) does not pass unnoticed when
+    // --keep-cache was requested.
+    if let Err(e) = write_marker_completed(&artifact_root) {
+        if args.keep_cache {
+            tracing::warn!(
+                error = %e,
+                run_id = %artifact_root.run_id,
+                "pr-review --keep-cache: write_marker_completed failed; the cache may not be reusable on the next run",
+            );
+        } else {
+            tracing::debug!(error = %e, "pr-review write_marker_completed failed");
+        }
+    }
+
+    // The explicit cleanup logic below owns deletion; disarm the guard so its
+    // Drop does not double-remove or fight the explicit policy.
+    cleanup_guard.disarm();
 
     // ── 10. Cleanup ────────────────────────────────────────────────────────
     if was_cache_hit {
@@ -1271,17 +1362,40 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // future reuse and is only wiped explicitly via `pr-review clean`.
         // Update the access timestamp so `--older-than` pruning measures
         // last-use time, not creation time.
-        let _ = touch_marker_accessed(&artifact_root);
+        if let Err(e) = touch_marker_accessed(&artifact_root) {
+            tracing::debug!(error = %e, "pr-review touch_marker_accessed failed");
+        }
     } else if !args.keep_cache {
         // Fresh run: remove the worktree then the artifact root.  Errors are
         // logged but do not fail the command — the marker is already Completed.
         // For cache-hit runs, worktree_opt is None — the worktree was created
         // by a prior run and must not be removed (the artifact may still be
         // in use by other commands).  For cold runs, remove the worktree.
-        if let Some(wt) = worktree_opt {
-            let _ = remove_worktree(&wt);
+        let mut worktree_removed_cleanly = true;
+        if let Some(wt) = worktree_opt
+            && let Err(e) = remove_worktree(&wt)
+        {
+            worktree_removed_cleanly = false;
+            tracing::warn!(
+                error = %e,
+                worktree = %wt.root.display(),
+                "pr-review cleanup: remove_worktree failed; \
+                 `git worktree remove` may have left a dangling pointer in `.git/worktrees/`",
+            );
         }
-        let _ = std::fs::remove_dir_all(&artifact_root.root);
+        if worktree_removed_cleanly {
+            // remove_worktree already does belt-and-suspenders directory removal
+            // and `git worktree prune`, so only nuke the artifact root if that
+            // path succeeded — otherwise we'd leave a dangling worktree pointer
+            // behind in the source repo's `.git/worktrees/`.
+            if let Err(e) = std::fs::remove_dir_all(&artifact_root.root) {
+                tracing::warn!(
+                    error = %e,
+                    path = %artifact_root.root.display(),
+                    "pr-review cleanup: remove_dir_all failed",
+                );
+            }
+        }
     }
 
     // ── 11. Evaluate severity threshold ───────────────────────────────────
@@ -1427,18 +1541,35 @@ pub fn list_review_artifacts(
 /// Recursively sum the sizes of all files under `dir`.  Ignores I/O errors
 /// (treats unreadable entries as zero bytes).
 fn dir_size_bytes(dir: &Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(dir) {
+    // Bounded depth + skip symlinks: a symlink loop or a symlink pointing at
+    // `/` inside the cache root would otherwise blow the stack or report
+    // wildly inflated sizes. The cache directory should never legitimately
+    // exceed this depth (workspace_hash / run_id / storage / per-table dirs).
+    const MAX_DEPTH: u32 = 16;
+    fn inner(dir: &Path, depth: u32) -> u64 {
+        if depth >= MAX_DEPTH {
+            return 0;
+        }
+        let mut total = 0u64;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
         for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                total += dir_size_bytes(&path);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                total = total.saturating_add(inner(&entry.path(), depth + 1));
             } else if let Ok(meta) = entry.metadata() {
-                total += meta.len();
+                total = total.saturating_add(meta.len());
             }
         }
+        total
     }
-    total
+    inner(dir, 0)
 }
 
 /// Parse a duration string like `7d`, `1w`, `12h`, `30m`, `60s` into a
@@ -1512,27 +1643,54 @@ fn assert_not_baseline_overlap(artifact_root: &Path, workspace_root: &Path) -> R
     Ok(())
 }
 
-/// Returns `true` when `s` looks like a full 40-character lowercase hex SHA-1.
+/// Returns `true` when `s` looks like a full 40-character hex SHA-1.
 ///
 /// Used to decide whether an unresolved `--base`/`--head` input should be
 /// silently treated as a literal SHA (safe bypass) or surfaced as an error
-/// (likely a typo'd ref name).
+/// (likely a typo'd ref name). Accepts uppercase, lowercase, or mixed-case
+/// hex; downstream comparisons against stored marker SHAs use
+/// [`str::eq_ignore_ascii_case`].
 fn is_full_sha(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Selector kind passed into [`delete_artifact`] so it can refuse to delete
+/// `InProgress` artifacts when the user's selector did not explicitly opt in
+/// (e.g. `--older-than`). Explicit selectors (`--all`, `--run-id`,
+/// `--base`/`--head`) accept `InProgress` markers because the user named the
+/// artifact directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteSelector {
+    /// Time-based pruning. Refuses `InProgress` unless `include_active` is true.
+    OlderThan { include_active: bool },
+    /// User explicitly named the artifact via `--all`, `--run-id`, or
+    /// `--base`/`--head`. `InProgress` markers are deletable.
+    Explicit,
 }
 
 /// Delete a single artifact root, enforcing all safety guards.
 ///
 /// 1. Re-reads the marker (refuses if missing/unparsable).
 /// 2. Checks `workspace_hash` matches.
-/// 3. Checks no overlap with baseline storage/registry.
-/// 4. Attempts worktree removal, then `remove_dir_all`.
+/// 3. Re-checks `InProgress` for time-based selectors (TOCTOU defense vs a
+///    concurrent run that flipped state between discovery and delete).
+/// 4. Checks no overlap with baseline storage/registry.
+/// 5. Attempts worktree removal, then `remove_dir_all`.
 ///
 /// In dry-run mode, logs what would be removed but performs no deletion.
 pub(crate) fn delete_artifact(
     artifact: &DiscoveredArtifact,
     workspace_root: &Path,
     dry_run: bool,
+) -> Result<()> {
+    delete_artifact_with_selector(artifact, workspace_root, dry_run, DeleteSelector::Explicit)
+}
+
+pub(crate) fn delete_artifact_with_selector(
+    artifact: &DiscoveredArtifact,
+    workspace_root: &Path,
+    dry_run: bool,
+    selector: DeleteSelector,
 ) -> Result<()> {
     // Step 1: re-read the marker.
     let marker_path = artifact.root.join(MARKER_FILENAME);
@@ -1555,7 +1713,26 @@ pub(crate) fn delete_artifact(
         );
     }
 
-    // Step 3: no overlap with baseline paths.
+    // Step 3: TOCTOU defense for time-based pruning. A concurrent `pr-review`
+    // run may have flipped the marker state between discovery and the read
+    // above; refuse to delete InProgress artifacts unless the user opted in.
+    // `--all`, `--run-id`, and `--base/--head` are explicit selectors and
+    // accept InProgress markers because the user named the artifact directly.
+    if marker.status == ReviewStatus::InProgress
+        && matches!(
+            selector,
+            DeleteSelector::OlderThan {
+                include_active: false,
+            }
+        )
+    {
+        bail!(
+            "skipping `{}`: artifact is InProgress and selector did not opt in (`--include-active`)",
+            artifact.root.display(),
+        );
+    }
+
+    // Step 4: no overlap with baseline paths.
     assert_not_baseline_overlap(&artifact.root, workspace_root)
         .with_context(|| format!("safety check for `{}`", artifact.root.display()))?;
 
@@ -1571,16 +1748,34 @@ pub(crate) fn delete_artifact(
         return Ok(());
     }
 
-    // Step 4: remove worktree (best-effort), then remove the artifact dir.
+    // Step 4: remove worktree first; only nuke the artifact dir if the
+    // worktree removed cleanly, otherwise we'd leave a dangling pointer in
+    // `<workspace>/.git/worktrees/<run-id>` referencing a now-missing path.
     let worktree_root = artifact.root.join("worktree");
+    let mut worktree_removed_cleanly = true;
     if worktree_root.is_dir() {
         let wt = ReviewWorktree {
             repo: workspace_root.to_path_buf(),
             root: worktree_root,
             sha: marker.head_sha.clone(),
         };
-        // Best-effort: if removal fails, continue and let remove_dir_all clean up.
-        let _ = remove_worktree(&wt);
+        if let Err(e) = remove_worktree(&wt) {
+            worktree_removed_cleanly = false;
+            tracing::warn!(
+                error = %e,
+                worktree = %wt.root.display(),
+                "pr-review clean: remove_worktree failed; \
+                 leaving artifact dir in place to avoid dangling pointer in `.git/worktrees/`",
+            );
+        }
+    }
+
+    if !worktree_removed_cleanly {
+        bail!(
+            "refusing to remove `{}`: worktree removal failed; \
+             stop any running git tooling on that worktree, run `git worktree prune`, then retry",
+            artifact.root.display(),
+        );
     }
 
     std::fs::remove_dir_all(&artifact.root)
@@ -1687,7 +1882,10 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
         };
         all_artifacts
             .into_iter()
-            .filter(|a| a.marker.base_sha == base_sha && a.marker.head_sha == head_sha)
+            .filter(|a| {
+                a.marker.base_sha.eq_ignore_ascii_case(&base_sha)
+                    && a.marker.head_sha.eq_ignore_ascii_case(&head_sha)
+            })
             .collect()
     } else if let Some(ref duration_str) = args.older_than {
         let max_age = parse_duration(duration_str)
@@ -1730,13 +1928,29 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
         unreachable!("selector_count == 1 guarantees one branch is taken")
     };
 
+    // Determine the per-call selector kind so `delete_artifact_with_selector`
+    // can refuse to remove markers that flipped to InProgress between
+    // discovery and the per-artifact re-read (TOCTOU defense).
+    let selector_kind = if args.older_than.is_some() {
+        DeleteSelector::OlderThan {
+            include_active: args.include_active,
+        }
+    } else {
+        DeleteSelector::Explicit
+    };
+
     // Execute or preview deletions.
     let mut entries: Vec<CleanArtifactEntry> = Vec::with_capacity(selected.len());
     let mut had_error = false;
 
     for artifact in &selected {
         let was_dry = args.dry_run;
-        match delete_artifact(artifact, &app.workspace_path, args.dry_run) {
+        match delete_artifact_with_selector(
+            artifact,
+            &app.workspace_path,
+            args.dry_run,
+            selector_kind,
+        ) {
             Ok(()) => {
                 entries.push(CleanArtifactEntry {
                     run_id: artifact.marker.run_id.clone(),
@@ -1788,7 +2002,9 @@ mod tests {
     use super::*;
     use crate::{
         app::AppContext,
-        pr_review::artifact_root::{MARKER_FILENAME, ReviewMarker, ReviewStatus, workspace_hash},
+        pr_review::artifact_root::{
+            MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+        },
     };
 
     // ── temp-dir helper ───────────────────────────────────────────────────────
@@ -2064,7 +2280,7 @@ mod tests {
             created_at_override.map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
 
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash,
             workspace_root: workspace_root.to_path_buf(),
             base_sha: base_sha.to_owned(),
@@ -2075,7 +2291,7 @@ mod tests {
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
             created_at,
             status,
-            cache_key: None, // v1 marker — not eligible for cache reuse
+            cache_key: None,
             last_accessed_at: None,
         };
 
@@ -2428,7 +2644,7 @@ mod tests {
         let root = cache.join(&real_hash).join(run_id);
         fs::create_dir_all(&root).unwrap();
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: "deadbeefdeadbeef".to_owned(), // wrong hash
             workspace_root: ws.to_path_buf(),
             base_sha: "base".to_owned(),
@@ -2481,7 +2697,7 @@ mod tests {
         fs::create_dir_all(&baseline_storage).unwrap();
 
         let marker = ReviewMarker {
-            schema_version: 1,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: workspace_hash(ws),
             workspace_root: ws.to_path_buf(),
             base_sha: "b".to_owned(),
@@ -3295,46 +3511,48 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Parity Test 4: cache invalidates on gather_step_version change (v1 marker)
+    // Parity Test 4: cache ignores completed markers without cache keys
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn cache_invalidates_on_v1_marker_without_cache_key() {
+    fn cache_ignores_marker_without_cache_key() {
         if !git_available() {
             return;
         }
 
-        let ws_tmp = TempDir::new("v1-ws");
-        let cache_tmp = TempDir::new("v1-cache");
+        let ws_tmp = TempDir::new("no-cache-key-ws");
+        let cache_tmp = TempDir::new("no-cache-key-cache");
         let (ws, base_sha, head_sha) = build_fixture(ws_tmp.path());
 
-        // Manually plant a v1 marker (no cache_key) in the expected cache dir.
+        // Manually plant a completed marker without a cache_key in the
+        // expected cache dir.
         let ws_hash = workspace_hash(&ws);
-        let v1_run_id = "review-v1-legacy-run";
-        let v1_root = cache_tmp.path().join(&ws_hash).join(v1_run_id);
-        fs::create_dir_all(v1_root.join("storage")).unwrap();
-        fs::create_dir_all(v1_root.join("worktree")).unwrap();
-        fs::write(v1_root.join("registry.json"), b"{}").unwrap();
+        let planted_run_id = "review-no-cache-key-run";
+        let planted_root = cache_tmp.path().join(&ws_hash).join(planted_run_id);
+        fs::create_dir_all(planted_root.join("storage")).unwrap();
+        fs::create_dir_all(planted_root.join("worktree")).unwrap();
+        fs::write(planted_root.join("registry.json"), b"{}").unwrap();
 
-        let v1_marker = ReviewMarker {
-            schema_version: 1,
+        let planted_marker = ReviewMarker {
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: ws_hash.clone(),
             workspace_root: ws.clone(),
             base_sha: base_sha.clone(),
             head_sha: head_sha.clone(),
-            run_id: v1_run_id.to_owned(),
-            storage_path: v1_root.join("storage"),
-            registry_path: v1_root.join("registry.json"),
+            run_id: planted_run_id.to_owned(),
+            storage_path: planted_root.join("storage"),
+            registry_path: planted_root.join("registry.json"),
             gather_step_version: "0.0.0".to_owned(), // old version
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
-            cache_key: None, // v1: no cache key
+            cache_key: None,
             last_accessed_at: None,
         };
-        let v1_json = serde_json::to_vec_pretty(&v1_marker).unwrap();
-        fs::write(v1_root.join(MARKER_FILENAME), v1_json).unwrap();
+        let planted_json = serde_json::to_vec_pretty(&planted_marker).unwrap();
+        fs::write(planted_root.join(MARKER_FILENAME), planted_json).unwrap();
 
-        // Run with current binary version → must NOT reuse v1 artifact.
+        // Run with current binary version: it must not reuse an artifact that
+        // lacks the branch-scoped cache key.
         let app = make_app(&ws);
         let args = PrReviewRunArgs {
             base: base_sha.clone(),
@@ -3353,16 +3571,16 @@ mod tests {
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let run_id = report["safety"]["run_id"].as_str().unwrap();
 
-        // The run_id must differ from v1_run_id — a fresh artifact was created.
+        // The run_id must differ from the planted run: a fresh artifact was created.
         assert_ne!(
-            run_id, v1_run_id,
-            "v1 marker without cache_key must not be reused; got run_id={run_id}"
+            run_id, planted_run_id,
+            "marker without cache_key must not be reused; got run_id={run_id}"
         );
 
-        // v1 artifact root still exists (was not deleted by the fresh run).
+        // Planted artifact root still exists (was not deleted by the fresh run).
         assert!(
-            v1_root.exists(),
-            "v1 artifact must remain on disk after fresh run"
+            planted_root.exists(),
+            "planted artifact must remain on disk after fresh run"
         );
     }
 
@@ -3679,13 +3897,13 @@ mod tests {
     // ── Phase 6 Task 4: severity threshold tests ──────────────────────────────
 
     use crate::pr_review::delta_report::{
-        DeploymentDeltas, PayloadContractDeltaChange, PayloadFieldSummary, PayloadFieldTypeChange,
-        RemovedSurfaceRisk,
+        DELTA_REPORT_SCHEMA_VERSION, DeploymentDeltas, PayloadContractDeltaChange,
+        PayloadFieldSummary, PayloadFieldTypeChange, RemovedSurfaceRisk,
     };
 
     fn make_delta_report_empty() -> DeltaReport {
         DeltaReport {
-            schema_version: 7,
+            schema_version: DELTA_REPORT_SCHEMA_VERSION,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),

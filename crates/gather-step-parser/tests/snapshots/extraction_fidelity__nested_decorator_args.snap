@@ -1,5 +1,6 @@
 ---
 source: crates/gather-step-parser/tests/extraction_fidelity.rs
+assertion_line: 488
 expression: summarize(&parsed)
 ---
 ParsedSummary {
@@ -56,7 +57,7 @@ ParsedSummary {
             ),
             external_id: None,
             signature: Some(
-                "handle('roles', ['admin', 'ops'])",
+                "handle()",
             ),
             is_virtual: false,
         },

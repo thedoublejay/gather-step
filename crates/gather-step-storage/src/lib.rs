@@ -9,6 +9,7 @@ use tracing::{error, warn};
 
 pub mod daemon_metadata;
 pub mod daemon_state;
+pub mod footprint;
 pub mod fs_mode;
 pub mod graph_store;
 pub mod incremental;
@@ -25,7 +26,13 @@ pub use daemon_metadata::{
     StorageDaemonMetadata, StorageDaemonMetadataError, StorageDaemonMetadataGuard,
     daemon_pid_path_for_graph_path, daemon_pid_path_for_storage_root,
 };
-pub use graph_store::{EdgeCountSummary, GraphStore, GraphStoreDb, GraphStoreError};
+pub use footprint::{
+    SqliteObjectFootprint, StorageFileFootprint, StorageFootprintComponent, StorageFootprintError,
+    StorageFootprintReport, storage_footprint_report,
+};
+pub use graph_store::{
+    EdgeCountSummary, GraphStore, GraphStoreDb, GraphStoreError, GraphTableFootprint,
+};
 pub use incremental::{
     ChangedSet, IncrementalError, IncrementalFileEntry, RepoSnapshot, TrackedPath,
     classify_changes, classify_selected_changes, compute_affected_set, snapshot_repo_files,

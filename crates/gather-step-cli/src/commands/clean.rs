@@ -34,6 +34,18 @@ struct CleanOutput {
     event: &'static str,
     registry_path: String,
     storage_root: String,
+    /// Populated when `--include-review` was requested. JSON consumers (CI
+    /// scripts, MCP) need to see what was wiped from the OS cache; without
+    /// this they can't tell whether review artifacts were actually removed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<CleanReviewOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanReviewOutput {
+    cache_root: String,
+    removed_count: usize,
+    freed_bytes: u64,
 }
 
 pub fn run(app: &AppContext, args: CleanArgs) -> Result<()> {
@@ -47,10 +59,25 @@ pub fn run(app: &AppContext, args: CleanArgs) -> Result<()> {
     confirm_destructive_clean(app, &registry_path, &storage_root, args.yes)?;
     reset_index_state(&registry_path, &storage_root)?;
 
+    // Run review cleanup BEFORE emitting JSON so the review block is part of
+    // the same machine-readable payload (rather than only surfaced via the
+    // human-readable line, which is suppressed in JSON mode).
+    let review_payload = if args.include_review {
+        let report = clean_all_for_workspace(&app.workspace_path)?;
+        Some(CleanReviewOutput {
+            cache_root: report.cache_root.display().to_string(),
+            removed_count: report.removed_count,
+            freed_bytes: report.freed_bytes,
+        })
+    } else {
+        None
+    };
+
     let payload = CleanOutput {
         event: "clean_completed",
         registry_path: registry_path.display().to_string(),
         storage_root: storage_root.display().to_string(),
+        review: review_payload,
     };
     output.emit(&payload)?;
     output.line(format!(
@@ -58,13 +85,10 @@ pub fn run(app: &AppContext, args: CleanArgs) -> Result<()> {
         registry_path.display(),
         storage_root.display()
     ));
-
-    if args.include_review {
-        let report = clean_all_for_workspace(&app.workspace_path)?;
+    if let Some(ref review) = payload.review {
         output.line(format!(
-            "wiped {} review artifact(s) at {}",
-            report.removed_count,
-            report.cache_root.display(),
+            "wiped {} review artifact(s) at {} ({} bytes freed)",
+            review.removed_count, review.cache_root, review.freed_bytes,
         ));
     }
 

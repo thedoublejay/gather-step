@@ -508,6 +508,23 @@ const UPSERT_FILE_STATE_SQL: &str = r"
         parse_ms = excluded.parse_ms
 ";
 
+pub(crate) const STORED_CONTENT_HASH_BYTES: usize = 16;
+const CONTEXT_PACK_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+/// Store only a 128-bit BLAKE3 prefix for per-file change detection.
+///
+/// Indexer-produced hashes are full 32-byte BLAKE3 digests. A 16-byte prefix
+/// keeps collision risk negligible for this rebuildable cache while halving
+/// the hottest `file_index_state.content_hash` BLOB. Tests sometimes use
+/// deliberately tiny fixture hashes; those stay unchanged.
+pub(crate) fn stored_content_hash(hash: &[u8]) -> &[u8] {
+    if hash.len() > STORED_CONTENT_HASH_BYTES {
+        &hash[..STORED_CONTENT_HASH_BYTES]
+    } else {
+        hash
+    }
+}
+
 const UPSERT_COMMIT_SQL: &str = r"
     INSERT INTO commits (
         sha, repo, author_email, date, message, classification,
@@ -939,14 +956,13 @@ pub enum MetadataStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("metadata store connection pool mutex was poisoned")]
     Poisoned,
-    #[error(
-        "your local index uses an unsupported schema; run `gather-step clean && gather-step index` to rebuild"
-    )]
-    SchemaVersionMismatch { stored: i64, expected: i64 },
 }
 
 /// Current metadata schema version.
-pub const METADATA_SCHEMA_VERSION: i64 = 1;
+///
+/// v3.1 is a fresh generated-state release. `SQLite` metadata starts at user
+/// version zero and does not carry migration or upgrade branches.
+pub const METADATA_SCHEMA_VERSION: i64 = 0;
 
 impl MetadataStoreDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetadataStoreError> {
@@ -1020,25 +1036,8 @@ impl MetadataStoreDb {
     }
 
     fn bootstrap_schema(connection: &mut Connection) -> Result<(), MetadataStoreError> {
-        let stored_version: i64 =
-            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-
-        if stored_version == 0 {
-            // Fresh database: create all tables at the current schema version.
-            connection.execute_batch(CURRENT_SCHEMA)?;
-            connection.pragma_update(None, "user_version", METADATA_SCHEMA_VERSION)?;
-        } else if stored_version == METADATA_SCHEMA_VERSION {
-            // Already at the current version; run `CREATE TABLE IF NOT EXISTS`
-            // to add any tables that might be missing (e.g. a DB from a
-            // development build that predates a table addition within the same
-            // schema version).
-            connection.execute_batch(CURRENT_SCHEMA)?;
-        } else {
-            return Err(MetadataStoreError::SchemaVersionMismatch {
-                stored: stored_version,
-                expected: METADATA_SCHEMA_VERSION,
-            });
-        }
+        connection.execute_batch(CURRENT_SCHEMA)?;
+        connection.pragma_update(None, "user_version", METADATA_SCHEMA_VERSION)?;
         Ok(())
     }
 
@@ -1074,6 +1073,17 @@ impl MetadataStoreDb {
         let value = action(&tx)?;
         tx.commit()?;
         Ok(value)
+    }
+
+    fn prune_stale_context_packs_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        now_unix: i64,
+    ) -> Result<usize, rusqlite::Error> {
+        let cutoff = now_unix.saturating_sub(CONTEXT_PACK_RETENTION_SECONDS);
+        tx.execute(
+            "DELETE FROM context_packs WHERE last_read_at < ?1",
+            params![cutoff],
+        )
     }
 
     fn read_connection(&self) -> Result<PooledConnection<'_>, MetadataStoreError> {
@@ -1343,7 +1353,7 @@ impl MetadataStoreDb {
             )
             .optional()?;
         Ok(match stored_hash {
-            Some(hash) => hash != current_hash,
+            Some(hash) => hash != stored_content_hash(current_hash),
             None => true,
         })
     }
@@ -1597,7 +1607,7 @@ impl MetadataStoreDb {
                 statement.execute(params![
                     &state.repo,
                     path_bytes,
-                    &state.content_hash,
+                    stored_content_hash(&state.content_hash),
                     state.size_bytes,
                     state.mtime_ns,
                     state.node_count,
@@ -1923,10 +1933,9 @@ impl MetadataStoreDb {
         }
 
         for (file_path, current_hash) in files {
-            if stored_hashes
-                .get(*file_path)
-                .is_some_and(|stored_hash| stored_hash == current_hash)
-            {
+            if stored_hashes.get(*file_path).is_some_and(|stored_hash| {
+                stored_hash.as_slice() == stored_content_hash(current_hash)
+            }) {
                 required.remove(*file_path);
             }
         }
@@ -2169,6 +2178,10 @@ impl MetadataStoreDb {
         const CONTEXT_PACK_FILE_CHUNK_SIZE: usize = 300;
 
         self.with_write_txn(|tx| {
+            Self::prune_stale_context_packs_in_tx(
+                tx,
+                record.created_at.max(record.last_read_at),
+            )?;
             tx.execute(
                 "INSERT INTO context_packs(pack_key, mode, target, generation, response, created_at, last_read_at, byte_size, hit_count)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -2406,7 +2419,7 @@ impl MetadataStore for MetadataStoreDb {
         statement.execute(params![
             &state.repo,
             path_bytes,
-            &state.content_hash,
+            stored_content_hash(&state.content_hash),
             state.size_bytes,
             state.mtime_ns,
             state.node_count,
@@ -2427,7 +2440,7 @@ impl MetadataStore for MetadataStoreDb {
                 statement.execute(params![
                     &state.repo,
                     path_bytes,
-                    &state.content_hash,
+                    stored_content_hash(&state.content_hash),
                     state.size_bytes,
                     state.mtime_ns,
                     state.node_count,
@@ -2457,7 +2470,7 @@ impl MetadataStore for MetadataStoreDb {
             .optional()?;
 
         Ok(match stored_hash {
-            Some(hash) => hash != current_hash,
+            Some(hash) => hash != stored_content_hash(current_hash),
             None => true,
         })
     }
@@ -2517,7 +2530,7 @@ impl MetadataStore for MetadataStoreDb {
         for (file_path, current_hash) in files {
             if stored_hashes
                 .get(*file_path)
-                .is_some_and(|stored| stored == current_hash)
+                .is_some_and(|stored| stored.as_slice() == stored_content_hash(current_hash))
             {
                 required.remove(*file_path);
             }
@@ -2576,7 +2589,7 @@ impl MetadataStore for MetadataStoreDb {
         for (file_path, current_hash) in files {
             if stored_hashes
                 .get(*file_path)
-                .is_some_and(|stored| stored == current_hash)
+                .is_some_and(|stored| stored.as_slice() == stored_content_hash(current_hash))
             {
                 required.remove(*file_path);
             }
@@ -3327,10 +3340,10 @@ mod tests {
     };
 
     use super::{
-        CoChangePairRecord, CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord,
-        ContextPackRecord, FileAnalytics, FileIndexState, MetadataStore, MetadataStoreDb,
-        MetadataStoreError, PayloadContractQuery, PayloadContractStoreRecord,
-        SQLITE_PAGE_SIZE_BYTES,
+        CONTEXT_PACK_RETENTION_SECONDS, CoChangePairRecord, CommitFileChangeKind,
+        CommitFileDeltaRecord, CommitRecord, ContextPackRecord, FileAnalytics, FileIndexState,
+        MetadataStore, MetadataStoreDb, MetadataStoreError, PayloadContractQuery,
+        PayloadContractStoreRecord, SQLITE_PAGE_SIZE_BYTES,
     };
 
     static NEXT_TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
@@ -3635,6 +3648,24 @@ mod tests {
         assert!(!store.should_reindex("service-a", "src/lib.rs", &[1, 2, 3, 4])?);
         assert!(store.should_reindex("service-a", "src/lib.rs", &[9, 9, 9, 9])?);
         assert!(store.should_reindex("service-a", "src/main.rs", &[1, 2, 3, 4])?);
+
+        let long_hash = (0_u8..32).collect::<Vec<_>>();
+        store.upsert_file_state(&FileIndexState {
+            repo: "service-a".to_owned(),
+            file_path: "src/full-hash.rs".to_owned(),
+            content_hash: long_hash.clone(),
+            ..state.clone()
+        })?;
+        let stored_len = store.read_connection()?.query_row(
+            "SELECT length(content_hash) FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
+            params!["service-a", "src/full-hash.rs".as_bytes()],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(stored_len, 16);
+        assert!(!store.should_reindex("service-a", "src/full-hash.rs", &long_hash)?);
+        let mut changed_prefix = long_hash;
+        changed_prefix[0] ^= 0xFF;
+        assert!(store.should_reindex("service-a", "src/full-hash.rs", &changed_prefix)?);
         Ok(())
     }
 
@@ -4173,6 +4204,51 @@ mod tests {
     }
 
     #[test]
+    fn put_context_pack_prunes_stale_packs_and_file_deps() -> Result<(), MetadataStoreError> {
+        let (_db_path, store) = open_store("context-pack-age-prune")?;
+        let stale = ContextPackRecord {
+            pack_key: "pack:stale".to_owned(),
+            mode: "planning".to_owned(),
+            target: "staleTarget".to_owned(),
+            generation: 1,
+            response: br#"{"stale":true}"#.to_vec(),
+            created_at: 1,
+            last_read_at: 1,
+            byte_size: 14,
+            hit_count: 0,
+        };
+        let fresh = ContextPackRecord {
+            pack_key: "pack:fresh".to_owned(),
+            mode: "planning".to_owned(),
+            target: "freshTarget".to_owned(),
+            generation: 2,
+            response: br#"{"fresh":true}"#.to_vec(),
+            created_at: CONTEXT_PACK_RETENTION_SECONDS + 10,
+            last_read_at: CONTEXT_PACK_RETENTION_SECONDS + 10,
+            byte_size: 14,
+            hit_count: 0,
+        };
+        store.put_context_pack(
+            &stale,
+            &[("frontend_standard".to_owned(), "src/stale.ts".to_owned())],
+        )?;
+
+        store.put_context_pack(
+            &fresh,
+            &[("frontend_standard".to_owned(), "src/fresh.ts".to_owned())],
+        )?;
+
+        assert!(store.get_context_pack("pack:stale")?.is_none());
+        assert!(store.context_pack_files_for_key("pack:stale")?.is_empty());
+        assert_eq!(store.get_context_pack("pack:fresh")?, Some(fresh));
+        assert_eq!(
+            store.context_pack_files_for_key("pack:fresh")?,
+            vec![("frontend_standard".to_owned(), "src/fresh.ts".to_owned())]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn context_pack_invalidates_across_repo_targets() -> Result<(), MetadataStoreError> {
         let (_db_path, store) = open_store("context-pack-cross-repo")?;
         store.put_context_pack(
@@ -4196,6 +4272,52 @@ mod tests {
         )])?;
         assert_eq!(removed, 1);
         assert!(store.get_context_pack("pack:cross")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_target_invalidation_preserves_unrelated_packs() -> Result<(), MetadataStoreError>
+    {
+        let (_db_path, store) = open_store("context-pack-preserve-unrelated")?;
+        let changed = ContextPackRecord {
+            pack_key: "pack:changed".to_owned(),
+            mode: "planning".to_owned(),
+            target: "changedTarget".to_owned(),
+            generation: 99,
+            response: br#"{"changed":true}"#.to_vec(),
+            created_at: 100,
+            last_read_at: 100,
+            byte_size: 16,
+            hit_count: 0,
+        };
+        let unrelated = ContextPackRecord {
+            pack_key: "pack:unrelated".to_owned(),
+            mode: "planning".to_owned(),
+            target: "unrelatedTarget".to_owned(),
+            generation: 99,
+            response: br#"{"unrelated":true}"#.to_vec(),
+            created_at: 100,
+            last_read_at: 100,
+            byte_size: 18,
+            hit_count: 0,
+        };
+        store.put_context_pack(
+            &changed,
+            &[("frontend_standard".to_owned(), "src/api.ts".to_owned())],
+        )?;
+        store.put_context_pack(
+            &unrelated,
+            &[("frontend_standard".to_owned(), "src/other.ts".to_owned())],
+        )?;
+
+        let removed = store.invalidate_context_packs_for_targets(&[(
+            "frontend_standard".to_owned(),
+            "src/api.ts".to_owned(),
+        )])?;
+
+        assert_eq!(removed, 1);
+        assert!(store.get_context_pack("pack:changed")?.is_none());
+        assert!(store.get_context_pack("pack:unrelated")?.is_some());
         Ok(())
     }
 
