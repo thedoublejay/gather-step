@@ -1132,7 +1132,7 @@ fn emit_with_payload_event_type_emits_fine_grained_event() {
     );
 }
 
-/// TypeORM migration extraction-fidelity guard.
+/// `TypeORM` migration extraction-fidelity guard.
 ///
 /// Pins the cross-cutting behavior of `frameworks::typeorm` +
 /// `frameworks::typeorm_migration` against a single fixture so the framework

@@ -56,7 +56,6 @@ ratatui = { version = "0.30.0", default-features = false, features = ["crossterm
 [dev-dependencies]
 criterion.workspace = true
 pretty_assertions.workspace = true
-rustc-hash.workspace = true
 rusqlite.workspace = true
 tempfile = "3.27.0"
 toml.workspace = true

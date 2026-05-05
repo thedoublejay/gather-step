@@ -1202,7 +1202,6 @@ dependencies = [
  "hashbrown 0.17.0",
  "pretty_assertions",
  "regex",
- "rustc-hash 2.1.2",
  "serde",
  "tempfile",
  "thiserror",
