@@ -48,7 +48,7 @@ const MAX_CONTEXT_PACK_CACHE_BYTES: i64 = 64 * 1024 * 1024;
 const CONTEXT_PACK_CACHE_KEY_VERSION: &str = "v3";
 const CONTEXT_PACK_GRAPH_SCHEMA_VERSION: u32 = 0;
 const CONTEXT_PACK_SEARCH_SCHEMA_VERSION: u32 = 0;
-const CONTEXT_PACK_TS_JS_BACKEND_VERSION: &str = "swc";
+const CONTEXT_PACK_TS_JS_BACKEND_VERSION: &str = "oxc";
 const CONTEXT_PACK_DEPLOYMENT_TOPOLOGY_VERSION: &str = "v3";
 const MIGRATION_COLLECTION_PREFIX: &str = "__migration_collection__";
 const OPTIONALITY_MIN_CONFIDENCE: u16 = 750;
@@ -5574,7 +5574,7 @@ mod tests {
         assert!(key.starts_with("context_pack:v3:"));
         assert!(key.contains("graph_schema=0"));
         assert!(key.contains("search_schema=0"));
-        assert!(key.contains("ts_js_backend=swc"));
+        assert!(key.contains("ts_js_backend=oxc"));
         assert!(key.contains("deployment_topology=v3"));
         assert!(key.contains("mode=planning"));
         assert!(key.contains("repo=backend_standard"));

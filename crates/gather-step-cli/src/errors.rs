@@ -2,7 +2,9 @@ use std::io::ErrorKind;
 
 use anyhow::Error;
 use gather_step_core::ConfigError;
-use gather_step_storage::GraphStoreError;
+use gather_step_storage::{GraphStoreError, SearchStoreError};
+
+const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
 #[must_use]
 pub fn format_operator_error(error: &Error) -> String {
@@ -21,8 +23,16 @@ pub fn format_operator_error(error: &Error) -> String {
                 GraphStoreError::Corrupt { .. } => {
                     return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
                 }
+                GraphStoreError::SchemaVersionMismatch { .. } => {
+                    return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
+                }
                 _ => {}
             }
+        }
+        if let Some(search_error) = cause.downcast_ref::<SearchStoreError>()
+            && matches!(search_error, SearchStoreError::SchemaVersionMismatch { .. })
+        {
+            return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
         }
     }
 
@@ -45,6 +55,11 @@ pub fn format_operator_error(error: &Error) -> String {
         || contains_ascii_case_insensitive(&full, "repair aborted")
     {
         return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
+    }
+    if contains_ascii_case_insensitive(&full, "schema version mismatch")
+        || contains_ascii_case_insensitive(&full, "manual upgrade required")
+    {
+        return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
     }
 
     one_line(error.to_string())
@@ -107,4 +122,42 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{SCHEMA_VERSION_MISMATCH_MESSAGE, format_operator_error};
+
+    #[test]
+    fn graph_store_schema_mismatch_maps_to_friendly_message() {
+        let raw = gather_step_storage::GraphStoreError::SchemaVersionMismatch {
+            path: PathBuf::from("/tmp/graph.redb"),
+            stored: 99,
+            expected: 0,
+        };
+        let err: anyhow::Error = anyhow::Error::new(raw);
+        assert_eq!(format_operator_error(&err), SCHEMA_VERSION_MISMATCH_MESSAGE);
+    }
+
+    #[test]
+    fn search_store_schema_mismatch_maps_to_friendly_message() {
+        let raw = gather_step_storage::SearchStoreError::SchemaVersionMismatch {
+            stored: "99".to_owned(),
+            expected: 1,
+        };
+        let err: anyhow::Error = anyhow::Error::new(raw);
+        assert_eq!(format_operator_error(&err), SCHEMA_VERSION_MISMATCH_MESSAGE);
+    }
+
+    #[test]
+    fn unrelated_io_error_is_not_remapped_to_schema_message() {
+        let err: anyhow::Error = anyhow::Error::msg("read /tmp/foo: permission denied");
+        let msg = format_operator_error(&err);
+        assert!(
+            !msg.contains("schema version mismatch"),
+            "permission-denied error must not be remapped to schema-mismatch message: {msg}"
+        );
+    }
 }

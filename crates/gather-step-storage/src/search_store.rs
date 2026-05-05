@@ -269,6 +269,10 @@ pub enum SearchStoreError {
     InvalidNodeId(usize),
     #[error("invalid node kind tag `{0}`")]
     InvalidNodeKind(u64),
+    #[error(
+        "search index schema version mismatch: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
+    )]
+    SchemaVersionMismatch { stored: String, expected: u32 },
 }
 
 impl TantivySearchStore {
@@ -779,7 +783,11 @@ impl SearchDocument {
 
 /// Ensure the search directory carries the v3.1 fresh-release schema stamp.
 ///
-/// The version file is a plain decimal `u32` followed by a newline.
+/// The version file is a plain decimal `u32` followed by a newline. If a stamp
+/// is present, it must match [`SEARCH_INDEX_VERSION`]; otherwise a
+/// [`SearchStoreError::SchemaVersionMismatch`] is returned so callers can
+/// surface a friendly recovery hint instead of letting Tantivy fail later with
+/// a raw schema/field error.
 ///
 /// Exposed as `pub(crate)` so the unit-test suite can exercise it directly
 /// against a real filesystem directory without needing a non-test binary.
@@ -788,7 +796,16 @@ pub(crate) fn stamp_schema_version_if_missing(
 ) -> Result<(), SearchStoreError> {
     let version_path = dir.join(SEARCH_VERSION_FILE);
     match fs::read_to_string(&version_path) {
-        Ok(_) => Ok(()),
+        Ok(stored_raw) => {
+            let stored = stored_raw.trim();
+            match stored.parse::<u32>() {
+                Ok(value) if value == SEARCH_INDEX_VERSION => Ok(()),
+                _ => Err(SearchStoreError::SchemaVersionMismatch {
+                    stored: stored.to_owned(),
+                    expected: SEARCH_INDEX_VERSION,
+                }),
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::write(&version_path, format!("{SEARCH_INDEX_VERSION}\n"))?;
             Ok(())
@@ -2104,22 +2121,69 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Existing stamps are left alone. v3.1 does not carry a mixed-version
-    /// branch; incompatible older generated state fails later through the
-    /// underlying Tantivy schema/open path rather than custom upgrade UX.
+    /// Existing stamps that match the current version are accepted and left
+    /// alone. Mismatched stamps return a typed `SchemaVersionMismatch` error
+    /// so the CLI/MCP layer can render a friendly recovery hint instead of
+    /// letting Tantivy fail later with a raw schema/field error.
     #[test]
-    fn schema_version_stamp_preserves_existing_stamp() {
-        use super::{SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
+    fn schema_version_stamp_accepts_matching_stamp() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
-        let dir = temp_search_dir("version-existing");
+        let dir = temp_search_dir("version-matching");
+        fs::create_dir_all(&dir).expect("dir should exist");
+        fs::write(
+            dir.join(SEARCH_VERSION_FILE),
+            format!("{SEARCH_INDEX_VERSION}\n"),
+        )
+        .expect("write version file");
+
+        stamp_schema_version_if_missing(&dir).expect("matching stamp should pass through");
+
+        let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
+        assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_stamp_rejects_mismatched_stamp() {
+        use super::{
+            SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, SearchStoreError,
+            stamp_schema_version_if_missing,
+        };
+        use std::fs;
+
+        let dir = temp_search_dir("version-mismatched");
         fs::create_dir_all(&dir).expect("dir should exist");
         fs::write(dir.join(SEARCH_VERSION_FILE), "99\n").expect("write version file");
 
-        stamp_schema_version_if_missing(&dir).expect("existing stamp should pass through");
+        let err = stamp_schema_version_if_missing(&dir).expect_err("mismatch should error");
+        match err {
+            SearchStoreError::SchemaVersionMismatch { stored, expected } => {
+                assert_eq!(stored, "99");
+                assert_eq!(expected, SEARCH_INDEX_VERSION);
+            }
+            other => panic!("expected SchemaVersionMismatch, got {other:?}"),
+        }
 
-        let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
-        assert_eq!(stamp.trim(), "99");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_stamp_rejects_garbage_stamp() {
+        use super::{SEARCH_VERSION_FILE, SearchStoreError, stamp_schema_version_if_missing};
+        use std::fs;
+
+        let dir = temp_search_dir("version-garbage");
+        fs::create_dir_all(&dir).expect("dir should exist");
+        fs::write(dir.join(SEARCH_VERSION_FILE), "not-a-number\n").expect("write version file");
+
+        let err = stamp_schema_version_if_missing(&dir).expect_err("non-numeric stamp errors");
+        assert!(matches!(
+            err,
+            SearchStoreError::SchemaVersionMismatch { .. }
+        ));
 
         let _ = fs::remove_dir_all(&dir);
     }

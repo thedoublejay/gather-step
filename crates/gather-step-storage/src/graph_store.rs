@@ -424,6 +424,14 @@ pub enum GraphStoreError {
     MissingNode(NodeId),
     #[error("edge owner node is not a file: {0:?}")]
     OwnerNotAFile(NodeId),
+    #[error(
+        "graph schema version mismatch at `{path}`: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
+    )]
+    SchemaVersionMismatch {
+        path: PathBuf,
+        stored: u32,
+        expected: u32,
+    },
 }
 
 impl GraphStoreError {
@@ -482,6 +490,8 @@ impl GraphStoreDb {
         };
         if is_new {
             store.write_schema_version()?;
+        } else {
+            store.validate_schema_version()?;
         }
         Ok(store)
     }
@@ -497,6 +507,39 @@ impl GraphStoreDb {
                 .map_err(GraphStoreError::storage)?;
         }
         write_txn.commit().map_err(GraphStoreError::storage)
+    }
+
+    /// Read the persisted schema version and reject the open when it does not
+    /// match [`GRAPH_SCHEMA_VERSION`]. A missing version row is treated as
+    /// version 0 (the v3.1 baseline) so unstamped fresh stores keep opening
+    /// cleanly. Stamped stores from a future schema fail with a typed
+    /// [`GraphStoreError::SchemaVersionMismatch`] instead of producing
+    /// shape-incompatible reads.
+    fn validate_schema_version(&self) -> Result<(), GraphStoreError> {
+        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let table = match read_txn.open_table(GRAPH_SCHEMA) {
+            Ok(t) => t,
+            // Missing schema table means the on-disk version is the implicit
+            // baseline (0); a future bump can require the table to exist.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let stored = match table
+            .get(GRAPH_SCHEMA_VERSION_KEY)
+            .map_err(GraphStoreError::storage)?
+        {
+            Some(v) => v.value(),
+            None => GRAPH_SCHEMA_VERSION, // baseline assumption
+        };
+        if stored == GRAPH_SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(GraphStoreError::SchemaVersionMismatch {
+                path: self.path.clone(),
+                stored,
+                expected: GRAPH_SCHEMA_VERSION,
+            })
+        }
     }
 
     /// Run redb's integrity check.

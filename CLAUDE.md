@@ -17,7 +17,7 @@ When the user says **"review this PR using gather-step"** (or any close variant 
 
 1. Run `gather-step pr-review --base <base> --head <head> --json` to build the review index and emit a structured delta report. Use `--keep-cache` if the user wants to ask follow-up questions against the review index.
 2. **Warn the user before the first run** that it will take a minute or two: a fresh review index is being built from scratch in a disposable Gather Step storage. Subsequent runs against the same SHAs may reuse the cache.
-3. Read the report's `metadata`, `safety`, `changed_files`, and `suggested_followups`. The MVP report leaves `added_routes` / `added_symbols` / `added_payload_contracts` empty — those are populated by Phase 2 of the plan.
+3. Read the report's `metadata`, `safety`, `changed_files`, and `suggested_followups`. The current `schema_version` (defined by `DELTA_REPORT_SCHEMA_VERSION` in `crates/gather-step-cli/src/pr_review/delta_report.rs`) populates `routes`, `symbols`, `payload_contracts`, `events`, `decorators`, `contract_alignments`, `removed_surface_risks`, and `deployment` in addition to the metadata surfaces — none of these are stubs.
 4. For deep follow-ups, run the suggested commands as-is. They include `--registry` / `--storage` overrides pointing at the kept review index, so they read the PR-branch state, not the workspace baseline.
 5. Only fall back to manual diff inspection if `pr-review` is unavailable or fails. Never silently skip it for a structured review request.
 

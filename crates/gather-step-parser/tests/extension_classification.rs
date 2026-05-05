@@ -1,12 +1,12 @@
 //! Extension-classification regression tests.
 //!
-//! Verifies that `parse_ts_js_with_swc` routes `.mts`, `.cts`, and uppercase
+//! Verifies that the TS/JS visitor routes `.mts`, `.cts`, and uppercase
 //! variants (`.TS`, `.TSX`) through the TypeScript parser rather than the
 //! JavaScript parser.
 //!
 //! Prior to the fix, the extension gate matched only lowercase `ts` and `tsx`
-//! exactly, so these extensions fell through to `Syntax::Es(...)`.  A source
-//! file containing type annotations would then either trigger a parse error or
+//! exactly, so these extensions fell through to the JS parser. A source file
+//! containing type annotations would then either trigger a parse error or
 //! produce an empty / recovered module, both of which this test detects.
 
 /// Sources that are only valid as TypeScript (contain type annotations).

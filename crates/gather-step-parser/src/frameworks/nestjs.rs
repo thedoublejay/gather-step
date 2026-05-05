@@ -4512,7 +4512,7 @@ export class Svc {
     fn producer_extracts_event_from_static_template_literal() {
         // `client.emit(\`orders.created\`, ...)` — a zero-interpolation template
         // literal is semantically equivalent to a string literal but represented
-        // as Expr::Tpl in the SWC AST. Producer extraction currently misses it.
+        // as a `TemplateLiteral` AST node. Producer extraction currently misses it.
         let parsed = parse_nestjs_fixture(
             r#"
             export class OrderService {

@@ -69,7 +69,7 @@ name = "extraction_fidelity"
 required-features = ["test-support"]
 
 [[test]]
-name = "oxc_parity"
+name = "oxc_self_validation"
 required-features = ["test-support"]
 
 [[test]]

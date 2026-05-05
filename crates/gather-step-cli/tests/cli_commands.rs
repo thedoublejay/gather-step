@@ -243,6 +243,35 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .is_some_and(|tables| !tables.is_empty())
     );
 
+    // deployment-topology smoke: the 162-line CLI command and the 761-line
+    // analysis crate had effectively no end-to-end coverage before this test.
+    // Even with no deployment evidence in the fixture, the command must
+    // produce a stable empty-shape report rather than panicking or failing.
+    let deploy_topo = run_ok(
+        temp.path(),
+        &[
+            "--json",
+            "deployment-topology",
+            "where-deployed",
+            "--service",
+            "ServiceAController",
+        ],
+    );
+    let deploy_topo_json = stdout_json(&deploy_topo);
+    for key in [
+        "deployments",
+        "services",
+        "env_vars",
+        "shared_infra",
+        "workflow_jobs",
+        "edges",
+    ] {
+        assert!(
+            deploy_topo_json[key].is_array(),
+            "deployment-topology output missing array key `{key}`"
+        );
+    }
+
     let status = run_ok(temp.path(), &["status", "--json"]);
     let status_json = stdout_json(&status);
     assert_eq!(status_json["event"], "status_completed");
@@ -277,8 +306,29 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .as_str()
             .is_some_and(|path| { path.ends_with(".gather-step/storage/graph.redb") })
     );
-    assert!(compact_json["graph_size_before_bytes"].is_u64());
-    assert!(compact_json["graph_size_after_bytes"].is_u64());
+    let before_bytes = compact_json["graph_size_before_bytes"]
+        .as_u64()
+        .expect("graph_size_before_bytes must be numeric");
+    let after_bytes = compact_json["graph_size_after_bytes"]
+        .as_u64()
+        .expect("graph_size_after_bytes must be numeric");
+    assert!(
+        after_bytes <= before_bytes,
+        "compaction must not grow the graph: before={before_bytes} after={after_bytes}"
+    );
+
+    // Re-run a search post-compact to confirm the store is still readable —
+    // a broken compaction that left the graph unusable would fail here.
+    let post_compact_search = run_ok(temp.path(), &["search", "OrderList", "--json"]);
+    let post_compact_search_json = stdout_json(&post_compact_search);
+    assert!(
+        post_compact_search_json["hits"]
+            .as_array()
+            .expect("post-compact hits array")
+            .iter()
+            .any(|item| item["symbol_name"] == "OrderList"),
+        "search results must survive compaction"
+    );
 
     let conventions = run_ok(temp.path(), &["conventions", "--json"]);
     let conventions_json = stdout_json(&conventions);

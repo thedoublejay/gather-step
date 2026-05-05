@@ -30,19 +30,34 @@ use oxc_ast::ast::{
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
 
-#[cfg(feature = "test-support")]
-use crate::ts_js_backend::TsJsParseStatus;
 use crate::{
     resolve::ImportBinding,
     traverse::FileEntry,
     tree_sitter::{DecoratorCapture, ParseState},
 };
 
+/// Outcome of a TS/JS parse pass.
+///
+/// `Parsed` and `Recovered` both populate the `ParseState`; the difference
+/// is whether the underlying parser surfaced any syntax errors. The
+/// tree-sitter fallback only kicks in for `Unrecoverable` (Oxc panicked on
+/// the source).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OxcParseStatus {
+pub(crate) enum TsJsParseStatus {
     Parsed,
     Recovered,
     Unrecoverable,
+}
+
+impl TsJsParseStatus {
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Parsed => "parsed",
+            Self::Recovered => "recovered",
+            Self::Unrecoverable => "unrecoverable",
+        }
+    }
 }
 
 const MAX_DEPTH: usize = 256;
@@ -59,7 +74,7 @@ pub(crate) fn parse_ts_js_with_oxc_with_status(
     state: &mut ParseState<'_>,
     source: &str,
     _absolute_path: &Path,
-) -> OxcParseStatus {
+) -> TsJsParseStatus {
     let allocator = Allocator::default();
     let options = ParseOptions {
         allow_return_outside_function: true,
@@ -70,14 +85,14 @@ pub(crate) fn parse_ts_js_with_oxc_with_status(
         .parse();
 
     let status = if parsed.panicked {
-        OxcParseStatus::Unrecoverable
+        TsJsParseStatus::Unrecoverable
     } else if parsed.errors.is_empty() {
-        OxcParseStatus::Parsed
+        TsJsParseStatus::Parsed
     } else {
-        OxcParseStatus::Recovered
+        TsJsParseStatus::Recovered
     };
 
-    if status == OxcParseStatus::Unrecoverable {
+    if status == TsJsParseStatus::Unrecoverable {
         return status;
     }
 
@@ -2813,7 +2828,8 @@ mod tests {
     use oxc_span::Span;
     use pretty_assertions::assert_eq;
 
-    use crate::{FileEntry, Language, ts_js_backend::TsJsParseStatus};
+    use super::TsJsParseStatus;
+    use crate::{FileEntry, Language};
 
     use super::{
         line_offsets, parse_top_level_declared_names, parse_ts_js_for_status, source_type_for_path,

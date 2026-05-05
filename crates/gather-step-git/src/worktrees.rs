@@ -17,7 +17,7 @@ use thiserror::Error;
 /// Drop is intentionally a no-op: cleanup is explicit so callers can opt into
 /// `--keep-cache` behaviour without leaking handles.  Call [`remove_worktree`]
 /// when the worktree is no longer needed.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReviewWorktree {
     /// The source repository (the user's checkout).
     pub repo: PathBuf,

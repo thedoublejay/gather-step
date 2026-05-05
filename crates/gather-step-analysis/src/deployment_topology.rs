@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeKind};
+use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeKind, canonical_topology_part};
 use gather_step_storage::{GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 
@@ -370,27 +370,6 @@ fn node_matches_repo(node: &NodeData, repo: &str) -> bool {
         .any(|value| value.contains(&repo_marker))
 }
 
-fn canonical_topology_part(value: &str) -> String {
-    let mut normalized = String::new();
-    let mut previous_was_separator = false;
-    for ch in value.trim().chars() {
-        let next = if ch.is_ascii_alphanumeric() {
-            previous_was_separator = false;
-            ch.to_ascii_lowercase()
-        } else if matches!(ch, '.' | '-' | ':') {
-            previous_was_separator = false;
-            ch
-        } else if !previous_was_separator {
-            previous_was_separator = true;
-            '_'
-        } else {
-            continue;
-        };
-        normalized.push(next);
-    }
-    normalized.trim_matches('_').replace("__", "_")
-}
-
 fn node_item(node: &NodeData) -> DeploymentTopologyNode {
     DeploymentTopologyNode {
         repo: node.repo.clone(),
@@ -757,5 +736,51 @@ mod tests {
 
         drop(graph);
         let _ = std::fs::remove_file(graph_path);
+    }
+
+    /// `canonical_topology_part` shared between `gather-step-core::virtual_nodes`
+    /// (which mints virtual-node qualified names) and this crate (which matches
+    /// user-supplied targets against those names) MUST stay byte-equivalent on
+    /// common inputs. A regression in either implementation would cause
+    /// `WhereDeployed` / `ServiceEnv` queries to silently return empty
+    /// despite the data being present in the graph.
+    #[test]
+    fn canonical_topology_part_normalizes_separators_consistently() {
+        use gather_step_core::canonical_topology_part;
+
+        // Whitespace and casing collapse to the same canonical form.
+        assert_eq!(canonical_topology_part("  Service-A  "), "service-a");
+        assert_eq!(canonical_topology_part("Service A"), "service_a");
+        assert_eq!(canonical_topology_part("Service\tA"), "service_a");
+        // Allowed special characters (`.`, `-`, `:`) survive verbatim
+        // (lower-cased), runs of disallowed characters collapse to one `_`.
+        assert_eq!(canonical_topology_part("api.v1:Auth"), "api.v1:auth");
+        assert_eq!(canonical_topology_part("a/b/c"), "a_b_c");
+        assert_eq!(canonical_topology_part("a___b"), "a_b");
+        // Empty / all-disallowed inputs canonicalize to empty.
+        assert_eq!(canonical_topology_part(""), "");
+        assert_eq!(canonical_topology_part("   "), "");
+    }
+
+    /// The full virtual-node qualified-name minting (which uses
+    /// `canonical_topology_part_or` with a fallback) and the topology lookup
+    /// (which uses bare `canonical_topology_part`) agree on the canonical form
+    /// of the variable name fragment. A drift here would silently break
+    /// `WhereDeployed` queries against deployments minted by the indexer.
+    #[test]
+    fn deployment_qn_matches_canonical_topology_part_for_common_inputs() {
+        use gather_step_core::{canonical_topology_part, deployment_qn};
+
+        let repo = "backend-svc";
+        let name = "api gateway";
+        let qn = deployment_qn(repo, name);
+        assert!(
+            qn.contains(&canonical_topology_part(repo)),
+            "deployment_qn `{qn}` should embed canonical_topology_part(`{repo}`)"
+        );
+        assert!(
+            qn.contains(&canonical_topology_part(name)),
+            "deployment_qn `{qn}` should embed canonical_topology_part(`{name}`)"
+        );
     }
 }

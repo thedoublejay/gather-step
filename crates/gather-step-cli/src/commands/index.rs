@@ -698,6 +698,13 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let mut committed = committed;
     committed.sort_by_key(|c| c.repo_idx);
     let count_start = Instant::now();
+    // Recount every CONFIGURED repo, not just the post-filter set. Cross-repo
+    // edges mean a partial reindex (`--repo foo`) can change graph totals for
+    // sibling repos that were not re-parsed — owner-reset of a foo file may
+    // remove edges whose `owner_file` belonged to the OTHER repo. The status
+    // command asserts `sum(registry_symbol_count) == sum(graph_node_count)`
+    // across all repos, so the registry must be refreshed even for filtered-
+    // out repos.
     let final_counts_by_repo = configured_repos
         .iter()
         .map(|repo| {
@@ -758,6 +765,11 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             git_analytics_warning: analytics_warning,
         });
     }
+    // For repos that did not commit through the indexer this run (filtered
+    // out, or had no indexable sources), still refresh the registry's count
+    // metadata using the freshly computed totals so it stays consistent with
+    // the live graph state — partial reindexes can shift sibling-repo counts
+    // through cross-repo edges (see `final_counts_by_repo` rationale above).
     for repo in &configured_repos {
         if committed_repo_names.contains(&repo.name) {
             continue;

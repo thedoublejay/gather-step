@@ -311,11 +311,17 @@ fn try_clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
 
     #[cfg(target_os = "linux")]
     {
-        let status = Command::new("cp")
-            .arg("--reflink=auto")
-            .arg(src)
-            .arg(dst)
-            .status();
+        // Pin to the absolute path so a tampered $PATH cannot substitute a
+        // malicious `cp`. macOS uses /bin/cp directly; on Linux the canonical
+        // location is the same, but we fall back to a $PATH lookup when
+        // /bin/cp is missing (e.g. minimal containers).
+        let bin = std::path::Path::new("/bin/cp");
+        let mut cmd = if bin.exists() {
+            Command::new(bin)
+        } else {
+            Command::new("cp")
+        };
+        let status = cmd.arg("--reflink=auto").arg(src).arg(dst).status();
         match status {
             Ok(status) if status.success() => Ok(true),
             Ok(_) => Ok(false),

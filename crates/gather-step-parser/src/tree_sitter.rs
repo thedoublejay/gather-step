@@ -219,14 +219,14 @@ fn parse_file_core(
     let parse_start = std::time::Instant::now();
 
     // Diagnostic bypass: when `GATHER_STEP_DIAG_TS=treesitter` is set, force
-    // TS/JS files through the tree-sitter path instead of swc. Used for
-    // empirical parity comparison against the swc output.
+    // TS/JS files through the tree-sitter path instead of the dedicated Oxc
+    // visitor. Used for empirical comparison against the Oxc output.
     let force_tree_sitter = std::env::var("GATHER_STEP_DIAG_TS")
         .map(|v| v == "treesitter")
         .unwrap_or(false);
 
-    // ── TS/JS: use swc (unless the diagnostic bypass is active) ─────────────
-    if should_use_swc(file) && !force_tree_sitter {
+    // ── TS/JS: use the Oxc visitor (unless the diagnostic bypass is active) ─
+    if should_use_ts_js_visitor(file) && !force_tree_sitter {
         let file_path_utf8 = path_to_utf8(&file.path);
         let file_path = file_path_utf8.as_str();
 
@@ -292,14 +292,13 @@ fn parse_file_core(
         });
 
         let fallback_checkpoint = state.checkpoint();
-        let ts_js_status = crate::ts_js_backend::parse_ts_js_with_backend(
-            crate::ts_js_backend::TsJsParserBackend::current(),
+        let ts_js_status = crate::ts_js_oxc::parse_ts_js_with_oxc_with_status(
             file,
             &mut state,
             &source,
             &absolute_path,
         );
-        if ts_js_status != crate::ts_js_backend::TsJsParseStatus::Parsed {
+        if ts_js_status != crate::ts_js_oxc::TsJsParseStatus::Parsed {
             let status = ts_js_status.as_str();
             state.restore(fallback_checkpoint);
             tracing::warn!(
@@ -322,8 +321,9 @@ fn parse_file_core(
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
 
-        // Framework augmentations (same logic as the non-swc path below).
-        macro_rules! state_snapshot_swc {
+        // Framework augmentations (same logic as the tree-sitter fallback path
+        // below; macro avoids cloning the snapshot when no augmenters apply).
+        macro_rules! state_snapshot_oxc {
             () => {
                 ParsedFile {
                     file: file.clone(),
@@ -373,7 +373,7 @@ fn parse_file_core(
             if !seen_groups.insert(group) {
                 continue;
             }
-            let augmentation = registry.augment(pack_id, &state_snapshot_swc!());
+            let augmentation = registry.augment(pack_id, &state_snapshot_oxc!());
             append_unique_nodes(&mut state.nodes, augmentation.nodes);
             state.edges.extend(augmentation.edges);
         }
@@ -471,7 +471,7 @@ fn parse_file_core(
 
     match file.language {
         Language::TypeScript | Language::JavaScript => {
-            // Should be unreachable; handled above by swc path.
+            // Should be unreachable; handled above by the Oxc visitor path.
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
         Language::Python => {
@@ -571,7 +571,10 @@ fn parse_file_core(
     Ok(parsed)
 }
 
-fn should_use_swc(file: &FileEntry) -> bool {
+/// True when this file should be parsed by the dedicated TS/JS visitor (Oxc)
+/// instead of the tree-sitter fallback. Static-mapping files (`.json`,
+/// `.yaml`, `.yml`) skip the visitor and stay on tree-sitter.
+fn should_use_ts_js_visitor(file: &FileEntry) -> bool {
     if !matches!(file.language, Language::TypeScript | Language::JavaScript) {
         return false;
     }
@@ -1333,7 +1336,8 @@ impl<'a> ParseState<'a> {
         self.import_bindings.push(binding);
     }
 
-    /// swc variant of `push_call_site` — takes a [`SourceSpan`] directly.
+    /// Span-form variant of [`push_call_site`] used by the Oxc visitor —
+    /// takes a [`SourceSpan`] directly instead of a tree-sitter `Node`.
     pub(crate) fn push_call_site_with_span(
         &mut self,
         owner_id: gather_step_core::NodeId,
@@ -4494,7 +4498,8 @@ mod tests {
         WorkspaceRepoIdentity, configured_workspace_repo_identities,
         import_path_exists_inside_allowed_roots, load_configured_workspace_repo_identities,
         parse_file, parse_file_with_context, resolve_import_path,
-        resolve_python_sibling_package_import, resolve_sibling_package_import, should_use_swc,
+        resolve_python_sibling_package_import, resolve_sibling_package_import,
+        should_use_ts_js_visitor,
     };
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -5632,7 +5637,7 @@ class Outer:
     }
 
     #[test]
-    fn swc_skips_static_mapping_files() {
+    fn ts_js_visitor_skips_static_mapping_files() {
         let mut file = crate::traverse::FileEntry {
             path: PathBuf::from("app/src/v2/app/translate/en/globalSearch.json"),
             language: Language::JavaScript,
@@ -5640,11 +5645,11 @@ class Outer:
             content_hash: [0; 32],
             source_bytes: None,
         };
-        assert!(!should_use_swc(&file));
+        assert!(!should_use_ts_js_visitor(&file));
 
         file.path = PathBuf::from("src/routes.ts");
         file.language = Language::TypeScript;
-        assert!(should_use_swc(&file));
+        assert!(should_use_ts_js_visitor(&file));
     }
 
     #[test]

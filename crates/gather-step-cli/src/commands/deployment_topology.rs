@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use gather_step_analysis::{
@@ -7,6 +9,7 @@ use gather_step_storage::StorageCoordinator;
 
 use crate::app::AppContext;
 use crate::command_render::RenderedCommand;
+use crate::storage_context::StorageContext;
 
 #[derive(Debug, Args)]
 pub struct DeploymentTopologyArgs {
@@ -14,6 +17,14 @@ pub struct DeploymentTopologyArgs {
     pub command: DeploymentTopologyCommand,
     #[arg(long, default_value_t = 20, help = "Maximum result count")]
     pub limit: usize,
+    /// Read symbol registry JSON from this path (used by `pr-review`
+    /// follow-ups to query a kept review index instead of the workspace
+    /// baseline).
+    #[arg(long)]
+    pub registry: Option<PathBuf>,
+    /// Read storage artifacts from this directory.
+    #[arg(long)]
+    pub storage: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -43,7 +54,16 @@ pub(crate) fn run_rendered(
     app: &AppContext,
     args: DeploymentTopologyArgs,
 ) -> Result<RenderedCommand> {
-    let storage = StorageCoordinator::open(app.workspace_paths().storage_root)?;
+    let ctx = if args.registry.is_some() || args.storage.is_some() {
+        StorageContext::workspace_read_only_with_overrides(
+            app,
+            args.registry.clone(),
+            args.storage.clone(),
+        )
+    } else {
+        StorageContext::workspace_read_only(app)
+    };
+    let storage = ctx.open_storage_coordinator()?;
     execute(&storage, app.repo_filter.as_deref(), args)
 }
 
@@ -153,6 +173,8 @@ mod tests {
                     service: " ".to_owned(),
                 },
                 limit: 20,
+                registry: None,
+                storage: None,
             },
         )
         .expect_err("empty service should fail");

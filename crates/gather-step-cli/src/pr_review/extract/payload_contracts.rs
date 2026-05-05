@@ -73,26 +73,13 @@ pub fn extract_payload_contract_deltas<M: MetadataStore>(
         }
     }
 
-    // Sort for deterministic output.
-    let sort_key = |d: &PayloadContractDelta| {
-        (
-            d.repo.clone(),
-            d.file.clone(),
-            d.target_qualified_name.clone(),
-            d.side.clone(),
-        )
-    };
-    added.sort_by_key(sort_key);
-    removed.sort_by_key(sort_key);
-    let change_sort_key = |c: &PayloadContractDeltaChange| {
-        (
-            c.repo.clone(),
-            c.file.clone(),
-            c.target_qualified_name.clone(),
-            c.side.clone(),
-        )
-    };
-    changed.sort_by_key(change_sort_key);
+    // Sort for deterministic output. Uses `sort_by` with `as_str()` borrows
+    // rather than `sort_by_key` with cloned `String`s — `sort_by_key` would
+    // call its closure O(n log n) times, allocating four owned strings per
+    // comparison.
+    added.sort_by(cmp_delta);
+    removed.sort_by(cmp_delta);
+    changed.sort_by(cmp_change);
 
     Ok(PayloadContractDeltas {
         added,
@@ -100,6 +87,39 @@ pub fn extract_payload_contract_deltas<M: MetadataStore>(
         changed,
         unavailable: false,
     })
+}
+
+fn cmp_delta(a: &PayloadContractDelta, b: &PayloadContractDelta) -> std::cmp::Ordering {
+    (
+        a.repo.as_str(),
+        a.file.as_str(),
+        a.target_qualified_name.as_str(),
+        a.side.as_str(),
+    )
+        .cmp(&(
+            b.repo.as_str(),
+            b.file.as_str(),
+            b.target_qualified_name.as_str(),
+            b.side.as_str(),
+        ))
+}
+
+fn cmp_change(
+    a: &PayloadContractDeltaChange,
+    b: &PayloadContractDeltaChange,
+) -> std::cmp::Ordering {
+    (
+        a.repo.as_str(),
+        a.file.as_str(),
+        a.target_qualified_name.as_str(),
+        a.side.as_str(),
+    )
+        .cmp(&(
+            b.repo.as_str(),
+            b.file.as_str(),
+            b.target_qualified_name.as_str(),
+            b.side.as_str(),
+        ))
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
