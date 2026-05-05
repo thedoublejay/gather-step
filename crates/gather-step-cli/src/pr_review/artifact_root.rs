@@ -210,7 +210,8 @@ pub fn workspace_hash(workspace_root: &Path) -> String {
 
 /// Generate a unique run id of the form `review-<utc-yyyymmdd-hhmmss>-<rand6>`.
 pub fn generate_run_id() -> String {
-    use rand::Rng as _;
+    // rand 0.10 split sample_iter onto the `RngExt` trait.
+    use rand::RngExt as _;
     let ts = Utc::now().format("%Y%m%d-%H%M%S");
     let suffix: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)

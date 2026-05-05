@@ -149,7 +149,7 @@ fn collect_ts_js_fixtures_inner(path: &Path, fixtures: &mut Vec<PathBuf>) {
                 })
             })
             .collect();
-        entries.sort_by_key(|entry| entry.path());
+        entries.sort_by_key(std::fs::DirEntry::path);
         for entry in entries {
             collect_ts_js_fixtures_inner(&entry.path(), fixtures);
         }

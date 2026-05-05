@@ -12,6 +12,23 @@ final-status-level = "slow"
 filter = 'test(incremental_reindex_updates_contract_drift)'
 threads-required = "num-test-threads"
 
+# Heavy end-to-end tests that index the fixture workspace and run multi-
+# scenario suites. Default 30s × 2 = 60s slow-timeout is insufficient on
+# slower macOS CI runners — both pack_oracle suites have a 120s internal
+# budget and the integration_pipeline/oracle_high_bar tests routinely hit
+# 50-60s under load. 60s × 4 = 240s gives enough headroom without hiding
+# real perf regressions (the tests still fail on real slowdowns; the
+# `runs_under_two_minutes` test still asserts < 120s internally).
+[[profile.default.overrides]]
+filter = '''
+    test(=pack_oracle_suite_runs_under_two_minutes)
+  | test(=pack_oracle_suite_proves_pack_quality_on_fixture_workspace)
+  | test(=oracle_high_bar_scenarios_are_stable_across_fresh_index_runs)
+  | test(=integration_pipeline_runs_on_committed_fixture_workspace)
+  | test(=partial_cli_reindex_refreshes_registry_counts_from_final_graph)
+'''
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 [profile.stress]
 fail-fast = true
 retries = 0
