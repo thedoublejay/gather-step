@@ -101,7 +101,7 @@ pub struct MemoryThresholds {
 pub struct StorageThresholds {
     /// Maximum allowed graph store size in bytes.
     pub graph_bytes_max: u64,
-    /// Maximum allowed SQLite metadata file size in bytes.
+    /// Maximum allowed `SQLite` metadata file size in bytes.
     pub metadata_bytes_max: u64,
     /// Maximum allowed Tantivy search index size in bytes.
     pub search_bytes_max: u64,

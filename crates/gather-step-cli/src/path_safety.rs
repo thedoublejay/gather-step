@@ -371,7 +371,7 @@ mod tests {
         let missing = PathBuf::from("/tmp/this-path-definitely-does-not-exist-gather-step-test");
         let err = canonical_workspace_root(&missing).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("Path safety I/O error"), "got: {msg}");
+        assert!(msg.contains("Path safety I/O error"), "Got: {msg}.");
     }
 
     #[test]

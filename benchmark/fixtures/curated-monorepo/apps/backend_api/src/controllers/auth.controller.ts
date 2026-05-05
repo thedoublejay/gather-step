@@ -3,8 +3,8 @@ import { Controller, Post, Body } from '@nestjs/common';
 @Controller('auth')
 export class AuthController {
   @Post('refresh')
-  async refreshToken(@Body('refreshToken') refreshToken: string): Promise<{ accessToken: string }> {
+  async renewSession(@Body('renewalCode') renewalCode: string): Promise<{ sessionHandle: string }> {
     // Minimal stub for benchmark fixture purposes.
-    return { accessToken: `refreshed-${refreshToken}` };
+    return { sessionHandle: `renewed-${renewalCode}` };
   }
 }

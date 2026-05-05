@@ -5777,13 +5777,13 @@ class Outer:
         let external = TestDir::new("relative-symlink-external");
         fs::create_dir_all(temp_dir.path().join("src")).expect("src dir should exist");
         fs::write(
-            external.path().join("secret.ts"),
-            "export const secret = 1;",
+            external.path().join("external_value.ts"),
+            "export const externalValue = 1;",
         )
         .expect("external file should write");
         symlink(
-            external.path().join("secret.ts"),
-            temp_dir.path().join("src/secret.ts"),
+            external.path().join("external_value.ts"),
+            temp_dir.path().join("src/external_value.ts"),
         )
         .expect("symlink should create");
 

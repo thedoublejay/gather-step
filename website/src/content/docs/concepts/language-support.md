@@ -1,6 +1,6 @@
 ---
 title: Language Support
-description: Which languages Gather Step parses today, what each tier extracts, and how Python and TypeScript reach first-class parity. Includes the private corpus benchmarking convention.
+description: Which languages Gather Step parses today, what each tier extracts, and how Python and TypeScript reach first-class parity. Includes the external corpus benchmarking convention.
 ---
 
 Gather Step parses source files into a queryable graph of files, modules, classes, functions, imports, and call sites. Not every language reaches the same depth. This page describes the current parsing tiers, what each one extracts, and how to reason about cross-repo edges when your workspace mixes languages.
@@ -54,15 +54,15 @@ When a file in a configured workspace imports a symbol, the resolver walks the f
 
 Diagnostics are emitted (`tracing::warn!`) at each tier when a step fails — malformed YAML, unreadable directories, missing `pyproject.toml` fields. If you see "import not resolved" symptoms, run with `RUST_LOG=gather_step_parser=warn` to surface the underlying cause.
 
-## Private Corpus Convention
+## External Corpus Convention
 
-When you measure parser quality or storage performance against repositories you cannot publish, follow the private corpus convention so committed artifacts stay neutral.
+When you measure parser quality or storage performance against repositories you cannot publish, follow the external corpus convention so committed artifacts stay neutral.
 
 - **Neutral fixtures live in the repo.** `tests/fixtures/python_planning_workspace/` is a synthetic Python workspace with safe names like `backend_standard` and `service_a`. CI thresholds run against these.
-- **Private corpora live on your machine.** `benchmark/python/private-corpus.local.yaml` and `benchmark/python/private-results/` are gitignored. They reference real repositories by alias only — `py-private-alpha`, `py-private-beta`, and so on.
+- **External corpora live on your machine.** `benchmark/python/external-corpus.local.yaml` and `benchmark/python/external-results/` are gitignored. They reference real repositories by alias only — `py-external-alpha`, `py-external-beta`, and so on.
 - **Aliases on every checked-in artifact.** Anything that lands in a release note, threshold update, or shared dashboard refers to the alias. Real names, paths, and raw outputs stay local.
 
-The `benchmark/python/private-corpus.example.yaml` file documents the schema (alias, path, file counts, framework families, indexability status). Copy it to `private-corpus.local.yaml`, fill in your real paths, and run the bench harness. See `benchmark/python/README.md` for the full workflow.
+The `benchmark/python/external-corpus.example.yaml` file documents the schema (alias, path, file counts, framework families, indexability status). Copy it to `external-corpus.local.yaml`, fill in your real paths, and run the bench harness. See `benchmark/python/README.md` for the full workflow.
 
 This convention is gather-step's local discipline; if you have seen "internal benchmark suite", "user test corpus" (TypeScript), or "fleet" (Google) in other projects, the underlying idea is the same — your data, not the project's data.
 

@@ -3880,7 +3880,7 @@ export class ItemController {
                 Some(&move |progress| {
                     progress_sink
                         .lock()
-                        .expect("progress mutex should not be poisoned")
+                        .expect("The progress mutex should not be poisoned.")
                         .push((progress.phase, progress.processed, progress.total));
                 }),
             )
@@ -3888,7 +3888,7 @@ export class ItemController {
 
         let progress_events = progress_events
             .lock()
-            .expect("progress mutex should not be poisoned");
+            .expect("The progress mutex should not be poisoned.");
         assert_eq!(progress_events.len(), 3);
         assert_eq!(progress_events[0].0, "traverse");
         assert_eq!(progress_events[1].0, "parse");

@@ -15,7 +15,7 @@ members = [
 
 [workspace.package]
 version = "3.1.0"
-authors = ["JJ Adonis"]
+authors = ["Gather Step contributors"]
 edition = "2024"
 rust-version = "1.94.1"
 license = "MIT"

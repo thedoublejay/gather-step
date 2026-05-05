@@ -20,7 +20,7 @@ const GRAPH_SCHEMA_VERSION_KEY: &str = "version";
 fn temp_db_path(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("clock")
+        .expect("The system clock should be after the Unix epoch.")
         .as_nanos();
     env::temp_dir().join(format!(
         "gather-step-{label}-{}-{nanos}.sqlite",
@@ -43,12 +43,12 @@ fn fresh_schema_stamps_metadata_user_version_zero() {
     let fresh_path = temp_db_path("fresh-schema-version");
     let _cleanup = Cleanup(fresh_path.clone());
 
-    MetadataStoreDb::open(&fresh_path).expect("fresh store should open");
+    MetadataStoreDb::open(&fresh_path).expect("The fresh metadata store should open.");
 
-    let conn = Connection::open(&fresh_path).expect("metadata db should reopen");
+    let conn = Connection::open(&fresh_path).expect("The metadata database should reopen.");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("user_version should read");
+        .expect("The user_version pragma should read.");
     assert_eq!(version, 0);
 }
 
@@ -58,17 +58,17 @@ fn metadata_store_rejects_future_user_version_with_mismatch_error() {
     let _cleanup = Cleanup(metadata_path.clone());
 
     {
-        let conn = Connection::open(&metadata_path).expect("metadata db should create");
+        let conn = Connection::open(&metadata_path).expect("The metadata database should create.");
         conn.pragma_update(None, "user_version", 99_i64)
-            .expect("future user_version should stamp");
+            .expect("The future user_version pragma should stamp.");
     }
 
     let err = MetadataStoreDb::open(&metadata_path)
         .err()
-        .expect("opening a future-version metadata store must fail");
+        .expect("Opening a future-version metadata store must fail.");
     assert!(
         matches!(err, MetadataStoreError::SchemaVersionMismatch { .. }),
-        "expected SchemaVersionMismatch, got {err:?}"
+        "Expected SchemaVersionMismatch, got {err:?}."
     );
 }
 
@@ -77,18 +77,18 @@ fn fresh_schema_stamps_graph_version_zero() {
     let graph_path = temp_db_path("fresh-graph-schema");
     let _cleanup = Cleanup(graph_path.clone());
 
-    let store = GraphStoreDb::open(&graph_path).expect("fresh graph store should open");
+    let store = GraphStoreDb::open(&graph_path).expect("The fresh graph store should open.");
     drop(store);
 
-    let db = redb::Database::open(&graph_path).expect("graph db should reopen");
-    let read_txn = db.begin_read().expect("read txn should begin");
+    let db = redb::Database::open(&graph_path).expect("The graph database should reopen.");
+    let read_txn = db.begin_read().expect("The read transaction should begin.");
     let schema = read_txn
         .open_table(GRAPH_SCHEMA)
-        .expect("graph schema table should exist");
+        .expect("The graph schema table should exist.");
     let version = schema
         .get(GRAPH_SCHEMA_VERSION_KEY)
-        .expect("graph schema version should read")
-        .expect("graph schema version should be stamped")
+        .expect("The graph schema version should read.")
+        .expect("The graph schema version should be stamped.")
         .value();
     assert_eq!(version, 0);
 }
@@ -108,30 +108,75 @@ fn graph_store_rejects_future_schema_version_with_mismatch_error() {
     // expected layout, then bump the version stamp to a value the current
     // build cannot understand.
     {
-        let store = GraphStoreDb::open(&graph_path).expect("fresh graph store should open");
+        let store = GraphStoreDb::open(&graph_path).expect("The fresh graph store should open.");
         drop(store);
     }
     {
-        let db = redb::Database::open(&graph_path).expect("graph db should reopen");
-        let write_txn = db.begin_write().expect("write txn");
+        let db = redb::Database::open(&graph_path).expect("The graph database should reopen.");
+        let write_txn = db
+            .begin_write()
+            .expect("The write transaction should begin.");
         {
             let mut table = write_txn
                 .open_table(GRAPH_SCHEMA)
-                .expect("graph schema table should exist");
+                .expect("The graph schema table should exist.");
             table
                 .insert(GRAPH_SCHEMA_VERSION_KEY, 99_u32)
-                .expect("bump schema version to 99");
+                .expect("The schema version should bump to 99.");
         }
-        write_txn.commit().expect("commit version bump");
+        write_txn.commit().expect("The version bump should commit.");
     }
 
     let err = GraphStoreDb::open(&graph_path)
         .err()
-        .expect("opening a future-version store must fail");
+        .expect("Opening a future-version store must fail.");
     assert!(
         matches!(err, GraphStoreError::SchemaVersionMismatch { .. }),
-        "expected SchemaVersionMismatch, got {err:?}"
+        "Expected SchemaVersionMismatch, got {err:?}."
     );
+}
+
+#[test]
+fn graph_store_accepts_missing_schema_table_as_implicit_v0() {
+    let graph_path = temp_db_path("implicit-v0-missing-table");
+    let _cleanup = Cleanup(graph_path.clone());
+
+    {
+        let db = redb::Database::create(&graph_path).expect("The graph database should create.");
+        let write_txn = db
+            .begin_write()
+            .expect("The write transaction should begin.");
+        write_txn
+            .commit()
+            .expect("The empty graph database should commit.");
+    }
+
+    let store = GraphStoreDb::open(&graph_path)
+        .expect("The unstamped graph store should open as implicit v0.");
+    drop(store);
+}
+
+#[test]
+fn graph_store_accepts_missing_schema_version_row_as_implicit_v0() {
+    let graph_path = temp_db_path("implicit-v0-missing-row");
+    let _cleanup = Cleanup(graph_path.clone());
+
+    {
+        let db = redb::Database::create(&graph_path).expect("The graph database should create.");
+        let write_txn = db
+            .begin_write()
+            .expect("The write transaction should begin.");
+        {
+            let _schema = write_txn
+                .open_table(GRAPH_SCHEMA)
+                .expect("The graph schema table should create.");
+        }
+        write_txn.commit().expect("The schema table should commit.");
+    }
+
+    let store = GraphStoreDb::open(&graph_path)
+        .expect("The graph store without a version row should open as implicit v0.");
+    drop(store);
 }
 
 #[test]
@@ -139,7 +184,7 @@ fn fresh_schema_supports_metadata_round_trip() {
     let fresh_path = temp_db_path("fresh-schema");
     let _cleanup = Cleanup(fresh_path.clone());
 
-    let store = MetadataStoreDb::open(&fresh_path).expect("fresh store should open");
+    let store = MetadataStoreDb::open(&fresh_path).expect("The fresh metadata store should open.");
     store
         .upsert_file_state(&FileIndexState {
             repo: "svc-a".to_owned(),
@@ -151,15 +196,15 @@ fn fresh_schema_supports_metadata_round_trip() {
             parse_ms: Some(7),
             ..Default::default()
         })
-        .expect("write file state");
+        .expect("The file state should write.");
     assert!(
         !store
             .should_reindex("svc-a", "src/current.ts", &[1, 2, 3, 4])
-            .expect("matching hash should be readable")
+            .expect("The matching hash should be readable.")
     );
     assert!(
         store
             .should_reindex("svc-a", "src/current.ts", &[9, 9, 9, 9])
-            .expect("mismatched hash should be readable")
+            .expect("The mismatched hash should be readable.")
     );
 }

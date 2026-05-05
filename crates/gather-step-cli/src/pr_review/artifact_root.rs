@@ -657,11 +657,11 @@ mod tests {
             "head1111",
             "review-symlinked-hash",
         )
-        .expect_err("symlinked workspace hash dir must be rejected");
+        .expect_err("The symlinked workspace hash directory must be rejected.");
 
         assert!(
             matches!(err, ArtifactRootError::PathSafety(_)),
-            "expected PathSafety, got {err}"
+            "Expected PathSafety, got {err}."
         );
     }
 
@@ -696,6 +696,64 @@ mod tests {
     }
 
     #[test]
+    fn touch_marker_accessed_sets_last_accessed_at() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseSHA",
+            "headSHA",
+            "review-touch-accessed",
+        )
+        .unwrap();
+
+        let before = read_marker(&artifact.marker_path).unwrap();
+        assert_eq!(before.last_accessed_at, None);
+
+        touch_marker_accessed(&artifact).unwrap();
+
+        let after = read_marker(&artifact.marker_path).unwrap();
+        let accessed_at = after
+            .last_accessed_at
+            .as_deref()
+            .expect("The last_accessed_at field should be set.");
+        chrono::DateTime::parse_from_rfc3339(accessed_at)
+            .expect("The last_accessed_at field should be an RFC 3339 timestamp.");
+    }
+
+    #[test]
+    fn read_marker_accepts_legacy_marker_without_last_accessed_at() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseSHA",
+            "headSHA",
+            "review-legacy-marker",
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&artifact.marker_path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value
+            .as_object_mut()
+            .expect("The marker JSON should be an object.")
+            .remove("last_accessed_at");
+        std::fs::write(
+            &artifact.marker_path,
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let marker = read_marker(&artifact.marker_path).unwrap();
+        assert_eq!(marker.last_accessed_at, None);
+    }
+
+    #[test]
     fn read_marker_rejects_unknown_schema_version() {
         let cache_tmp = TempDir::new().unwrap();
         let ws_tmp = TempDir::new().unwrap();
@@ -713,11 +771,11 @@ mod tests {
         marker.schema_version = MARKER_SCHEMA_VERSION + 1;
         write_marker_to_path(&marker, &artifact.marker_path).unwrap();
 
-        let err =
-            read_marker(&artifact.marker_path).expect_err("future marker schema must be rejected");
+        let err = read_marker(&artifact.marker_path)
+            .expect_err("The future marker schema must be rejected.");
         assert!(
             matches!(err, ArtifactRootError::UnsupportedMarkerSchema { .. }),
-            "expected UnsupportedMarkerSchema, got {err}"
+            "Expected UnsupportedMarkerSchema, got {err}."
         );
     }
 

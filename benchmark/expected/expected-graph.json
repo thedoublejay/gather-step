@@ -9,7 +9,7 @@
     {
       "file": "apps/backend_api/src/controllers/auth.controller.ts",
       "kind": "Function",
-      "name": "refreshToken"
+      "name": "renewSession"
     },
     {
       "file": "apps/backend_api/src/controllers/orders.controller.ts",
@@ -59,7 +59,7 @@
     {
       "file": "apps/frontend_app/src/hooks/useAuthentication.ts",
       "kind": "Function",
-      "name": "refreshAuthToken"
+      "name": "renewAuthSession"
     },
     {
       "file": "apps/frontend_app/src/hooks/useAuthentication.ts",

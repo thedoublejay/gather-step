@@ -1126,20 +1126,21 @@ repos:
         let storage_root = TestDir::new("symlink-storage");
         let repo_root = TestDir::new("symlink-repo");
         let outside_root = TestDir::new("symlink-outside");
-        fs::create_dir_all(repo_root.path().join("src")).expect("src dir");
+        fs::create_dir_all(repo_root.path().join("src"))
+            .expect("The source directory should exist.");
         fs::write(
             repo_root.path().join("src/app.ts"),
             "export function app() { return 1; }\n",
         )
-        .expect("regular file");
+        .expect("The regular file should write.");
         fs::write(
-            outside_root.path().join("secret.ts"),
-            "export const token = 'outside';\n",
+            outside_root.path().join("external_value.ts"),
+            "export const externalValue = 'outside';\n",
         )
-        .expect("outside file");
+        .expect("The external file should write.");
         std::os::unix::fs::symlink(
-            outside_root.path().join("secret.ts"),
-            repo_root.path().join("src/secret-link.ts"),
+            outside_root.path().join("external_value.ts"),
+            repo_root.path().join("src/external-link.ts"),
         )
         .expect("symlink should create");
 
@@ -1156,14 +1157,14 @@ repos:
         let mut pending = BTreeMap::new();
         watcher.record_event_paths(
             &Event::new(EventKind::Any)
-                .add_path(repo_root.path().join("src/secret-link.ts"))
+                .add_path(repo_root.path().join("src/external-link.ts"))
                 .add_path(repo_root.path().join("src/app.ts")),
             &mut pending,
         );
 
         let queued = pending
             .get("sample-service")
-            .expect("regular file should be queued")
+            .expect("The regular file should be queued.")
             .files
             .iter()
             .cloned()

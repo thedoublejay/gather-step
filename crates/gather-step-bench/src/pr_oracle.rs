@@ -1415,7 +1415,7 @@ mod tests {
             ChangeCategoryLabel::TypeRollout
         );
         assert_eq!(
-            classify_change_category("Fix auth token refresh"),
+            classify_change_category("Fix auth session renewal"),
             ChangeCategoryLabel::Auth
         );
         assert_eq!(

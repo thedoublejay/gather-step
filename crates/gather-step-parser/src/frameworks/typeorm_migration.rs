@@ -316,7 +316,7 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         let table_names = detect_migrations(&parsed)
             .into_iter()
@@ -351,7 +351,7 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         let table_names = detect_migrations(&parsed)
             .into_iter()
@@ -387,7 +387,7 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         let table_names = detect_migrations(&parsed)
             .into_iter()
@@ -419,7 +419,7 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         assert!(detect_migrations(&parsed).is_empty());
     }

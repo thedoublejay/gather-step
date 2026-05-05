@@ -88,7 +88,7 @@ fn route_link_resolves_frontend_to_backend_via_virtual_node() {
     let backend = symbol_node(
         "identity_service",
         "src/auth/auth.controller.ts",
-        "refreshAccessToken",
+        "renewAuthSession",
         0,
     );
     let route = virtual_node(

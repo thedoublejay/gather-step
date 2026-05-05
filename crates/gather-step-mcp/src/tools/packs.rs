@@ -4436,7 +4436,7 @@ mod tests {
                     line_start: Some(20),
                     repo: "identity".to_owned(),
                     symbol_id: "identity-caller".to_owned(),
-                    symbol_name: "refreshAccessToken".to_owned(),
+                    symbol_name: "renewAuthSession".to_owned(),
                 },
                 TraversalNode {
                     depth: 1,
@@ -4445,7 +4445,7 @@ mod tests {
                     line_start: Some(20),
                     repo: "identity".to_owned(),
                     symbol_id: "identity-caller".to_owned(),
-                    symbol_name: "refreshAccessToken".to_owned(),
+                    symbol_name: "renewAuthSession".to_owned(),
                 },
             ],
             Some("frontend_standard"),
@@ -4459,7 +4459,7 @@ mod tests {
                 repo: "identity".to_owned(),
                 symbol_id: "identity-caller".to_owned(),
                 symbol_kind: "function".to_owned(),
-                symbol_name: "refreshAccessToken".to_owned(),
+                symbol_name: "renewAuthSession".to_owned(),
             }]
         );
     }

@@ -637,10 +637,11 @@ fn metadata_schema_user_version_mismatch_reports_recovery_hint() {
     run_ok(temp.path(), &["init"]);
 
     let storage_root = temp.path().join(".gather-step/storage");
-    fs::create_dir_all(&storage_root).expect("storage dir");
-    let conn = Connection::open(storage_root.join("metadata.sqlite")).expect("metadata sqlite");
+    fs::create_dir_all(&storage_root).expect("The storage directory should be created.");
+    let conn = Connection::open(storage_root.join("metadata.sqlite"))
+        .expect("The metadata SQLite database should open.");
     conn.pragma_update(None, "user_version", 99)
-        .expect("stamp old development schema");
+        .expect("The old development schema should be stamped.");
     drop(conn);
 
     let output = run_fail(temp.path(), &["index", "--json"]);

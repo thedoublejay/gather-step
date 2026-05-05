@@ -1,0 +1,22 @@
+repos:
+  - name: gather-step
+    path: .
+indexing:
+  workspace_concurrency: 1
+  exclude:
+    - .git
+    - .gather-step
+    - target
+    - benchmark/results
+    - website/node_modules
+    - website/dist
+    - node_modules
+    - dist
+    - "*.min.js"
+    - "*.map"
+    - "*.lock"
+    - "*.d.ts"
+deployment:
+  include:
+    - .github/workflows/*.yml
+    - .github/workflows/*.yaml

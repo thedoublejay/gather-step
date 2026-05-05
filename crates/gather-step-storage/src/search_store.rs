@@ -363,11 +363,10 @@ impl TantivySearchStore {
             .lock())
     }
 
-    fn ensure_writer_health_for_reads(&self) -> Result<(), SearchStoreError> {
+    fn ensure_writer_health_for_reads(&self) {
         if let Some(writer) = &self.writer {
             drop(writer.lock());
         }
-        Ok(())
     }
 
     pub fn refresh_reader(&self) -> Result<(), SearchStoreError> {
@@ -710,7 +709,7 @@ impl SearchStore for TantivySearchStore {
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
-        self.ensure_writer_health_for_reads()?;
+        self.ensure_writer_health_for_reads();
         self.refresh_reader_if_needed()?;
 
         let exact_hits = self.execute_search(trimmed, limit, true, false, filters)?;

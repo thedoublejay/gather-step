@@ -42,7 +42,7 @@ impl TempDir {
             .map_or(0, |d| d.subsec_nanos());
         let pid = std::process::id();
         let path = std::env::temp_dir().join(format!("gs-test-{label}-{pid}-{nanos}-{counter}"));
-        std::fs::create_dir_all(&path).expect("create temp dir");
+        std::fs::create_dir_all(&path).expect("The temporary directory should be created.");
         Self { path }
     }
 

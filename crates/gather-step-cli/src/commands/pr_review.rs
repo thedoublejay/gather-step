@@ -571,8 +571,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 let base_short = &base_sha[..base_sha.len().min(12)];
                 if ws_head.sha != base_sha {
                     baseline_warnings.push(format!(
-                        "workspace HEAD {ws_short} does not match --base {base_short}; \
-                         the baseline index may not represent the base ref. \
+                        "The workspace HEAD {ws_short} does not match --base {base_short}; \
+                         the baseline index may not represent the base reference. \
                          Re-run after `git checkout {base_short}` and `gather-step index` \
                          for accurate deltas, or pass --no-baseline-check to suppress this warning."
                     ));
@@ -1492,7 +1492,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 "pr-review --keep-cache: Failed to write the completed marker. The cache may not be reusable on the next run.",
             );
         } else {
-            tracing::debug!(error = %e, "pr-review failed to write the completed marker.");
+            tracing::debug!(error = %e, "The pr-review command failed to write the completed marker.");
         }
     }
 
@@ -1530,7 +1530,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // Update the access timestamp so `--older-than` pruning measures
         // last-use time, not creation time.
         if let Err(e) = touch_marker_accessed(&artifact_root) {
-            tracing::debug!(error = %e, "pr-review failed to update the marker access timestamp.");
+            tracing::debug!(error = %e, "The pr-review command failed to update the marker access timestamp.");
         }
     } else if !args.keep_cache {
         // Fresh run: remove the worktree then the artifact root.  Errors are
@@ -2020,7 +2020,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
     // Validate --base/--head: both or neither.
     match (&args.base, &args.head) {
         (Some(_), None) | (None, Some(_)) => {
-            bail!("--base and --head must be specified together.");
+            bail!("The --base and --head flags must be specified together.");
         }
         _ => {}
     }
@@ -2169,7 +2169,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                 });
             }
             Err(e) => {
-                tracing::error!("Failed to process `{}`: {e:#}", artifact.root.display());
+                tracing::error!("Failed to process `{}`: {e:#}.", artifact.root.display());
                 had_error = true;
             }
         }
@@ -2213,6 +2213,8 @@ mod tests {
             test_helpers::TempDir,
         },
     };
+    use gather_step_core::{GatherStepConfig, RegistryStore};
+    use gather_step_storage::{IndexingOptions, index_workspace_with_storage};
 
     // ── git helpers ───────────────────────────────────────────────────────────
 
@@ -2413,6 +2415,92 @@ mod tests {
         git_run(&ws, &["checkout", "main"]);
 
         (ws, base_sha, head_sha)
+    }
+
+    /// Returns a fixture whose PR changes both Python code and deployment
+    /// topology. The baseline is left checked out so callers can build the
+    /// normal workspace index before running `pr-review` against the head SHA.
+    fn build_python_deployment_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: pyservice\n    path: pyservice\nindexing:\n  workspace_concurrency: 1\n  include_languages:\n    - python\n",
+        )
+        .unwrap();
+
+        let package = ws.join("pyservice/src/pyservice");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            ws.join("pyservice/pyproject.toml"),
+            "[project]\nname = \"pyservice\"\nversion = \"0.0.1\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("__init__.py"), "").unwrap();
+        fs::write(
+            package.join("app.py"),
+            "def existing_handler() -> str:\n    return \"ok\"\n",
+        )
+        .unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base"]);
+        let base_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "-b", "feature/python-deployment"]);
+        fs::write(
+            package.join("app.py"),
+            "def existing_handler() -> str:\n    return \"ok\"\n\n\ndef rollout_handler(event: dict[str, str]) -> dict[str, str]:\n    return {\"status\": event.get(\"id\", \"ok\")}\n",
+        )
+        .unwrap();
+        fs::write(
+            ws.join("pyservice/Dockerfile"),
+            "FROM python:3.12-slim\nENV FEATURE_FLAG=enabled\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(
+            &ws,
+            &[
+                "commit",
+                "--message",
+                "head: add python rollout and deployment",
+            ],
+        );
+        let head_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, base_sha, head_sha)
+    }
+
+    fn index_baseline_workspace(workspace: &Path) {
+        let config_path = workspace.join("gather-step.config.yaml");
+        let config = GatherStepConfig::from_yaml_file(&config_path)
+            .expect("The baseline fixture config should load.");
+        config
+            .validate_repo_roots_against_config_root(workspace)
+            .expect("The baseline fixture repo roots should validate.");
+
+        let gs_dir = workspace.join(".gather-step");
+        fs::create_dir_all(&gs_dir).expect("The generated-state directory should exist.");
+        let registry_path = gs_dir.join("registry.json");
+        let storage_root = gs_dir.join("storage");
+        let mut registry = RegistryStore::open(&registry_path).expect("The registry should open.");
+
+        index_workspace_with_storage(
+            &config,
+            workspace,
+            &mut registry,
+            &storage_root,
+            IndexingOptions::default(),
+        )
+        .expect("The baseline fixture should index.");
     }
 
     fn make_app(workspace: &Path) -> AppContext {
@@ -2730,10 +2818,82 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
 
         assert!(!root_old.exists(), "old artifact should be deleted");
         assert!(root_fresh.exists(), "fresh artifact must remain");
+    }
+
+    #[test]
+    fn older_than_prefers_last_accessed_at_when_present() {
+        let ws_tmp = TempDir::new("age-accessed-ws");
+        let cache_tmp = TempDir::new("age-accessed-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let recent_ts = chrono::Utc::now().to_rfc3339();
+        let root_recent_access = write_fake_artifact(
+            cache,
+            ws,
+            "review-recent-access",
+            "baseACCESS",
+            "headACCESS",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+        );
+        let marker_path = root_recent_access.join(MARKER_FILENAME);
+        let mut marker: ReviewMarker =
+            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+        marker.last_accessed_at = Some(recent_ts);
+        fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
+
+        let root_legacy_old = write_fake_artifact(
+            cache,
+            ws,
+            "review-legacy-old",
+            "baseLEGACY",
+            "headLEGACY",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+            config: None,
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: Some("1d".to_owned()),
+            include_active: false,
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
+
+        assert!(
+            root_recent_access.exists(),
+            "Recently accessed artifacts must remain even when created_at is old."
+        );
+        assert!(
+            !root_legacy_old.exists(),
+            "Legacy artifacts without last_accessed_at should fall back to created_at."
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2967,7 +3127,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).expect("JSON must parse");
 
@@ -3031,7 +3191,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let review_root = PathBuf::from(report["safety"]["review_root"].as_str().unwrap());
@@ -3070,7 +3230,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let review_root = PathBuf::from(report["safety"]["review_root"].as_str().unwrap());
@@ -3114,7 +3274,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let _ = run_inner(&app, &args).expect("run_inner should succeed");
+        let _ = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         // After state: .gather-step should have same existence as before.
         let existed_after = baseline_gather_step.exists();
@@ -3191,7 +3351,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let changed_files: Vec<&str> = report["changed_files"]
             .as_array()
@@ -3240,7 +3400,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let changed_repos: Vec<&str> = report["metadata"]["changed_repos"]
             .as_array()
@@ -3264,6 +3424,80 @@ mod tests {
             "base workspace config must not classify changed_repos: {changed_repos:?}"
         );
         assert_eq!(indexed_repos, vec!["newrepo"]);
+    }
+
+    #[test]
+    fn pr_review_temp_index_reports_python_symbols_and_deployment_topology() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("python-deployment-ws");
+        let cache_tmp = TempDir::new("python-deployment-cache");
+        let (ws, base_sha, head_sha) = build_python_deployment_fixture(ws_tmp.path());
+        index_baseline_workspace(&ws);
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        let changed_files: Vec<&str> = report["changed_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert!(
+            changed_files
+                .iter()
+                .any(|path| path.ends_with("pyservice/src/pyservice/app.py")),
+            "Python changes must be included in pr-review changed files: {changed_files:?}."
+        );
+        assert!(
+            changed_files
+                .iter()
+                .any(|path| path.ends_with("pyservice/Dockerfile")),
+            "Deployment-topology changes must be included in pr-review changed files: {changed_files:?}."
+        );
+
+        let added_symbols = report["symbols"]["added"].as_array().unwrap();
+        assert!(
+            added_symbols.iter().any(|symbol| {
+                symbol["repo"] == "pyservice"
+                    && symbol["kind"] == "function"
+                    && symbol["qualified_name"]
+                        .as_str()
+                        .is_some_and(|qn| qn.ends_with("rollout_handler"))
+            }),
+            "Python symbol deltas must include rollout_handler: {added_symbols:?}."
+        );
+
+        let added_deployments = report["deployment"]["deployments"]["added"]
+            .as_array()
+            .unwrap();
+        assert!(
+            added_deployments.iter().any(|deployment| {
+                deployment["repo"] == "pyservice"
+                    && deployment["kind"] == "dockerfile"
+                    && deployment["file"] == "Dockerfile"
+            }),
+            "Deployment topology deltas must include the added Dockerfile: {added_deployments:?}."
+        );
     }
 
     #[test]
@@ -3357,7 +3591,7 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
 
         assert!(
             root_in_progress.exists(),
@@ -3805,6 +4039,7 @@ mod tests {
         status: ReviewStatus,
         created_at_override: Option<&str>,
         cache_key: Option<crate::pr_review::artifact_root::CacheKey>,
+        last_accessed_at: Option<&str>,
     ) -> PathBuf {
         let hash = workspace_hash(workspace_root);
         let root = cache_root.join(&hash).join(run_id);
@@ -3832,7 +4067,7 @@ mod tests {
             created_at,
             status,
             cache_key,
-            last_accessed_at: None,
+            last_accessed_at: last_accessed_at.map(ToOwned::to_owned),
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -3877,6 +4112,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(active_key),
+            None,
         );
 
         // Artifact 2: has a cache key with SHAs that do NOT resolve in this
@@ -3898,6 +4134,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(inactive_key),
+            None,
         );
 
         let app = make_app(&ws);
@@ -3926,7 +4163,7 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
 
         assert!(
             root_active.exists(),
@@ -3974,6 +4211,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(active_key),
+            None,
         );
 
         // Artifact with inactive key.
@@ -3994,6 +4232,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(inactive_key),
+            None,
         );
 
         let app = make_app(&ws);
@@ -4068,6 +4307,7 @@ mod tests {
             ReviewStatus::Completed,
             None,
             Some(active_key),
+            None,
         );
 
         let app = make_app(&ws);
@@ -4339,7 +4579,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let _ = run_inner(&app, &args).expect("run_inner should succeed");
+        let _ = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         assert!(
             comment_path.exists(),
@@ -4420,9 +4660,10 @@ mod tests {
             github_comment_file: None,
             no_baseline_check: false,
         };
-        let (cached_rendered, _) = run_inner(&app, &args_no_keep).expect("cached run must succeed");
+        let (cached_rendered, _) =
+            run_inner(&app, &args_no_keep).expect("The cached run should succeed.");
         let cached_json: serde_json::Value =
-            serde_json::from_str(&cached_rendered).expect("cached JSON must parse");
+            serde_json::from_str(&cached_rendered).expect("The cached JSON should parse.");
         assert_eq!(
             cached_json["safety"]["cleanup_policy"].as_str(),
             Some("cache_hit_retained"),

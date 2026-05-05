@@ -596,16 +596,43 @@ fn report_filter_fields<S: GraphStore>(
 }
 
 fn logical_field_matches_payload(field_path: &str, payload_field: &str) -> bool {
+    let payload_suffix = dot_prefixed(payload_field);
+    let payload_prefix = dot_suffixed(payload_field);
+    let payload_infix = dot_wrapped(payload_field);
     field_path == payload_field
-        || field_path.ends_with(&format!(".{payload_field}"))
-        || field_path.contains(&format!(".{payload_field}."))
-        || field_path.starts_with(&format!("{payload_field}."))
+        || field_path.ends_with(&payload_suffix)
+        || field_path.contains(&payload_infix)
+        || field_path.starts_with(&payload_prefix)
 }
 
 fn filter_field_matches_payload(filter_field: &str, payload_field: &str) -> bool {
+    let payload_prefix = dot_suffixed(payload_field);
+    let filter_prefix = dot_suffixed(filter_field);
     filter_field == payload_field
-        || filter_field.starts_with(&format!("{payload_field}."))
-        || payload_field.starts_with(&format!("{filter_field}."))
+        || filter_field.starts_with(&payload_prefix)
+        || payload_field.starts_with(&filter_prefix)
+}
+
+fn dot_prefixed(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 1);
+    out.push('.');
+    out.push_str(value);
+    out
+}
+
+fn dot_suffixed(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 1);
+    out.push_str(value);
+    out.push('.');
+    out
+}
+
+fn dot_wrapped(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('.');
+    out.push_str(value);
+    out.push('.');
+    out
 }
 
 fn decode_migration_filters(value: Option<&str>) -> Vec<String> {
