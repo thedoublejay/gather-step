@@ -34,3 +34,9 @@ latency:
 memory:
   rss_growth_max_fraction: 0.10
   rss_absolute_max_bytes: 1073741824
+
+storage:
+  graph_bytes_max: 800000
+  metadata_bytes_max: 1500000
+  search_bytes_max: 50000
+  total_bytes_max: 3500000

@@ -1,4 +1,9 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::UNIX_EPOCH,
+};
 
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, PayloadContractDoc,
@@ -13,6 +18,7 @@ use crate::frameworks::nestjs::{
 use crate::path_guard::canonicalize_existing_file_under;
 use crate::traverse::classify_language;
 use crate::tree_sitter::{ParsedFile, SymbolCapture};
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InferredPayloadContract {
@@ -23,6 +29,7 @@ pub struct InferredPayloadContract {
 
 pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContract> {
     let mut inferred = Vec::new();
+    let mut context = PayloadInferenceContext::new(parsed);
 
     for call_site in &parsed.call_sites {
         let Some((target, target_kind, target_qualified_name)) = producer_target(parsed, call_site)
@@ -103,7 +110,8 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
         let Some(signature) = symbol.node.signature.as_deref() else {
             continue;
         };
-        let Some((source_type_name, fields)) = infer_consumer_fields(parsed, signature, source)
+        let Some((source_type_name, fields)) =
+            infer_consumer_fields(&mut context, parsed, signature, source)
         else {
             continue;
         };
@@ -163,6 +171,121 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
     }
 
     inferred
+}
+
+#[derive(Debug)]
+struct PayloadInferenceContext {
+    repo_root: Option<PathBuf>,
+    imported_sources: FxHashMap<ImportedSourceKey, Option<Arc<str>>>,
+    imported_type_fields: FxHashMap<ImportedTypeKey, Option<Vec<PayloadField>>>,
+}
+
+impl PayloadInferenceContext {
+    fn new(parsed: &ParsedFile) -> Self {
+        Self {
+            repo_root: fs::canonicalize(repo_root_for(parsed)).ok(),
+            imported_sources: FxHashMap::default(),
+            imported_type_fields: FxHashMap::default(),
+        }
+    }
+
+    fn imported_type_fields(
+        &mut self,
+        parsed: &ParsedFile,
+        path: &Path,
+        type_name: &str,
+    ) -> Option<Vec<PayloadField>> {
+        let (safe_path, metadata) = self.imported_metadata(path)?;
+        let key = ImportedTypeKey {
+            source: imported_source_key(&safe_path, &metadata),
+            type_name: type_name.to_owned(),
+        };
+        if let Some(cached) = self.imported_type_fields.get(&key) {
+            return cached.clone();
+        }
+
+        let fields = self
+            .imported_source(parsed, &safe_path, &metadata)
+            .and_then(|source| extract_local_named_type_fields(source.as_ref(), type_name));
+        self.imported_type_fields.insert(key, fields.clone());
+        fields
+    }
+
+    fn imported_source(
+        &mut self,
+        parsed: &ParsedFile,
+        safe_path: &Path,
+        metadata: &fs::Metadata,
+    ) -> Option<Arc<str>> {
+        let key = imported_source_key(safe_path, metadata);
+        if let Some(cached) = self.imported_sources.get(&key) {
+            return cached.clone();
+        }
+
+        let source = self.read_imported_source(parsed, safe_path, metadata);
+        self.imported_sources.insert(key, source.clone());
+        source
+    }
+
+    fn imported_metadata(&self, path: &Path) -> Option<(PathBuf, fs::Metadata)> {
+        let repo_root = self.repo_root.as_ref()?;
+        let safe_path = canonicalize_existing_file_under(path, repo_root)?;
+        let relative = safe_path.strip_prefix(repo_root).ok()?;
+        classify_language(relative)?;
+        let metadata = fs::symlink_metadata(&safe_path).ok()?;
+        if metadata.len() > crate::TraverseConfig::default().max_file_size_bytes() {
+            return None;
+        }
+        Some((safe_path, metadata))
+    }
+
+    fn read_imported_source(
+        &self,
+        parsed: &ParsedFile,
+        safe_path: &Path,
+        metadata: &fs::Metadata,
+    ) -> Option<Arc<str>> {
+        let repo_root = self.repo_root.as_ref()?;
+        let relative = safe_path.strip_prefix(repo_root).ok()?;
+        let bytes = if relative == parsed.file.path {
+            Arc::clone(&parsed.source)
+        } else {
+            let bytes = fs::read(safe_path).ok()?;
+            if u64::try_from(bytes.len()).ok()? != metadata.len() {
+                return None;
+            }
+            match simdutf8::basic::from_utf8(&bytes) {
+                Ok(source) => Arc::<str>::from(source),
+                Err(_) => String::from_utf8_lossy(&bytes).as_ref().into(),
+            }
+        };
+        Some(bytes)
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ImportedSourceKey {
+    path: PathBuf,
+    len: u64,
+    modified_nanos: u128,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ImportedTypeKey {
+    source: ImportedSourceKey,
+    type_name: String,
+}
+
+fn imported_source_key(path: &Path, metadata: &fs::Metadata) -> ImportedSourceKey {
+    ImportedSourceKey {
+        path: path.to_path_buf(),
+        len: metadata.len(),
+        modified_nanos: metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos()),
+    }
 }
 
 fn payload_contract_node(
@@ -324,6 +447,7 @@ fn parse_object_literal_fields(raw: &str) -> Option<Vec<PayloadField>> {
 }
 
 fn infer_consumer_fields(
+    context: &mut PayloadInferenceContext,
     parsed: &ParsedFile,
     signature: &str,
     source: &str,
@@ -347,7 +471,7 @@ fn infer_consumer_fields(
         .trim()
         .trim_matches('?')
         .to_owned();
-    let fields = extract_named_type_fields(parsed, source, &type_name)?;
+    let fields = extract_named_type_fields(context, parsed, source, &type_name)?;
     Some((Some(type_name), fields))
 }
 
@@ -356,12 +480,13 @@ fn parse_inline_type_literal(type_expr: &str) -> Option<Vec<PayloadField>> {
 }
 
 fn extract_named_type_fields(
+    context: &mut PayloadInferenceContext,
     parsed: &ParsedFile,
     source: &str,
     type_name: &str,
 ) -> Option<Vec<PayloadField>> {
     extract_local_named_type_fields(source, type_name)
-        .or_else(|| extract_imported_type_fields(parsed, type_name))
+        .or_else(|| extract_imported_type_fields(context, parsed, type_name))
 }
 
 fn extract_local_named_type_fields(source: &str, type_name: &str) -> Option<Vec<PayloadField>> {
@@ -414,9 +539,13 @@ fn extract_class_fields(source: &str, type_name: &str) -> Option<Vec<PayloadFiel
     parse_class_fields(block)
 }
 
-fn extract_imported_type_fields(parsed: &ParsedFile, type_name: &str) -> Option<Vec<PayloadField>> {
+fn extract_imported_type_fields(
+    context: &mut PayloadInferenceContext,
+    parsed: &ParsedFile,
+    type_name: &str,
+) -> Option<Vec<PayloadField>> {
     let imported = resolve_imported_type_source(parsed, type_name)?;
-    extract_local_named_type_fields(imported.parsed.source.as_ref(), &imported.imported_name)
+    context.imported_type_fields(parsed, &imported.path, &imported.imported_name)
 }
 
 fn resolve_imported_type_source(
@@ -428,39 +557,15 @@ fn resolve_imported_type_source(
     })?;
     let imported_name = binding.imported_name.as_deref().unwrap_or(type_name);
     let path = binding.resolved_path.as_ref()?;
-    let imported = parse_imported_file(parsed, path)?;
     Some(ParsedImportedType {
         imported_name: imported_name.to_owned(),
-        parsed: imported,
+        path: path.clone(),
     })
 }
 
 struct ParsedImportedType {
     imported_name: String,
-    parsed: ParsedFile,
-}
-
-fn parse_imported_file(parsed: &ParsedFile, path: &Path) -> Option<ParsedFile> {
-    let repo_root = fs::canonicalize(repo_root_for(parsed)).ok()?;
-    let safe_path = canonicalize_existing_file_under(path, &repo_root)?;
-    let relative = safe_path.strip_prefix(&repo_root).ok()?;
-    let language = classify_language(relative)?;
-    let metadata = fs::symlink_metadata(&safe_path).ok()?;
-    if metadata.len() > crate::TraverseConfig::default().max_file_size_bytes() {
-        return None;
-    }
-    crate::tree_sitter::parse_file(
-        parsed.file_node.repo.as_str(),
-        &repo_root,
-        &crate::FileEntry {
-            path: relative.to_path_buf(),
-            language,
-            size_bytes: metadata.len(),
-            content_hash: [0; 32],
-            source_bytes: None,
-        },
-    )
-    .ok()
+    path: PathBuf,
 }
 
 fn repo_root_for(parsed: &ParsedFile) -> std::path::PathBuf {

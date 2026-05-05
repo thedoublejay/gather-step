@@ -7,7 +7,12 @@ This changelog lists significant user-visible changes. It is maintained manually
 
 ## Unreleased
 
-No unreleased changes yet.
+- Added a checked-in `gather-step.config.yaml` so the repository can run `gather-step pr-review` against itself without a manual config override.
+- Hardened `pr-review` artifact compatibility coverage: marker schema checks now cover legacy `last_accessed_at` absence, cache access timestamps, and `--older-than` pruning behavior.
+- Added an end-to-end `pr-review` regression proving temp-index reviews surface both Python symbol changes and deployment-topology changes.
+- Clarified graph-store schema policy with tests: unstamped v0 redb stores are accepted as the v3.1/v3.2 baseline, while future stamped stores are rejected with a typed schema-mismatch error.
+- Reduced hot-path overhead by promoting projection and git-classification regexes to module-level lazy statics and by avoiding repeated dotted-field `format!` allocations in projection-impact matching.
+- Normalized benchmark, docs, and test fixtures to avoid local path, personal-name, and sensitive-looking placeholder strings in checked-in artifacts.
 
 ## v3.1.0
 
@@ -59,6 +64,11 @@ Indexing-performance, storage, and security release. Replaces the SWC-based Type
 - Secret-surface MCP smoke test exercises the redaction surface end-to-end.
 - Deployment-topology MCP tools test pins the public response shape.
 - Benchmark harness samples resource peaks (max RSS, peak memory footprint, open FDs on Unix).
+
+### Internal Architecture
+
+- New `gather-step-deploy` workspace crate. Deployment-artifact parsing (Dockerfile, Compose, Kubernetes, Kustomize, Helm, GitHub Actions, env files) was extracted out of `gather-step-storage` and is now consumed by `gather-step-storage::indexer` and `gather-step-analysis`. No public API change for end users; the `deployment-topology` queries and the PR-review `deployment` delta surface continue to behave the same.
+- TypeORM framework parser added (entity decorators, migration `MigrationInterface` `up`/`down` extraction). Powers the existing PR-review `payload_contracts` and migration-edge surfaces for TypeORM repos.
 
 ### Release-wide
 
@@ -284,7 +294,7 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 
 - Added `gather-step-bench workspace-run` to measure wall-clock index time, graph node/edge counts, cross-repo edge count, RSS growth, and storage byte breakdowns (graph, metadata, search, sidecar) for a configured workspace.
 - Added a neutral Python planning workspace fixture under `tests/fixtures/python_planning_workspace/` so the planning oracle and storage benchmark have a committed Python target.
-- Documented the [private corpus benchmarking convention](/concepts/language-support/#private-corpus-convention) for measuring against repositories that cannot be checked in.
+- Documented the [external corpus benchmarking convention](/concepts/language-support/#external-corpus-convention) for measuring against repositories that cannot be checked in.
 - Renamed `StorageMetrics::metadata_wal_bytes` to `metadata_sidecar_bytes` since the field actually sums the SQLite WAL and SHM files. Deserialization remains backward-compatible with the old bench JSON field name.
 - Promoted `HarnessError::Workspace` from a stringified message to a typed `Box<WorkspaceIndexError<RepoIndexerError>>` so `anyhow::downcast` and structured logging can recover the source chain.
 - Recorded the fresh 2026-04-30 release-build benchmark summary without checking in local benchmark artifacts.

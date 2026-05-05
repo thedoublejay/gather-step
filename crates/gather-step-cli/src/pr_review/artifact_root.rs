@@ -94,32 +94,82 @@ impl CacheKey {
 ///
 /// Every field is required for v3.1 markers except optional cache/access
 /// metadata fields used by branch-scoped cache reuse.
+///
+/// Fields are `pub(crate)` so the lifecycle invariants enforced by
+/// [`update_marker_status`] (and [`is_valid_status_transition`]) cannot be
+/// bypassed by external struct-update syntax. Integration tests outside
+/// this crate seed marker fixtures via [`ReviewMarker::new_for_test_fixture`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewMarker {
-    pub schema_version: u32,
+    pub(crate) schema_version: u32,
     /// First 16 hex characters of the blake3 hash of the canonical workspace
     /// root path bytes.
-    pub workspace_hash: String,
-    pub workspace_root: PathBuf,
-    pub base_sha: String,
-    pub head_sha: String,
-    pub run_id: String,
-    pub storage_path: PathBuf,
-    pub registry_path: PathBuf,
+    pub(crate) workspace_hash: String,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) base_sha: String,
+    pub(crate) head_sha: String,
+    pub(crate) run_id: String,
+    pub(crate) storage_path: PathBuf,
+    pub(crate) registry_path: PathBuf,
     /// Value of `CARGO_PKG_VERSION` at build time.
-    pub gather_step_version: String,
+    pub(crate) gather_step_version: String,
     /// RFC 3339 UTC timestamp of when the artifact root was created.
-    pub created_at: String,
-    pub status: ReviewStatus,
+    pub(crate) created_at: String,
+    pub(crate) status: ReviewStatus,
     /// Cache key for branch-scoped reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_key: Option<CacheKey>,
+    pub(crate) cache_key: Option<CacheKey>,
     /// RFC 3339 UTC timestamp of the last time this artifact was accessed via a
     /// cache hit.  Updated each time `pr-review` reuses this artifact so that
     /// `--older-than` pruning measures last-use time, not creation time.
     /// `None` for artifacts that have never been accessed via cache reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_accessed_at: Option<String>,
+    pub(crate) last_accessed_at: Option<String>,
+}
+
+impl ReviewMarker {
+    /// Construct a marker for integration-test fixtures from outside the
+    /// crate.  Production code should never call this — the normal write
+    /// path goes through `materialize_artifact_root` (which produces an
+    /// `InProgress` marker) and then [`update_marker_status`] (which
+    /// enforces transition rules).
+    #[doc(hidden)]
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fixture seeder mirrors every marker field one-to-one; collapsing into a builder would obscure the field-by-field correspondence integration tests rely on"
+    )]
+    pub fn new_for_test_fixture(
+        schema_version: u32,
+        workspace_hash: String,
+        workspace_root: PathBuf,
+        base_sha: String,
+        head_sha: String,
+        run_id: String,
+        storage_path: PathBuf,
+        registry_path: PathBuf,
+        gather_step_version: String,
+        created_at: String,
+        status: ReviewStatus,
+        cache_key: Option<CacheKey>,
+        last_accessed_at: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version,
+            workspace_hash,
+            workspace_root,
+            base_sha,
+            head_sha,
+            run_id,
+            storage_path,
+            registry_path,
+            gather_step_version,
+            created_at,
+            status,
+            cache_key,
+            last_accessed_at,
+        }
+    }
 }
 
 /// Lifecycle state of a review artifact root.
@@ -135,26 +185,72 @@ pub enum ReviewStatus {
 }
 
 /// Handle to an artifact root directory tree that has been created on disk.
+///
+/// Fields are `pub(crate)` so the layout produced by
+/// [`materialize_artifact_root`] / [`from_existing`] is the only path that
+/// can construct a valid handle. External callers cannot synthesize a
+/// `ReviewArtifactRoot` with mismatched child paths.
 #[derive(Debug)]
 pub struct ReviewArtifactRoot {
     /// `<cache_root>/<workspace_hash>/<run_id>/`
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
     /// Copy of the user's source workspace root (not the artifact root).
-    pub workspace_root: PathBuf,
+    pub(crate) workspace_root: PathBuf,
     /// `root/worktree/`
-    pub worktree_root: PathBuf,
+    pub(crate) worktree_root: PathBuf,
     /// `root/registry.json`
-    pub registry_path: PathBuf,
+    pub(crate) registry_path: PathBuf,
     /// `root/storage/`
-    pub storage_root: PathBuf,
+    pub(crate) storage_root: PathBuf,
     /// `root/reports/`
-    pub reports_dir: PathBuf,
+    pub(crate) reports_dir: PathBuf,
     /// `root/logs/`
-    pub logs_dir: PathBuf,
+    pub(crate) logs_dir: PathBuf,
     /// `root/review-marker.json`
-    pub marker_path: PathBuf,
-    pub run_id: String,
-    pub workspace_hash: String,
+    pub(crate) marker_path: PathBuf,
+    pub(crate) run_id: String,
+    pub(crate) workspace_hash: String,
+}
+
+impl ReviewArtifactRoot {
+    /// Reconstruct a [`ReviewArtifactRoot`] from an already-materialized
+    /// directory on disk.
+    ///
+    /// Used by the cache-reuse path (`try_reuse_cache`) when the on-disk
+    /// layout was produced by a prior run of [`plan_artifact_root`] /
+    /// [`materialize_artifact_root`]. Both functions derive child paths from
+    /// the same constants — owning that derivation in one place here means
+    /// renaming `worktree/`, `storage/`, etc. cannot make creation and reuse
+    /// disagree.
+    ///
+    /// Callers are responsible for verifying that `root` exists and contains
+    /// the expected children before calling this.
+    #[must_use]
+    pub fn from_existing(
+        root: PathBuf,
+        workspace_root: PathBuf,
+        run_id: String,
+        workspace_hash: String,
+    ) -> Self {
+        let worktree_root = root.join("worktree");
+        let registry_path = root.join("registry.json");
+        let storage_root = root.join("storage");
+        let reports_dir = root.join("reports");
+        let logs_dir = root.join("logs");
+        let marker_path = root.join(MARKER_FILENAME);
+        Self {
+            root,
+            workspace_root,
+            worktree_root,
+            registry_path,
+            storage_root,
+            reports_dir,
+            logs_dir,
+            marker_path,
+            run_id,
+            workspace_hash,
+        }
+    }
 }
 
 // ─── Error type ───────────────────────────────────────────────────────────────
@@ -162,24 +258,41 @@ pub struct ReviewArtifactRoot {
 /// Errors produced by artifact-root operations.
 #[derive(Debug, Error)]
 pub enum ArtifactRootError {
-    #[error("artifact root path already exists: {path}")]
+    #[error("The artifact root path already exists: {path}.")]
     RootExists { path: PathBuf },
 
-    #[error("io error in {path}: {source}")]
+    #[error("I/O error in {path}: {source}.")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("marker serialization failed: {source}")]
+    #[error("Marker serialization failed: {source}.")]
     Serialize {
         #[source]
         source: serde_json::Error,
     },
 
-    #[error("review safety guard refused: {0}")]
+    #[error("The review safety guard refused the artifact paths: {0}.")]
     Safety(#[from] ReviewSafetyError),
+
+    #[error("The path safety guard refused the artifact paths: {0}.")]
+    PathSafety(#[from] crate::path_safety::PathSafetyError),
+
+    #[error("Unsupported review marker schema version {found} at {path}; expected {expected}.")]
+    UnsupportedMarkerSchema {
+        path: PathBuf,
+        found: u32,
+        expected: u32,
+    },
+
+    #[error("Invalid review marker status transition at {path}: {from:?} to {to:?}.")]
+    InvalidMarkerStatusTransition {
+        path: PathBuf,
+        from: ReviewStatus,
+        to: ReviewStatus,
+    },
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -240,26 +353,14 @@ pub fn plan_artifact_root(
         return Err(ArtifactRootError::RootExists { path: root });
     }
 
-    // Derive all child paths.
-    let worktree_root = root.join("worktree");
-    let registry_path = root.join("registry.json");
-    let storage_root = root.join("storage");
-    let reports_dir = root.join("reports");
-    let logs_dir = root.join("logs");
-    let marker_path = root.join(MARKER_FILENAME);
-
-    Ok(ReviewArtifactRoot {
+    // Child paths flow through `ReviewArtifactRoot::from_existing` so the
+    // creation path and the cache-reuse path cannot disagree about the layout.
+    Ok(ReviewArtifactRoot::from_existing(
         root,
-        workspace_root: workspace_root.to_path_buf(),
-        worktree_root,
-        registry_path,
-        storage_root,
-        reports_dir,
-        logs_dir,
-        marker_path,
-        run_id: run_id.to_owned(),
-        workspace_hash: hash,
-    })
+        workspace_root.to_path_buf(),
+        run_id.to_owned(),
+        hash,
+    ))
 }
 
 /// Materialize a previously planned artifact root and write its initial marker.
@@ -276,6 +377,30 @@ pub fn materialize_artifact_root(
         return Err(ArtifactRootError::RootExists {
             path: artifact.root.clone(),
         });
+    }
+
+    // Symlink rejection — defense-in-depth against an attacker pre-creating
+    // symlinks under the cache root to redirect the artifact root, the
+    // worktree, the registry, or the storage dir to a sensitive location
+    // outside `<cache>/gather-step/pr-review/`. Walks from the cache root
+    // through the workspace-hash directory and run directory; rejects on the
+    // first symlink.
+    //
+    // `reject_symlinked_generated_state` tolerates non-existent path tails,
+    // so calling it on paths the next block is about to `create_dir_all` is
+    // safe.
+    let anchor = artifact
+        .root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| std::path::Path::new(""));
+    for path in [
+        &artifact.root,
+        &artifact.worktree_root,
+        &artifact.storage_root,
+        &artifact.registry_path,
+    ] {
+        crate::path_safety::reject_symlinked_generated_state(anchor, path)?;
     }
 
     // Create all directories.
@@ -369,8 +494,27 @@ fn update_marker_status(
     status: ReviewStatus,
 ) -> Result<(), ArtifactRootError> {
     let mut marker = read_marker(&root.marker_path)?;
+    let current = marker.status;
+    if !is_valid_status_transition(current, status) {
+        return Err(ArtifactRootError::InvalidMarkerStatusTransition {
+            path: root.marker_path.clone(),
+            from: current,
+            to: status,
+        });
+    }
     marker.status = status;
     write_marker_to_path(&marker, &root.marker_path)
+}
+
+fn is_valid_status_transition(from: ReviewStatus, to: ReviewStatus) -> bool {
+    from == to
+        || matches!(
+            (from, to),
+            (
+                ReviewStatus::InProgress,
+                ReviewStatus::Completed | ReviewStatus::Quarantined
+            )
+        )
 }
 
 // ─── Marker I/O ───────────────────────────────────────────────────────────────
@@ -390,7 +534,16 @@ pub fn read_marker(marker_path: &Path) -> Result<ReviewMarker, ArtifactRootError
         path: marker_path.to_path_buf(),
         source,
     })?;
-    serde_json::from_slice(&bytes).map_err(|source| ArtifactRootError::Serialize { source })
+    let marker: ReviewMarker =
+        serde_json::from_slice(&bytes).map_err(|source| ArtifactRootError::Serialize { source })?;
+    if marker.schema_version != MARKER_SCHEMA_VERSION {
+        return Err(ArtifactRootError::UnsupportedMarkerSchema {
+            path: marker_path.to_path_buf(),
+            found: marker.schema_version,
+            expected: MARKER_SCHEMA_VERSION,
+        });
+    }
+    Ok(marker)
 }
 
 fn write_marker_to_path(marker: &ReviewMarker, path: &Path) -> Result<(), ArtifactRootError> {
@@ -567,6 +720,32 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn create_artifact_root_rejects_symlinked_workspace_hash_dir() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+        let outside_tmp = TempDir::new().unwrap();
+
+        let hash = workspace_hash(ws_tmp.path());
+        let hash_dir = cache_tmp.path().join(hash);
+        std::os::unix::fs::symlink(outside_tmp.path(), &hash_dir).unwrap();
+
+        let err = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "base1111",
+            "head1111",
+            "review-symlinked-hash",
+        )
+        .expect_err("The symlinked workspace hash directory must be rejected.");
+
+        assert!(
+            matches!(err, ArtifactRootError::PathSafety(_)),
+            "Expected PathSafety, got {err}."
+        );
+    }
+
     // ── marker round-trip ─────────────────────────────────────────────────────
 
     #[test]
@@ -597,6 +776,90 @@ mod tests {
         assert_eq!(marker.status, ReviewStatus::InProgress);
     }
 
+    #[test]
+    fn touch_marker_accessed_sets_last_accessed_at() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseSHA",
+            "headSHA",
+            "review-touch-accessed",
+        )
+        .unwrap();
+
+        let before = read_marker(&artifact.marker_path).unwrap();
+        assert_eq!(before.last_accessed_at, None);
+
+        touch_marker_accessed(&artifact).unwrap();
+
+        let after = read_marker(&artifact.marker_path).unwrap();
+        let accessed_at = after
+            .last_accessed_at
+            .as_deref()
+            .expect("The last_accessed_at field should be set.");
+        chrono::DateTime::parse_from_rfc3339(accessed_at)
+            .expect("The last_accessed_at field should be an RFC 3339 timestamp.");
+    }
+
+    #[test]
+    fn read_marker_accepts_legacy_marker_without_last_accessed_at() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseSHA",
+            "headSHA",
+            "review-legacy-marker",
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&artifact.marker_path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value
+            .as_object_mut()
+            .expect("The marker JSON should be an object.")
+            .remove("last_accessed_at");
+        std::fs::write(
+            &artifact.marker_path,
+            serde_json::to_vec_pretty(&value).unwrap(),
+        )
+        .unwrap();
+
+        let marker = read_marker(&artifact.marker_path).unwrap();
+        assert_eq!(marker.last_accessed_at, None);
+    }
+
+    #[test]
+    fn read_marker_rejects_unknown_schema_version() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseSHA",
+            "headSHA",
+            "review-future-marker",
+        )
+        .unwrap();
+
+        let mut marker = read_marker(&artifact.marker_path).unwrap();
+        marker.schema_version = MARKER_SCHEMA_VERSION + 1;
+        write_marker_to_path(&marker, &artifact.marker_path).unwrap();
+
+        let err = read_marker(&artifact.marker_path)
+            .expect_err("The future marker schema must be rejected.");
+        assert!(
+            matches!(err, ArtifactRootError::UnsupportedMarkerSchema { .. }),
+            "Expected UnsupportedMarkerSchema, got {err}."
+        );
+    }
+
     // ── write_marker_completed ────────────────────────────────────────────────
 
     #[test]
@@ -616,6 +879,36 @@ mod tests {
         write_marker_completed(&artifact).unwrap();
         let marker = read_marker(&artifact.marker_path).unwrap();
         assert_eq!(marker.status, ReviewStatus::Completed);
+    }
+
+    #[test]
+    fn write_marker_completed_refuses_quarantined_marker() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseQ",
+            "headQ",
+            "review-quarantined",
+        )
+        .unwrap();
+
+        write_marker_quarantined(&artifact).unwrap();
+        let err = write_marker_completed(&artifact)
+            .expect_err("A Quarantined marker must not transition to Completed.");
+        assert!(
+            matches!(
+                err,
+                ArtifactRootError::InvalidMarkerStatusTransition {
+                    from: ReviewStatus::Quarantined,
+                    to: ReviewStatus::Completed,
+                    ..
+                }
+            ),
+            "Expected InvalidMarkerStatusTransition, got {err}."
+        );
     }
 
     // ── to_storage_context ────────────────────────────────────────────────────

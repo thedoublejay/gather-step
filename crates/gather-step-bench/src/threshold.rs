@@ -13,6 +13,7 @@ pub struct Thresholds {
     pub planning_oracle: PlanningOracleThresholds,
     pub latency: LatencyThresholds,
     pub memory: MemoryThresholds,
+    pub storage: StorageThresholds,
 }
 
 /// Thresholds for parsing correctness.
@@ -95,6 +96,19 @@ pub struct MemoryThresholds {
     pub rss_absolute_max_bytes: u64,
 }
 
+/// On-disk storage regression thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageThresholds {
+    /// Maximum allowed graph store size in bytes.
+    pub graph_bytes_max: u64,
+    /// Maximum allowed `SQLite` metadata file size in bytes.
+    pub metadata_bytes_max: u64,
+    /// Maximum allowed Tantivy search index size in bytes.
+    pub search_bytes_max: u64,
+    /// Maximum allowed total generated storage size in bytes.
+    pub total_bytes_max: u64,
+}
+
 impl Thresholds {
     /// Load thresholds from a YAML file at `path`.
     ///
@@ -147,6 +161,12 @@ impl Thresholds {
             memory: MemoryThresholds {
                 rss_growth_max_fraction: 0.10,
                 rss_absolute_max_bytes: 1_073_741_824,
+            },
+            storage: StorageThresholds {
+                graph_bytes_max: 800_000,
+                metadata_bytes_max: 1_500_000,
+                search_bytes_max: 50_000,
+                total_bytes_max: 3_500_000,
             },
         }
     }

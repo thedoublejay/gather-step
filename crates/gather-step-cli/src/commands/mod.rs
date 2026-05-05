@@ -22,7 +22,9 @@ pub mod trace;
 pub mod tui;
 pub mod watch;
 
-use anyhow::Result;
+use std::process::ExitCode;
+
+use anyhow::{Result, bail};
 use clap::{
     ArgAction, Args, Parser, Subcommand,
     builder::styling::{AnsiColor, Effects, Styles},
@@ -111,34 +113,70 @@ pub enum McpSubcommand {
     Serve(serve::ServeArgs),
 }
 
-pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
+/// User-visible command outcome.
+///
+/// Errors still propagate as `Err` and are mapped to exit 1 in `main`.
+/// `ReviewThresholdExceeded` maps to exit 2 so CI can distinguish "tool broke"
+/// from "`pr-review` found high-severity changes."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliOutcome {
+    Success,
+    ReviewThresholdExceeded,
+}
+
+impl CliOutcome {
+    #[must_use]
+    pub fn exit_code(self) -> ExitCode {
+        match self {
+            Self::Success => ExitCode::from(0),
+            Self::ReviewThresholdExceeded => ExitCode::from(2),
+        }
+    }
+
+    fn from_pr_review_code(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(Self::Success),
+            2 => Ok(Self::ReviewThresholdExceeded),
+            other => bail!("pr-review returned an unexpected exit code: {other}."),
+        }
+    }
+}
+
+fn success(result: Result<()>) -> Result<CliOutcome> {
+    result.map(|()| CliOutcome::Success)
+}
+
+/// Run the dispatched subcommand and return the user-visible outcome.
+pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     match cli.command {
-        Some(Command::Init(args)) => init::run(&app, args).await,
-        Some(Command::Index(args)) => index::run(&app, args).await,
-        Some(Command::Clean(args)) => clean::run(&app, args),
-        Some(Command::Compact(args)) => compact::run(&app, args),
-        Some(Command::Reindex(args)) => reindex::run(&app, args).await,
-        Some(Command::Serve(args)) => serve::run(&app, args).await,
-        Some(Command::Watch(args)) => watch::run(&app, args).await,
-        Some(Command::Tui(args)) => tui::run(&app, args),
-        Some(Command::Search(args)) => search::run(&app, args),
-        Some(Command::Trace(args)) => trace::run(&app, args),
-        Some(Command::SetupMcp(args)) => setup_mcp::run(&app, args),
-        Some(Command::Status(args)) => status::run(&app, args),
-        Some(Command::StorageReport(args)) => storage_report::run(&app, args),
-        Some(Command::Doctor(args)) => doctor::run(&app, args),
-        Some(Command::Generate(command)) => generate::run(&app, command),
-        Some(Command::Impact(args)) => impact::run(&app, args),
-        Some(Command::ProjectionImpact(args)) => projection_impact::run(&app, args),
-        Some(Command::DeploymentTopology(args)) => deployment_topology::run(&app, args),
-        Some(Command::Pack(args)) => pack::run(&app, &args),
-        Some(Command::Events(args)) => events::run(&app, args),
-        Some(Command::Conventions(args)) => conventions::run(&app, args),
-        Some(Command::PrReview(args)) => pr_review::run(&app, args),
+        Some(Command::Init(args)) => success(init::run(&app, args).await),
+        Some(Command::Index(args)) => success(index::run(&app, args).await),
+        Some(Command::Clean(args)) => success(clean::run(&app, args)),
+        Some(Command::Compact(args)) => success(compact::run(&app, args)),
+        Some(Command::Reindex(args)) => success(reindex::run(&app, args).await),
+        Some(Command::Serve(args)) => success(serve::run(&app, args).await),
+        Some(Command::Watch(args)) => success(watch::run(&app, args).await),
+        Some(Command::Tui(args)) => success(tui::run(&app, args)),
+        Some(Command::Search(args)) => success(search::run(&app, args)),
+        Some(Command::Trace(args)) => success(trace::run(&app, args)),
+        Some(Command::SetupMcp(args)) => success(setup_mcp::run(&app, args)),
+        Some(Command::Status(args)) => success(status::run(&app, args)),
+        Some(Command::StorageReport(args)) => success(storage_report::run(&app, args)),
+        Some(Command::Doctor(args)) => success(doctor::run(&app, args)),
+        Some(Command::Generate(command)) => success(generate::run(&app, command)),
+        Some(Command::Impact(args)) => success(impact::run(&app, args)),
+        Some(Command::ProjectionImpact(args)) => success(projection_impact::run(&app, args)),
+        Some(Command::DeploymentTopology(args)) => success(deployment_topology::run(&app, args)),
+        Some(Command::Pack(args)) => success(pack::run(&app, &args)),
+        Some(Command::Events(args)) => success(events::run(&app, args)),
+        Some(Command::Conventions(args)) => success(conventions::run(&app, args)),
+        Some(Command::PrReview(args)) => {
+            CliOutcome::from_pr_review_code(pr_review::run(&app, args)?)
+        }
         Some(Command::Mcp(command)) => match command.command {
-            McpSubcommand::Serve(args) => serve::run(&app, args).await,
+            McpSubcommand::Serve(args) => success(serve::run(&app, args).await),
         },
-        None => no_args::run(&app).await,
+        None => success(no_args::run(&app).await),
     }
 }
 

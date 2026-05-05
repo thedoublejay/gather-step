@@ -41,7 +41,7 @@ gather-step-output = { path = "../gather-step-output", version = "3.1.0" }
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
 indicatif.workspace = true
-mimalloc = { version = "0.1.48", default-features = false }
+mimalloc = { version = "=0.1.50", default-features = false }
 serde.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
@@ -56,7 +56,6 @@ ratatui = { version = "0.30.0", default-features = false, features = ["crossterm
 [dev-dependencies]
 criterion.workspace = true
 pretty_assertions.workspace = true
-rustc-hash.workspace = true
 rusqlite.workspace = true
 tempfile = "3.27.0"
 toml.workspace = true

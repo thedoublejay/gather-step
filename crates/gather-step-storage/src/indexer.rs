@@ -3,12 +3,13 @@ use std::{
     fs,
     fs::OpenOptions,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use crossbeam_channel::bounded;
@@ -129,13 +130,7 @@ struct PathAliasCache {
 impl PathAliasCache {
     fn get(&self, repo_root: &Path) -> Arc<PathAliases> {
         let repo_key = cache_path_key(repo_root);
-        if let Some(aliases) = self
-            .aliases_by_repo_root
-            .lock()
-            .expect("path alias cache mutex should not be poisoned")
-            .get(&repo_key)
-            .cloned()
-        {
+        if let Some(aliases) = self.aliases_by_repo_root.lock().get(&repo_key).cloned() {
             return aliases;
         }
 
@@ -148,10 +143,7 @@ impl PathAliasCache {
         }
         let aliases = Arc::new(aliases);
 
-        let mut aliases_by_repo_root = self
-            .aliases_by_repo_root
-            .lock()
-            .expect("path alias cache mutex should not be poisoned");
+        let mut aliases_by_repo_root = self.aliases_by_repo_root.lock();
         if let Some(existing) = aliases_by_repo_root.get(&repo_key) {
             return Arc::clone(existing);
         }
@@ -164,7 +156,6 @@ impl PathAliasCache {
         if let Some(packages) = self
             .packages_by_workspace_root
             .lock()
-            .expect("workspace package cache mutex should not be poisoned")
             .get(&workspace_key)
             .cloned()
         {
@@ -172,10 +163,7 @@ impl PathAliasCache {
         }
 
         let packages = Arc::<[WorkspacePackage]>::from(discover_workspace_packages(workspace_root));
-        let mut packages_by_workspace_root = self
-            .packages_by_workspace_root
-            .lock()
-            .expect("workspace package cache mutex should not be poisoned");
+        let mut packages_by_workspace_root = self.packages_by_workspace_root.lock();
         if let Some(existing) = packages_by_workspace_root.get(&workspace_key) {
             return Arc::clone(existing);
         }
@@ -184,14 +172,8 @@ impl PathAliasCache {
     }
 
     fn clear(&self) {
-        self.aliases_by_repo_root
-            .lock()
-            .expect("path alias cache mutex should not be poisoned")
-            .clear();
-        self.packages_by_workspace_root
-            .lock()
-            .expect("workspace package cache mutex should not be poisoned")
-            .clear();
+        self.aliases_by_repo_root.lock().clear();
+        self.packages_by_workspace_root.lock().clear();
     }
 }
 
@@ -3898,7 +3880,7 @@ export class ItemController {
                 Some(&move |progress| {
                     progress_sink
                         .lock()
-                        .expect("progress mutex should not poison")
+                        .expect("The progress mutex should not be poisoned.")
                         .push((progress.phase, progress.processed, progress.total));
                 }),
             )
@@ -3906,7 +3888,7 @@ export class ItemController {
 
         let progress_events = progress_events
             .lock()
-            .expect("progress mutex should not poison");
+            .expect("The progress mutex should not be poisoned.");
         assert_eq!(progress_events.len(), 3);
         assert_eq!(progress_events[0].0, "traverse");
         assert_eq!(progress_events[1].0, "parse");

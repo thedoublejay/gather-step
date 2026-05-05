@@ -31,9 +31,9 @@ docs/superpowers/
 # Local release-note drafts
 release-notes/
 
-# Local-only Python private corpus benchmark inputs/results
-benchmark/python/private-corpus.local.yaml
-benchmark/python/private-results/
+# Local-only Python external corpus benchmark inputs/results
+benchmark/python/external-corpus.local.yaml
+benchmark/python/external-results/
 
 # dhat heap profiler output (emitted by `gather-step` runs that link dhat)
 dhat-heap.json

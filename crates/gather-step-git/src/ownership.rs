@@ -4,7 +4,7 @@ use gather_step_storage::{
     CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord, FileAnalytics, MetadataStore,
     MetadataStoreError,
 };
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -166,7 +166,7 @@ pub fn persist_ownership_into_file_analytics<S: MetadataStore>(
         .list_file_analytics_for_repo(repo)?
         .into_iter()
         .map(|record| (record.file_path.clone(), record))
-        .collect::<FxHashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
 
     for summary in ownership {
         let mut record = analytics_by_path
@@ -222,7 +222,7 @@ pub fn analyze_ownership(
     let commit_by_sha = commits
         .iter()
         .map(|commit| (commit.sha.clone(), commit.author_email.clone()))
-        .collect::<FxHashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
     debug_assert!(
         commits.windows(2).all(|pair| pair[0].repo == pair[1].repo),
         "analyze_ownership was called with commits from multiple repos",
@@ -242,7 +242,7 @@ pub fn analyze_ownership(
         |commit| commit.repo.clone(),
     );
 
-    let mut contribution_by_file = FxHashMap::<String, FxHashMap<String, f64>>::default();
+    let mut contribution_by_file = HashMap::<String, HashMap<String, f64>>::default();
     for delta in deltas {
         if matches!(
             delta.change_kind,
@@ -321,7 +321,7 @@ fn compute_bus_factor(contributions: &[OwnershipContribution], threshold: f64) -
 fn build_rename_successors(
     commits: &[CommitRecord],
     deltas: &[CommitFileDeltaRecord],
-) -> FxHashMap<String, String> {
+) -> HashMap<String, String> {
     // Resolve renames in commit chronological order so a later move wins
     // over an earlier one. Sorting deltas by SHA (a content hash) here
     // would be effectively random and could pick the wrong successor when
@@ -329,7 +329,7 @@ fn build_rename_successors(
     let date_by_sha = commits
         .iter()
         .map(|commit| (commit.sha.as_str(), commit.date))
-        .collect::<FxHashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
     let mut ordered = deltas.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
         let left_date = date_by_sha.get(left.sha.as_str()).copied().unwrap_or(0);
@@ -340,7 +340,7 @@ fn build_rename_successors(
             .then_with(|| left.file_path.cmp(&right.file_path))
     });
 
-    let mut successors = FxHashMap::default();
+    let mut successors = HashMap::default();
     for delta in ordered {
         if delta.change_kind == CommitFileChangeKind::Renamed
             && let Some(old_path) = delta.old_path.as_ref()
@@ -352,7 +352,7 @@ fn build_rename_successors(
     successors
 }
 
-fn canonicalize_path(successors: &FxHashMap<String, String>, path: &str) -> String {
+fn canonicalize_path(successors: &HashMap<String, String>, path: &str) -> String {
     let mut current = path;
     let mut seen = BTreeSet::new();
     while let Some(next) = successors.get(current) {

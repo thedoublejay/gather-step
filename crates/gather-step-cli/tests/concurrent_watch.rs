@@ -159,6 +159,12 @@ fn daemon_bind_unavailable_in_test_env(stderr: &str) -> bool {
     stderr.trim_start().starts_with("binding ") && stderr.contains(".gather-step/daemon.sock")
 }
 
+fn watcher_backend_unavailable_in_test_env(stderr: &str) -> bool {
+    stderr.contains("The filesystem watcher failed: Unable to start the FSEvent stream.")
+        || stderr.contains("The filesystem watcher failed: Unable to start FSEvent stream.")
+        || stderr.contains("unable to start FSEvent stream")
+}
+
 fn wait_for_daemon_or_skip(child: &mut Child, daemon_pid: &Path, daemon_sock: &Path) -> bool {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -167,7 +173,9 @@ fn wait_for_daemon_or_skip(child: &mut Child, daemon_pid: &Path, daemon_sock: &P
         }
         if let Some(status) = child.try_wait().expect("child status should load") {
             let stderr = read_child_stderr(child);
-            if daemon_bind_unavailable_in_test_env(&stderr) {
+            if daemon_bind_unavailable_in_test_env(&stderr)
+                || watcher_backend_unavailable_in_test_env(&stderr)
+            {
                 return false;
             }
             panic!(
@@ -260,7 +268,7 @@ fn serve_watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
     let stderr = read_child_stderr(&mut child);
     assert!(
         exited.success(),
-        "serve --watch should exit cleanly\nstderr:\n{stderr}"
+        "The serve --watch command should exit cleanly.\nStderr:\n{stderr}"
     );
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -308,7 +316,14 @@ fn watch_rejects_concurrent_index_with_storage_held_error_and_cleans_up_daemon_f
     assert!(status.success(), "kill -INT should succeed");
 
     let exited = wait_for_child_exit(&mut child);
-    assert!(exited.success(), "watch should exit cleanly");
+    let stderr = read_child_stderr(&mut child);
+    if !exited.success() && watcher_backend_unavailable_in_test_env(&stderr) {
+        return;
+    }
+    assert!(
+        exited.success(),
+        "The watch command should exit cleanly.\nStatus: {exited}\nStderr:\n{stderr}"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && (daemon_pid.exists() || daemon_sock.exists()) {

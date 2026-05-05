@@ -55,12 +55,22 @@ fn add_migration_table_edge(
 }
 
 fn migration_primary_symbol(parsed: &ParsedFile) -> gather_step_core::NodeId {
+    // TypeORM migrations always implement `MigrationInterface` with an `up`
+    // (and usually `down`) method, so the `up` function is the most reliable
+    // anchor. Fall back to a class whose name *ends* with `Migration` (some
+    // codebases name them `AddAlertWorkflowMigration` rather than the
+    // timestamped convention). Substring `contains("Migration")` is rejected
+    // because it would falsely catch unrelated classes such as
+    // `DataMigrationHelper`, anchoring the MigratesCollection edge on the
+    // wrong symbol.
     parsed
         .nodes
         .iter()
-        .find(|node| {
-            matches!(node.kind, NodeKind::Class | NodeKind::Function)
-                && (node.name.contains("Migration") || node.name == "up")
+        .find(|node| matches!(node.kind, NodeKind::Function) && node.name == "up")
+        .or_else(|| {
+            parsed.nodes.iter().find(|node| {
+                matches!(node.kind, NodeKind::Class) && node.name.ends_with("Migration")
+            })
         })
         .map_or(parsed.file_node.id, |node| node.id)
 }

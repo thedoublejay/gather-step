@@ -26,11 +26,12 @@ rmcp = { version = "1.5.0", features = ["client", "server", "macros", "transport
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
+tokio.workspace = true
 tokio-util.workspace = true
 getrandom = "=0.4.2"
 tracing.workspace = true
 libc.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true

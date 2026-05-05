@@ -36,14 +36,7 @@ pub fn detect_migrations(parsed: &ParsedFile) -> Vec<TypeormMigration> {
         .collect()
 }
 
-fn is_migration_path(path: &std::path::Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|segment| segment.eq_ignore_ascii_case("migrations"))
-    })
-}
+use super::migration_utils::{is_migration_path, matching_closing_paren, top_level_arguments};
 
 fn uses_typeorm(source: &str) -> bool {
     source.contains("from 'typeorm'")
@@ -138,7 +131,7 @@ enum SqlToken {
 }
 
 fn table_name_after_keyword(tokens: &[SqlToken], start: usize) -> Option<String> {
-    let mut cursor = start;
+    let mut cursor = skip_optional_if_exists(tokens, start);
     let mut table = identifier_token(tokens.get(cursor)?)?.to_owned();
     cursor += 1;
     while matches!(tokens.get(cursor), Some(SqlToken::Dot)) {
@@ -149,6 +142,28 @@ fn table_name_after_keyword(tokens: &[SqlToken], start: usize) -> Option<String>
         cursor += 2;
     }
     normalize_table_name(&table)
+}
+
+fn skip_optional_if_exists(tokens: &[SqlToken], start: usize) -> usize {
+    if !identifier_eq(tokens.get(start), "if") {
+        return start;
+    }
+
+    let mut cursor = start + 1;
+    if identifier_eq(tokens.get(cursor), "not") {
+        cursor += 1;
+    }
+    if identifier_eq(tokens.get(cursor), "exists") {
+        cursor + 1
+    } else {
+        start
+    }
+}
+
+fn identifier_eq(token: Option<&SqlToken>, expected: &str) -> bool {
+    token
+        .and_then(identifier_token)
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 fn identifier_token(token: &SqlToken) -> Option<&str> {
@@ -244,86 +259,6 @@ fn normalize_table_name(value: &str) -> Option<String> {
     }
 }
 
-fn top_level_arguments(raw_arguments: &str) -> Vec<&str> {
-    let mut arguments = Vec::new();
-    let mut depth = 0_u32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut argument_start = 0;
-
-    for (index, ch) in raw_arguments.char_indices() {
-        if let Some(current_quote) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == current_quote {
-                quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => quote = Some(ch),
-            '{' | '[' | '(' => depth = depth.saturating_add(1),
-            '}' | ']' | ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                arguments.push(raw_arguments[argument_start..index].trim());
-                argument_start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    let trailing = raw_arguments[argument_start..].trim();
-    if !trailing.is_empty() {
-        arguments.push(trailing);
-    }
-    arguments
-}
-
-fn matching_closing_paren(source: &str, open: usize) -> Option<usize> {
-    let mut depth = 0_u32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (relative_index, ch) in source.get(open..)?.char_indices() {
-        let index = open + relative_index;
-        if let Some(current_quote) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == current_quote {
-                quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => quote = Some(ch),
-            '(' => depth = depth.saturating_add(1),
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
-}
-
 fn quoted_or_template_literal_value(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if (trimmed.starts_with('"') && trimmed.ends_with('"'))
@@ -381,7 +316,7 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         let table_names = detect_migrations(&parsed)
             .into_iter()
@@ -416,13 +351,49 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         let table_names = detect_migrations(&parsed)
             .into_iter()
             .map(|migration| migration.table_name)
             .collect::<Vec<_>>();
         assert_eq!(table_names, vec!["alerts"]);
+    }
+
+    #[test]
+    fn detects_typeorm_sql_tables_after_if_exists_clauses() {
+        let parsed = parse_file_with_frameworks(
+            "svc",
+            std::path::Path::new("/repo"),
+            &crate::FileEntry {
+                path: "src/migrations/1714410000002-if-exists.ts".into(),
+                language: crate::Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: Some(
+                    br#"
+                    import { MigrationInterface, QueryRunner } from 'typeorm';
+
+                    export class IfExists1714410000002 implements MigrationInterface {
+                      public async up(queryRunner: QueryRunner): Promise<void> {
+                        await queryRunner.query(`ALTER TABLE IF EXISTS "alerts" ADD COLUMN "workflow" jsonb`);
+                        await queryRunner.query(`CREATE TABLE IF NOT EXISTS "alert_events" ("id" uuid)`);
+                      }
+                    }
+                    "#
+                    .to_vec()
+                    .into(),
+                ),
+            },
+            &[Framework::TypeOrm],
+        )
+        .expect("The fixture should parse.");
+
+        let table_names = detect_migrations(&parsed)
+            .into_iter()
+            .map(|migration| migration.table_name)
+            .collect::<Vec<_>>();
+        assert_eq!(table_names, vec!["alert_events", "alerts"]);
     }
 
     #[test]
@@ -448,7 +419,7 @@ mod tests {
             },
             &[Framework::TypeOrm],
         )
-        .expect("fixture should parse");
+        .expect("The fixture should parse.");
 
         assert!(detect_migrations(&parsed).is_empty());
     }

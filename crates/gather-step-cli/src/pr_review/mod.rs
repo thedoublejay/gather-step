@@ -14,3 +14,5 @@ pub mod extract;
 pub mod index_runner;
 pub mod overlay;
 pub mod parity;
+#[cfg(test)]
+pub(crate) mod test_helpers;

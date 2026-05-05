@@ -1271,14 +1271,15 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = TestDir::new("permissions");
-        let unreadable = temp_dir.path().join("secret.ts");
-        fs::write(&unreadable, "export const x = 1;\n").expect("write");
+        let unreadable = temp_dir.path().join("unreadable.ts");
+        fs::write(&unreadable, "export const x = 1;\n")
+            .expect("The unreadable fixture should write.");
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
-            .expect("set permissions");
+            .expect("The unreadable fixture permissions should be set.");
 
         let result = collect_repo_files(temp_dir.path(), &TraverseConfig::default());
 
-        // Restore permissions before assertion so cleanup succeeds
+        // Restore permissions before assertion so cleanup succeeds.
         let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
 
         // The walker should return an error because the file cannot be opened

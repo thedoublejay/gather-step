@@ -18,7 +18,7 @@ use crate::sanitize::wrap_inline_code;
 /// ```text
 /// `useAuthentication.ts`
 ///  → ConsumesApiFrom `__route__POST__/auth/refresh`
-///  → Serves `identity/refresh-access-token/controller.ts`
+///  → Serves `identity/renew-session/controller.ts`
 /// ```
 ///
 /// Node names are resolved from `store`; when a node is not found, the raw

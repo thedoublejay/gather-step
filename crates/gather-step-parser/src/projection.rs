@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::OnceLock,
+    sync::LazyLock,
 };
 
 use rustc_hash::FxHashSet;
@@ -15,6 +15,41 @@ use crate::{traverse::Language, tree_sitter::ParsedFile};
 
 const CONFIDENCE_HIGH: u16 = 900;
 const CONFIDENCE_MEDIUM: u16 = 700;
+
+static PROPERTY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*(?:public\s+|private\s+|protected\s+|readonly\s+|static\s+)*([A-Za-z_$][A-Za-z0-9_$]*)[!?]?\s*:\s*[^;=\n]+;",
+    )
+    .expect("The property regex should compile.")
+});
+static TYPED_VARIABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*([^=;,\n]+)")
+        .expect("The typed-variable regex should compile.")
+});
+static TYPED_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[(,]\s*([A-Za-z_$][A-Za-z0-9_$]*)\??\s*:\s*([^=,)\n]+)")
+        .expect("The typed-parameter regex should compile.")
+});
+static FIELD_ALIAS_ASSIGNMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*([^;\n]+)")
+        .expect("The field-alias assignment regex should compile.")
+});
+static DESTRUCTURED_ALIAS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\b")
+        .expect("The destructured-alias regex should compile.")
+});
+static OBJECT_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(^|[,{]\s*)["']?([A-Za-z_$][A-Za-z0-9_$.]*)["']?\s*:\s*([^,\n}{;]+)"#)
+        .expect("The object-field regex should compile.")
+});
+static DOTTED_ACCESS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:this|[A-Za-z_$][A-Za-z0-9_$]*)\??\.([A-Za-z_$][A-Za-z0-9_$]*)")
+        .expect("The dotted-access regex should compile.")
+});
+static DOTTED_STRING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"["']([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)["']"#)
+        .expect("The dotted-string regex should compile.")
+});
 
 pub(crate) fn augment_projection_fields(parsed: &mut ParsedFile) {
     if !matches!(
@@ -1194,69 +1229,35 @@ fn push_edge(
 }
 
 fn property_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?m)^\s*(?:public\s+|private\s+|protected\s+|readonly\s+|static\s+)*([A-Za-z_$][A-Za-z0-9_$]*)[!?]?\s*:\s*[^;=\n]+;",
-        )
-        .expect("property regex should compile")
-    })
+    &PROPERTY_RE
 }
 
 fn typed_variable_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*([^=;,\n]+)")
-            .expect("typed variable regex should compile")
-    })
+    &TYPED_VARIABLE_RE
 }
 
 fn typed_parameter_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"[(,]\s*([A-Za-z_$][A-Za-z0-9_$]*)\??\s*:\s*([^=,)\n]+)")
-            .expect("typed parameter regex should compile")
-    })
+    &TYPED_PARAMETER_RE
 }
 
 fn field_alias_assignment_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*([^;\n]+)")
-            .expect("field alias assignment regex should compile")
-    })
+    &FIELD_ALIAS_ASSIGNMENT_RE
 }
 
 fn destructured_alias_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\b")
-            .expect("destructured alias regex should compile")
-    })
+    &DESTRUCTURED_ALIAS_RE
 }
 
 fn object_field_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"(?m)(^|[,{]\s*)["']?([A-Za-z_$][A-Za-z0-9_$.]*)["']?\s*:\s*([^,\n}{;]+)"#)
-            .expect("object field regex should compile")
-    })
+    &OBJECT_FIELD_RE
 }
 
 fn dotted_access_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?:this|[A-Za-z_$][A-Za-z0-9_$]*)\??\.([A-Za-z_$][A-Za-z0-9_$]*)")
-            .expect("dotted access regex should compile")
-    })
+    &DOTTED_ACCESS_RE
 }
 
 fn dotted_string_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"["']([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)["']"#)
-            .expect("dotted string regex should compile")
-    })
+    &DOTTED_STRING_RE
 }
 
 #[cfg(test)]

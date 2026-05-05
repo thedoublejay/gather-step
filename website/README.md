@@ -25,7 +25,7 @@ website/
 
 ```bash
 cd website
-bun install
+bun install --frozen-lockfile
 bun run dev          # http://localhost:4321
 bun run build        # static output → dist/
 bun run preview      # serve built site locally

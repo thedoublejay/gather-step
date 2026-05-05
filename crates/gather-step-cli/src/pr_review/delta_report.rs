@@ -628,6 +628,7 @@ pub struct SafetyMetadata {
 pub enum CleanupPolicy {
     RemoveOnExit,
     KeepCache,
+    CacheHitRetained,
 }
 
 /// A suggested `gather-step` invocation the reviewer can run against the
@@ -940,6 +941,7 @@ impl DeltaReport {
         let _ = writeln!(buf, "- **run id:** `{}`", s.run_id);
         let cleanup_label = match s.cleanup_policy {
             CleanupPolicy::KeepCache => "keep-cache",
+            CleanupPolicy::CacheHitRetained => "cache-hit-retained",
             CleanupPolicy::RemoveOnExit => "remove-on-exit",
         };
         let _ = writeln!(buf, "- **cleanup:** `{cleanup_label}`");
@@ -1869,34 +1871,35 @@ mod tests {
     // Finding 4: followup_command_shell_quotes_paths_with_spaces
     #[test]
     fn followup_command_shell_quotes_paths_with_spaces() {
-        let workspace = std::path::Path::new("/Users/foo/My Projects/gather-step");
-        let registry = std::path::Path::new("/Users/foo/My Projects/.cache/registry.json");
-        let storage = std::path::Path::new("/Users/foo/My Projects/.cache/storage");
+        let workspace = std::path::Path::new("/workspace/Foo Projects/gather-step");
+        let registry = std::path::Path::new("/workspace/Foo Projects/.cache/registry.json");
+        let storage = std::path::Path::new("/workspace/Foo Projects/.cache/storage");
 
         let commands = build_suggested_followups(workspace, registry, storage);
 
         for cmd in &commands {
             // Each path component with spaces must be single-quoted in the command.
             assert!(
-                cmd.command.contains("'/Users/foo/My Projects/gather-step'"),
+                cmd.command
+                    .contains("'/workspace/Foo Projects/gather-step'"),
                 "workspace path with spaces must be single-quoted: {}",
                 cmd.command
             );
             assert!(
                 cmd.command
-                    .contains("'/Users/foo/My Projects/.cache/registry.json'"),
+                    .contains("'/workspace/Foo Projects/.cache/registry.json'"),
                 "registry path with spaces must be single-quoted: {}",
                 cmd.command
             );
             assert!(
                 cmd.command
-                    .contains("'/Users/foo/My Projects/.cache/storage'"),
+                    .contains("'/workspace/Foo Projects/.cache/storage'"),
                 "storage path with spaces must be single-quoted: {}",
                 cmd.command
             );
             // Verify the original path round-trips: single-quoted value between the
             // surrounding quotes equals the original path string.
-            let ws_expected = "/Users/foo/My Projects/gather-step";
+            let ws_expected = "/workspace/Foo Projects/gather-step";
             assert!(
                 cmd.command.contains(&format!("'{ws_expected}'")),
                 "round-trip of workspace path must match: {}",

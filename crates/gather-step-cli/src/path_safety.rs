@@ -22,7 +22,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum PathSafetyError {
     /// A resolved path escapes the workspace root.
-    #[error("path escapes workspace: `{path}` resolves outside workspace root `{workspace_root}`")]
+    #[error(
+        "Path escapes the workspace: `{path}` resolves outside workspace root `{workspace_root}`."
+    )]
     PathEscape {
         path: PathBuf,
         workspace_root: PathBuf,
@@ -30,7 +32,7 @@ pub enum PathSafetyError {
 
     /// A `.git` symlink target resolves outside the workspace root.
     #[error(
-        "git symlink escapes workspace: link `{link_path}` -> `{target}` resolves outside workspace root"
+        "Git symlink escapes the workspace: link `{link_path}` -> `{target}` resolves outside workspace root."
     )]
     GitSymlinkEscape { link_path: PathBuf, target: PathBuf },
 
@@ -40,13 +42,13 @@ pub enum PathSafetyError {
     /// TOCTOU races and to ensure that private-permission enforcement is
     /// applied to the intended location on disk.
     #[error(
-        "generated-state path `{symlink_path}` is a symlink; \
-         remove the symlink and use a real directory"
+        "Generated-state path `{symlink_path}` is a symlink. \
+         Remove the symlink and use a real directory."
     )]
     GeneratedStateSymlink { symlink_path: PathBuf },
 
     /// An I/O error occurred while performing path operations.
-    #[error("path safety I/O error for `{path}`: {source}")]
+    #[error("Path safety I/O error for `{path}`: {source}.")]
     Io {
         path: PathBuf,
         #[source]
@@ -267,6 +269,22 @@ pub fn reject_symlinked_generated_state(
     workspace_root: &Path,
     generated_state_path: &Path,
 ) -> Result<(), PathSafetyError> {
+    match std::fs::symlink_metadata(workspace_root) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(PathSafetyError::GeneratedStateSymlink {
+                symlink_path: workspace_root.to_path_buf(),
+            });
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(PathSafetyError::Io {
+                path: workspace_root.to_path_buf(),
+                source,
+            });
+        }
+    }
+
     // Collect the suffix of `generated_state_path` that extends beyond
     // `workspace_root`, then check each component in order.
     let relative = generated_state_path
@@ -353,7 +371,7 @@ mod tests {
         let missing = PathBuf::from("/tmp/this-path-definitely-does-not-exist-gather-step-test");
         let err = canonical_workspace_root(&missing).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("path safety I/O error"), "got: {msg}");
+        assert!(msg.contains("Path safety I/O error"), "Got: {msg}.");
     }
 
     #[test]
@@ -416,6 +434,24 @@ mod tests {
 
         let storage = link.join("storage");
         let err = reject_symlinked_generated_state(&root, &storage).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symlink"),
+            "expected symlink error message, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlinked_generated_state_rejects_symlinked_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_root = tmp.path().join("real-workspace");
+        fs::create_dir_all(&real_root).unwrap();
+        let workspace_link = tmp.path().join("workspace-link");
+        std::os::unix::fs::symlink(&real_root, &workspace_link).unwrap();
+
+        let storage = workspace_link.join(".gather-step").join("storage");
+        let err = reject_symlinked_generated_state(&workspace_link, &storage).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("symlink"),

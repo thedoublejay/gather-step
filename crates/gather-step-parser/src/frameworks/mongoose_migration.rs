@@ -236,14 +236,7 @@ fn repo_root_for(parsed: &ParsedFile) -> PathBuf {
     root
 }
 
-fn is_migration_path(path: &std::path::Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|segment| segment.eq_ignore_ascii_case("migrations"))
-    })
-}
+use super::migration_utils::{is_migration_path, matching_closing_paren, top_level_arguments};
 
 fn imports_mongoose(source: &str) -> bool {
     source.contains("from 'mongoose'")
@@ -286,86 +279,6 @@ fn contains_after_prefix(source: &str, prefix: &str, suffix: &str) -> bool {
 
 fn first_argument(raw_arguments: &str) -> Option<&str> {
     top_level_arguments(raw_arguments).into_iter().next()
-}
-
-fn top_level_arguments(raw_arguments: &str) -> Vec<&str> {
-    let mut arguments = Vec::new();
-    let mut depth = 0_u32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut argument_start = 0;
-
-    for (index, ch) in raw_arguments.char_indices() {
-        if let Some(current_quote) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == current_quote {
-                quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => quote = Some(ch),
-            '{' | '[' | '(' => depth = depth.saturating_add(1),
-            '}' | ']' | ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                arguments.push(raw_arguments[argument_start..index].trim());
-                argument_start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    let trailing = raw_arguments[argument_start..].trim();
-    if !trailing.is_empty() {
-        arguments.push(trailing);
-    }
-    arguments
-}
-
-fn matching_closing_paren(source: &str, open: usize) -> Option<usize> {
-    let mut depth = 0_u32;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    for (relative_index, ch) in source.get(open..)?.char_indices() {
-        let index = open + relative_index;
-        if let Some(current_quote) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == current_quote {
-                quote = None;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' | '`' => quote = Some(ch),
-            '(' => depth = depth.saturating_add(1),
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
 }
 
 fn normalize_literal(raw: &str) -> String {

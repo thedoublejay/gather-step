@@ -255,19 +255,19 @@ mod tests {
         assert_eq!(mismatches[0].package, "@workspace/shared-contracts");
     }
 
-    /// `package.json` files sometimes contain `_authToken` or similar
-    /// credential fields in their JSON.  The structured parser must not
+    /// `package.json` files sometimes contain credential fields in their JSON.
+    /// The structured parser must not
     /// propagate those values into any emitted graph node's `name`,
     /// `qualified_name`, or `signature` fields.
     #[test]
-    fn package_json_auth_token_does_not_reach_graph_nodes() {
-        let secret = "secret-value-xyz";
+    fn package_json_credential_field_does_not_reach_graph_nodes() {
+        let credential_value = "credential-value-xyz";
         let raw = format!(
             r#"{{
                 "name": "my-service",
-                "_authToken": "{secret}",
+                "_authCredential": "{credential_value}",
                 "dependencies": {{
-                    "_authToken": "{secret}",
+                    "_authCredential": "{credential_value}",
                     "@workspace/shared-contracts": "2.0.0"
                 }}
             }}"#
@@ -279,21 +279,21 @@ mod tests {
             extract_package_manifest("my-service", "package.json", owner_file, repo_node, &raw)
                 .expect("extraction should succeed");
 
-        let has_secret = |field: &str| field.contains(secret);
+        let has_credential = |field: &str| field.contains(credential_value);
         for node in &extraction.nodes {
             assert!(
-                !has_secret(&node.name),
-                "node.name must not contain the auth token: {:?}",
+                !has_credential(&node.name),
+                "The node.name field must not contain the credential value: {:?}.",
                 node.name
             );
             assert!(
-                !node.qualified_name.as_deref().is_some_and(has_secret),
-                "node.qualified_name must not contain the auth token: {:?}",
+                !node.qualified_name.as_deref().is_some_and(has_credential),
+                "The node.qualified_name field must not contain the credential value: {:?}.",
                 node.qualified_name
             );
             assert!(
-                !node.signature.as_deref().is_some_and(has_secret),
-                "node.signature must not contain the auth token: {:?}",
+                !node.signature.as_deref().is_some_and(has_credential),
+                "The node.signature field must not contain the credential value: {:?}.",
                 node.signature
             );
         }

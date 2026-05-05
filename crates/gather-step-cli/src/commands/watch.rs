@@ -109,6 +109,27 @@ fn log_value(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<invalid>\"".to_owned())
 }
 
+fn sentence_case_with_period(message: &str) -> String {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return "Unknown error.".to_owned();
+    }
+    if trimmed.eq_ignore_ascii_case("unable to start FSEvent stream") {
+        return "Unable to start the FSEvent stream.".to_owned();
+    }
+
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return "Unknown error.".to_owned();
+    };
+    let mut sentence = first.to_uppercase().collect::<String>();
+    sentence.push_str(chars.as_str());
+    if !matches!(sentence.chars().last(), Some('.' | '!' | '?')) {
+        sentence.push('.');
+    }
+    sentence
+}
+
 pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     let output = app.output();
     let daemon_metadata;
@@ -122,7 +143,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     path_safety::reject_symlinked_generated_state(&app.workspace_path, &storage_root)
         .with_context(|| {
             format!(
-                "generated-state path `{}` failed symlink check",
+                "Generated-state path `{}` failed the symlink check.",
                 storage_root.display()
             )
         })?;
@@ -192,7 +213,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                 Ok(event) => event,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "watch event subscriber lagged; continuing");
+                    tracing::warn!(skipped, "The watch event subscriber lagged; continuing.");
                     continue;
                 }
             };
@@ -355,7 +376,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
             };
 
             if let Err(error) = emit_result {
-                tracing::warn!(%error, "watch event output failed; stopping event stream");
+                tracing::warn!(%error, "Watch event output failed; stopping the event stream.");
                 break;
             }
         }
@@ -373,14 +394,20 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
         }
         () = cancel.cancelled() => {}
     }
-    watch_task.await??;
-    daemon_task.await??;
+    let watch_result = watch_task.await.context("The watch task crashed.")?;
+    if let Err(error) = watch_result {
+        bail!(
+            "The filesystem watcher failed: {}",
+            sentence_case_with_period(&error.to_string())
+        );
+    }
+    daemon_task.await.context("The daemon task crashed.")??;
     let status = watcher.status();
     drop(watcher);
     drop(stores);
     drop(daemon_metadata);
     if let Err(error) = event_task.await {
-        tracing::warn!(?error, "watch event task crashed");
+        tracing::warn!(?error, "The watch event task crashed.");
     }
     if output.is_json() {
         output.emit(&WatchStatusOutput {
@@ -430,7 +457,7 @@ pub(crate) fn apply_repo_filter(
     config.allow_listed_repos.retain(|repo| repo == repo_filter);
 
     if config.repos.is_empty() {
-        bail!("repo `{repo_filter}` was not found in the workspace config");
+        bail!("Repo `{repo_filter}` was not found in the workspace config.");
     }
 
     config.validate()?;

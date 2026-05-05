@@ -139,7 +139,9 @@ gather-step pr-review clean --all                  # wipe all review artifacts f
 ```
 
 `clean --older-than` skips `InProgress` artifacts so it cannot race a running
-review. `--all` removes everything including `InProgress`.
+review. When a marker has `last_accessed_at`, pruning uses that timestamp so
+cache hits keep useful artifacts fresh; older markers fall back to `created_at`.
+`--all` removes everything including `InProgress`.
 
 `gather-step clean --include-review` extends the workspace `clean` command to
 also wipe review artifacts. A full `gather-step reindex` automatically wipes

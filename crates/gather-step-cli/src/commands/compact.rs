@@ -34,7 +34,7 @@ pub fn run(app: &AppContext, args: CompactArgs) -> Result<()> {
     path_safety::reject_symlinked_generated_state(&app.workspace_path, &storage_root)
         .with_context(|| {
             format!(
-                "generated-state path `{}` failed symlink check",
+                "Generated-state path `{}` failed the symlink check.",
                 storage_root.display()
             )
         })?;

@@ -65,6 +65,9 @@ use crate::{
 /// Maximum number of changed-file paths included in the report.
 const MAX_CHANGED_FILES: usize = 200;
 
+#[cfg(test)]
+static TEMP_INDEX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Args, Debug, Clone)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -102,6 +105,16 @@ pub struct PrReviewArgs {
     /// Useful for CI and tests.
     #[arg(long, value_name = "PATH", hide = true)]
     pub cache_root: Option<PathBuf>,
+
+    /// Path to a `gather-step.config.yaml` to use for the review run.
+    ///
+    /// The review temp-index requires a config at the worktree root. By
+    /// default the worktree is checked out at `--head`, so a config that
+    /// is committed in that ref is naturally present. Pass this flag when
+    /// the workspace does not have a checked-in config (e.g. during
+    /// bootstrap), or to override the committed one for a single run.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
 
     /// Exit with code 2 if any removed-surface risk has severity `High`.
     /// Without this flag the report is always emitted with exit code 0.
@@ -282,20 +295,22 @@ pub enum ReviewEngine {
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
-pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
+pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
     match args.command {
-        Some(PrReviewSubcommand::Clean(ref clean_args)) => run_clean(app, &args, clean_args),
+        Some(PrReviewSubcommand::Clean(ref clean_args)) => {
+            run_clean(app, &args, clean_args).map(|()| 0)
+        }
         None => {
             // Default path: run a review. --base and --head are required here.
             let base = args
                 .base
                 .as_deref()
-                .context("--base is required when running a review (no subcommand given)")?
+                .context("--base is required when running a review with no subcommand.")?
                 .to_owned();
             let head = args
                 .head
                 .as_deref()
-                .context("--head is required when running a review (no subcommand given)")?
+                .context("--head is required when running a review with no subcommand.")?
                 .to_owned();
 
             // --strict is a deprecated alias for --severity strict.
@@ -330,6 +345,7 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
                 keep_cache: args.keep_cache,
                 json: args.json,
                 cache_root: args.cache_root,
+                config: args.config,
                 strict: args.strict,
                 severity: effective_severity,
                 format: effective_format,
@@ -338,7 +354,10 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
             };
 
             let (report, exceeded) = run_inner(app, &review_args)?;
-            // Print to stdout.
+            // Print to stdout, then explicitly flush so the structured report
+            // is on the wire before we return — `main` exits via
+            // `std::process::ExitCode` so destructors run, but also flushing
+            // here keeps the contract explicit at the print site.
             #[expect(
                 clippy::print_stdout,
                 reason = "pr-review is the sole caller of this path; structured output goes here"
@@ -346,14 +365,14 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<()> {
             {
                 println!("{report}");
             }
-            // Exit code 2 when the severity threshold is exceeded.
-            // Using std::process::exit after rendering so the report always prints
-            // before the process terminates; callers can distinguish "broke" (exit
-            // 1 from anyhow) from "threshold exceeded" (exit 2).
-            if exceeded {
-                std::process::exit(2);
-            }
-            Ok(())
+            let _ = <std::io::Stdout as std::io::Write>::flush(&mut std::io::stdout());
+            // Exit code 2 when the severity threshold is exceeded — threaded
+            // back through `Result<u8>` so `main` can flush stdio/tracing
+            // properly before terminating. Avoids the abrupt `process::exit`
+            // that previously truncated output under fully-buffered stdout.
+            // Callers distinguish "broke" (exit 1 from anyhow) from
+            // "threshold exceeded" (exit 2).
+            Ok(if exceeded { 2 } else { 0 })
         }
     }
 }
@@ -375,6 +394,11 @@ pub struct PrReviewRunArgs {
     pub keep_cache: bool,
     pub json: bool,
     pub cache_root: Option<PathBuf>,
+    /// Optional override for the worktree-root config. When set, the file at
+    /// this path is copied into the materialized worktree before indexing,
+    /// so callers can review workspaces that do not check in their
+    /// `gather-step.config.yaml`.
+    pub config: Option<PathBuf>,
     /// Deprecated: kept for backward-compat.  Callers should prefer `severity`.
     pub strict: bool,
     pub severity: SeverityMode,
@@ -396,27 +420,39 @@ enum RunOutcome {
         worktree: gather_step_git::worktrees::ReviewWorktree,
         elapsed_ms: u64,
         total_repos: usize,
-        /// Surfaces not supported by the active review engine.
-        unsupported_surfaces: Vec<String>,
+        /// Surfaces not supported by the active review engine.  Kept typed
+        /// so per-surface `_unavailable` checks can match on the variant
+        /// rather than comparing free-form strings.
+        unsupported_surfaces: Vec<UnsupportedSurface>,
     },
 }
 
 /// Best-effort cleanup guard for the review artifact and worktree.
 ///
-/// Runs cleanup on `Drop` unless [`Self::disarm`] has been called. This keeps
-/// the disposable cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/`
+/// Runs cleanup on `Drop` unless [`Self::disarm`] has been called or the
+/// guard was constructed with [`CacheRetention::Keep`]. This keeps the
+/// disposable cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/`
 /// is removed unless `--keep-cache`) under panic, signal, and early-return
 /// paths — not just the happy-return path.
+///
+/// When `retention` is [`CacheRetention::Keep`], the guard does NOT remove
+/// anything on Drop. The user explicitly opted to inspect this run's
+/// artifact, including failures. Failed runs reach Drop with the artifact
+/// marker already set to [`ReviewStatus::Quarantined`] by
+/// [`quarantine_on_error`], so the artifact remains discoverable by
+/// `pr-review clean --run-id <id>` or `pr-review clean --older-than <duration>`.
 struct ReviewCleanupGuard {
     artifact_root_path: Option<std::path::PathBuf>,
     worktree: Option<ReviewWorktree>,
+    retention: CacheRetention,
 }
 
 impl ReviewCleanupGuard {
-    fn new() -> Self {
+    fn new(retention: CacheRetention) -> Self {
         Self {
             artifact_root_path: None,
             worktree: None,
+            retention,
         }
     }
 
@@ -433,25 +469,79 @@ impl ReviewCleanupGuard {
 
 impl Drop for ReviewCleanupGuard {
     fn drop(&mut self) {
+        if self.retention.keeps_cache() {
+            // User opted to inspect the artifact (including failures).
+            // Drop the references so we don't double-cleanup if a later
+            // explicit cleanup path runs, but do not touch disk.
+            self.artifact_root_path = None;
+            self.worktree = None;
+            return;
+        }
+        // Worktree removal is the gate for artifact-root removal: if `git
+        // worktree remove` fails (e.g. dirty working tree, locked refs), the
+        // source repo's `.git/worktrees/<id>` pointer is still present and
+        // would be left dangling if we deleted the artifact dir it points
+        // at. Quarantine instead so the user can run `pr-review clean
+        // --run-id <id>` once the worktree state is unstuck.
+        let mut worktree_removed = true;
         if let Some(wt) = self.worktree.take()
             && let Err(e) = remove_worktree(&wt)
         {
+            worktree_removed = false;
             tracing::warn!(
                 error = %e,
                 worktree = %wt.root.display(),
-                "pr-review cleanup guard: remove_worktree failed (panic/early return path)",
+                "pr-review cleanup guard: Failed to remove the worktree on a panic or early-return path; leaving the artifact for manual cleanup.",
             );
         }
-        if let Some(path) = self.artifact_root_path.take()
-            && path.exists()
-            && let Err(e) = std::fs::remove_dir_all(&path)
-        {
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "pr-review cleanup guard: remove_dir_all failed (panic/early return path)",
-            );
+        if let Some(path) = self.artifact_root_path.take() {
+            if !worktree_removed {
+                let quarantined = quarantine_artifact_path(&path);
+                if quarantined {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. The artifact marker was moved to the Quarantined state. \
+                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                    );
+                } else {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed, and the marker could not be transitioned to Quarantined. \
+                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                    );
+                }
+                return;
+            }
+            if path.exists()
+                && let Err(e) = std::fs::remove_dir_all(&path)
+            {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "pr-review cleanup guard: Failed to remove the artifact directory on a panic or early-return path.",
+                );
+            }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheRetention {
+    Discard,
+    Keep,
+}
+
+impl CacheRetention {
+    fn from_keep_cache(keep_cache: bool) -> Self {
+        if keep_cache {
+            Self::Keep
+        } else {
+            Self::Discard
+        }
+    }
+
+    fn keeps_cache(self) -> bool {
+        matches!(self, Self::Keep)
     }
 }
 
@@ -461,6 +551,20 @@ impl Drop for ReviewCleanupGuard {
 /// exceeded (see [`evaluate_severity_threshold`]).  The caller uses this to
 /// exit with code 2 AFTER printing the report.
 pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bool)> {
+    #[cfg(test)]
+    let _temp_index_test_guard = if matches!(args.engine, ReviewEngine::TempIndex) {
+        // TempIndex tests materialize Tantivy search indexes, which can exceed
+        // the default macOS file-descriptor limit when lib tests run in
+        // parallel. Serialize this path in tests only; production behavior and
+        // integration-test binaries are unchanged.
+        Some(match TEMP_INDEX_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        })
+    } else {
+        None
+    };
+
     // Legacy --json flag coerces to Json format.
     let effective_format = if args.json || app.json_output {
         OutputFormat::Json
@@ -473,7 +577,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let resolved =
         resolve_range(&app.workspace_path, &args.base, &args.head).with_context(|| {
             format!(
-                "resolving refs `{}..{}` in `{}`",
+                "Resolving refs `{}..{}` in `{}`.",
                 args.base,
                 args.head,
                 app.workspace_path.display()
@@ -497,25 +601,25 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 let base_short = &base_sha[..base_sha.len().min(12)];
                 if ws_head.sha != base_sha {
                     baseline_warnings.push(format!(
-                        "workspace HEAD {ws_short} does not match --base {base_short}; \
-                         the baseline index may not represent the base ref. \
+                        "The workspace HEAD {ws_short} does not match --base {base_short}; \
+                         the baseline index may not represent the base reference. \
                          Re-run after `git checkout {base_short}` and `gather-step index` \
                          for accurate deltas, or pass --no-baseline-check to suppress this warning."
                     ));
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e, "could not resolve workspace HEAD for baseline check");
+                tracing::debug!(error = %e, "Could not resolve workspace HEAD for the baseline check.");
             }
         }
     }
 
     // ── 2. Changed files ───────────────────────────────────────────────────
     let diff_base_sha = merge_base(&app.workspace_path, &base_sha, &head_sha)
-        .with_context(|| format!("finding merge-base for `{base_sha}` and `{head_sha}`"))?;
+        .with_context(|| format!("Finding the merge-base for `{base_sha}` and `{head_sha}`."))?;
     let changed =
         changed_files(&app.workspace_path, &diff_base_sha, &head_sha).with_context(|| {
-            format!("listing changed files between merge-base `{diff_base_sha}` and `{head_sha}`")
+            format!("Listing changed files between merge-base `{diff_base_sha}` and `{head_sha}`.")
         })?;
 
     let all_changed_paths: Vec<String> = changed
@@ -531,10 +635,46 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         .collect();
 
     // ── 3b. Cache key ──────────────────────────────────────────────────────
-    // Read the workspace config file to compute a stable config_hash.
-    // If the file is absent or unreadable, treat as empty bytes.
-    let config_file_path = app.workspace_path.join("gather-step.config.yaml");
-    let config_bytes: Vec<u8> = std::fs::read(&config_file_path).unwrap_or_default();
+    // Read the config file the engine will actually use, so the cache key
+    // identifies "same config" exactly when the config the head worktree
+    // sees is identical.
+    //
+    // Selection precedence:
+    //   1. `--config <path>` override → read once, then hash and write those
+    //      exact bytes into the worktree.
+    //   2. Otherwise, hash the bytes committed at `<head_sha>:gather-step.config.yaml`
+    //      via `git show`. This is what the detached worktree will check out,
+    //      not the user's working tree (which may be at a different ref).
+    //   3. If neither is readable, hash empty bytes — the indexer will fail
+    //      later with a clearer error if a config is genuinely required.
+    let config_override_path: Option<PathBuf> = args.config.clone();
+    if let Some(path) = config_override_path.as_ref() {
+        if !path.exists() {
+            anyhow::bail!(
+                "The --config path does not exist: `{}`. Next step: pass an existing `gather-step.config.yaml` or omit `--config`.",
+                path.display()
+            );
+        }
+        if path.is_dir() {
+            anyhow::bail!(
+                "The --config path is a directory, not a file: `{}`.",
+                path.display()
+            );
+        }
+    }
+    let config_override_bytes: Option<Vec<u8>> = if let Some(path) = config_override_path.as_ref() {
+        Some(
+            std::fs::read(path)
+                .with_context(|| format!("Reading --config from `{}`.", path.display()))?,
+        )
+    } else {
+        None
+    };
+    let config_bytes: Vec<u8> = if let Some(bytes) = config_override_bytes.as_ref() {
+        bytes.clone()
+    } else {
+        read_config_at_sha(&app.workspace_path, &head_sha)
+    };
     let cache_key_struct =
         compute_cache_key(&app.workspace_path, &base_sha, &head_sha, &config_bytes);
 
@@ -549,7 +689,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // takes over. If the function panics or returns Err between arming and
     // disarming, the Drop impl removes the worktree and artifact root rather
     // than leaving them as InProgress orphans in the user's OS cache.
-    let mut cleanup_guard = ReviewCleanupGuard::new();
+    let mut cleanup_guard =
+        ReviewCleanupGuard::new(CacheRetention::from_keep_cache(args.keep_cache));
 
     // Try to reuse a prior completed artifact with the same cache key.
     // Cache reuse is independent of `keep_cache` — `keep_cache` controls
@@ -557,9 +698,19 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let mut was_cache_hit = false;
     let outcome: RunOutcome = if let Some(hit_root) =
         try_reuse_cache(&cache_root, &cache_key_struct).unwrap_or_else(|e| {
-            tracing::debug!(error = %e, "cache lookup failed; falling back to cold run");
+            tracing::warn!(error = %e, "Cache lookup failed; falling back to a cold run.");
             None
         }) {
+        let workspace_ctx = StorageContext::workspace_read_only(app);
+        let _review_ctx = StorageContext::review_checked(
+            &workspace_ctx,
+            hit_root.root.clone(),
+            hit_root.registry_path.clone(),
+            hit_root.storage_root.clone(),
+            hit_root.run_id.clone(),
+        )
+        .map_err(ArtifactRootError::Safety)
+        .with_context(|| "The review safety guard rejected cached artifact paths.")?;
         // Cache hit: skip worktree creation and indexing.
         was_cache_hit = true;
         RunOutcome::CacheHit(hit_root)
@@ -568,7 +719,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         let run_id = generate_run_id();
 
         let artifact_root = plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
-            .with_context(|| format!("planning artifact root for run `{run_id}`"))?;
+            .with_context(|| format!("Planning the artifact root for run `{run_id}`."))?;
 
         // Safety guard: construct both contexts and verify no path overlap before
         // creating review directories, writing the marker, or opening any review
@@ -582,7 +733,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             run_id.clone(),
         )
         .map_err(ArtifactRootError::Safety)
-        .with_context(|| "review safety guard rejected the proposed artifact paths")?;
+        .with_context(|| "The review safety guard rejected the proposed artifact paths.")?;
 
         materialize_artifact_root(
             &artifact_root,
@@ -590,7 +741,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             &head_sha,
             Some(cache_key_struct.clone()),
         )
-        .with_context(|| format!("creating artifact root for run `{run_id}`"))?;
+        .with_context(|| format!("Creating the artifact root for run `{run_id}`."))?;
 
         // ── 5. Materialize worktree ────────────────────────────────────────
         // `materialize_artifact_root` pre-creates the worktree directory; git worktree
@@ -598,7 +749,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         if artifact_root.worktree_root.exists() {
             std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
                 format!(
-                    "removing pre-created worktree placeholder at `{}`",
+                    "Removing the pre-created worktree placeholder at `{}`.",
                     artifact_root.worktree_root.display()
                 )
             })?;
@@ -614,7 +765,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 quarantine_on_error(&artifact_root);
                 return Err(e).with_context(|| {
                     format!(
-                        "creating detached worktree at `{}`",
+                        "Creating the detached worktree at `{}`.",
                         artifact_root.worktree_root.display()
                     )
                 });
@@ -626,28 +777,54 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // will trigger best-effort cleanup via Drop.
         cleanup_guard.arm(artifact_root.root.clone(), Some(worktree.clone()));
 
+        // ── 5a. --config override ─────────────────────────────────────────
+        // When the user passed `--config <path>`, write the exact bytes that
+        // were hashed for the cache key into the
+        // worktree root so the indexer reads the requested config instead of
+        // whatever the head commit checked in (or the absent-file case).
+        // Done AFTER worktree creation so we overwrite the committed config
+        // rather than racing with `git worktree add`.
+        if let (Some(src), Some(bytes)) = (
+            config_override_path.as_ref(),
+            config_override_bytes.as_ref(),
+        ) {
+            let dst = artifact_root.worktree_root.join("gather-step.config.yaml");
+            if let Err(e) = std::fs::write(&dst, bytes) {
+                quarantine_on_error(&artifact_root);
+                return Err(anyhow::Error::from(e)).with_context(|| {
+                    format!(
+                        "Writing --config `{}` into the review worktree at `{}`.",
+                        src.display(),
+                        dst.display()
+                    )
+                });
+            }
+        }
+
         // ── 5b. Seed from baseline (Task 3) ───────────────────────────────
         // If the workspace has a normal index with a matching config hash,
         // copy it into the review artifact root so the indexer only needs to
         // update changed repos rather than rebuild from scratch.
         match pick_seed_source(&app.workspace_path, &cache_key_struct.config_hash) {
             Ok(Some(seed)) => {
-                tracing::info!("seeding review artifact from baseline workspace index");
+                tracing::info!("Seeding the review artifact from the baseline workspace index.");
                 if let Err(e) = seed_artifact_root(&seed, &artifact_root) {
                     // Non-fatal: log and continue with a full index.
                     tracing::warn!(
                         error = %e,
-                        "seed_artifact_root failed; falling back to full reindex"
+                        "Seeding the artifact root failed. Falling back to a full reindex."
                     );
                 }
             }
             Ok(None) => {
-                tracing::debug!("workspace baseline not seedable; doing full review index");
+                tracing::debug!(
+                    "The workspace baseline is not seedable. Running a full review index."
+                );
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "pick_seed_source error; falling back to full reindex"
+                    "Seed source selection failed. Falling back to a full reindex."
                 );
             }
         }
@@ -713,15 +890,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             Ok(s) => s,
             Err(e) => {
                 quarantine_on_error(&artifact_root);
-                return Err(e).with_context(|| "review engine materialize failed");
+                return Err(e).with_context(|| "Review engine materialization failed.");
             }
         };
         let engine_total_repos = engine_snapshot.total_repos;
-        let engine_unsupported: Vec<String> = engine_snapshot
-            .unsupported_surfaces
-            .iter()
-            .map(|s| s.as_str().to_owned())
-            .collect();
+        let engine_unsupported: Vec<UnsupportedSurface> =
+            engine_snapshot.unsupported_surfaces.clone();
         // Truncation is intentional: no real indexing run takes > 584 million years.
         #[expect(
             clippy::cast_possible_truncation,
@@ -776,6 +950,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
     let cleanup_policy = if args.keep_cache {
         CleanupPolicy::KeepCache
+    } else if was_cache_hit {
+        CleanupPolicy::CacheHitRetained
     } else {
         CleanupPolicy::RemoveOnExit
     };
@@ -790,15 +966,14 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // as unsupported.  Extractors are skipped for those surfaces; the flag tells
     // the renderer to print an informational note instead of an empty section.
     let unsupported = &run_unsupported_surfaces;
-    let routes_unavailable = unsupported.iter().any(|s| s == "routes");
-    let symbols_unavailable = unsupported.iter().any(|s| s == "symbols");
-    let payload_contracts_unavailable = unsupported.iter().any(|s| s == "payload_contracts");
-    let events_unavailable = unsupported.iter().any(|s| s == "events");
-    let decorators_unavailable = unsupported.iter().any(|s| s == "decorators");
-    let contract_alignments_unavailable = unsupported.iter().any(|s| s == "contract_alignments");
-    let deployment_unavailable = unsupported
-        .iter()
-        .any(|s| s == UnsupportedSurface::Deployment.as_str());
+    let has_surface = |s: UnsupportedSurface| unsupported.contains(&s);
+    let routes_unavailable = has_surface(UnsupportedSurface::Routes);
+    let symbols_unavailable = has_surface(UnsupportedSurface::Symbols);
+    let payload_contracts_unavailable = has_surface(UnsupportedSurface::PayloadContracts);
+    let events_unavailable = has_surface(UnsupportedSurface::Events);
+    let decorators_unavailable = has_surface(UnsupportedSurface::Decorators);
+    let contract_alignments_unavailable = has_surface(UnsupportedSurface::ContractAlignments);
+    let deployment_unavailable = has_surface(UnsupportedSurface::Deployment);
 
     let (
         route_deltas,
@@ -836,7 +1011,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "route delta extraction failed; emitting empty deltas"
+                                            "Route delta extraction failed. Emitting empty deltas."
                                         );
                                         RouteDeltas::default()
                                     }
@@ -856,7 +1031,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "symbol delta extraction failed; emitting empty deltas"
+                                            "Symbol delta extraction failed. Emitting empty deltas."
                                         );
                                         SymbolDeltas::default()
                                     }
@@ -876,8 +1051,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "payload-contract delta extraction failed; \
-                                             emitting empty deltas"
+                                            "Payload-contract delta extraction failed. \
+                                             Emitting empty deltas."
                                         );
                                         PayloadContractDeltas::default()
                                     }
@@ -897,7 +1072,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "event delta extraction failed; emitting empty deltas"
+                                            "Event delta extraction failed. Emitting empty deltas."
                                         );
                                         EventDeltas::default()
                                     }
@@ -918,8 +1093,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 Err(e) => {
                                     tracing::warn!(
                                         error = %e,
-                                        "removed-surface risk extraction failed; \
-                                         emitting empty risks"
+                                        "Removed-surface risk extraction failed. \
+                                         Emitting empty risks."
                                     );
                                     vec![]
                                 }
@@ -945,7 +1120,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                                     error = %e,
                                                     method = %r.method,
                                                     path = %r.path,
-                                                    "impact attachment failed for removed route"
+                                                    "Impact attachment failed for a removed route."
                                                 ),
                                             }
                                         }
@@ -954,7 +1129,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             error = %e,
                                             method = %r.method,
                                             path = %r.path,
-                                            "route node lookup failed"
+                                            "Route node lookup failed."
                                         ),
                                     }
                                 }
@@ -979,7 +1154,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                                     error = %e,
                                                     method = %method,
                                                     path = %path,
-                                                    "impact attachment failed for changed route"
+                                                    "Impact attachment failed for a changed route."
                                                 ),
                                             }
                                         }
@@ -988,7 +1163,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             error = %e,
                                             method = %method,
                                             path = %path,
-                                            "route node lookup failed for changed"
+                                            "Route node lookup failed for a changed route."
                                         ),
                                     }
                                 }
@@ -1014,7 +1189,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                                     error = %e,
                                                     repo = %s.repo,
                                                     qn = %s.qualified_name,
-                                                    "impact attachment failed for removed symbol"
+                                                    "Impact attachment failed for a removed symbol."
                                                 ),
                                             }
                                         }
@@ -1023,7 +1198,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             error = %e,
                                             repo = %s.repo,
                                             qn = %s.qualified_name,
-                                            "symbol node lookup failed"
+                                            "Symbol node lookup failed."
                                         ),
                                     }
                                 }
@@ -1042,7 +1217,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                                     error = %e,
                                                     repo = %repo,
                                                     qn = %qn,
-                                                    "impact attachment failed for changed symbol"
+                                                    "Impact attachment failed for a changed symbol."
                                                 ),
                                             }
                                         }
@@ -1051,7 +1226,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             error = %e,
                                             repo = %repo,
                                             qn = %qn,
-                                            "symbol node lookup failed for changed"
+                                            "Symbol node lookup failed for a changed symbol."
                                         ),
                                     }
                                 }
@@ -1079,8 +1254,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                                     error = %e,
                                                     repo = %c.repo,
                                                     target = %c.target_qualified_name,
-                                                    "impact attachment failed for removed \
-                                                     payload contract"
+                                                    "Impact attachment failed for a removed \
+                                                     payload contract."
                                                 ),
                                             }
                                         }
@@ -1089,7 +1264,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             error = %e,
                                             repo = %c.repo,
                                             target = %c.target_qualified_name,
-                                            "payload contract node lookup failed"
+                                            "Payload contract node lookup failed."
                                         ),
                                     }
                                 }
@@ -1112,8 +1287,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                                     error = %e,
                                                     repo = %c.repo,
                                                     target = %c.target_qualified_name,
-                                                    "impact attachment failed for changed \
-                                                     payload contract"
+                                                    "Impact attachment failed for a changed \
+                                                     payload contract."
                                                 ),
                                             }
                                         }
@@ -1122,7 +1297,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                             error = %e,
                                             repo = %c.repo,
                                             target = %c.target_qualified_name,
-                                            "payload contract node lookup failed for changed"
+                                            "Payload contract node lookup failed for a changed contract."
                                         ),
                                     }
                                 }
@@ -1143,8 +1318,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "contract alignment extraction failed; \
-                                             emitting empty alignments"
+                                            "Contract alignment extraction failed. \
+                                             Emitting empty alignments."
                                         );
                                         ContractAlignments::default()
                                     }
@@ -1166,8 +1341,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "decorator delta extraction failed; \
-                                             emitting empty decorator deltas"
+                                            "Decorator delta extraction failed. \
+                                             Emitting empty decorator deltas."
                                         );
                                         DecoratorDeltas::default()
                                     }
@@ -1189,8 +1364,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     Err(e) => {
                                         tracing::warn!(
                                             error = %e,
-                                            "deployment delta extraction failed; \
-                                             emitting empty deltas"
+                                            "Deployment delta extraction failed. \
+                                             Emitting empty deltas."
                                         );
                                         DeploymentDeltas::default()
                                     }
@@ -1211,8 +1386,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                "baseline storage could not be opened; \
-                                 emitting empty deltas"
+                                "Baseline storage could not be opened. \
+                                 Emitting empty deltas."
                             );
                             (
                                 RouteDeltas::default(),
@@ -1230,8 +1405,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        "review storage could not be opened for diff extraction; \
-                         emitting empty deltas"
+                        "Review storage could not be opened for diff extraction. \
+                         Emitting empty deltas."
                     );
                     (
                         RouteDeltas::default(),
@@ -1248,8 +1423,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         } else {
             tracing::warn!(
                 storage = %ws_paths.storage_root.display(),
-                "baseline index not found; run `gather-step index` first \
-                 to enable PR-review deltas"
+                "Baseline index was not found. Run `gather-step index` first \
+                 to enable PR-review deltas."
             );
             (
                 RouteDeltas::default(),
@@ -1345,10 +1520,10 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             tracing::warn!(
                 error = %e,
                 run_id = %artifact_root.run_id,
-                "pr-review --keep-cache: write_marker_completed failed; the cache may not be reusable on the next run",
+                "pr-review --keep-cache: Failed to write the completed marker. The cache may not be reusable on the next run.",
             );
         } else {
-            tracing::debug!(error = %e, "pr-review write_marker_completed failed");
+            tracing::debug!(error = %e, "The pr-review command failed to write the completed marker.");
         }
     }
 
@@ -1356,21 +1531,41 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // Drop does not double-remove or fight the explicit policy.
     cleanup_guard.disarm();
 
-    // ── 10. Cleanup ────────────────────────────────────────────────────────
+    // ── 10. Evaluate severity threshold ───────────────────────────────────
+    let has_high_risk = evaluate_severity_threshold(args.severity, &report);
+
+    // ── 11. Render ─────────────────────────────────────────────────────────
+    let rendered = match effective_format {
+        OutputFormat::Json => report
+            .render_json()
+            .context("Serializing the delta report to JSON.")?,
+        OutputFormat::GithubComment => report.render_github_comment(GITHUB_COMMENT_LIMIT),
+        OutputFormat::Braingent => report.render_braingent(),
+        OutputFormat::Markdown => report.render_markdown(),
+    };
+
+    // ── 12. Optional github-comment file write ─────────────────────────────
+    if let Some(ref path) = args.github_comment_file {
+        let comment = match effective_format {
+            OutputFormat::GithubComment => rendered.clone(),
+            _ => report.render_github_comment(GITHUB_COMMENT_LIMIT),
+        };
+        std::fs::write(path, &comment)
+            .with_context(|| format!("Writing the GitHub comment to `{}`.", path.display()))?;
+    }
+
+    // ── 13. Cleanup ────────────────────────────────────────────────────────
     if was_cache_hit {
         // Cache hit: NEVER delete on success.  The cached artifact exists for
         // future reuse and is only wiped explicitly via `pr-review clean`.
         // Update the access timestamp so `--older-than` pruning measures
         // last-use time, not creation time.
         if let Err(e) = touch_marker_accessed(&artifact_root) {
-            tracing::debug!(error = %e, "pr-review touch_marker_accessed failed");
+            tracing::debug!(error = %e, "The pr-review command failed to update the marker access timestamp.");
         }
     } else if !args.keep_cache {
         // Fresh run: remove the worktree then the artifact root.  Errors are
         // logged but do not fail the command — the marker is already Completed.
-        // For cache-hit runs, worktree_opt is None — the worktree was created
-        // by a prior run and must not be removed (the artifact may still be
-        // in use by other commands).  For cold runs, remove the worktree.
         let mut worktree_removed_cleanly = true;
         if let Some(wt) = worktree_opt
             && let Err(e) = remove_worktree(&wt)
@@ -1379,8 +1574,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             tracing::warn!(
                 error = %e,
                 worktree = %wt.root.display(),
-                "pr-review cleanup: remove_worktree failed; \
-                 `git worktree remove` may have left a dangling pointer in `.git/worktrees/`",
+                "pr-review cleanup: Failed to remove the worktree. \
+                 `git worktree remove` may have left a dangling pointer in `.git/worktrees/`.",
             );
         }
         if worktree_removed_cleanly {
@@ -1392,33 +1587,10 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 tracing::warn!(
                     error = %e,
                     path = %artifact_root.root.display(),
-                    "pr-review cleanup: remove_dir_all failed",
+                    "pr-review cleanup: Failed to remove the artifact directory.",
                 );
             }
         }
-    }
-
-    // ── 11. Evaluate severity threshold ───────────────────────────────────
-    let has_high_risk = evaluate_severity_threshold(args.severity, &report);
-
-    // ── 12. Render ─────────────────────────────────────────────────────────
-    let rendered = match effective_format {
-        OutputFormat::Json => report
-            .render_json()
-            .context("serializing delta report to JSON")?,
-        OutputFormat::GithubComment => report.render_github_comment(GITHUB_COMMENT_LIMIT),
-        OutputFormat::Braingent => report.render_braingent(),
-        OutputFormat::Markdown => report.render_markdown(),
-    };
-
-    // ── 13. Optional github-comment file write ─────────────────────────────
-    if let Some(ref path) = args.github_comment_file {
-        let comment = match effective_format {
-            OutputFormat::GithubComment => rendered.clone(),
-            _ => report.render_github_comment(GITHUB_COMMENT_LIMIT),
-        };
-        std::fs::write(path, &comment)
-            .with_context(|| format!("writing github comment to `{}`", path.display()))?;
     }
 
     Ok((rendered, has_high_risk))
@@ -1467,10 +1639,57 @@ fn map_changed_repos_from_config(
     result_set.into_iter().collect()
 }
 
-/// Mark the artifact root as Quarantined on error, ignoring any secondary
-/// failure to write the marker.
+/// Mark the artifact root as Quarantined on error.
 fn quarantine_on_error(artifact_root: &ReviewArtifactRoot) {
-    let _ = write_marker_quarantined(artifact_root);
+    if let Err(e) = write_marker_quarantined(artifact_root) {
+        tracing::warn!(
+            error = %e,
+            root = %artifact_root.root.display(),
+            run_id = %artifact_root.run_id,
+            "Failed to mark the pr-review artifact as Quarantined after an error.",
+        );
+    }
+}
+
+/// Best-effort quarantine for an artifact root identified only by path.
+///
+/// Returns `true` when the on-disk marker was successfully transitioned to
+/// [`ReviewStatus::Quarantined`], `false` otherwise (marker unreadable,
+/// transition rejected, or write failed). Callers use the return value to
+/// keep user-facing log messages truthful — claiming the marker was moved
+/// when it was not is worse than logging the failure.
+fn quarantine_artifact_path(artifact_root_path: &Path) -> bool {
+    let marker_path = artifact_root_path.join(MARKER_FILENAME);
+    let marker = match read_marker(&marker_path) {
+        Ok(marker) => marker,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %marker_path.display(),
+                "Failed to read the pr-review artifact marker before quarantine.",
+            );
+            return false;
+        }
+    };
+
+    let artifact_root = ReviewArtifactRoot::from_existing(
+        artifact_root_path.to_path_buf(),
+        marker.workspace_root,
+        marker.run_id,
+        marker.workspace_hash,
+    );
+    match write_marker_quarantined(&artifact_root) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %artifact_root.root.display(),
+                run_id = %artifact_root.run_id,
+                "Failed to mark the pr-review artifact as Quarantined after worktree cleanup failed.",
+            );
+            false
+        }
+    }
 }
 
 // ─── pr-review clean ──────────────────────────────────────────────────────────
@@ -1499,11 +1718,16 @@ pub fn list_review_artifacts(
 
     let mut artifacts = Vec::new();
 
-    let entries = std::fs::read_dir(&hash_dir)
-        .with_context(|| format!("reading review cache directory `{}`", hash_dir.display()))?;
+    let entries = std::fs::read_dir(&hash_dir).with_context(|| {
+        format!(
+            "Reading the review cache directory `{}`.",
+            hash_dir.display()
+        )
+    })?;
 
     for entry in entries {
-        let entry = entry.with_context(|| format!("reading entry in `{}`", hash_dir.display()))?;
+        let entry =
+            entry.with_context(|| format!("Reading an entry in `{}`.", hash_dir.display()))?;
         let root = entry.path();
 
         if !root.is_dir() {
@@ -1515,7 +1739,7 @@ pub fn list_review_artifacts(
             Ok(marker) => {
                 if marker.workspace_hash != current_hash {
                     tracing::warn!(
-                        "skipping `{}`: workspace_hash mismatch (expected `{}`, got `{}`)",
+                        "Skipping `{}` because the workspace_hash does not match. Expected `{}`, got `{}`.",
                         root.display(),
                         current_hash,
                         marker.workspace_hash,
@@ -1530,7 +1754,10 @@ pub fn list_review_artifacts(
                 });
             }
             Err(e) => {
-                tracing::warn!("skipping `{}`: could not read marker: {e}", root.display());
+                tracing::warn!(
+                    "Skipping `{}` because the marker could not be read: {e}.",
+                    root.display()
+                );
             }
         }
     }
@@ -1577,12 +1804,12 @@ fn dir_size_bytes(dir: &Path) -> u64 {
 pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     let s = s.trim();
     if s.is_empty() {
-        bail!("empty duration string");
+        bail!("Duration string is empty.");
     }
 
     let (num_str, unit) = s.split_at(s.len() - 1);
     let n: u64 = num_str.parse().with_context(|| {
-        format!("invalid duration `{s}`: expected `<n><unit>` where unit is s/m/h/d/w")
+        format!("Invalid duration `{s}`. Expected `<n><unit>`, where unit is s, m, h, d, or w.")
     })?;
 
     let secs = match unit {
@@ -1591,7 +1818,7 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
         "h" => n * 3600,
         "d" => n * 86_400,
         "w" => n * 7 * 86_400,
-        other => bail!("invalid duration unit `{other}` in `{s}`: use s, m, h, d, or w"),
+        other => bail!("Invalid duration unit `{other}` in `{s}`. Use s, m, h, d, or w."),
     };
 
     Ok(std::time::Duration::from_secs(secs))
@@ -1615,32 +1842,72 @@ struct CleanArtifactEntry {
     deleted: bool,
 }
 
-// ─── Safety guard ─────────────────────────────────────────────────────────────
-
-/// Verify that `artifact_root` does not overlap the baseline `.gather-step`
-/// storage or registry paths.
+/// Read the bytes of `gather-step.config.yaml` as committed at `sha` in
+/// `workspace_root`'s git repo via `git show <sha>:gather-step.config.yaml`.
 ///
-/// Returns `Ok(())` when safe, `Err` with a descriptive message when the
-/// artifact root could clobber baseline state.
-fn assert_not_baseline_overlap(artifact_root: &Path, workspace_root: &Path) -> Result<()> {
-    let baseline_storage = workspace_root.join(".gather-step").join("storage");
-    let baseline_registry = workspace_root.join(".gather-step").join("registry.json");
-
-    // Check if artifact_root equals or is an ancestor of baseline paths, or
-    // vice-versa (baseline path inside artifact_root).
-    for baseline in [&baseline_storage, &baseline_registry] {
-        if artifact_root == *baseline
-            || baseline.starts_with(artifact_root)
-            || artifact_root.starts_with(baseline)
-        {
-            bail!(
-                "artifact root `{}` overlaps baseline path `{}`; refusing deletion",
-                artifact_root.display(),
-                baseline.display()
+/// Returns empty bytes when the file is not committed at that ref or git
+/// fails for any reason. The cache-key fingerprint is best-effort here:
+/// hashing empty bytes when the file is absent is the same outcome as
+/// hashing an empty file, which is the right "no config" semantics.
+fn read_config_at_sha(workspace_root: &Path, sha: &str) -> Vec<u8> {
+    let spec = format!("{sha}:gather-step.config.yaml");
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(["show", &spec])
+        .output()
+    {
+        Ok(out) if out.status.success() => out.stdout,
+        Ok(out) => {
+            tracing::debug!(
+                sha = %sha,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "Git could not read gather-step.config.yaml at the requested SHA. Using empty bytes for the cache key.",
             );
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                sha = %sha,
+                "Git show failed. Using empty bytes for the cache key.",
+            );
+            Vec::new()
         }
     }
-    Ok(())
+}
+
+// ─── Safety guard ─────────────────────────────────────────────────────────────
+
+/// Verify that the artifact's review paths do not overlap the workspace's
+/// baseline storage, registry, or root.
+///
+/// Delegates to [`crate::storage_context::validate_review_paths_disjoint`] —
+/// the same canonicalized check used at artifact-creation time
+/// ([`crate::storage_context::StorageContext::review_checked`]) — so the
+/// creation and deletion guards cannot disagree about which layouts are safe.
+///
+/// Uses the marker's stored `storage_path` / `registry_path` rather than
+/// inferring them from `artifact_root`, so artifacts created with
+/// non-default sub-layouts are still validated against the paths the marker
+/// actually claims to own.
+fn assert_not_baseline_overlap(artifact: &DiscoveredArtifact, workspace_root: &Path) -> Result<()> {
+    let baseline_registry = workspace_root.join(".gather-step").join("registry.json");
+    let baseline_storage = workspace_root.join(".gather-step").join("storage");
+    crate::storage_context::validate_review_paths_disjoint(
+        workspace_root,
+        &baseline_registry,
+        &baseline_storage,
+        &artifact.root,
+        &artifact.marker.registry_path,
+        &artifact.marker.storage_path,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "artifact at `{}` overlaps baseline state; refusing deletion: {e}",
+            artifact.root.display()
+        )
+    })
 }
 
 /// Returns `true` when `s` looks like a full 40-character hex SHA-1.
@@ -1678,6 +1945,12 @@ pub(crate) enum DeleteSelector {
 /// 5. Attempts worktree removal, then `remove_dir_all`.
 ///
 /// In dry-run mode, logs what would be removed but performs no deletion.
+///
+/// Test-only thin wrapper around [`delete_artifact_with_selector`] with a
+/// fixed [`DeleteSelector::Explicit`]. Production callers always pass an
+/// explicit selector so the `InProgress` / TOCTOU re-check matches the
+/// user's intent precisely.
+#[cfg(test)]
 pub(crate) fn delete_artifact(
     artifact: &DiscoveredArtifact,
     workspace_root: &Path,
@@ -1696,7 +1969,7 @@ pub(crate) fn delete_artifact_with_selector(
     let marker_path = artifact.root.join(MARKER_FILENAME);
     let marker = read_marker(&marker_path).with_context(|| {
         format!(
-            "re-reading marker for artifact at `{}`",
+            "Re-reading the marker for artifact at `{}`.",
             artifact.root.display()
         )
     })?;
@@ -1705,8 +1978,8 @@ pub(crate) fn delete_artifact_with_selector(
     let current_hash = workspace_hash(workspace_root);
     if marker.workspace_hash != current_hash {
         bail!(
-            "refusing to delete `{}`: workspace_hash in marker (`{}`) does not match \
-             current workspace hash (`{}`)",
+            "Refusing to delete `{}` because the workspace_hash in the marker (`{}`) does not match \
+             the current workspace hash (`{}`).",
             artifact.root.display(),
             marker.workspace_hash,
             current_hash,
@@ -1727,14 +2000,19 @@ pub(crate) fn delete_artifact_with_selector(
         )
     {
         bail!(
-            "skipping `{}`: artifact is InProgress and selector did not opt in (`--include-active`)",
+            "Skipping `{}` because the artifact is InProgress and the selector did not opt in with `--include-active`.",
             artifact.root.display(),
         );
     }
 
-    // Step 4: no overlap with baseline paths.
-    assert_not_baseline_overlap(&artifact.root, workspace_root)
-        .with_context(|| format!("safety check for `{}`", artifact.root.display()))?;
+    // Step 4: no overlap with baseline paths (canonicalized — same check as
+    // creation-side `StorageContext::review_checked`).
+    assert_not_baseline_overlap(artifact, workspace_root).with_context(|| {
+        format!(
+            "Running the safety check for `{}`.",
+            artifact.root.display()
+        )
+    })?;
 
     if dry_run {
         #[expect(clippy::print_stdout, reason = "clean command progress output")]
@@ -1764,22 +2042,22 @@ pub(crate) fn delete_artifact_with_selector(
             tracing::warn!(
                 error = %e,
                 worktree = %wt.root.display(),
-                "pr-review clean: remove_worktree failed; \
-                 leaving artifact dir in place to avoid dangling pointer in `.git/worktrees/`",
+                "pr-review clean: Failed to remove the worktree. \
+                 Leaving the artifact directory in place to avoid a dangling pointer in `.git/worktrees/`.",
             );
         }
     }
 
     if !worktree_removed_cleanly {
         bail!(
-            "refusing to remove `{}`: worktree removal failed; \
-             stop any running git tooling on that worktree, run `git worktree prune`, then retry",
+            "Refusing to remove `{}` because worktree removal failed. \
+             Stop any running Git tooling on that worktree, run `git worktree prune`, then retry.",
             artifact.root.display(),
         );
     }
 
     std::fs::remove_dir_all(&artifact.root)
-        .with_context(|| format!("removing artifact root `{}`", artifact.root.display()))?;
+        .with_context(|| format!("Removing artifact root `{}`.", artifact.root.display()))?;
 
     #[expect(clippy::print_stdout, reason = "clean command progress output")]
     {
@@ -1807,20 +2085,20 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
     if selector_count == 0 {
         bail!(
             "pr-review clean requires exactly one selector: \
-             --run-id <ID>, --base <REF> --head <REF>, --older-than <DURATION>, or --all"
+             --run-id <ID>, --base <REF> --head <REF>, --older-than <DURATION>, or --all."
         );
     }
     if selector_count > 1 {
         bail!(
-            "pr-review clean: only one selector may be given at a time; \
-             combine --dry-run with any selector to preview"
+            "pr-review clean accepts only one selector at a time. \
+             Combine --dry-run with any selector to preview."
         );
     }
 
     // Validate --base/--head: both or neither.
     match (&args.base, &args.head) {
         (Some(_), None) | (None, Some(_)) => {
-            bail!("--base and --head must be specified together");
+            bail!("The --base and --head flags must be specified together.");
         }
         _ => {}
     }
@@ -1834,7 +2112,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
 
     // Discover all review artifacts for this workspace.
     let all_artifacts = list_review_artifacts(&app.workspace_path, &cache_root)
-        .context("discovering review artifacts")?;
+        .context("Discovering review artifacts.")?;
 
     // Baseline paths we will never touch.
     let ws_paths = app.workspace_paths();
@@ -1873,8 +2151,8 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                     (base_ref.clone(), head_ref.clone())
                 } else {
                     return Err(e).context(format!(
-                        "could not resolve --base {base_ref:?} or --head {head_ref:?} \
-                         against workspace at {}; pass full 40-char SHAs to bypass resolution",
+                        "Could not resolve --base {base_ref:?} or --head {head_ref:?} \
+                         against workspace at {}. Pass full 40-character SHAs to bypass resolution.",
                         app.workspace_path.display()
                     ));
                 }
@@ -1889,7 +2167,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
             .collect()
     } else if let Some(ref duration_str) = args.older_than {
         let max_age = parse_duration(duration_str)
-            .with_context(|| format!("parsing --older-than `{duration_str}`"))?;
+            .with_context(|| format!("Parsing --older-than `{duration_str}`."))?;
         let now = std::time::SystemTime::now();
         all_artifacts
             .into_iter()
@@ -1909,12 +2187,21 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                 {
                     tracing::debug!(
                         run_id = %a.marker.run_id,
-                        "skipping active cache key (use --include-active to override)"
+                        "Skipping the active cache key. Use --include-active to override."
                     );
                     return false;
                 }
-                // Parse RFC 3339 created_at to compare age.
-                chrono::DateTime::parse_from_rfc3339(&a.marker.created_at)
+                // Compute age. Prefer `last_accessed_at` (refreshed on every
+                // cache hit) over `created_at` so artifacts that are still
+                // being reused don't age out from under an active workflow.
+                // If `last_accessed_at` is absent (older marker, or no hit
+                // yet), fall back to `created_at`.
+                let age_anchor = a
+                    .marker
+                    .last_accessed_at
+                    .as_deref()
+                    .unwrap_or(&a.marker.created_at);
+                chrono::DateTime::parse_from_rfc3339(age_anchor)
                     .ok()
                     .is_some_and(|dt| {
                         let artifact_time = std::time::SystemTime::UNIX_EPOCH
@@ -1960,7 +2247,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                 });
             }
             Err(e) => {
-                tracing::error!("failed to process `{}`: {e:#}", artifact.root.display());
+                tracing::error!("Failed to process `{}`: {e:#}.", artifact.root.display());
                 had_error = true;
             }
         }
@@ -1974,7 +2261,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
             skipped_baseline_paths: baseline_paths,
         };
         let json =
-            serde_json::to_string_pretty(&output).context("serializing clean output to JSON")?;
+            serde_json::to_string_pretty(&output).context("Serializing clean output to JSON.")?;
         #[expect(clippy::print_stdout, reason = "clean JSON output goes to stdout")]
         {
             println!("{json}");
@@ -1982,7 +2269,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
     }
 
     if had_error {
-        bail!("one or more artifacts could not be cleaned; see errors above");
+        bail!("One or more artifacts could not be cleaned. See the errors above.");
     }
 
     Ok(())
@@ -1992,50 +2279,20 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process::Command,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::{fs, path::Path, process::Command};
 
     use super::*;
     use crate::{
         app::AppContext,
-        pr_review::artifact_root::{
-            MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+        pr_review::{
+            artifact_root::{
+                MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+            },
+            test_helpers::TempDir,
         },
     };
-
-    // ── temp-dir helper ───────────────────────────────────────────────────────
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!("gs-pr-review-test-{label}-{id}"));
-            fs::create_dir_all(&path).expect("temp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = Command::new("git")
-                .args(["-C", &self.path.to_string_lossy(), "worktree", "prune"])
-                .output();
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    use gather_step_core::{GatherStepConfig, RegistryStore};
+    use gather_step_storage::{IndexingOptions, index_workspace_with_storage};
 
     // ── git helpers ───────────────────────────────────────────────────────────
 
@@ -2238,6 +2495,92 @@ mod tests {
         (ws, base_sha, head_sha)
     }
 
+    /// Returns a fixture whose PR changes both Python code and deployment
+    /// topology. The baseline is left checked out so callers can build the
+    /// normal workspace index before running `pr-review` against the head SHA.
+    fn build_python_deployment_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: pyservice\n    path: pyservice\nindexing:\n  workspace_concurrency: 1\n  include_languages:\n    - python\n",
+        )
+        .unwrap();
+
+        let package = ws.join("pyservice/src/pyservice");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            ws.join("pyservice/pyproject.toml"),
+            "[project]\nname = \"pyservice\"\nversion = \"0.0.1\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("__init__.py"), "").unwrap();
+        fs::write(
+            package.join("app.py"),
+            "def existing_handler() -> str:\n    return \"ok\"\n",
+        )
+        .unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base"]);
+        let base_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "-b", "feature/python-deployment"]);
+        fs::write(
+            package.join("app.py"),
+            "def existing_handler() -> str:\n    return \"ok\"\n\n\ndef rollout_handler(event: dict[str, str]) -> dict[str, str]:\n    return {\"status\": event.get(\"id\", \"ok\")}\n",
+        )
+        .unwrap();
+        fs::write(
+            ws.join("pyservice/Dockerfile"),
+            "FROM python:3.12-slim\nENV FEATURE_FLAG=enabled\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(
+            &ws,
+            &[
+                "commit",
+                "--message",
+                "head: add python rollout and deployment",
+            ],
+        );
+        let head_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, base_sha, head_sha)
+    }
+
+    fn index_baseline_workspace(workspace: &Path) {
+        let config_path = workspace.join("gather-step.config.yaml");
+        let config = GatherStepConfig::from_yaml_file(&config_path)
+            .expect("The baseline fixture config should load.");
+        config
+            .validate_repo_roots_against_config_root(workspace)
+            .expect("The baseline fixture repo roots should validate.");
+
+        let gs_dir = workspace.join(".gather-step");
+        fs::create_dir_all(&gs_dir).expect("The generated-state directory should exist.");
+        let registry_path = gs_dir.join("registry.json");
+        let storage_root = gs_dir.join("storage");
+        let mut registry = RegistryStore::open(&registry_path).expect("The registry should open.");
+
+        index_workspace_with_storage(
+            &config,
+            workspace,
+            &mut registry,
+            &storage_root,
+            IndexingOptions::default(),
+        )
+        .expect("The baseline fixture should index.");
+    }
+
     fn make_app(workspace: &Path) -> AppContext {
         AppContext {
             workspace_path: workspace.to_path_buf(),
@@ -2301,6 +2644,63 @@ mod tests {
         root
     }
 
+    #[test]
+    fn cleanup_guard_with_keep_cache_does_not_touch_disk_on_drop() {
+        let ws_tmp = TempDir::new("keep-cache-ws");
+        let cache_tmp = TempDir::new("keep-cache-cache");
+        let artifact_root = write_fake_artifact(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "review-keep-cache",
+            "baseKC",
+            "headKC",
+            ReviewStatus::InProgress,
+            None,
+        );
+
+        let mut guard = ReviewCleanupGuard::new(CacheRetention::Keep);
+        guard.arm(artifact_root.clone(), None);
+        drop(guard);
+
+        assert!(
+            artifact_root.exists(),
+            "The cleanup guard must not remove artifacts when cache retention is Keep."
+        );
+        let marker = read_marker(&artifact_root.join(MARKER_FILENAME)).unwrap();
+        assert_eq!(marker.status, ReviewStatus::InProgress);
+    }
+
+    #[test]
+    fn cleanup_guard_quarantines_artifact_when_worktree_remove_fails() {
+        let ws_tmp = TempDir::new("drop-worktree-fail-ws");
+        let cache_tmp = TempDir::new("drop-worktree-fail-cache");
+        let artifact_root = write_fake_artifact(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "review-drop-worktree-fail",
+            "baseWF",
+            "headWF",
+            ReviewStatus::InProgress,
+            None,
+        );
+        let worktree = ReviewWorktree {
+            repo: ws_tmp.path().to_path_buf(),
+            root: artifact_root.join("worktree"),
+            sha: "0000000000000000000000000000000000000000".to_owned(),
+        };
+
+        let mut guard = ReviewCleanupGuard::new(CacheRetention::Discard);
+        guard.arm(artifact_root.clone(), Some(worktree));
+        drop(guard);
+
+        assert!(
+            artifact_root.exists(),
+            "The artifact root must stay on disk when worktree removal fails."
+        );
+        let marker = read_marker(&artifact_root.join(MARKER_FILENAME)).unwrap();
+        assert_eq!(marker.status, ReviewStatus::Quarantined);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Test 1: dry_run_lists_artifacts_and_deletes_nothing
     // ─────────────────────────────────────────────────────────────────────────
@@ -2340,6 +2740,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2402,6 +2803,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2468,6 +2870,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2533,6 +2936,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2549,10 +2953,82 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
 
         assert!(!root_old.exists(), "old artifact should be deleted");
         assert!(root_fresh.exists(), "fresh artifact must remain");
+    }
+
+    #[test]
+    fn older_than_prefers_last_accessed_at_when_present() {
+        let ws_tmp = TempDir::new("age-accessed-ws");
+        let cache_tmp = TempDir::new("age-accessed-cache");
+        let ws = ws_tmp.path();
+        let cache = cache_tmp.path();
+
+        let old_ts = (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        let recent_ts = chrono::Utc::now().to_rfc3339();
+        let root_recent_access = write_fake_artifact(
+            cache,
+            ws,
+            "review-recent-access",
+            "baseACCESS",
+            "headACCESS",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+        );
+        let marker_path = root_recent_access.join(MARKER_FILENAME);
+        let mut marker: ReviewMarker =
+            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+        marker.last_accessed_at = Some(recent_ts);
+        fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
+
+        let root_legacy_old = write_fake_artifact(
+            cache,
+            ws,
+            "review-legacy-old",
+            "baseLEGACY",
+            "headLEGACY",
+            ReviewStatus::Completed,
+            Some(&old_ts),
+        );
+
+        let app = make_app(ws);
+        let top = PrReviewArgs {
+            command: None,
+            base: None,
+            head: None,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: false,
+            cache_root: Some(cache.to_path_buf()),
+            config: None,
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+        let clean_args = CleanArgs {
+            dry_run: false,
+            run_id: None,
+            base: None,
+            head: None,
+            older_than: Some("1d".to_owned()),
+            include_active: false,
+            all: false,
+        };
+
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
+
+        assert!(
+            root_recent_access.exists(),
+            "Recently accessed artifacts must remain even when created_at is old."
+        );
+        assert!(
+            !root_legacy_old.exists(),
+            "Legacy artifacts without last_accessed_at should fall back to created_at."
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2594,6 +3070,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2777,6 +3254,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2784,7 +3262,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).expect("JSON must parse");
 
@@ -2840,6 +3318,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2847,7 +3326,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let review_root = PathBuf::from(report["safety"]["review_root"].as_str().unwrap());
@@ -2878,6 +3357,7 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2885,7 +3365,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let review_root = PathBuf::from(report["safety"]["review_root"].as_str().unwrap());
@@ -2921,6 +3401,7 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2928,7 +3409,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let _ = run_inner(&app, &args).expect("run_inner should succeed");
+        let _ = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         // After state: .gather-step should have same existence as before.
         let existed_after = baseline_gather_step.exists();
@@ -2959,6 +3440,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_root.clone()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -2996,6 +3478,7 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3003,7 +3486,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let changed_files: Vec<&str> = report["changed_files"]
             .as_array()
@@ -3044,6 +3527,7 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3051,7 +3535,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let (rendered, _) = run_inner(&app, &args).expect("run_inner should succeed");
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
         let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let changed_repos: Vec<&str> = report["metadata"]["changed_repos"]
             .as_array()
@@ -3075,6 +3559,80 @@ mod tests {
             "base workspace config must not classify changed_repos: {changed_repos:?}"
         );
         assert_eq!(indexed_repos, vec!["newrepo"]);
+    }
+
+    #[test]
+    fn pr_review_temp_index_reports_python_symbols_and_deployment_topology() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("python-deployment-ws");
+        let cache_tmp = TempDir::new("python-deployment-cache");
+        let (ws, base_sha, head_sha) = build_python_deployment_fixture(ws_tmp.path());
+        index_baseline_workspace(&ws);
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            json: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            strict: false,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Markdown,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        let changed_files: Vec<&str> = report["changed_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert!(
+            changed_files
+                .iter()
+                .any(|path| path.ends_with("pyservice/src/pyservice/app.py")),
+            "Python changes must be included in pr-review changed files: {changed_files:?}."
+        );
+        assert!(
+            changed_files
+                .iter()
+                .any(|path| path.ends_with("pyservice/Dockerfile")),
+            "Deployment-topology changes must be included in pr-review changed files: {changed_files:?}."
+        );
+
+        let added_symbols = report["symbols"]["added"].as_array().unwrap();
+        assert!(
+            added_symbols.iter().any(|symbol| {
+                symbol["repo"] == "pyservice"
+                    && symbol["kind"] == "function"
+                    && symbol["qualified_name"]
+                        .as_str()
+                        .is_some_and(|qn| qn.ends_with("rollout_handler"))
+            }),
+            "Python symbol deltas must include rollout_handler: {added_symbols:?}."
+        );
+
+        let added_deployments = report["deployment"]["deployments"]["added"]
+            .as_array()
+            .unwrap();
+        assert!(
+            added_deployments.iter().any(|deployment| {
+                deployment["repo"] == "pyservice"
+                    && deployment["kind"] == "dockerfile"
+                    && deployment["file"] == "Dockerfile"
+            }),
+            "Deployment topology deltas must include the added Dockerfile: {added_deployments:?}."
+        );
     }
 
     #[test]
@@ -3151,6 +3709,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3167,7 +3726,7 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
 
         assert!(
             root_in_progress.exists(),
@@ -3216,6 +3775,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3274,6 +3834,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3365,6 +3926,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3404,14 +3966,31 @@ mod tests {
 
         let app = make_app(&ws);
 
-        // First run: keep_cache.
-        let args = PrReviewRunArgs {
+        // The cache_key reads the config from `git show <head_sha>:gather-step.config.yaml`
+        // (the bytes the worktree will actually see) by default, OR from
+        // `--config` when set. To exercise the config_hash invalidation we
+        // need a config source the test can mutate without committing — so
+        // route both runs through `--config` against an external file.
+        // Both configs must validate against the build_fixture worktree
+        // (which contains a `myrepo/` directory) — otherwise the indexer
+        // will reject the config before we get a cache key. Differ only on
+        // an inline comment so the byte-hash differs but the repo set is
+        // identical.
+        let cfg_a = ws_tmp.path().join("config-a.yaml");
+        let cfg_b = ws_tmp.path().join("config-b.yaml");
+        let base_yaml =
+            "repos:\n  - name: myrepo\n    path: myrepo\nindexing:\n  workspace_concurrency: 1\n";
+        fs::write(&cfg_a, format!("# variant: a\n{base_yaml}")).unwrap();
+        fs::write(&cfg_b, format!("# variant: b\n{base_yaml}")).unwrap();
+
+        let mut args = PrReviewRunArgs {
             base: base_sha.clone(),
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: Some(cfg_a.clone()),
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3422,14 +4001,8 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(&first_rendered).unwrap();
         let first_run_id = first["safety"]["run_id"].as_str().unwrap().to_owned();
 
-        // Modify the config file (different bytes → different config_hash).
-        fs::write(
-            ws.join("gather-step.config.yaml"),
-            "repos:\n  - name: changed\n    path: changed\nindexing:\n  workspace_concurrency: 1\n",
-        )
-        .unwrap();
-
-        // Second run: same base/head, but config changed → cache miss.
+        // Switch to a different config file → different config_hash → cache miss.
+        args.config = Some(cfg_b);
         let (second_rendered, _) = run_inner(&app, &args).expect("second run must succeed");
         let second: serde_json::Value = serde_json::from_str(&second_rendered).unwrap();
         let second_run_id = second["safety"]["run_id"].as_str().unwrap().to_owned();
@@ -3464,6 +4037,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3494,6 +4068,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3561,6 +4136,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3598,6 +4174,7 @@ mod tests {
         status: ReviewStatus,
         created_at_override: Option<&str>,
         cache_key: Option<crate::pr_review::artifact_root::CacheKey>,
+        last_accessed_at: Option<&str>,
     ) -> PathBuf {
         let hash = workspace_hash(workspace_root);
         let root = cache_root.join(&hash).join(run_id);
@@ -3613,7 +4190,7 @@ mod tests {
             created_at_override.map_or_else(|| chrono::Utc::now().to_rfc3339(), ToOwned::to_owned);
 
         let marker = ReviewMarker {
-            schema_version: 2,
+            schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash,
             workspace_root: workspace_root.to_path_buf(),
             base_sha: base_sha.to_owned(),
@@ -3625,7 +4202,7 @@ mod tests {
             created_at,
             status,
             cache_key,
-            last_accessed_at: None,
+            last_accessed_at: last_accessed_at.map(ToOwned::to_owned),
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -3658,7 +4235,7 @@ mod tests {
             base_sha: base_sha.clone(),
             head_sha: head_sha.clone(),
             config_hash: "cfg".to_owned(),
-            schema_version: 2,
+            schema_version: MARKER_SCHEMA_VERSION,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let root_active = write_fake_artifact_with_key(
@@ -3670,6 +4247,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(active_key),
+            None,
         );
 
         // Artifact 2: has a cache key with SHAs that do NOT resolve in this
@@ -3679,7 +4257,7 @@ mod tests {
             base_sha: "deadbeef".repeat(5),
             head_sha: "cafebabe".repeat(5),
             config_hash: "cfg".to_owned(),
-            schema_version: 2,
+            schema_version: MARKER_SCHEMA_VERSION,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let root_inactive = write_fake_artifact_with_key(
@@ -3691,6 +4269,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(inactive_key),
+            None,
         );
 
         let app = make_app(&ws);
@@ -3702,6 +4281,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3718,7 +4298,7 @@ mod tests {
             all: false,
         };
 
-        run_clean(&app, &top, &clean_args).expect("clean --older-than should succeed");
+        run_clean(&app, &top, &clean_args).expect("The clean --older-than command should succeed.");
 
         assert!(
             root_active.exists(),
@@ -3754,7 +4334,7 @@ mod tests {
             base_sha: base_sha.clone(),
             head_sha: head_sha.clone(),
             config_hash: "cfg".to_owned(),
-            schema_version: 2,
+            schema_version: MARKER_SCHEMA_VERSION,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let root_active = write_fake_artifact_with_key(
@@ -3766,6 +4346,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(active_key),
+            None,
         );
 
         // Artifact with inactive key.
@@ -3774,7 +4355,7 @@ mod tests {
             base_sha: "deadbeef".repeat(5),
             head_sha: "cafebabe".repeat(5),
             config_hash: "cfg".to_owned(),
-            schema_version: 2,
+            schema_version: MARKER_SCHEMA_VERSION,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let root_inactive = write_fake_artifact_with_key(
@@ -3786,6 +4367,7 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(inactive_key),
+            None,
         );
 
         let app = make_app(&ws);
@@ -3797,6 +4379,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -3847,7 +4430,7 @@ mod tests {
             base_sha: base_sha.clone(),
             head_sha: head_sha.clone(),
             config_hash: "cfg".to_owned(),
-            schema_version: 2,
+            schema_version: MARKER_SCHEMA_VERSION,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         let root_active = write_fake_artifact_with_key(
@@ -3859,6 +4442,7 @@ mod tests {
             ReviewStatus::Completed,
             None,
             Some(active_key),
+            None,
         );
 
         let app = make_app(&ws);
@@ -3870,6 +4454,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache.to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -4121,6 +4706,7 @@ mod tests {
             keep_cache: false,
             json: false,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::GithubComment,
@@ -4128,7 +4714,7 @@ mod tests {
             no_baseline_check: false,
         };
 
-        let _ = run_inner(&app, &args).expect("run_inner should succeed");
+        let _ = run_inner(&app, &args).expect("The pr-review run should succeed.");
 
         assert!(
             comment_path.exists(),
@@ -4174,6 +4760,7 @@ mod tests {
             keep_cache: true,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
@@ -4201,13 +4788,22 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,
             github_comment_file: None,
             no_baseline_check: false,
         };
-        let _ = run_inner(&app, &args_no_keep).expect("cached run must succeed");
+        let (cached_rendered, _) =
+            run_inner(&app, &args_no_keep).expect("The cached run should succeed.");
+        let cached_json: serde_json::Value =
+            serde_json::from_str(&cached_rendered).expect("The cached JSON should parse.");
+        assert_eq!(
+            cached_json["safety"]["cleanup_policy"].as_str(),
+            Some("cache_hit_retained"),
+            "cache-hit reports must not claim remove-on-exit cleanup"
+        );
 
         assert!(
             artifact_root_path.exists(),
@@ -4238,6 +4834,7 @@ mod tests {
             keep_cache: false,
             json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
             strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::Markdown,

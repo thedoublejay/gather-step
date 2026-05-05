@@ -1,17 +1,17 @@
 # Python Corpus Benchmarks
 
 This directory defines the neutral alias contract for Python corpus benchmarks.
-Committed files must use aliases only. Real private repository names, package
-names, local paths, raw outputs, and private benchmark JSON stay local.
+Committed files must use aliases only. Real repository names, package names,
+local paths, raw outputs, and local benchmark JSON stay out of the repo.
 
 Local-only inputs:
 
-- `benchmark/python/private-corpus.local.yaml`
-- `benchmark/python/private-results/`
+- `benchmark/python/external-corpus.local.yaml`
+- `benchmark/python/external-results/`
 
-Both paths are gitignored. Use aliases such as `py-private-alpha` and
-`py-private-beta` in summaries and comparable output. The checked-in example
-manifest documents the fields expected by the private corpus harness without
+Both paths are gitignored. Use aliases such as `py-external-alpha` and
+`py-external-beta` in summaries and comparable output. The checked-in example
+manifest documents the fields expected by the external corpus harness without
 including real paths.
 
 Neutral fixture check:
@@ -39,5 +39,5 @@ breakdowns for graph, metadata, and search files.
 
 The neutral scenario may use a `[python_oracle]` table for Python-specific
 repo, bridge, rank, warning, resolution, completeness, and unresolved-gap
-assertions. Private corpus manifests should use the same alias-only vocabulary
+assertions. External corpus manifests should use the same alias-only vocabulary
 when comparable summaries are needed.

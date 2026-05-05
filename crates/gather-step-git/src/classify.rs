@@ -3,7 +3,7 @@
 //! parsing logic can be tested independently and re-used elsewhere
 //! (e.g. when ingesting PR titles).
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
@@ -16,6 +16,22 @@ use regex::Regex;
 const COMMIT_TYPE_PREFIXES: &[&str] = &[
     "feat", "fix", "refactor", "chore", "docs", "test", "build", "ci", "perf", "style", "revert",
 ];
+
+static COMMIT_TYPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    let alternation = COMMIT_TYPE_PREFIXES.join("|");
+    // (?i) makes the type token case-insensitive; the `(?:...)` non-capturing
+    // group lets us accept a parenthesised scope, a bracketed scope, or no scope.
+    let pattern = format!(r"(?ix)^\s*({alternation})(?:\([^)]*\)|\[[^\]]*\])?!?:\s+");
+    Regex::new(&pattern).expect("The commit_type_regex pattern must compile.")
+});
+
+static MERGE_PR_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*Merge\s+pull\s+request\s+#(\d+)\b")
+        .expect("The merge_pr_regex pattern must compile.")
+});
+
+static SQUASH_PR_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(#(\d+)\)").expect("The squash_pr_regex pattern must compile."));
 
 /// Default heuristic tokens that suggest a commit message records a design
 /// decision rather than a routine change. Matched case-insensitively as
@@ -36,33 +52,20 @@ pub const DEFAULT_DECISION_SIGNALS: &[&str] = &[
 /// `feat[TICKET-123]: …` ticket-tag variant are accepted; the `!` marker is
 /// optional and indicates a breaking change.
 fn commit_type_regex() -> &'static Regex {
-    static CELL: OnceLock<Regex> = OnceLock::new();
-    CELL.get_or_init(|| {
-        let alternation = COMMIT_TYPE_PREFIXES.join("|");
-        // (?i) makes the type token case-insensitive; the `(?:…)` non-capturing
-        // group lets us accept a parenthesised scope OR a bracketed scope OR
-        // nothing at all.
-        let pattern = format!(r"(?ix)^\s*({alternation})(?:\([^)]*\)|\[[^\]]*\])?!?:\s+");
-        Regex::new(&pattern).expect("commit_type_regex pattern must compile")
-    })
+    &COMMIT_TYPE_REGEX
 }
 
 /// Recognises a GitHub-style "Merge pull request #N from …" merge subject.
 /// Anchored at the start of the message after optional whitespace.
 fn merge_pr_regex() -> &'static Regex {
-    static CELL: OnceLock<Regex> = OnceLock::new();
-    CELL.get_or_init(|| {
-        Regex::new(r"(?i)^\s*Merge\s+pull\s+request\s+#(\d+)\b")
-            .expect("merge_pr_regex pattern must compile")
-    })
+    &MERGE_PR_REGEX
 }
 
 /// Recognises the `(#N)` suffix that GitHub appends on squash-merge subjects.
 /// Searched anywhere in the message so messages with body lines (like a
 /// `Co-Authored-By` trailer) still match against the subject occurrence.
 fn squash_pr_regex() -> &'static Regex {
-    static CELL: OnceLock<Regex> = OnceLock::new();
-    CELL.get_or_init(|| Regex::new(r"\(#(\d+)\)").expect("squash_pr_regex pattern must compile"))
+    &SQUASH_PR_REGEX
 }
 
 /// Returns the conventional-commits type prefix for a message, or `None` if

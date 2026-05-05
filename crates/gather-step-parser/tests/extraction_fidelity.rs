@@ -1131,3 +1131,66 @@ fn emit_with_payload_event_type_emits_fine_grained_event() {
         "broad Event node {broad_qn} must still be present"
     );
 }
+
+/// `TypeORM` migration extraction-fidelity guard.
+///
+/// Pins the cross-cutting behavior of `frameworks::typeorm` +
+/// `frameworks::typeorm_migration` against a single fixture so the framework
+/// path's contract is observable in the test suite, not just inline unit
+/// tests inside the parser modules.
+///
+/// Asserts:
+/// - Each table referenced by the migration produces a virtual `Entity`
+///   node named after the table and a `MigratesCollection` edge.
+/// - Both SQL-string evidence (`alerts`, `notifications`) and typed
+///   call-site evidence (`audit_logs` from `queryRunner.addColumn(...)`)
+///   surface as targets.
+/// - The substring-match bug fixed in v3.1 stays fixed: a class named
+///   `DataMigrationHelper` (which contains "Migration" but is not the
+///   migration class) is NOT used as the primary symbol — the `up`
+///   function is preferred.
+#[test]
+fn typeorm_migration_fixture_emits_migrates_collection_edges_and_picks_up_as_primary() {
+    use gather_step_parser::frameworks::Framework;
+    // The fixture lives under `migrations/` so the parser's
+    // `is_migration_path` check matches the path component.
+    let parsed = parse_fixture("migrations/typeorm_migration.ts", &[Framework::TypeOrm]);
+
+    let migrates_targets: BTreeSet<String> = parsed
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::MigratesCollection)
+        .filter_map(|e| {
+            parsed
+                .nodes
+                .iter()
+                .find(|n| n.id == e.target)
+                .map(|n| n.name.clone())
+        })
+        .collect();
+
+    for table in ["alerts", "notifications", "audit_logs"] {
+        assert!(
+            migrates_targets.contains(table),
+            "expected MigratesCollection edge to `{table}` from typeorm_migration fixture; got {migrates_targets:?}"
+        );
+    }
+
+    // `migration_primary_symbol` should pick the `up` function, never the
+    // unrelated `DataMigrationHelper` class. The first MigratesCollection
+    // source we see should be a function (or at least the migration class
+    // ending in "Migration"), not the helper.
+    let migrates_sources: BTreeSet<String> = parsed
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::MigratesCollection)
+        .map(|e| display_node(&parsed, e.source))
+        .collect();
+
+    assert!(
+        !migrates_sources
+            .iter()
+            .any(|s| s.contains("DataMigrationHelper")),
+        "MigratesCollection edge anchored on unrelated `DataMigrationHelper` (substring-match regression); sources={migrates_sources:?}"
+    );
+}

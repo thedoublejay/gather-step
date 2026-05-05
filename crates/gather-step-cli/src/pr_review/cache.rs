@@ -27,6 +27,48 @@ use super::artifact_root::{
     CacheKey, MARKER_FILENAME, ReviewArtifactRoot, ReviewStatus, read_marker, workspace_hash,
 };
 
+/// A 16-character lowercase blake3 hex prefix.
+///
+/// Newtype wrapper so call sites cannot accidentally drift on length or
+/// substitute an arbitrary `String`.  Construction is restricted to
+/// [`Hash16::blake3_prefix`] (single source of truth); the value can be
+/// compared, displayed, and turned into a `String` for serde-stable
+/// storage in `CacheKey` / `ReviewMarker`, but cannot be reconstructed
+/// from external bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct Hash16(String);
+
+impl Hash16 {
+    /// Compute the 16-char blake3 hex prefix of `bytes`.
+    ///
+    /// Single source of truth so [`compute_cache_key`],
+    /// [`pick_seed_source`], and the unit-test helpers cannot drift on
+    /// length or hash family.
+    pub(super) fn blake3_prefix(bytes: &[u8]) -> Self {
+        let hash = blake3::hash(bytes);
+        let hex = hash.to_hex();
+        debug_assert!(
+            hex.len() >= 16,
+            "blake3 hex output must be at least 16 chars",
+        );
+        Self(hex[..16].to_owned())
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(super) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Hash16 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 // ─── Cache lookup ─────────────────────────────────────────────────────────────
 
 /// Scan `<cache_root>/<workspace_hash>/` for a prior completed artifact whose
@@ -107,19 +149,16 @@ pub fn try_reuse_cache(cache_root: &Path, key: &CacheKey) -> Result<Option<Revie
             continue;
         }
 
-        // Reconstruct the ReviewArtifactRoot from the on-disk layout.
-        let root = ReviewArtifactRoot {
-            root: run_dir.clone(),
-            workspace_root: marker.workspace_root.clone(),
-            worktree_root: run_dir.join("worktree"),
-            registry_path: run_dir.join("registry.json"),
-            storage_root: run_dir.join("storage"),
-            reports_dir: run_dir.join("reports"),
-            logs_dir: run_dir.join("logs"),
-            marker_path,
-            run_id: marker.run_id.clone(),
-            workspace_hash: marker.workspace_hash.clone(),
-        };
+        // Reconstruct the ReviewArtifactRoot from the on-disk layout. The
+        // child-path derivation lives in `from_existing` so it cannot drift
+        // from `plan_artifact_root` / `materialize_artifact_root`.
+        let root = ReviewArtifactRoot::from_existing(
+            run_dir.clone(),
+            marker.workspace_root.clone(),
+            marker.run_id.clone(),
+            marker.workspace_hash.clone(),
+        );
+        let _ = marker_path; // marker_path is rederived inside `from_existing`
 
         tracing::info!(
             run_id = %marker.run_id,
@@ -158,17 +197,13 @@ pub fn compute_cache_key(
     let ws_hash = workspace_hash(workspace_root);
 
     // blake3 of config bytes (or empty → hash of empty bytes).
-    let config_hash = {
-        let hash = blake3::hash(config_content);
-        let hex = hash.to_hex();
-        hex[..16].to_owned()
-    };
+    let config_hash = Hash16::blake3_prefix(config_content);
 
     CacheKey {
         workspace_hash: ws_hash,
         base_sha: base_sha.to_owned(),
         head_sha: head_sha.to_owned(),
-        config_hash,
+        config_hash: config_hash.into_string(),
         schema_version: super::artifact_root::MARKER_SCHEMA_VERSION,
         gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -211,16 +246,12 @@ pub fn pick_seed_source(
     // Condition 3: config hash must match so the schema is compatible.
     let config_file = workspace_root.join("gather-step.config.yaml");
     let config_bytes = std::fs::read(&config_file).unwrap_or_default();
-    let ws_config_hash = {
-        let hash = blake3::hash(&config_bytes);
-        let hex = hash.to_hex();
-        hex[..16].to_owned()
-    };
+    let ws_config_hash = Hash16::blake3_prefix(&config_bytes);
 
-    if ws_config_hash != review_config_hash {
+    if ws_config_hash.as_str() != review_config_hash {
         tracing::debug!(
             ws_hash = %ws_config_hash,
-            review_hash = %review_config_hash,
+            review_hash = review_config_hash,
             "workspace config hash differs from review config hash; skipping seed"
         );
         return Ok(None);
@@ -341,44 +372,14 @@ fn try_clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::{fs, path::Path};
 
     use super::*;
     use crate::pr_review::artifact_root::{
         CacheKey, MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus,
         workspace_hash,
     };
-
-    // ── Temp-dir helper ───────────────────────────────────────────────────────
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!("gs-cache-test-{label}-{id}"));
-            fs::create_dir_all(&path).expect("temp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    use crate::pr_review::test_helpers::TempDir;
 
     // ── CacheKey fingerprint ──────────────────────────────────────────────────
 
@@ -655,12 +656,10 @@ mod tests {
 
     // ── pick_seed_source tests ────────────────────────────────────────────────
 
-    /// Compute a 16-char blake3 hex hash of `bytes` — mirrors the logic in
-    /// `compute_cache_key` and `pick_seed_source`.
+    /// Compute a 16-char blake3 hex hash of `bytes`. Thin wrapper around
+    /// the production helper to keep the call sites readable in tests.
     fn config_hash_of(bytes: &[u8]) -> String {
-        let hash = blake3::hash(bytes);
-        let hex = hash.to_hex();
-        hex[..16].to_owned()
+        super::Hash16::blake3_prefix(bytes).into_string()
     }
 
     /// Build a minimal workspace fixture:
