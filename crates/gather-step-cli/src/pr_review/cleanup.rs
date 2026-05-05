@@ -103,7 +103,10 @@ mod tests {
     };
 
     use crate::{
-        commands::pr_review::{DiscoveredArtifact, delete_artifact, list_review_artifacts},
+        commands::pr_review::{
+            DeleteSelector, DiscoveredArtifact, delete_artifact, delete_artifact_with_selector,
+            list_review_artifacts,
+        },
         pr_review::{
             artifact_root::{
                 MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus,
@@ -290,6 +293,44 @@ mod tests {
             "InProgress artifact should remain on disk"
         );
         let _ = fs::remove_dir_all(workspace_cache);
+    }
+
+    /// Inverse of [`clean_all_for_workspace_skips_in_progress_artifacts`]:
+    /// when a caller opts in via [`DeleteSelector::Explicit`] (the path used
+    /// by `pr-review clean --all` and `--run-id <id>`), an `InProgress`
+    /// artifact IS removed. Pins the symmetry of the skip-versus-delete
+    /// branches against accidental flipping.
+    #[test]
+    fn explicit_selector_removes_in_progress_artifact() {
+        let ws = TempDir::new("ws-in-progress-explicit");
+        let cache = TempDir::new("cache-in-progress-explicit");
+        let hash = workspace_hash(ws.path());
+
+        let active_root = write_artifact(
+            cache.path(),
+            ws.path(),
+            "run-in-progress-explicit",
+            &hash,
+            ReviewStatus::InProgress,
+            None,
+        );
+
+        let discovered =
+            list_review_artifacts(ws.path(), cache.path()).expect("list should succeed");
+        assert_eq!(discovered.len(), 1, "fixture should be discoverable");
+
+        delete_artifact_with_selector(
+            &discovered[0],
+            ws.path(),
+            /* dry_run = */ false,
+            DeleteSelector::Explicit,
+        )
+        .expect("Explicit selector must delete the InProgress artifact");
+
+        assert!(
+            !active_root.exists(),
+            "InProgress artifact must be removed when the caller opts in via Explicit",
+        );
     }
 
     // ── Test 3 ───────────────────────────────────────────────────────────────

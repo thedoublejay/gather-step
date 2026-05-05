@@ -94,32 +94,82 @@ impl CacheKey {
 ///
 /// Every field is required for v3.1 markers except optional cache/access
 /// metadata fields used by branch-scoped cache reuse.
+///
+/// Fields are `pub(crate)` so the lifecycle invariants enforced by
+/// [`update_marker_status`] (and [`is_valid_status_transition`]) cannot be
+/// bypassed by external struct-update syntax. Integration tests outside
+/// this crate seed marker fixtures via [`ReviewMarker::new_for_test_fixture`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewMarker {
-    pub schema_version: u32,
+    pub(crate) schema_version: u32,
     /// First 16 hex characters of the blake3 hash of the canonical workspace
     /// root path bytes.
-    pub workspace_hash: String,
-    pub workspace_root: PathBuf,
-    pub base_sha: String,
-    pub head_sha: String,
-    pub run_id: String,
-    pub storage_path: PathBuf,
-    pub registry_path: PathBuf,
+    pub(crate) workspace_hash: String,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) base_sha: String,
+    pub(crate) head_sha: String,
+    pub(crate) run_id: String,
+    pub(crate) storage_path: PathBuf,
+    pub(crate) registry_path: PathBuf,
     /// Value of `CARGO_PKG_VERSION` at build time.
-    pub gather_step_version: String,
+    pub(crate) gather_step_version: String,
     /// RFC 3339 UTC timestamp of when the artifact root was created.
-    pub created_at: String,
-    pub status: ReviewStatus,
+    pub(crate) created_at: String,
+    pub(crate) status: ReviewStatus,
     /// Cache key for branch-scoped reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_key: Option<CacheKey>,
+    pub(crate) cache_key: Option<CacheKey>,
     /// RFC 3339 UTC timestamp of the last time this artifact was accessed via a
     /// cache hit.  Updated each time `pr-review` reuses this artifact so that
     /// `--older-than` pruning measures last-use time, not creation time.
     /// `None` for artifacts that have never been accessed via cache reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_accessed_at: Option<String>,
+    pub(crate) last_accessed_at: Option<String>,
+}
+
+impl ReviewMarker {
+    /// Construct a marker for integration-test fixtures from outside the
+    /// crate.  Production code should never call this — the normal write
+    /// path goes through `materialize_artifact_root` (which produces an
+    /// `InProgress` marker) and then [`update_marker_status`] (which
+    /// enforces transition rules).
+    #[doc(hidden)]
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fixture seeder mirrors every marker field one-to-one; collapsing into a builder would obscure the field-by-field correspondence integration tests rely on"
+    )]
+    pub fn new_for_test_fixture(
+        schema_version: u32,
+        workspace_hash: String,
+        workspace_root: PathBuf,
+        base_sha: String,
+        head_sha: String,
+        run_id: String,
+        storage_path: PathBuf,
+        registry_path: PathBuf,
+        gather_step_version: String,
+        created_at: String,
+        status: ReviewStatus,
+        cache_key: Option<CacheKey>,
+        last_accessed_at: Option<String>,
+    ) -> Self {
+        Self {
+            schema_version,
+            workspace_hash,
+            workspace_root,
+            base_sha,
+            head_sha,
+            run_id,
+            storage_path,
+            registry_path,
+            gather_step_version,
+            created_at,
+            status,
+            cache_key,
+            last_accessed_at,
+        }
+    }
 }
 
 /// Lifecycle state of a review artifact root.
@@ -135,26 +185,31 @@ pub enum ReviewStatus {
 }
 
 /// Handle to an artifact root directory tree that has been created on disk.
+///
+/// Fields are `pub(crate)` so the layout produced by
+/// [`materialize_artifact_root`] / [`from_existing`] is the only path that
+/// can construct a valid handle. External callers cannot synthesize a
+/// `ReviewArtifactRoot` with mismatched child paths.
 #[derive(Debug)]
 pub struct ReviewArtifactRoot {
     /// `<cache_root>/<workspace_hash>/<run_id>/`
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
     /// Copy of the user's source workspace root (not the artifact root).
-    pub workspace_root: PathBuf,
+    pub(crate) workspace_root: PathBuf,
     /// `root/worktree/`
-    pub worktree_root: PathBuf,
+    pub(crate) worktree_root: PathBuf,
     /// `root/registry.json`
-    pub registry_path: PathBuf,
+    pub(crate) registry_path: PathBuf,
     /// `root/storage/`
-    pub storage_root: PathBuf,
+    pub(crate) storage_root: PathBuf,
     /// `root/reports/`
-    pub reports_dir: PathBuf,
+    pub(crate) reports_dir: PathBuf,
     /// `root/logs/`
-    pub logs_dir: PathBuf,
+    pub(crate) logs_dir: PathBuf,
     /// `root/review-marker.json`
-    pub marker_path: PathBuf,
-    pub run_id: String,
-    pub workspace_hash: String,
+    pub(crate) marker_path: PathBuf,
+    pub(crate) run_id: String,
+    pub(crate) workspace_hash: String,
 }
 
 impl ReviewArtifactRoot {

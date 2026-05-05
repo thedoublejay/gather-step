@@ -430,17 +430,17 @@ enum RunOutcome {
 /// Best-effort cleanup guard for the review artifact and worktree.
 ///
 /// Runs cleanup on `Drop` unless [`Self::disarm`] has been called or the
-/// guard was constructed with `keep_cache = true`. This keeps the disposable
-/// cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/` is removed
-/// unless `--keep-cache`) under panic, signal, and early-return paths —
-/// not just the happy-return path.
+/// guard was constructed with [`CacheRetention::Keep`]. This keeps the
+/// disposable cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/`
+/// is removed unless `--keep-cache`) under panic, signal, and early-return
+/// paths — not just the happy-return path.
 ///
-/// When `keep_cache` is `true`, the guard does NOT remove anything on Drop.
-/// The user explicitly opted to inspect this run's artifact, including
-/// failures. Failed runs reach Drop with the artifact marker already set to
-/// [`ReviewStatus::Quarantined`] by [`quarantine_on_error`], so the artifact
-/// remains discoverable by `pr-review clean --run-id <id>` or
-/// `pr-review clean --older-than <duration>`.
+/// When `retention` is [`CacheRetention::Keep`], the guard does NOT remove
+/// anything on Drop. The user explicitly opted to inspect this run's
+/// artifact, including failures. Failed runs reach Drop with the artifact
+/// marker already set to [`ReviewStatus::Quarantined`] by
+/// [`quarantine_on_error`], so the artifact remains discoverable by
+/// `pr-review clean --run-id <id>` or `pr-review clean --older-than <duration>`.
 struct ReviewCleanupGuard {
     artifact_root_path: Option<std::path::PathBuf>,
     worktree: Option<ReviewWorktree>,
@@ -496,12 +496,20 @@ impl Drop for ReviewCleanupGuard {
         }
         if let Some(path) = self.artifact_root_path.take() {
             if !worktree_removed {
-                quarantine_artifact_path(&path);
-                tracing::warn!(
-                    path = %path.display(),
-                    "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. The artifact marker was moved to the Quarantined state. \
-                     Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
-                );
+                let quarantined = quarantine_artifact_path(&path);
+                if quarantined {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. The artifact marker was moved to the Quarantined state. \
+                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                    );
+                } else {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed, and the marker could not be transitioned to Quarantined. \
+                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                    );
+                }
                 return;
             }
             if path.exists()
@@ -1643,7 +1651,14 @@ fn quarantine_on_error(artifact_root: &ReviewArtifactRoot) {
     }
 }
 
-fn quarantine_artifact_path(artifact_root_path: &Path) {
+/// Best-effort quarantine for an artifact root identified only by path.
+///
+/// Returns `true` when the on-disk marker was successfully transitioned to
+/// [`ReviewStatus::Quarantined`], `false` otherwise (marker unreadable,
+/// transition rejected, or write failed). Callers use the return value to
+/// keep user-facing log messages truthful — claiming the marker was moved
+/// when it was not is worse than logging the failure.
+fn quarantine_artifact_path(artifact_root_path: &Path) -> bool {
     let marker_path = artifact_root_path.join(MARKER_FILENAME);
     let marker = match read_marker(&marker_path) {
         Ok(marker) => marker,
@@ -1653,7 +1668,7 @@ fn quarantine_artifact_path(artifact_root_path: &Path) {
                 path = %marker_path.display(),
                 "Failed to read the pr-review artifact marker before quarantine.",
             );
-            return;
+            return false;
         }
     };
 
@@ -1663,13 +1678,17 @@ fn quarantine_artifact_path(artifact_root_path: &Path) {
         marker.run_id,
         marker.workspace_hash,
     );
-    if let Err(e) = write_marker_quarantined(&artifact_root) {
-        tracing::warn!(
-            error = %e,
-            root = %artifact_root.root.display(),
-            run_id = %artifact_root.run_id,
-            "Failed to mark the pr-review artifact as Quarantined after worktree cleanup failed.",
-        );
+    match write_marker_quarantined(&artifact_root) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %artifact_root.root.display(),
+                run_id = %artifact_root.run_id,
+                "Failed to mark the pr-review artifact as Quarantined after worktree cleanup failed.",
+            );
+            false
+        }
     }
 }
 
