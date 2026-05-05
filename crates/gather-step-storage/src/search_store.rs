@@ -3,13 +3,11 @@ use std::{
     cmp::Ordering,
     fs,
     path::{Path, PathBuf},
-    sync::{
-        Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
-    },
+    sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
 };
 
-use rustc_hash::FxHashSet;
+use parking_lot::{Mutex, MutexGuard};
+use smallvec::SmallVec;
 
 use gather_step_core::{NodeData, NodeId, NodeKind, Visibility};
 #[cfg(not(test))]
@@ -257,10 +255,6 @@ pub enum SearchStoreError {
     OpenDirectory(#[from] OpenDirectoryError),
     #[error("failed to create search index directory: {0}")]
     Io(#[from] std::io::Error),
-    #[error("search writer mutex was poisoned")]
-    WriterPoisoned,
-    #[error("search reader mutex was poisoned")]
-    ReaderPoisoned,
     #[error("search store is read-only")]
     ReadOnly,
     #[error("search document missing required field `{0}`")]
@@ -362,29 +356,22 @@ impl TantivySearchStore {
     }
 
     fn writer(&self) -> Result<MutexGuard<'_, IndexWriter>, SearchStoreError> {
-        self.writer
+        Ok(self
+            .writer
             .as_ref()
             .ok_or(SearchStoreError::ReadOnly)?
-            .lock()
-            .map_err(|_| SearchStoreError::WriterPoisoned)
+            .lock())
     }
 
     fn ensure_writer_health_for_reads(&self) -> Result<(), SearchStoreError> {
         if let Some(writer) = &self.writer {
-            drop(
-                writer
-                    .lock()
-                    .map_err(|_| SearchStoreError::WriterPoisoned)?,
-            );
+            drop(writer.lock());
         }
         Ok(())
     }
 
     pub fn refresh_reader(&self) -> Result<(), SearchStoreError> {
-        let reader = self
-            .reader
-            .lock()
-            .map_err(|_| SearchStoreError::ReaderPoisoned)?;
+        let reader = self.reader.lock();
         reader.reload()?;
         Ok(())
     }
@@ -595,10 +582,7 @@ impl TantivySearchStore {
         fuzzy: bool,
         filters: SearchFilters<'_>,
     ) -> Result<Vec<SearchHit>, SearchStoreError> {
-        let reader = self
-            .reader
-            .lock()
-            .map_err(|_| SearchStoreError::ReaderPoisoned)?;
+        let reader = self.reader.lock();
         let searcher = reader.searcher();
         let parser = self.build_query_parser(fuzzy);
         let parser_text = parser_query_text(query_text);
@@ -622,7 +606,8 @@ impl TantivySearchStore {
     }
 
     fn apply_filters(&self, query: Box<dyn Query>, filters: SearchFilters<'_>) -> Box<dyn Query> {
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, query)];
+        let mut clauses: SmallVec<[(Occur, Box<dyn Query>); 4]> = SmallVec::new();
+        clauses.push((Occur::Must, query));
         if let Some(repo) = filters.repo {
             clauses.push((
                 Occur::Must,
@@ -653,7 +638,7 @@ impl TantivySearchStore {
         if clauses.len() == 1 {
             clauses.pop().expect("query clause exists").1
         } else {
-            Box::new(BooleanQuery::from(clauses))
+            Box::new(BooleanQuery::from(clauses.into_vec()))
         }
     }
 
@@ -990,24 +975,17 @@ fn tokenize_camel_case(s: &str) -> Vec<String> {
 /// Example: query `StreamableSession` → tokens `["streamable", "session"]`.
 /// A file at `src/session/streamable.ts` contains both → 1.08 × 1.08 = 1.1664,
 /// capped at 1.3.  A file at `src/mcp/transport.ts` contains neither → 1.0.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "one-shot owned lowercase needed to build path token set for membership checks"
-)]
 fn path_token_match_boost(query_tokens: &[String], file_path: &str) -> f32 {
     if query_tokens.is_empty() || file_path.is_empty() {
         return 1.0;
     }
-    // Collect path tokens (split on separators, lowercase).
-    let path_tokens: FxHashSet<String> = file_path
-        .split(['/', '-', '_', '.'])
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
 
     let mut multiplier = 1.0_f32;
     for token in query_tokens {
-        if path_tokens.contains(token.as_str()) {
+        if file_path
+            .split(['/', '-', '_', '.'])
+            .any(|part| !part.is_empty() && part.eq_ignore_ascii_case(token))
+        {
             multiplier *= 1.08;
             if multiplier >= 1.3 {
                 return 1.3;

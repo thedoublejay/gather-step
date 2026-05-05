@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gather_step_bench::{
     compare::{BenchmarkResult, Environment, compare_result_dirs},
-    harness::{index_workspace_fixture, run_index_pass, run_workspace_index_pass},
+    harness::{StorageMetrics, index_workspace_fixture, run_index_pass, run_workspace_index_pass},
     link_quality::{
         load_link_quality_task, render_link_quality_report, run_link_quality_benchmark,
     },
@@ -471,7 +471,7 @@ fn run_command(
     ));
 
     let mut checks: Vec<String> = Vec::new();
-    let mut rss_failure = None;
+    let mut failures = Vec::new();
 
     // Check memory threshold.
     if let Some(rss_growth) = metrics.memory_rss_growth_bytes {
@@ -485,9 +485,10 @@ fn run_command(
                 rss_growth, thresholds.memory.rss_absolute_max_bytes
             );
             print_status(&message);
-            rss_failure = Some(message);
+            failures.push(message);
         }
     }
+    collect_storage_threshold_checks(&metrics.storage, &thresholds, &mut checks, &mut failures);
 
     let env = Environment::current();
     let date = chrono::Utc::now().to_rfc3339();
@@ -508,8 +509,8 @@ fn run_command(
     };
 
     write_result(output_dir, "index_pass", &date, &result)?;
-    if let Some(message) = rss_failure {
-        anyhow::bail!(message);
+    if !failures.is_empty() {
+        anyhow::bail!(failures.join("; "));
     }
     Ok(())
 }
@@ -546,7 +547,7 @@ fn workspace_run_command(
     ));
 
     let mut checks: Vec<String> = Vec::new();
-    let mut rss_failure = None;
+    let mut failures = Vec::new();
     if let Some(rss_growth) = metrics.memory_rss_growth_bytes {
         checks.push(format!(
             "memory.rss_absolute_max_bytes: {} <= {}",
@@ -558,9 +559,10 @@ fn workspace_run_command(
                 rss_growth, thresholds.memory.rss_absolute_max_bytes
             );
             print_status(&message);
-            rss_failure = Some(message);
+            failures.push(message);
         }
     }
+    collect_storage_threshold_checks(&metrics.storage, &thresholds, &mut checks, &mut failures);
 
     let env = Environment::current();
     let date = chrono::Utc::now().to_rfc3339();
@@ -585,10 +587,61 @@ fn workspace_run_command(
     };
 
     write_result(output_dir, "workspace_index_pass", &date, &result)?;
-    if let Some(message) = rss_failure {
-        anyhow::bail!(message);
+    if !failures.is_empty() {
+        anyhow::bail!(failures.join("; "));
     }
     Ok(())
+}
+
+fn collect_storage_threshold_checks(
+    storage: &StorageMetrics,
+    thresholds: &Thresholds,
+    checks: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) {
+    check_storage_bytes(
+        "storage.graph_bytes_max",
+        storage.graph_bytes,
+        thresholds.storage.graph_bytes_max,
+        checks,
+        failures,
+    );
+    check_storage_bytes(
+        "storage.metadata_bytes_max",
+        storage.metadata_bytes,
+        thresholds.storage.metadata_bytes_max,
+        checks,
+        failures,
+    );
+    check_storage_bytes(
+        "storage.search_bytes_max",
+        storage.search_bytes,
+        thresholds.storage.search_bytes_max,
+        checks,
+        failures,
+    );
+    check_storage_bytes(
+        "storage.total_bytes_max",
+        storage.total_bytes,
+        thresholds.storage.total_bytes_max,
+        checks,
+        failures,
+    );
+}
+
+fn check_storage_bytes(
+    label: &str,
+    actual: u64,
+    max: u64,
+    checks: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) {
+    checks.push(format!("{label}: {actual} <= {max}"));
+    if actual > max {
+        let message = format!("FAIL: {label} exceeded: {actual} > {max}.");
+        print_status(&message);
+        failures.push(message);
+    }
 }
 
 fn link_quality_command(

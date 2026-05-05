@@ -66,6 +66,7 @@ globset = "0.4.18"
 rustc-hash = "2.1.2"
 hashbrown = "=0.17.0"
 foldhash = "=0.2.0"
+parking_lot = "=0.12.5"
 tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = "0.7.18"
 notify = "=9.0.0-rc.4"

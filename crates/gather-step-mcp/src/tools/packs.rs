@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock};
 
 use gather_step_analysis::anchor::rank_anchors;
 use gather_step_analysis::event_topology::{resolve_event_targets, resolve_route_target};
@@ -20,6 +20,7 @@ use gather_step_core::{
 };
 use gather_step_output::evidence::render_evidence_chain;
 use gather_step_storage::{GraphStore, MetadataStore, PayloadContractQuery};
+use parking_lot::{Mutex, MutexGuard};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -80,7 +81,7 @@ static PACK_INFLIGHT: LazyLock<Mutex<BTreeMap<String, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    mutex.lock()
 }
 
 fn inflight_entry(cache_key: &str) -> Arc<Mutex<()>> {

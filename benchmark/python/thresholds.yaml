@@ -22,7 +22,7 @@ planning_oracle:
   expected_repo_recall_min: 1.0
   forbidden_hit_rate_max: 0.0
   empty_result_rate_max: 0.0
-  unresolved_gap_rate_max: 1.0
+  unresolved_gap_rate_max: 0.30
   event_resolution_success_rate_min: 1.0
   stability_kendall_tau_min: 0.999
 
@@ -34,3 +34,9 @@ latency:
 memory:
   rss_growth_max_fraction: 0.10
   rss_absolute_max_bytes: 1073741824
+
+storage:
+  graph_bytes_max: 800000
+  metadata_bytes_max: 1500000
+  search_bytes_max: 50000
+  total_bytes_max: 3500000
