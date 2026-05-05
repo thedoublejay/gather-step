@@ -23,7 +23,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphCsrSnapshot, GraphStore, GraphStoreError};
 
 // ─── Key types ────────────────────────────────────────────────────────────────
 
@@ -74,10 +74,12 @@ impl<'a, S: GraphStore> DiffOverlayStore<'a, S> {
         baseline: &'a S,
         review: &R,
     ) -> Result<Self, GraphStoreError> {
-        let baseline_nodes = collect_nodes(baseline)?;
-        let review_nodes = collect_nodes(review)?;
-        let baseline_edges = collect_edges(baseline, &baseline_nodes)?;
-        let review_edges = collect_edges(review, &review_nodes)?;
+        let baseline_snapshot = baseline.csr_snapshot()?;
+        let review_snapshot = review.csr_snapshot()?;
+        let baseline_nodes = collect_nodes(&baseline_snapshot);
+        let review_nodes = collect_nodes(&review_snapshot);
+        let baseline_edges = collect_edges(&baseline_snapshot);
+        let review_edges = collect_edges(&review_snapshot);
 
         let mut overlay = Self::new(baseline);
 
@@ -152,27 +154,16 @@ impl<'a, S: GraphStore> DiffOverlayStore<'a, S> {
     }
 }
 
-fn collect_nodes<S: GraphStore>(store: &S) -> Result<FxHashMap<NodeId, NodeData>, GraphStoreError> {
-    let mut nodes = FxHashMap::default();
-    for &kind in NodeKind::all() {
-        for node in store.nodes_by_type(kind)? {
-            nodes.insert(node.id, node);
-        }
-    }
-    Ok(nodes)
+fn collect_nodes(snapshot: &GraphCsrSnapshot) -> FxHashMap<NodeId, NodeData> {
+    snapshot
+        .nodes()
+        .iter()
+        .map(|node| (node.id, node.clone()))
+        .collect()
 }
 
-fn collect_edges<S: GraphStore>(
-    store: &S,
-    nodes: &FxHashMap<NodeId, NodeData>,
-) -> Result<FxHashSet<EdgeData>, GraphStoreError> {
-    let mut edges = FxHashSet::default();
-    for id in nodes.keys() {
-        for edge in store.get_outgoing(*id)? {
-            edges.insert(edge);
-        }
-    }
-    Ok(edges)
+fn collect_edges(snapshot: &GraphCsrSnapshot) -> FxHashSet<EdgeData> {
+    snapshot.edges().iter().cloned().collect()
 }
 
 // ─── GraphStore impl ──────────────────────────────────────────────────────────

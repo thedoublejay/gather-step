@@ -31,7 +31,8 @@ pub use footprint::{
     StorageFootprintReport, storage_footprint_report,
 };
 pub use graph_store::{
-    EdgeCountSummary, GraphStore, GraphStoreDb, GraphStoreError, GraphTableFootprint,
+    EdgeCountSummary, GraphCsrSnapshot, GraphStore, GraphStoreDb, GraphStoreError,
+    GraphTableFootprint,
 };
 pub use incremental::{
     ChangedSet, IncrementalError, IncrementalFileEntry, RepoSnapshot, TrackedPath,

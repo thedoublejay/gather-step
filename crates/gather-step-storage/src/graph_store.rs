@@ -12,7 +12,7 @@ use redb::{
     Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadableDatabase,
     ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -282,6 +282,132 @@ pub struct EdgeCountSummary {
     pub virtual_other_cross_repo_edges: usize,
 }
 
+/// Read-only compressed-sparse-row snapshot of graph nodes and edge adjacency.
+///
+/// The snapshot is built from a consistent read transaction and is intended for
+/// frozen read paths that need many adjacency lookups without repeatedly
+/// opening redb tables.
+#[derive(Clone, Debug, Default)]
+pub struct GraphCsrSnapshot {
+    nodes: Vec<NodeData>,
+    node_positions: FxHashMap<NodeId, usize>,
+    edges: Vec<EdgeData>,
+    outgoing_offsets: Vec<usize>,
+    outgoing_edge_indices: Vec<usize>,
+    incoming_offsets: Vec<usize>,
+    incoming_edge_indices: Vec<usize>,
+    owner_offsets: Vec<usize>,
+    owner_edge_indices: Vec<usize>,
+}
+
+impl GraphCsrSnapshot {
+    pub fn from_parts(mut nodes: Vec<NodeData>, edges: Vec<EdgeData>) -> Self {
+        nodes.sort_by_key(|node| node.id.as_bytes());
+        let node_positions = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id, index))
+            .collect::<FxHashMap<_, _>>();
+
+        let (outgoing_offsets, outgoing_edge_indices) =
+            Self::build_edge_index(nodes.len(), &node_positions, &edges, |edge| edge.source);
+        let (incoming_offsets, incoming_edge_indices) =
+            Self::build_edge_index(nodes.len(), &node_positions, &edges, |edge| edge.target);
+        let (owner_offsets, owner_edge_indices) =
+            Self::build_edge_index(nodes.len(), &node_positions, &edges, |edge| edge.owner_file);
+
+        Self {
+            nodes,
+            node_positions,
+            edges,
+            outgoing_offsets,
+            outgoing_edge_indices,
+            incoming_offsets,
+            incoming_edge_indices,
+            owner_offsets,
+            owner_edge_indices,
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn nodes(&self) -> &[NodeData] {
+        &self.nodes
+    }
+
+    pub fn edges(&self) -> &[EdgeData] {
+        &self.edges
+    }
+
+    pub fn outgoing_edges(&self, node_id: NodeId) -> impl Iterator<Item = &EdgeData> {
+        self.edge_indices_for(&self.outgoing_offsets, &self.outgoing_edge_indices, node_id)
+            .iter()
+            .map(|&edge_index| &self.edges[edge_index])
+    }
+
+    pub fn incoming_edges(&self, node_id: NodeId) -> impl Iterator<Item = &EdgeData> {
+        self.edge_indices_for(&self.incoming_offsets, &self.incoming_edge_indices, node_id)
+            .iter()
+            .map(|&edge_index| &self.edges[edge_index])
+    }
+
+    pub fn owner_edges(&self, owner_file: NodeId) -> impl Iterator<Item = &EdgeData> {
+        self.edge_indices_for(&self.owner_offsets, &self.owner_edge_indices, owner_file)
+            .iter()
+            .map(|&edge_index| &self.edges[edge_index])
+    }
+
+    fn build_edge_index<F>(
+        node_count: usize,
+        node_positions: &FxHashMap<NodeId, usize>,
+        edges: &[EdgeData],
+        node_for_edge: F,
+    ) -> (Vec<usize>, Vec<usize>)
+    where
+        F: Fn(&EdgeData) -> NodeId,
+    {
+        let mut offsets = vec![0; node_count + 1];
+        for edge in edges {
+            if let Some(&node_position) = node_positions.get(&node_for_edge(edge)) {
+                offsets[node_position + 1] += 1;
+            }
+        }
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+
+        let mut cursors = offsets.clone();
+        let mut edge_indices = vec![0; offsets[node_count]];
+        for (edge_index, edge) in edges.iter().enumerate() {
+            if let Some(&node_position) = node_positions.get(&node_for_edge(edge)) {
+                let write_index = cursors[node_position];
+                edge_indices[write_index] = edge_index;
+                cursors[node_position] += 1;
+            }
+        }
+
+        (offsets, edge_indices)
+    }
+
+    fn edge_indices_for<'a>(
+        &'a self,
+        offsets: &'a [usize],
+        edge_indices: &'a [usize],
+        node_id: NodeId,
+    ) -> &'a [usize] {
+        let Some(&node_position) = self.node_positions.get(&node_id) else {
+            return &[];
+        };
+        &edge_indices[offsets[node_position]..offsets[node_position + 1]]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphTableFootprint {
     pub name: String,
@@ -304,6 +430,22 @@ pub trait GraphStore {
     fn get_outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
     fn get_incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
     fn edges_by_owner(&self, owner_file: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+    fn csr_snapshot(&self) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        let mut nodes_by_id = FxHashMap::default();
+        for &kind in NodeKind::all() {
+            for node in self.nodes_by_type(kind)? {
+                nodes_by_id.insert(node.id, node);
+            }
+        }
+
+        let nodes = nodes_by_id.into_values().collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        for node in &nodes {
+            edges.extend(self.get_outgoing(node.id)?);
+        }
+
+        Ok(GraphCsrSnapshot::from_parts(nodes, edges))
+    }
     fn delete_edges_for_owner(&self, owner_file: NodeId) -> Result<(), GraphStoreError>;
     fn delete_edges_for_owner_by_kind(
         &self,
@@ -2817,6 +2959,64 @@ impl GraphStoreDb {
             .map_err(|_| GraphStoreError::storage(redb::StorageError::ValueTooLarge(usize::MAX)))
     }
 
+    pub fn csr_snapshot(&self) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        let read_txn = self.begin_read_txn()?;
+        Self::csr_snapshot_in_read_txn(&read_txn)
+    }
+
+    fn csr_snapshot_in_read_txn(
+        read_txn: &redb::ReadTransaction,
+    ) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        let nodes_table = match read_txn.open_table(NODES) {
+            Ok(table) => table,
+            Err(error) if Self::is_missing_table_error(&error) => {
+                return Ok(GraphCsrSnapshot::default());
+            }
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+
+        let node_capacity =
+            usize::try_from(nodes_table.len().map_err(GraphStoreError::storage)?).unwrap_or(0);
+        let mut nodes = Vec::with_capacity(node_capacity);
+        let mut repo_cache = FxHashMap::default();
+        let mut file_path_cache = FxHashMap::default();
+        let mut signature_cache = FxHashMap::default();
+        let node_iter = nodes_table.iter().map_err(GraphStoreError::storage)?;
+        for entry in node_iter {
+            let (_node_id, raw) = entry.map_err(GraphStoreError::storage)?;
+            let stored = Self::decode_stored_node(raw.value())?;
+            nodes.push(Self::rehydrate_node_with_cache(
+                read_txn,
+                stored,
+                &mut repo_cache,
+                &mut file_path_cache,
+                &mut signature_cache,
+            )?);
+        }
+
+        let edges_table = match read_txn.open_table(EDGES) {
+            Ok(table) => Some(table),
+            Err(error) if Self::is_missing_table_error(&error) => None,
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let edge_capacity = edges_table
+            .as_ref()
+            .map(|table| table.len().map_err(GraphStoreError::storage))
+            .transpose()?
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or(0);
+        let mut edges = Vec::with_capacity(edge_capacity);
+        if let Some(edges_table) = edges_table {
+            let edge_iter = edges_table.iter().map_err(GraphStoreError::storage)?;
+            for entry in edge_iter {
+                let (_edge_id, raw) = entry.map_err(GraphStoreError::storage)?;
+                edges.push(Self::decode_edge(raw.value())?);
+            }
+        }
+
+        Ok(GraphCsrSnapshot::from_parts(nodes, edges))
+    }
+
     /// Compute all five cross-repo edge counters in a single EDGES-table scan
     /// and one read transaction, replacing the previous five sequential calls.
     ///
@@ -3126,6 +3326,10 @@ impl GraphStore for GraphStoreDb {
             }
         }
         Ok(result)
+    }
+
+    fn csr_snapshot(&self) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        GraphStoreDb::csr_snapshot(self)
     }
 
     fn delete_edges_for_owner(&self, owner_file: NodeId) -> Result<(), GraphStoreError> {
@@ -3487,6 +3691,7 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
     use redb::ReadableDatabase;
+    use rustc_hash::FxHashSet;
 
     use super::{
         BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGE_KIND_COUNTS, GraphStore, GraphStoreDb,
@@ -3728,6 +3933,48 @@ mod tests {
         let incoming = store.get_incoming(b.id).expect("incoming should load");
 
         assert_eq!(incoming, vec![relation]);
+    }
+
+    #[test]
+    fn csr_snapshot_builds_forward_reverse_and_owner_adjacency() {
+        let store = test_store("csr-snapshot");
+        let file = node("service-a", "src/foo.ts", NodeKind::File, "src/foo.ts", 0);
+        let a = node("service-a", "src/foo.ts", NodeKind::Function, "a", 0);
+        let b = node("service-a", "src/foo.ts", NodeKind::Function, "b", 1);
+        let c = node("service-a", "src/foo.ts", NodeKind::Function, "c", 2);
+        let a_to_b = edge(a.id, b.id, file.id);
+        let a_to_c = edge(a.id, c.id, file.id);
+
+        store
+            .bulk_insert(
+                &[file.clone(), a.clone(), b.clone(), c.clone()],
+                &[a_to_b.clone(), a_to_c.clone()],
+            )
+            .expect("batch should insert");
+
+        let snapshot = store.csr_snapshot().expect("snapshot should build");
+
+        assert_eq!(snapshot.node_count(), 4);
+        assert_eq!(snapshot.edge_count(), 2);
+        assert!(snapshot.nodes().iter().any(|node| node.id == a.id));
+        assert_eq!(
+            snapshot
+                .outgoing_edges(a.id)
+                .map(|edge| edge.target)
+                .collect::<FxHashSet<_>>(),
+            [b.id, c.id].into_iter().collect::<FxHashSet<_>>()
+        );
+        assert_eq!(
+            snapshot.incoming_edges(b.id).cloned().collect::<Vec<_>>(),
+            vec![a_to_b.clone()]
+        );
+        assert_eq!(
+            snapshot
+                .owner_edges(file.id)
+                .map(|edge| edge.target)
+                .collect::<FxHashSet<_>>(),
+            [b.id, c.id].into_iter().collect::<FxHashSet<_>>()
+        );
     }
 
     #[test]
