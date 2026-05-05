@@ -60,6 +60,11 @@ Indexing-performance, storage, and security release. Replaces the SWC-based Type
 - Deployment-topology MCP tools test pins the public response shape.
 - Benchmark harness samples resource peaks (max RSS, peak memory footprint, open FDs on Unix).
 
+### Internal architecture
+
+- New `gather-step-deploy` workspace crate. Deployment-artifact parsing (Dockerfile, Compose, Kubernetes, Kustomize, Helm, GitHub Actions, env files) was extracted out of `gather-step-storage` and is now consumed by `gather-step-storage::indexer` and `gather-step-analysis`. No public API change for end users; the `deployment-topology` queries and the PR-review `deployment` delta surface continue to behave the same.
+- TypeORM framework parser added (entity decorators, migration `MigrationInterface` `up`/`down` extraction). Powers the existing PR-review `payload_contracts` and migration-edge surfaces for TypeORM repos.
+
 ### Release-wide
 
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.1.0`.

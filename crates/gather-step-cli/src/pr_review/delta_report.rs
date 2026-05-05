@@ -628,6 +628,7 @@ pub struct SafetyMetadata {
 pub enum CleanupPolicy {
     RemoveOnExit,
     KeepCache,
+    CacheHitRetained,
 }
 
 /// A suggested `gather-step` invocation the reviewer can run against the
@@ -940,6 +941,7 @@ impl DeltaReport {
         let _ = writeln!(buf, "- **run id:** `{}`", s.run_id);
         let cleanup_label = match s.cleanup_policy {
             CleanupPolicy::KeepCache => "keep-cache",
+            CleanupPolicy::CacheHitRetained => "cache-hit-retained",
             CleanupPolicy::RemoveOnExit => "remove-on-exit",
         };
         let _ = writeln!(buf, "- **cleanup:** `{cleanup_label}`");

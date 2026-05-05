@@ -197,7 +197,28 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Maximum recursion depth for [`directory_size_bytes`].
+///
+/// Bounds the stack against pathological / adversarial directory trees. The
+/// symlink check at each level prevents loops, but a real tree nested 10k
+/// deep would still blow the default 8 MiB thread stack on macOS. 64 levels
+/// is well past anything a real source-controlled workspace produces.
+const DIR_SIZE_MAX_DEPTH: u32 = 64;
+
 fn directory_size_bytes(path: &Path) -> Result<u64> {
+    directory_size_bytes_inner(path, 0)
+}
+
+fn directory_size_bytes_inner(path: &Path, depth: u32) -> Result<u64> {
+    if depth > DIR_SIZE_MAX_DEPTH {
+        tracing::warn!(
+            path = %path.display(),
+            depth,
+            "directory_size_bytes: max depth ({}) exceeded; truncating count",
+            DIR_SIZE_MAX_DEPTH,
+        );
+        return Ok(0);
+    }
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("reading metadata for {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -213,7 +234,7 @@ fn directory_size_bytes(path: &Path) -> Result<u64> {
     let mut total = 0_u64;
     for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
         let entry = entry.with_context(|| format!("reading entry under {}", path.display()))?;
-        total = total.saturating_add(directory_size_bytes(&entry.path())?);
+        total = total.saturating_add(directory_size_bytes_inner(&entry.path(), depth + 1)?);
     }
     Ok(total)
 }
@@ -374,7 +395,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     path_safety::reject_symlinked_generated_state(&app.workspace_path, &storage_root)
         .with_context(|| {
             format!(
-                "generated-state path `{}` failed symlink check",
+                "Generated-state path `{}` failed the symlink check.",
                 storage_root.display()
             )
         })?;
@@ -896,6 +917,34 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         context_pack_cache_rows_removed, "stage timing: global context-pack cache clear skipped",
     );
     drop(indexer);
+
+    // Wipe review artifacts AFTER `drop(indexer)` (which fsyncs the new
+    // baseline) but BEFORE precompute. Order matters:
+    //   1. drop(indexer)            → new workspace index is durable
+    //   2. clean_all_for_workspace  → stale review caches gone (their
+    //                                 baseline SHAs no longer match)
+    //   3. precompute_context_packs → re-populate against the new index
+    // Doing the wipe AFTER precompute (the prior order) left a window where
+    // a process kill between drop(indexer) and the wipe would leave the new
+    // index durable on disk while old review caches still pointed at the
+    // now-stale baseline. `clean_all_for_workspace` skips live InProgress
+    // artifacts so concurrent `pr-review` runs are not nuked.
+    match clean_all_for_workspace(&app.workspace_path) {
+        Ok(report) if report.removed_count > 0 => {
+            output.line(format!(
+                "  wiped {} review artifact(s) (full reindex invalidates their baseline)",
+                report.removed_count,
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(
+                error = %e,
+                "could not wipe review artifacts after full reindex; continuing"
+            );
+        }
+    }
+
     let precompute_start = Instant::now();
     let precompute_pack_count =
         precompute_pack_call_count(&hot_pack_targets, &precomputed_pack_targets);
@@ -1039,31 +1088,6 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         fs::write(path, artifact)
             .with_context(|| format!("writing artifact to {}", path.display()))?;
         output.line(format!("Release-gate artifact: {}", path.display()));
-    }
-
-    // Best-effort: wipe review artifacts for this workspace after a successful
-    // full reindex.  Every full index rebuilds from scratch, which invalidates
-    // any prior review caches (their baseline SHAs no longer match the new
-    // index).  Failure here is non-fatal — the index run already succeeded.
-    //
-    // NOTE: `gather-step index` is always a full reindex (there is no
-    // incremental index path at the CLI level).  The `auto_recover` flag
-    // additionally wipes storage before re-opening, but either way every run
-    // of this command produces a fresh index.
-    match clean_all_for_workspace(&app.workspace_path) {
-        Ok(report) if report.removed_count > 0 => {
-            output.line(format!(
-                "  wiped {} review artifact(s) (full reindex invalidates their baseline)",
-                report.removed_count,
-            ));
-        }
-        Ok(_) => {}
-        Err(e) => {
-            warn!(
-                error = %e,
-                "could not wipe review artifacts after full reindex; continuing"
-            );
-        }
     }
 
     if watch || should_prompt_for_watch(app)? {

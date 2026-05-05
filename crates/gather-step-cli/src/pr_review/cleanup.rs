@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::{
-    commands::pr_review::{DiscoveredArtifact, delete_artifact, list_review_artifacts},
+    commands::pr_review::{
+        DeleteSelector, DiscoveredArtifact, delete_artifact_with_selector, list_review_artifacts,
+    },
     pr_review::artifact_root::default_cache_root,
 };
 
@@ -38,7 +40,18 @@ pub struct ReviewCleanupReport {
 ///
 /// Refuses to delete any artifact whose root overlaps `<workspace>/.gather-step/`
 /// (defense in depth — `default_cache_root` is always outside that tree, but
-/// the guard inside [`delete_artifact`] enforces it unconditionally).
+/// the guard inside [`delete_artifact_with_selector`] enforces it
+/// unconditionally).
+///
+/// **Live `InProgress` artifacts are skipped.** This function is invoked
+/// automatically by `gather-step index` after a successful full reindex; an
+/// `InProgress` marker means another process is currently running a
+/// `pr-review` against this workspace and its on-disk state is mid-write.
+/// Deleting it would race the live worktree creation / indexing run and
+/// could corrupt the concurrent process. Users who really want to wipe
+/// active artifacts must opt in explicitly via `pr-review clean --all` (or
+/// `--older-than ... --include-active`), which routes through the
+/// `DeleteSelector::Explicit` / `OlderThan { include_active: true }` paths.
 pub fn clean_all_for_workspace(workspace_root: &Path) -> Result<ReviewCleanupReport> {
     let cache_root = default_cache_root(workspace_root);
     let mut report = ReviewCleanupReport {
@@ -48,8 +61,20 @@ pub fn clean_all_for_workspace(workspace_root: &Path) -> Result<ReviewCleanupRep
 
     let artifacts: Vec<DiscoveredArtifact> = list_review_artifacts(workspace_root, &cache_root)?;
 
+    // Treat the workspace-wide cleanup as time-based with `include_active = false`
+    // so concurrent `pr-review` runs (which leave an `InProgress` marker until
+    // they finalize) are protected.
+    let selector = DeleteSelector::OlderThan {
+        include_active: false,
+    };
+
     for artifact in &artifacts {
-        match delete_artifact(artifact, workspace_root, /* dry_run = */ false) {
+        match delete_artifact_with_selector(
+            artifact,
+            workspace_root,
+            /* dry_run = */ false,
+            selector,
+        ) {
             Ok(()) => {
                 report.removed_count += 1;
                 report.freed_bytes += artifact.size_bytes;
@@ -75,44 +100,17 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     use crate::{
         commands::pr_review::{DiscoveredArtifact, delete_artifact, list_review_artifacts},
-        pr_review::artifact_root::{
-            MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+        pr_review::{
+            artifact_root::{
+                MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+            },
+            test_helpers::TempDir,
         },
     };
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
-            let pid = std::process::id();
-            let path = std::env::temp_dir().join(format!("gs-cleanup-{label}-{pid}-{nanos}"));
-            fs::create_dir_all(&path).expect("tmp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     /// Write a fake review artifact under `cache_root` for `workspace_root`
     /// and return the artifact root path.

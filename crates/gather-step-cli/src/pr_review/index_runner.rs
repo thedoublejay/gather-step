@@ -165,50 +165,13 @@ pub fn run_review_index(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process::Command,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::{fs, path::Path, process::Command};
 
     use gather_step_storage::IndexingOptions;
 
-    use crate::pr_review::artifact_root::create_artifact_root;
+    use crate::pr_review::{artifact_root::create_artifact_root, test_helpers::TempDir};
 
     use super::run_review_index;
-
-    // ── temp-dir helper ───────────────────────────────────────────────────────
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!("gather-step-review-index-test-{name}-{id}"));
-            fs::create_dir_all(&path).expect("temp dir should exist");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            // Prune any git worktrees registered against this directory before
-            // removal — otherwise git leaves dangling refs in the source repo.
-            let _ = Command::new("git")
-                .args(["-C", &self.path.to_string_lossy(), "worktree", "prune"])
-                .output();
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     // ── git helpers ───────────────────────────────────────────────────────────
 

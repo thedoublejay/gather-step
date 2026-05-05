@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::Write;
+use std::process::ExitCode;
 
 use anyhow::{Error, Result};
 use clap::Parser;
@@ -30,13 +31,14 @@ static GLOBAL: Alloc = Alloc;
 // done from the synchronous indexer body (git analysis, progress refresh,
 // tracing flushes) and hurts end-to-end wall clock.
 #[tokio::main]
-async fn main() {
-    if let Err(error) = run_main().await {
-        exit_with_operator_error(&error);
+async fn main() -> ExitCode {
+    match run_main().await {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => print_operator_error_and_code(&error),
     }
 }
 
-async fn run_main() -> Result<()> {
+async fn run_main() -> Result<u8> {
     #[cfg(feature = "dhat-heap")]
     let _heap_profiler = dhat::Profiler::new_heap();
 
@@ -47,8 +49,14 @@ async fn run_main() -> Result<()> {
     commands::run(cli, app).await
 }
 
-fn exit_with_operator_error(error: &Error) -> ! {
+/// Print the operator-facing error to stderr and return exit code 1.
+///
+/// Returning `ExitCode` rather than calling `std::process::exit(1)` lets
+/// tokio's runtime tear down cleanly and lets stdio buffers flush — important
+/// for `pr-review` (which prints a structured report on stdout) and any
+/// command that emits trailing tracing lines.
+fn print_operator_error_and_code(error: &Error) -> ExitCode {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "{}", format_operator_error(error));
-    std::process::exit(1);
+    ExitCode::from(1)
 }

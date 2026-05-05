@@ -631,7 +631,7 @@ fn corrupt_graph_index_reports_auto_recover_and_auto_recover_rebuilds() {
 }
 
 #[test]
-fn metadata_schema_user_version_resets_to_fresh_release_zero() {
+fn metadata_schema_user_version_mismatch_reports_recovery_hint() {
     let temp = TempDir::new("metadata-schema-zero");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
@@ -643,15 +643,10 @@ fn metadata_schema_user_version_resets_to_fresh_release_zero() {
         .expect("stamp old development schema");
     drop(conn);
 
-    let output = run_ok(temp.path(), &["index", "--json"]);
-    let output_json = stdout_json(&output);
-    assert_eq!(output_json["event"], "index_completed");
-
-    let conn = Connection::open(storage_root.join("metadata.sqlite")).expect("metadata sqlite");
-    let version: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("user_version should read");
-    assert_eq!(version, 0);
+    let output = run_fail(temp.path(), &["index", "--json"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Index schema version mismatch"));
+    assert!(stderr.contains("gather-step index --auto-recover"));
 }
 
 #[test]

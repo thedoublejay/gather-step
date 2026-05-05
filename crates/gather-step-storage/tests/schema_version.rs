@@ -7,7 +7,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gather_step_storage::{FileIndexState, GraphStoreDb, MetadataStore, MetadataStoreDb};
+use gather_step_storage::{
+    FileIndexState, GraphStoreDb, GraphStoreError, MetadataStore, MetadataStoreDb,
+    MetadataStoreError,
+};
 use redb::{ReadableDatabase, TableDefinition};
 use rusqlite::Connection;
 
@@ -50,6 +53,26 @@ fn fresh_schema_stamps_metadata_user_version_zero() {
 }
 
 #[test]
+fn metadata_store_rejects_future_user_version_with_mismatch_error() {
+    let metadata_path = temp_db_path("future-metadata-schema");
+    let _cleanup = Cleanup(metadata_path.clone());
+
+    {
+        let conn = Connection::open(&metadata_path).expect("metadata db should create");
+        conn.pragma_update(None, "user_version", 99_i64)
+            .expect("future user_version should stamp");
+    }
+
+    let err = MetadataStoreDb::open(&metadata_path)
+        .err()
+        .expect("opening a future-version metadata store must fail");
+    assert!(
+        matches!(err, MetadataStoreError::SchemaVersionMismatch { .. }),
+        "expected SchemaVersionMismatch, got {err:?}"
+    );
+}
+
+#[test]
 fn fresh_schema_stamps_graph_version_zero() {
     let graph_path = temp_db_path("fresh-graph-schema");
     let _cleanup = Cleanup(graph_path.clone());
@@ -68,6 +91,47 @@ fn fresh_schema_stamps_graph_version_zero() {
         .expect("graph schema version should be stamped")
         .value();
     assert_eq!(version, 0);
+}
+
+/// Open-time enforcement: a graph store stamped with a future schema
+/// version must reject the open with `SchemaVersionMismatch` so the
+/// CLI's friendly recovery hint (`gather-step index --auto-recover`) gets
+/// a typed error to map. Previously only the formatter-side mapping was
+/// covered; without this guard, a regression in `validate_schema_version`
+/// could silently allow incompatible stores to open.
+#[test]
+fn graph_store_rejects_future_schema_version_with_mismatch_error() {
+    let graph_path = temp_db_path("future-graph-schema");
+    let _cleanup = Cleanup(graph_path.clone());
+
+    // First, create a valid v0 store so the redb file exists with the
+    // expected layout, then bump the version stamp to a value the current
+    // build cannot understand.
+    {
+        let store = GraphStoreDb::open(&graph_path).expect("fresh graph store should open");
+        drop(store);
+    }
+    {
+        let db = redb::Database::open(&graph_path).expect("graph db should reopen");
+        let write_txn = db.begin_write().expect("write txn");
+        {
+            let mut table = write_txn
+                .open_table(GRAPH_SCHEMA)
+                .expect("graph schema table should exist");
+            table
+                .insert(GRAPH_SCHEMA_VERSION_KEY, 99_u32)
+                .expect("bump schema version to 99");
+        }
+        write_txn.commit().expect("commit version bump");
+    }
+
+    let err = GraphStoreDb::open(&graph_path)
+        .err()
+        .expect("opening a future-version store must fail");
+    assert!(
+        matches!(err, GraphStoreError::SchemaVersionMismatch { .. }),
+        "expected SchemaVersionMismatch, got {err:?}"
+    );
 }
 
 #[test]

@@ -111,34 +111,41 @@ pub enum McpSubcommand {
     Serve(serve::ServeArgs),
 }
 
-pub async fn run(cli: Cli, app: AppContext) -> Result<()> {
+/// Run the dispatched subcommand and return the process exit code (0 on
+/// success, non-zero for severity-threshold-style "completed but reportable"
+/// outcomes). Errors propagate as `Err` and are mapped to exit 1 in `main`.
+///
+/// Almost every subcommand returns 0; `pr-review` may return 2 when
+/// `--severity strict` / `pedantic` thresholds are exceeded so CI can
+/// distinguish "tool broke" from "review found high-severity changes".
+pub async fn run(cli: Cli, app: AppContext) -> Result<u8> {
     match cli.command {
-        Some(Command::Init(args)) => init::run(&app, args).await,
-        Some(Command::Index(args)) => index::run(&app, args).await,
-        Some(Command::Clean(args)) => clean::run(&app, args),
-        Some(Command::Compact(args)) => compact::run(&app, args),
-        Some(Command::Reindex(args)) => reindex::run(&app, args).await,
-        Some(Command::Serve(args)) => serve::run(&app, args).await,
-        Some(Command::Watch(args)) => watch::run(&app, args).await,
-        Some(Command::Tui(args)) => tui::run(&app, args),
-        Some(Command::Search(args)) => search::run(&app, args),
-        Some(Command::Trace(args)) => trace::run(&app, args),
-        Some(Command::SetupMcp(args)) => setup_mcp::run(&app, args),
-        Some(Command::Status(args)) => status::run(&app, args),
-        Some(Command::StorageReport(args)) => storage_report::run(&app, args),
-        Some(Command::Doctor(args)) => doctor::run(&app, args),
-        Some(Command::Generate(command)) => generate::run(&app, command),
-        Some(Command::Impact(args)) => impact::run(&app, args),
-        Some(Command::ProjectionImpact(args)) => projection_impact::run(&app, args),
-        Some(Command::DeploymentTopology(args)) => deployment_topology::run(&app, args),
-        Some(Command::Pack(args)) => pack::run(&app, &args),
-        Some(Command::Events(args)) => events::run(&app, args),
-        Some(Command::Conventions(args)) => conventions::run(&app, args),
+        Some(Command::Init(args)) => init::run(&app, args).await.map(|()| 0),
+        Some(Command::Index(args)) => index::run(&app, args).await.map(|()| 0),
+        Some(Command::Clean(args)) => clean::run(&app, args).map(|()| 0),
+        Some(Command::Compact(args)) => compact::run(&app, args).map(|()| 0),
+        Some(Command::Reindex(args)) => reindex::run(&app, args).await.map(|()| 0),
+        Some(Command::Serve(args)) => serve::run(&app, args).await.map(|()| 0),
+        Some(Command::Watch(args)) => watch::run(&app, args).await.map(|()| 0),
+        Some(Command::Tui(args)) => tui::run(&app, args).map(|()| 0),
+        Some(Command::Search(args)) => search::run(&app, args).map(|()| 0),
+        Some(Command::Trace(args)) => trace::run(&app, args).map(|()| 0),
+        Some(Command::SetupMcp(args)) => setup_mcp::run(&app, args).map(|()| 0),
+        Some(Command::Status(args)) => status::run(&app, args).map(|()| 0),
+        Some(Command::StorageReport(args)) => storage_report::run(&app, args).map(|()| 0),
+        Some(Command::Doctor(args)) => doctor::run(&app, args).map(|()| 0),
+        Some(Command::Generate(command)) => generate::run(&app, command).map(|()| 0),
+        Some(Command::Impact(args)) => impact::run(&app, args).map(|()| 0),
+        Some(Command::ProjectionImpact(args)) => projection_impact::run(&app, args).map(|()| 0),
+        Some(Command::DeploymentTopology(args)) => deployment_topology::run(&app, args).map(|()| 0),
+        Some(Command::Pack(args)) => pack::run(&app, &args).map(|()| 0),
+        Some(Command::Events(args)) => events::run(&app, args).map(|()| 0),
+        Some(Command::Conventions(args)) => conventions::run(&app, args).map(|()| 0),
         Some(Command::PrReview(args)) => pr_review::run(&app, args),
         Some(Command::Mcp(command)) => match command.command {
-            McpSubcommand::Serve(args) => serve::run(&app, args).await,
+            McpSubcommand::Serve(args) => serve::run(&app, args).await.map(|()| 0),
         },
-        None => no_args::run(&app).await,
+        None => no_args::run(&app).await.map(|()| 0),
     }
 }
 

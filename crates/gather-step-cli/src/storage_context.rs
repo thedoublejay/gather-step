@@ -44,16 +44,16 @@ use crate::path_safety;
 pub enum ReviewSafetyError {
     /// Review storage equals or contains the workspace storage path (or vice
     /// versa).
-    #[error("review storage path {review} overlaps the workspace storage path {workspace}")]
+    #[error("Review storage path {review} overlaps the workspace storage path {workspace}.")]
     StorageOverlap { review: PathBuf, workspace: PathBuf },
 
     /// Review registry equals the workspace registry path.
-    #[error("review registry path {review} equals the workspace registry path {workspace}")]
+    #[error("Review registry path {review} equals the workspace registry path {workspace}.")]
     RegistryEqualsWorkspace { review: PathBuf, workspace: PathBuf },
 
     /// Review storage equals the workspace registry path, or review registry
     /// equals the workspace storage path (cross-collision paranoia check).
-    #[error("review path {review} collides with workspace generated state at {workspace}")]
+    #[error("Review path {review} collides with workspace-generated state at {workspace}.")]
     GeneratedStateCollision { review: PathBuf, workspace: PathBuf },
 
     /// Review `workspace_root` equals or contains the standing workspace root.
@@ -62,7 +62,7 @@ pub enum ReviewSafetyError {
     /// allowed — workspace-local review artifacts behind a flag are permitted
     /// by the master plan.
     #[error(
-        "review workspace_root {review} equals or contains the standing workspace root {workspace}"
+        "Review workspace_root {review} equals or contains the standing workspace root {workspace}."
     )]
     WorkspaceRootCollision { review: PathBuf, workspace: PathBuf },
 
@@ -75,8 +75,8 @@ pub enum ReviewSafetyError {
     /// (e.g. in the OS cache dir, or in a sibling directory such as
     /// `.gather-step-review/`).
     #[error(
-        "review path {review} is inside the workspace-generated state directory {generated_state_root}; \
-         review artifacts must not be placed under `.gather-step/`"
+        "Review path {review} is inside the workspace-generated state directory {generated_state_root}. \
+         Review artifacts must not be placed under `.gather-step/`."
     )]
     WorkspaceGeneratedStateOverlap {
         review: PathBuf,
@@ -84,7 +84,7 @@ pub enum ReviewSafetyError {
     },
 
     /// Filesystem error while canonicalizing a path.
-    #[error("path canonicalization failed for {path}: {source}")]
+    #[error("Path canonicalization failed for {path}: {source}.")]
     Canonicalize {
         path: PathBuf,
         #[source]
@@ -146,6 +146,86 @@ fn canonicalize_for_guard(p: &Path) -> Result<PathBuf, ReviewSafetyError> {
             }
         }
     }
+}
+
+/// Canonicalized check that the proposed review-artifact paths do not
+/// overlap the workspace's baseline storage, registry, or root.
+///
+/// Single source of truth for the review-vs-workspace overlap rules.  Used
+/// both by [`StorageContext::review_checked`] (creation-side guard) and by
+/// `pr_review::commands::delete_artifact_with_selector` (deletion-side
+/// guard) so the two paths cannot disagree about which proposed layouts
+/// are safe.
+///
+/// Validation order matches `review_checked`:
+///   1. `StorageOverlap`        2. `RegistryEqualsWorkspace`
+///   3. `GeneratedStateCollision` (cross)
+///   4. `WorkspaceRootCollision`
+///   5. `WorkspaceGeneratedStateOverlap` (under `<workspace>/.gather-step/`)
+pub(crate) fn validate_review_paths_disjoint(
+    workspace_root: &Path,
+    workspace_registry: &Path,
+    workspace_storage: &Path,
+    review_workspace_root: &Path,
+    review_registry_path: &Path,
+    review_storage_root: &Path,
+) -> Result<(), ReviewSafetyError> {
+    let c_rev_root = canonicalize_for_guard(review_workspace_root)?;
+    let c_rev_reg = canonicalize_for_guard(review_registry_path)?;
+    let c_rev_stor = canonicalize_for_guard(review_storage_root)?;
+
+    let c_ws_root = canonicalize_for_guard(workspace_root)?;
+    let c_ws_reg = canonicalize_for_guard(workspace_registry)?;
+    let c_ws_stor = canonicalize_for_guard(workspace_storage)?;
+
+    if c_rev_stor == c_ws_stor
+        || c_rev_stor.starts_with(&c_ws_stor)
+        || c_ws_stor.starts_with(&c_rev_stor)
+    {
+        return Err(ReviewSafetyError::StorageOverlap {
+            review: c_rev_stor,
+            workspace: c_ws_stor,
+        });
+    }
+
+    if c_rev_reg == c_ws_reg {
+        return Err(ReviewSafetyError::RegistryEqualsWorkspace {
+            review: c_rev_reg,
+            workspace: c_ws_reg,
+        });
+    }
+
+    if c_rev_stor == c_ws_reg {
+        return Err(ReviewSafetyError::GeneratedStateCollision {
+            review: c_rev_stor,
+            workspace: c_ws_reg,
+        });
+    }
+    if c_rev_reg == c_ws_stor {
+        return Err(ReviewSafetyError::GeneratedStateCollision {
+            review: c_rev_reg,
+            workspace: c_ws_stor,
+        });
+    }
+
+    if c_rev_root == c_ws_root || c_ws_root.starts_with(&c_rev_root) {
+        return Err(ReviewSafetyError::WorkspaceRootCollision {
+            review: c_rev_root,
+            workspace: c_ws_root,
+        });
+    }
+
+    let generated_state_root = canonicalize_for_guard(&workspace_root.join(".gather-step"))?;
+    for candidate in [&c_rev_root, &c_rev_reg, &c_rev_stor] {
+        if candidate.starts_with(&generated_state_root) {
+            return Err(ReviewSafetyError::WorkspaceGeneratedStateOverlap {
+                review: candidate.clone(),
+                generated_state_root: generated_state_root.clone(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Whether the Tantivy search index is opened for reading only or for
@@ -337,75 +417,14 @@ impl StorageContext {
         review_storage_root: PathBuf,
         run_id: String,
     ) -> Result<Self, ReviewSafetyError> {
-        // Canonicalize all six paths, tolerating paths that don't exist yet.
-        let c_rev_root = canonicalize_for_guard(&review_workspace_root)?;
-        let c_rev_reg = canonicalize_for_guard(&review_registry_path)?;
-        let c_rev_stor = canonicalize_for_guard(&review_storage_root)?;
-
-        let c_ws_root = canonicalize_for_guard(&workspace.workspace_root)?;
-        let c_ws_reg = canonicalize_for_guard(&workspace.registry_path)?;
-        let c_ws_stor = canonicalize_for_guard(&workspace.storage_root)?;
-
-        // Validation order (first match wins):
-        //   1. StorageOverlap        2. RegistryEqualsWorkspace
-        //   3. GeneratedStateCollision 4. WorkspaceRootCollision
-
-        // 1. Storage overlap (bidirectional containment).
-        if c_rev_stor == c_ws_stor
-            || c_rev_stor.starts_with(&c_ws_stor)
-            || c_ws_stor.starts_with(&c_rev_stor)
-        {
-            return Err(ReviewSafetyError::StorageOverlap {
-                review: c_rev_stor,
-                workspace: c_ws_stor,
-            });
-        }
-
-        // 2. Registry identity.
-        if c_rev_reg == c_ws_reg {
-            return Err(ReviewSafetyError::RegistryEqualsWorkspace {
-                review: c_rev_reg,
-                workspace: c_ws_reg,
-            });
-        }
-
-        // 3. Cross-collision: storage ↔ registry.
-        if c_rev_stor == c_ws_reg {
-            return Err(ReviewSafetyError::GeneratedStateCollision {
-                review: c_rev_stor,
-                workspace: c_ws_reg,
-            });
-        }
-        if c_rev_reg == c_ws_stor {
-            return Err(ReviewSafetyError::GeneratedStateCollision {
-                review: c_rev_reg,
-                workspace: c_ws_stor,
-            });
-        }
-
-        // 4. Workspace-root collision: review root equals or *contains* the
-        //    workspace root (review root being *inside* workspace root is fine).
-        if c_rev_root == c_ws_root || c_ws_root.starts_with(&c_rev_root) {
-            return Err(ReviewSafetyError::WorkspaceRootCollision {
-                review: c_rev_root,
-                workspace: c_ws_root,
-            });
-        }
-
-        // 5. Workspace generated-state overlap: none of the review paths may
-        //    reside under `<workspace_root>/.gather-step/`.  A path that equals
-        //    `.gather-step` itself is also rejected (it would replace the whole
-        //    generated-state directory).
-        let generated_state_root =
-            canonicalize_for_guard(&workspace.workspace_root.join(".gather-step"))?;
-        for candidate in [&c_rev_root, &c_rev_reg, &c_rev_stor] {
-            if candidate.starts_with(&generated_state_root) {
-                return Err(ReviewSafetyError::WorkspaceGeneratedStateOverlap {
-                    review: candidate.clone(),
-                    generated_state_root: generated_state_root.clone(),
-                });
-            }
-        }
+        validate_review_paths_disjoint(
+            &workspace.workspace_root,
+            &workspace.registry_path,
+            &workspace.storage_root,
+            &review_workspace_root,
+            &review_registry_path,
+            &review_storage_root,
+        )?;
 
         Ok(Self::review(
             review_workspace_root,

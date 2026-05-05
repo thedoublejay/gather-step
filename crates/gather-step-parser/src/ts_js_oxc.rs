@@ -2013,7 +2013,7 @@ fn emit_decorator_call_site(
     );
 }
 
-// ── Helpers shared with the SWC-era contract ─────────────────────────────────
+// ── Helpers shared with the v3.0 ParseState contract ─────────────────────────
 
 fn args_text(args: &[Argument<'_>], source: &str) -> Vec<String> {
     args.iter()
@@ -2873,10 +2873,10 @@ mod tests {
         assert_eq!(span.column_len, 2);
     }
 
-    /// Top-level declared-names parity helper covers exports, plain decls,
-    /// the TS-only forms (interface/type/enum/namespace), and JSX-aware
-    /// extensions so the parity guard against SWC has a concrete shape it
-    /// can compare against.
+    /// Top-level declared-names self-validation covers exports, plain
+    /// decls, the TS-only forms (interface/type/enum/namespace), and
+    /// JSX-aware extensions so the curated invariant has a concrete shape
+    /// to anchor against.
     #[test]
     fn oxc_top_level_declared_names_covers_export_and_ts_only_forms() {
         let typescript_source = "\

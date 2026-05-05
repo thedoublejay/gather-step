@@ -27,6 +27,15 @@ use super::artifact_root::{
     CacheKey, MARKER_FILENAME, ReviewArtifactRoot, ReviewStatus, read_marker, workspace_hash,
 };
 
+/// Compute the 16-char blake3 hex prefix used for cache-key fingerprints.
+///
+/// Single source of truth so [`compute_cache_key`], [`pick_seed_source`],
+/// and the unit-test helpers cannot drift.
+fn blake3_hex16(bytes: &[u8]) -> String {
+    let hash = blake3::hash(bytes);
+    hash.to_hex()[..16].to_owned()
+}
+
 // ─── Cache lookup ─────────────────────────────────────────────────────────────
 
 /// Scan `<cache_root>/<workspace_hash>/` for a prior completed artifact whose
@@ -107,19 +116,16 @@ pub fn try_reuse_cache(cache_root: &Path, key: &CacheKey) -> Result<Option<Revie
             continue;
         }
 
-        // Reconstruct the ReviewArtifactRoot from the on-disk layout.
-        let root = ReviewArtifactRoot {
-            root: run_dir.clone(),
-            workspace_root: marker.workspace_root.clone(),
-            worktree_root: run_dir.join("worktree"),
-            registry_path: run_dir.join("registry.json"),
-            storage_root: run_dir.join("storage"),
-            reports_dir: run_dir.join("reports"),
-            logs_dir: run_dir.join("logs"),
-            marker_path,
-            run_id: marker.run_id.clone(),
-            workspace_hash: marker.workspace_hash.clone(),
-        };
+        // Reconstruct the ReviewArtifactRoot from the on-disk layout. The
+        // child-path derivation lives in `from_existing` so it cannot drift
+        // from `plan_artifact_root` / `materialize_artifact_root`.
+        let root = ReviewArtifactRoot::from_existing(
+            run_dir.clone(),
+            marker.workspace_root.clone(),
+            marker.run_id.clone(),
+            marker.workspace_hash.clone(),
+        );
+        let _ = marker_path; // marker_path is rederived inside `from_existing`
 
         tracing::info!(
             run_id = %marker.run_id,
@@ -158,11 +164,7 @@ pub fn compute_cache_key(
     let ws_hash = workspace_hash(workspace_root);
 
     // blake3 of config bytes (or empty → hash of empty bytes).
-    let config_hash = {
-        let hash = blake3::hash(config_content);
-        let hex = hash.to_hex();
-        hex[..16].to_owned()
-    };
+    let config_hash = blake3_hex16(config_content);
 
     CacheKey {
         workspace_hash: ws_hash,
@@ -211,11 +213,7 @@ pub fn pick_seed_source(
     // Condition 3: config hash must match so the schema is compatible.
     let config_file = workspace_root.join("gather-step.config.yaml");
     let config_bytes = std::fs::read(&config_file).unwrap_or_default();
-    let ws_config_hash = {
-        let hash = blake3::hash(&config_bytes);
-        let hex = hash.to_hex();
-        hex[..16].to_owned()
-    };
+    let ws_config_hash = blake3_hex16(&config_bytes);
 
     if ws_config_hash != review_config_hash {
         tracing::debug!(
@@ -341,44 +339,14 @@ fn try_clone_file(src: &Path, dst: &Path) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::{fs, path::Path};
 
     use super::*;
     use crate::pr_review::artifact_root::{
         CacheKey, MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus,
         workspace_hash,
     };
-
-    // ── Temp-dir helper ───────────────────────────────────────────────────────
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(label: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!("gs-cache-test-{label}-{id}"));
-            fs::create_dir_all(&path).expect("temp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
+    use crate::pr_review::test_helpers::TempDir;
 
     // ── CacheKey fingerprint ──────────────────────────────────────────────────
 
@@ -655,12 +623,10 @@ mod tests {
 
     // ── pick_seed_source tests ────────────────────────────────────────────────
 
-    /// Compute a 16-char blake3 hex hash of `bytes` — mirrors the logic in
-    /// `compute_cache_key` and `pick_seed_source`.
+    /// Compute a 16-char blake3 hex hash of `bytes`. Thin wrapper around
+    /// the production helper to keep the call sites readable in tests.
     fn config_hash_of(bytes: &[u8]) -> String {
-        let hash = blake3::hash(bytes);
-        let hex = hash.to_hex();
-        hex[..16].to_owned()
+        super::blake3_hex16(bytes)
     }
 
     /// Build a minimal workspace fixture:

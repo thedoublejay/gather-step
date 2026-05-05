@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 
 use anyhow::Error;
 use gather_step_core::ConfigError;
-use gather_step_storage::{GraphStoreError, SearchStoreError};
+use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError};
 
 const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
@@ -34,6 +34,14 @@ pub fn format_operator_error(error: &Error) -> String {
         {
             return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
         }
+        if let Some(metadata_error) = cause.downcast_ref::<MetadataStoreError>()
+            && matches!(
+                metadata_error,
+                MetadataStoreError::SchemaVersionMismatch { .. }
+            )
+        {
+            return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
+        }
     }
 
     if contains_ascii_case_insensitive(&full, "workspace is not a git repository") {
@@ -62,7 +70,7 @@ pub fn format_operator_error(error: &Error) -> String {
         return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
     }
 
-    one_line(error.to_string())
+    full
 }
 
 fn format_config_error(error: &ConfigError) -> String {
@@ -152,12 +160,42 @@ mod tests {
     }
 
     #[test]
+    fn metadata_store_schema_mismatch_maps_to_friendly_message() {
+        let raw = gather_step_storage::MetadataStoreError::SchemaVersionMismatch {
+            stored: 99,
+            expected: 0,
+        };
+        let err: anyhow::Error = anyhow::Error::new(raw);
+        assert_eq!(format_operator_error(&err), SCHEMA_VERSION_MISMATCH_MESSAGE);
+    }
+
+    #[test]
     fn unrelated_io_error_is_not_remapped_to_schema_message() {
         let err: anyhow::Error = anyhow::Error::msg("read /tmp/foo: permission denied");
         let msg = format_operator_error(&err);
         assert!(
             !msg.contains("schema version mismatch"),
             "permission-denied error must not be remapped to schema-mismatch message: {msg}"
+        );
+    }
+
+    #[test]
+    fn unhandled_error_preserves_full_cause_chain() {
+        // Wrap an inner error with anyhow::Context so the chain has two links.
+        // The fallback path must surface both, not just the outermost message.
+        use anyhow::Context;
+        let inner: anyhow::Error = anyhow::Error::msg("config not found at worktree root");
+        let wrapped: anyhow::Result<()> =
+            Err::<(), _>(inner).context("review engine materialize failed");
+        let err = wrapped.unwrap_err();
+        let msg = format_operator_error(&err);
+        assert!(
+            msg.contains("review engine materialize failed"),
+            "outer context lost: {msg}"
+        );
+        assert!(
+            msg.contains("config not found at worktree root"),
+            "inner cause swallowed by formatter — chain not surfaced: {msg}"
         );
     }
 }

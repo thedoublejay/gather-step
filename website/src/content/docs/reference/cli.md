@@ -506,6 +506,35 @@ gather-step --workspace /path/to/workspace deployment-topology env-var-consumers
 
 ---
 
+### `storage-report`
+
+Reports on-disk size of the workspace's generated state — useful for diagnosing index bloat and confirming that compactions have shrunk the storage tree.
+
+```bash
+gather-step [GLOBAL FLAGS] storage-report [--storage <PATH>] [--registry <PATH>]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--storage <PATH>` | path | `<workspace>/.gather-step/storage` | Inspect this storage directory instead of the workspace default. Useful for inspecting a kept `pr-review` artifact's storage. |
+| `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Inspect this registry file instead of the workspace default. |
+
+**Examples**
+
+```bash
+# Workspace default
+gather-step --workspace /path/to/workspace storage-report
+
+# Inspect a kept review artifact
+gather-step storage-report \
+  --storage ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/storage \
+  --registry ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/registry.json
+```
+
+**When to use** — to confirm a `compact` or full reindex actually shrunk the on-disk footprint, or to compare the size of a review artifact against the workspace baseline.
+
+---
+
 ### `pack`
 
 Returns a bounded context pack for a target symbol. A pack is a ranked, budget-capped bundle of the most relevant symbols, semantic bridges, suggested next steps, and unresolved gaps for a specific task mode. Context packs are precomputed for the top two symbols per repo during `index`, so pack retrieval is fast.
@@ -762,7 +791,7 @@ The `deployment` surface captures changes to deployment topology: added, removed
 
 ```bash
 gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine temp-index] \
-  [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
+  [--config <PATH>] [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
 ```
 
 | Flag | Type | Default | Description |
@@ -770,9 +799,10 @@ gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine temp-in
 | `--base <REF>` | string | required | Base ref (branch, tag, SHA, or any git rev). |
 | `--head <REF>` | string | required | Head ref (branch, tag, SHA, `HEAD`, etc.). |
 | `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. `temp-index` builds a full isolated index. This flag is retained for forward-compatible engine selection; no alternate public engine is currently exposed. |
+| `--config <PATH>` | path | — | Path to a `gather-step.config.yaml` to use for this review run. The temp-index requires a config at the worktree root; by default the worktree is checked out at `--head`, so a config that is committed in that ref is picked up automatically. Pass `--config` when the workspace does not have a checked-in config (e.g. during bootstrap), or to override the committed one for a single run. The bytes of this file feed into the cache-key fingerprint, so different `--config` values produce distinct cache entries. |
 | `--severity <MODE>` | enum | `warn` | `warn` always exits 0. `strict` exits 2 on High risks or incompatible payload type changes. `pedantic` exits 2 on any Medium+ risk, any payload change, or removed permission decorators. |
 | `--format <FORMAT>` | enum | `markdown` | `markdown` emits a human-readable Markdown report. `json` emits compact machine-readable JSON. `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit. `braingent` emits Markdown with YAML frontmatter for Braingent archival. |
-| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run. Cache hits are available when a retained matching artifact already exists. |
+| `--keep-cache` | bool flag | false | Keep the review artifact directory after the run, including failed runs (failed artifacts are marked `Quarantined` so `pr-review clean` can find them). Cache hits are available when a retained matching artifact already exists. |
 | `--github-comment-file <PATH>` | path | — | Write the GitHub-comment-formatted output to this file in addition to stdout. Accepted with any `--format` for scripting convenience. |
 | `--no-baseline-check` | bool flag | false | Suppress the warning emitted when the workspace HEAD does not match `--base`. Use in CI environments where the workspace is always checked out at the feature branch. |
 | `--json` | bool flag | false | **Deprecated.** Use `--format json` instead. Emits JSON output; equivalent to `--format json`. |
@@ -796,7 +826,8 @@ Exactly one selector must be given. Combine `--dry-run` with any selector to pre
 | `--run-id <ID>` | string | Delete the artifact directory for one explicit run ID. Removes `InProgress` artifacts when explicitly targeted. |
 | `--base <REF>` | string | Delete artifacts whose recorded base ref matches this ref. Must be used together with `--head`. |
 | `--head <REF>` | string | Delete artifacts whose recorded head ref matches this ref. Must be used together with `--base`. |
-| `--older-than <DURATION>` | string | Delete completed, failed, and quarantined artifacts older than this duration. Format: `<n><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`. Skips `InProgress` artifacts to avoid racing a live indexing run. |
+| `--older-than <DURATION>` | string | Delete completed, failed, and quarantined artifacts older than this duration. Format: `<n><unit>` where unit is one of `s`, `m`, `h`, `d`, `w`. Skips `InProgress` artifacts to avoid racing a live indexing run, and additionally skips artifacts whose cache key is still active (both `--base` and `--head` SHAs are still resolvable in this workspace), so artifacts available for the next review run are not pruned. Override the active-key skip with `--include-active`. |
+| `--include-active` | bool flag | Only meaningful with `--older-than`. Also delete artifacts whose cache key is still active in this workspace. Rejected when paired with `--all` / `--run-id` / `--base` / `--head` so users do not believe they are protecting active artifacts that the other selectors will delete unconditionally. |
 | `--all` | bool flag | Delete every review artifact for this workspace, including `InProgress` ones. |
 
 **Examples**

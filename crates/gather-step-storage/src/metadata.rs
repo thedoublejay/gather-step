@@ -950,11 +950,13 @@ struct PooledConnection<'a> {
 
 #[derive(Debug, Error)]
 pub enum MetadataStoreError {
-    #[error("failed to access metadata database file: {0}")]
+    #[error("Failed to access the metadata database file: {0}.")]
     Io(#[from] std::io::Error),
-    #[error("sqlite metadata store error: {0}")]
+    #[error("SQLite metadata store error: {0}.")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("metadata store connection pool mutex was poisoned")]
+    #[error("Metadata schema version mismatch: stored version {stored}, expected {expected}.")]
+    SchemaVersionMismatch { stored: i64, expected: i64 },
+    #[error("The metadata store connection-pool mutex was poisoned.")]
     Poisoned,
 }
 
@@ -980,6 +982,9 @@ impl MetadataStoreDb {
         connection.busy_timeout(Duration::from_secs(5))?;
         Self::configure_new_database(&connection)?;
         Self::configure_connection(&connection)?;
+        if !is_new {
+            Self::validate_schema_version(&connection)?;
+        }
         Self::bootstrap_schema(&mut connection)?;
 
         let readers = (0..READER_POOL_SIZE)
@@ -1032,7 +1037,19 @@ impl MetadataStoreDb {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         Self::configure_connection(&connection)?;
+        Self::validate_schema_version(&connection)?;
         Ok(connection)
+    }
+
+    fn validate_schema_version(connection: &Connection) -> Result<(), MetadataStoreError> {
+        let stored = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if stored != METADATA_SCHEMA_VERSION {
+            return Err(MetadataStoreError::SchemaVersionMismatch {
+                stored,
+                expected: METADATA_SCHEMA_VERSION,
+            });
+        }
+        Ok(())
     }
 
     fn bootstrap_schema(connection: &mut Connection) -> Result<(), MetadataStoreError> {
@@ -1280,7 +1297,7 @@ impl MetadataStoreDb {
 
     pub fn finalize(&self) {
         if let Err(e) = self.try_finalize() {
-            tracing::warn!(error = %e, "metadata finalize failed");
+            tracing::warn!(error = %e, "Metadata finalization failed.");
         }
     }
 

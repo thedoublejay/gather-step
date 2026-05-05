@@ -157,29 +157,80 @@ pub struct ReviewArtifactRoot {
     pub workspace_hash: String,
 }
 
+impl ReviewArtifactRoot {
+    /// Reconstruct a [`ReviewArtifactRoot`] from an already-materialized
+    /// directory on disk.
+    ///
+    /// Used by the cache-reuse path (`try_reuse_cache`) when the on-disk
+    /// layout was produced by a prior run of [`plan_artifact_root`] /
+    /// [`materialize_artifact_root`]. Both functions derive child paths from
+    /// the same constants — owning that derivation in one place here means
+    /// renaming `worktree/`, `storage/`, etc. cannot make creation and reuse
+    /// disagree.
+    ///
+    /// Callers are responsible for verifying that `root` exists and contains
+    /// the expected children before calling this.
+    #[must_use]
+    pub fn from_existing(
+        root: PathBuf,
+        workspace_root: PathBuf,
+        run_id: String,
+        workspace_hash: String,
+    ) -> Self {
+        let worktree_root = root.join("worktree");
+        let registry_path = root.join("registry.json");
+        let storage_root = root.join("storage");
+        let reports_dir = root.join("reports");
+        let logs_dir = root.join("logs");
+        let marker_path = root.join(MARKER_FILENAME);
+        Self {
+            root,
+            workspace_root,
+            worktree_root,
+            registry_path,
+            storage_root,
+            reports_dir,
+            logs_dir,
+            marker_path,
+            run_id,
+            workspace_hash,
+        }
+    }
+}
+
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 /// Errors produced by artifact-root operations.
 #[derive(Debug, Error)]
 pub enum ArtifactRootError {
-    #[error("artifact root path already exists: {path}")]
+    #[error("The artifact root path already exists: {path}.")]
     RootExists { path: PathBuf },
 
-    #[error("io error in {path}: {source}")]
+    #[error("I/O error in {path}: {source}.")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("marker serialization failed: {source}")]
+    #[error("Marker serialization failed: {source}.")]
     Serialize {
         #[source]
         source: serde_json::Error,
     },
 
-    #[error("review safety guard refused: {0}")]
+    #[error("The review safety guard refused the artifact paths: {0}.")]
     Safety(#[from] ReviewSafetyError),
+
+    #[error("The path safety guard refused the artifact paths: {0}.")]
+    PathSafety(#[from] crate::path_safety::PathSafetyError),
+
+    #[error("Unsupported review marker schema version {found} at {path}; expected {expected}.")]
+    UnsupportedMarkerSchema {
+        path: PathBuf,
+        found: u32,
+        expected: u32,
+    },
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -240,26 +291,14 @@ pub fn plan_artifact_root(
         return Err(ArtifactRootError::RootExists { path: root });
     }
 
-    // Derive all child paths.
-    let worktree_root = root.join("worktree");
-    let registry_path = root.join("registry.json");
-    let storage_root = root.join("storage");
-    let reports_dir = root.join("reports");
-    let logs_dir = root.join("logs");
-    let marker_path = root.join(MARKER_FILENAME);
-
-    Ok(ReviewArtifactRoot {
+    // Child paths flow through `ReviewArtifactRoot::from_existing` so the
+    // creation path and the cache-reuse path cannot disagree about the layout.
+    Ok(ReviewArtifactRoot::from_existing(
         root,
-        workspace_root: workspace_root.to_path_buf(),
-        worktree_root,
-        registry_path,
-        storage_root,
-        reports_dir,
-        logs_dir,
-        marker_path,
-        run_id: run_id.to_owned(),
-        workspace_hash: hash,
-    })
+        workspace_root.to_path_buf(),
+        run_id.to_owned(),
+        hash,
+    ))
 }
 
 /// Materialize a previously planned artifact root and write its initial marker.
@@ -276,6 +315,30 @@ pub fn materialize_artifact_root(
         return Err(ArtifactRootError::RootExists {
             path: artifact.root.clone(),
         });
+    }
+
+    // Symlink rejection — defense-in-depth against an attacker pre-creating
+    // symlinks under the cache root to redirect the artifact root, the
+    // worktree, the registry, or the storage dir to a sensitive location
+    // outside `<cache>/gather-step/pr-review/`. Walks from the cache root
+    // through the workspace-hash directory and run directory; rejects on the
+    // first symlink.
+    //
+    // `reject_symlinked_generated_state` tolerates non-existent path tails,
+    // so calling it on paths the next block is about to `create_dir_all` is
+    // safe.
+    let anchor = artifact
+        .root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap_or_else(|| std::path::Path::new(""));
+    for path in [
+        &artifact.root,
+        &artifact.worktree_root,
+        &artifact.storage_root,
+        &artifact.registry_path,
+    ] {
+        crate::path_safety::reject_symlinked_generated_state(anchor, path)?;
     }
 
     // Create all directories.
@@ -390,7 +453,16 @@ pub fn read_marker(marker_path: &Path) -> Result<ReviewMarker, ArtifactRootError
         path: marker_path.to_path_buf(),
         source,
     })?;
-    serde_json::from_slice(&bytes).map_err(|source| ArtifactRootError::Serialize { source })
+    let marker: ReviewMarker =
+        serde_json::from_slice(&bytes).map_err(|source| ArtifactRootError::Serialize { source })?;
+    if marker.schema_version != MARKER_SCHEMA_VERSION {
+        return Err(ArtifactRootError::UnsupportedMarkerSchema {
+            path: marker_path.to_path_buf(),
+            found: marker.schema_version,
+            expected: MARKER_SCHEMA_VERSION,
+        });
+    }
+    Ok(marker)
 }
 
 fn write_marker_to_path(marker: &ReviewMarker, path: &Path) -> Result<(), ArtifactRootError> {
@@ -567,6 +639,32 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn create_artifact_root_rejects_symlinked_workspace_hash_dir() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+        let outside_tmp = TempDir::new().unwrap();
+
+        let hash = workspace_hash(ws_tmp.path());
+        let hash_dir = cache_tmp.path().join(hash);
+        std::os::unix::fs::symlink(outside_tmp.path(), &hash_dir).unwrap();
+
+        let err = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "base1111",
+            "head1111",
+            "review-symlinked-hash",
+        )
+        .expect_err("symlinked workspace hash dir must be rejected");
+
+        assert!(
+            matches!(err, ArtifactRootError::PathSafety(_)),
+            "expected PathSafety, got {err}"
+        );
+    }
+
     // ── marker round-trip ─────────────────────────────────────────────────────
 
     #[test]
@@ -595,6 +693,32 @@ mod tests {
         assert_eq!(marker.registry_path, artifact.registry_path);
         assert_eq!(marker.gather_step_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(marker.status, ReviewStatus::InProgress);
+    }
+
+    #[test]
+    fn read_marker_rejects_unknown_schema_version() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseSHA",
+            "headSHA",
+            "review-future-marker",
+        )
+        .unwrap();
+
+        let mut marker = read_marker(&artifact.marker_path).unwrap();
+        marker.schema_version = MARKER_SCHEMA_VERSION + 1;
+        write_marker_to_path(&marker, &artifact.marker_path).unwrap();
+
+        let err =
+            read_marker(&artifact.marker_path).expect_err("future marker schema must be rejected");
+        assert!(
+            matches!(err, ArtifactRootError::UnsupportedMarkerSchema { .. }),
+            "expected UnsupportedMarkerSchema, got {err}"
+        );
     }
 
     // ── write_marker_completed ────────────────────────────────────────────────

@@ -234,46 +234,14 @@ impl ReviewEngineImpl for OverlayEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        sync::atomic::{AtomicU64, Ordering},
-        time::SystemTime,
-    };
+    use std::fs;
 
     use gather_step_core::NodeKind;
     use gather_step_storage::{GraphStore, GraphStoreDb, IndexingOptions};
 
-    use crate::pr_review::artifact_root::create_artifact_root;
+    use crate::pr_review::{artifact_root::create_artifact_root, test_helpers::TempDir};
 
     use super::*;
-
-    // ── temp-dir helper ───────────────────────────────────────────────────────
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("gs-engine-{name}-{nanos}-{counter}"));
-            fs::create_dir_all(&path).expect("create temp dir");
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     /// Write a minimal indexable workspace fixture:
     /// ```text
@@ -325,13 +293,13 @@ mod tests {
         }
 
         let ws_tmp = TempDir::new("ws");
-        write_minimal_fixture(&ws_tmp.path);
+        write_minimal_fixture(ws_tmp.path());
 
         // Initialise a git repo so the worktree has a HEAD commit.
         let git = |args: &[&str]| {
             std::process::Command::new("git")
                 .args(args)
-                .current_dir(&ws_tmp.path)
+                .current_dir(ws_tmp.path())
                 .env("GIT_AUTHOR_NAME", "Test")
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "Test")
@@ -351,8 +319,8 @@ mod tests {
 
         let cache_tmp = TempDir::new("cache");
         let artifact_root = create_artifact_root(
-            &cache_tmp.path,
-            &ws_tmp.path,
+            cache_tmp.path(),
+            ws_tmp.path(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "test-run-engine",
@@ -366,7 +334,7 @@ mod tests {
         // Simpler: just copy the config into the worktree_root.
         fs::create_dir_all(&artifact_root.worktree_root).ok();
         fs::copy(
-            ws_tmp.path.join("gather-step.config.yaml"),
+            ws_tmp.path().join("gather-step.config.yaml"),
             artifact_root.worktree_root.join("gather-step.config.yaml"),
         )
         .expect("copy config");
@@ -374,12 +342,12 @@ mod tests {
         let dest_repo = artifact_root.worktree_root.join("myrepo");
         fs::create_dir_all(dest_repo.join("src")).expect("create dest repo src");
         fs::copy(
-            ws_tmp.path.join("myrepo/package.json"),
+            ws_tmp.path().join("myrepo/package.json"),
             dest_repo.join("package.json"),
         )
         .ok();
         fs::copy(
-            ws_tmp.path.join("myrepo/src/hello.ts"),
+            ws_tmp.path().join("myrepo/src/hello.ts"),
             dest_repo.join("src/hello.ts"),
         )
         .ok();
@@ -411,11 +379,11 @@ mod tests {
     fn overlay_engine_marks_unsupported_surfaces() {
         let cache_tmp = TempDir::new("cache-overlay");
         let ws_tmp = TempDir::new("ws-overlay");
-        write_minimal_fixture(&ws_tmp.path);
+        write_minimal_fixture(ws_tmp.path());
 
         let artifact_root = create_artifact_root(
-            &cache_tmp.path,
-            &ws_tmp.path,
+            cache_tmp.path(),
+            ws_tmp.path(),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "test-run-overlay",
