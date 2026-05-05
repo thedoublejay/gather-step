@@ -211,7 +211,7 @@ fn parse_file_core(
     // Tolerate non-UTF-8 source files (Latin-1, Windows-1252, stray high bytes
     // in copyright headers, etc.).  Invalid byte sequences are replaced with
     // U+FFFD so that indexing continues rather than aborting the entire repo.
-    let source: std::sync::Arc<str> = match std::str::from_utf8(&raw_bytes) {
+    let source: std::sync::Arc<str> = match simdutf8::basic::from_utf8(&raw_bytes) {
         Ok(s) => s.into(),
         Err(_) => String::from_utf8_lossy(&raw_bytes).as_ref().into(),
     };

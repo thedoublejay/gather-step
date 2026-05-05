@@ -4,7 +4,7 @@ use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ResolverStrategy, ref_node_id,
 };
 use gather_step_storage::{GraphStore, GraphStoreError, MetadataStore, MetadataStoreError};
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use hashbrown::HashMap;
 use thiserror::Error;
 use tracing::warn;
 
@@ -113,10 +113,7 @@ fn build_commit_facts(
 ) -> Vec<CommitFact> {
     // Pre-allocate with the number of deltas as an upper bound on the number of
     // distinct SHAs so the map never needs to rehash during iteration.
-    let mut deltas_by_sha = FxHashMap::<String, Vec<CommitFileDelta>>::with_capacity_and_hasher(
-        deltas.len(),
-        FxBuildHasher,
-    );
+    let mut deltas_by_sha = HashMap::<String, Vec<CommitFileDelta>>::with_capacity(deltas.len());
     for delta in deltas {
         deltas_by_sha
             .entry(delta.sha.clone())
@@ -187,7 +184,7 @@ fn materialize_summary_edges<G: GraphStore>(
     let file_by_path = file_nodes
         .iter()
         .map(|node| (node.file_path.as_str(), node.id))
-        .collect::<FxHashMap<_, _>>();
+        .collect::<HashMap<_, _>>();
 
     let mut author_nodes = BTreeMap::<String, NodeData>::new();
     let mut edges = Vec::new();
@@ -219,7 +216,7 @@ fn materialize_summary_edges<G: GraphStore>(
         }
     }
 
-    let mut emitted_per_file = FxHashMap::<String, usize>::default();
+    let mut emitted_per_file = HashMap::<String, usize>::default();
     for pair in &analytics.co_changes {
         let Some(&src_id) = file_by_path.get(pair.file_a.as_str()) else {
             continue;

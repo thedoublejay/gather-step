@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gather_step_storage::{CoChangePairRecord, FileAnalytics, MetadataStore, MetadataStoreError};
-use rustc_hash::FxHashMap;
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -141,8 +141,8 @@ pub fn analyze_history(
     );
 
     let rename_successors = build_rename_successors(facts);
-    let mut hotspot_by_file = FxHashMap::<String, MutableHotspot>::default();
-    let mut co_change_by_pair = FxHashMap::<(String, String), MutableCoChange>::default();
+    let mut hotspot_by_file = HashMap::<String, MutableHotspot>::default();
+    let mut co_change_by_pair = HashMap::<(String, String), MutableCoChange>::default();
 
     for fact in facts {
         let Some(age_days) = age_days(computed_at_unix, fact.author_date_unix) else {
@@ -300,11 +300,11 @@ struct MutableCoChange {
     last_seen_unix: i64,
 }
 
-fn build_rename_successors(facts: &[CommitFact]) -> FxHashMap<String, String> {
+fn build_rename_successors(facts: &[CommitFact]) -> HashMap<String, String> {
     let mut ordered = facts.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|fact| fact.author_date_unix);
 
-    let mut successors = FxHashMap::default();
+    let mut successors = HashMap::default();
     for fact in ordered {
         for delta in &fact.file_deltas {
             if delta.change_kind == CommitFileChangeKind::Renamed
@@ -318,7 +318,7 @@ fn build_rename_successors(facts: &[CommitFact]) -> FxHashMap<String, String> {
     successors
 }
 
-fn canonicalize_path(successors: &FxHashMap<String, String>, path: &str) -> String {
+fn canonicalize_path(successors: &HashMap<String, String>, path: &str) -> String {
     let mut current = path;
     let mut seen = BTreeSet::new();
     while let Some(next) = successors.get(current) {

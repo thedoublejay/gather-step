@@ -12,6 +12,7 @@ description = "Git history analysis for Gather Step"
 gather-step-core.workspace = true
 gather-step-storage.workspace = true
 gix.workspace = true
+hashbrown.workspace = true
 regex.workspace = true
 blake3.workspace = true
 rustc-hash.workspace = true
