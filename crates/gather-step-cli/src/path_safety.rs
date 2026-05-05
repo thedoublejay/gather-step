@@ -440,4 +440,22 @@ mod tests {
             "expected symlink error message, got: {msg}"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlinked_generated_state_rejects_symlinked_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_root = tmp.path().join("real-workspace");
+        fs::create_dir_all(&real_root).unwrap();
+        let workspace_link = tmp.path().join("workspace-link");
+        std::os::unix::fs::symlink(&real_root, &workspace_link).unwrap();
+
+        let storage = workspace_link.join(".gather-step").join("storage");
+        let err = reject_symlinked_generated_state(&workspace_link, &storage).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symlink"),
+            "expected symlink error message, got: {msg}"
+        );
+    }
 }

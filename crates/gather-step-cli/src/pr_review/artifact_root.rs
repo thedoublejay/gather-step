@@ -231,6 +231,13 @@ pub enum ArtifactRootError {
         found: u32,
         expected: u32,
     },
+
+    #[error("Invalid review marker status transition at {path}: {from:?} to {to:?}.")]
+    InvalidMarkerStatusTransition {
+        path: PathBuf,
+        from: ReviewStatus,
+        to: ReviewStatus,
+    },
 }
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -432,8 +439,27 @@ fn update_marker_status(
     status: ReviewStatus,
 ) -> Result<(), ArtifactRootError> {
     let mut marker = read_marker(&root.marker_path)?;
+    let current = marker.status;
+    if !is_valid_status_transition(current, status) {
+        return Err(ArtifactRootError::InvalidMarkerStatusTransition {
+            path: root.marker_path.clone(),
+            from: current,
+            to: status,
+        });
+    }
     marker.status = status;
     write_marker_to_path(&marker, &root.marker_path)
+}
+
+fn is_valid_status_transition(from: ReviewStatus, to: ReviewStatus) -> bool {
+    from == to
+        || matches!(
+            (from, to),
+            (
+                ReviewStatus::InProgress,
+                ReviewStatus::Completed | ReviewStatus::Quarantined
+            )
+        )
 }
 
 // ─── Marker I/O ───────────────────────────────────────────────────────────────
@@ -798,6 +824,36 @@ mod tests {
         write_marker_completed(&artifact).unwrap();
         let marker = read_marker(&artifact.marker_path).unwrap();
         assert_eq!(marker.status, ReviewStatus::Completed);
+    }
+
+    #[test]
+    fn write_marker_completed_refuses_quarantined_marker() {
+        let cache_tmp = TempDir::new().unwrap();
+        let ws_tmp = TempDir::new().unwrap();
+
+        let artifact = create_artifact_root(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "baseQ",
+            "headQ",
+            "review-quarantined",
+        )
+        .unwrap();
+
+        write_marker_quarantined(&artifact).unwrap();
+        let err = write_marker_completed(&artifact)
+            .expect_err("A Quarantined marker must not transition to Completed.");
+        assert!(
+            matches!(
+                err,
+                ArtifactRootError::InvalidMarkerStatusTransition {
+                    from: ReviewStatus::Quarantined,
+                    to: ReviewStatus::Completed,
+                    ..
+                }
+            ),
+            "Expected InvalidMarkerStatusTransition, got {err}."
+        );
     }
 
     // ── to_storage_context ────────────────────────────────────────────────────

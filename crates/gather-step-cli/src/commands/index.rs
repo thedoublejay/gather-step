@@ -928,19 +928,26 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // a process kill between drop(indexer) and the wipe would leave the new
     // index durable on disk while old review caches still pointed at the
     // now-stale baseline. `clean_all_for_workspace` skips live InProgress
-    // artifacts so concurrent `pr-review` runs are not nuked.
+    // artifacts so concurrent `pr-review` runs are not deleted.
     match clean_all_for_workspace(&app.workspace_path) {
-        Ok(report) if report.removed_count > 0 => {
-            output.line(format!(
-                "  wiped {} review artifact(s) (full reindex invalidates their baseline)",
-                report.removed_count,
-            ));
+        Ok(report) => {
+            if report.removed_count > 0 {
+                output.line(format!(
+                    "  wiped {} review artifact(s) (full reindex invalidates their baseline)",
+                    report.removed_count,
+                ));
+            }
+            if report.skipped_count > 0 {
+                output.line(format!(
+                    "  skipped {} review artifact(s) during cleanup; inspect the warning logs or run `gather-step pr-review clean --all`",
+                    report.skipped_count,
+                ));
+            }
         }
-        Ok(_) => {}
         Err(e) => {
             warn!(
                 error = %e,
-                "could not wipe review artifacts after full reindex; continuing"
+                "Could not wipe review artifacts after a full reindex; continuing."
             );
         }
     }

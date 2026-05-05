@@ -83,7 +83,7 @@ pub fn clean_all_for_workspace(workspace_root: &Path) -> Result<ReviewCleanupRep
                 tracing::warn!(
                     root = %artifact.root.display(),
                     error = %e,
-                    "skipping review artifact: delete refused",
+                    "Skipping the review artifact because deletion was refused.",
                 );
                 report.skipped_count += 1;
             }
@@ -106,7 +106,8 @@ mod tests {
         commands::pr_review::{DiscoveredArtifact, delete_artifact, list_review_artifacts},
         pr_review::{
             artifact_root::{
-                MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus, workspace_hash,
+                MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker, ReviewStatus,
+                default_cache_root, workspace_hash,
             },
             test_helpers::TempDir,
         },
@@ -249,6 +250,46 @@ mod tests {
         // mechanism that keeps other-workspace artifacts safe.
         let discovery_skipped = 1usize;
         assert_eq!(discovery_skipped, 1);
+    }
+
+    #[test]
+    fn clean_all_for_workspace_skips_in_progress_artifacts() {
+        let ws = TempDir::new("ws-in-progress-direct");
+        let cache_root = default_cache_root(ws.path());
+        let hash = workspace_hash(ws.path());
+        let workspace_cache = cache_root.join(&hash);
+        let _ = fs::remove_dir_all(&workspace_cache);
+
+        let completed_root = write_artifact(
+            &cache_root,
+            ws.path(),
+            "run-completed",
+            &hash,
+            ReviewStatus::Completed,
+            None,
+        );
+        let active_root = write_artifact(
+            &cache_root,
+            ws.path(),
+            "run-in-progress",
+            &hash,
+            ReviewStatus::InProgress,
+            None,
+        );
+
+        let report = super::clean_all_for_workspace(ws.path()).unwrap();
+
+        assert_eq!(report.removed_count, 1);
+        assert_eq!(report.skipped_count, 1);
+        assert!(
+            !completed_root.exists(),
+            "completed artifact should be removed"
+        );
+        assert!(
+            active_root.exists(),
+            "InProgress artifact should remain on disk"
+        );
+        let _ = fs::remove_dir_all(workspace_cache);
     }
 
     // ── Test 3 ───────────────────────────────────────────────────────────────
