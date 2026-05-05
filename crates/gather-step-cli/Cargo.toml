@@ -31,6 +31,7 @@ rand.workspace = true
 comfy-table.workspace = true
 console.workspace = true
 crossbeam-channel.workspace = true
+kanal.workspace = true
 dhat = { workspace = true, optional = true }
 gather-step-analysis = { path = "../gather-step-analysis", version = "3.1.0" }
 gather-step-core.workspace = true

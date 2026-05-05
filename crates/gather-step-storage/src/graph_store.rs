@@ -406,6 +406,32 @@ impl GraphCsrSnapshot {
         };
         &edge_indices[offsets[node_position]..offsets[node_position + 1]]
     }
+
+    /// Export the snapshot's adjacency arrays as an
+    /// [`crate::adjacency_blob::AdjacencyBlob`] suitable for rkyv
+    /// serialization.  Node and edge payloads are intentionally not
+    /// included — the blob captures only the dense adjacency layout.
+    #[must_use]
+    pub fn to_adjacency_blob(&self) -> crate::adjacency_blob::AdjacencyBlob {
+        crate::adjacency_blob::AdjacencyBlob {
+            node_count: self.nodes.len() as u64,
+            edge_count: self.edges.len() as u64,
+            outgoing_offsets: self.outgoing_offsets.iter().map(|&n| n as u64).collect(),
+            outgoing_edge_indices: self
+                .outgoing_edge_indices
+                .iter()
+                .map(|&n| n as u64)
+                .collect(),
+            incoming_offsets: self.incoming_offsets.iter().map(|&n| n as u64).collect(),
+            incoming_edge_indices: self
+                .incoming_edge_indices
+                .iter()
+                .map(|&n| n as u64)
+                .collect(),
+            owner_offsets: self.owner_offsets.iter().map(|&n| n as u64).collect(),
+            owner_edge_indices: self.owner_edge_indices.iter().map(|&n| n as u64).collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

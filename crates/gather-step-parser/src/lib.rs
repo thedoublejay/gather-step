@@ -5,6 +5,7 @@ pub mod manifests;
 pub(crate) mod path_guard;
 pub mod payload;
 pub(crate) mod projection;
+pub(crate) mod regex_dfa;
 pub mod resolve;
 pub mod traverse;
 pub mod tree_sitter;

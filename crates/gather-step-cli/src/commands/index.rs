@@ -488,15 +488,15 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // `gather-step-storage::indexer`.
     let workspace_bulk = indexer.begin_workspace_bulk_session();
 
-    let (tx, rx) = crossbeam_channel::bounded::<PreparedRepo>(PHASE_CHANNEL_DEPTH);
+    let (tx, rx) = kanal::bounded::<PreparedRepo>(PHASE_CHANNEL_DEPTH);
     // One analytics job is produced per repo after its storage commit. Capacity
     // equal to the run's repo count bounds retained jobs while avoiding writer
     // backpressure when analytics is slower than storage commits.
     let analytics_queue_depth = config.repos.len().max(1);
     let (analytics_tx, analytics_rx) =
-        crossbeam_channel::bounded::<AnalyticsJob>(analytics_queue_depth);
+        kanal::bounded::<AnalyticsJob>(analytics_queue_depth);
     let (analytics_result_tx, analytics_result_rx) =
-        crossbeam_channel::unbounded::<AnalyticsRepoResult>();
+        kanal::unbounded::<AnalyticsRepoResult>();
     let indexer_ref = &indexer;
     let config_ref = &config;
     let config_root_ref = &config_root;
@@ -685,7 +685,12 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         let analytics_timings = analytics_worker
             .join()
             .map_err(|_| anyhow::anyhow!("analytics thread panicked"))?;
-        let analytics_results = analytics_result_rx.try_iter().collect::<Vec<_>>();
+        // kanal Receiver does not expose `try_iter`; drain explicitly until the
+        // analytics worker has dropped its sender, which closes the channel.
+        let mut analytics_results = Vec::new();
+        while let Ok(result) = analytics_result_rx.recv() {
+            analytics_results.push(result);
+        }
 
         // Prefer the writer's error (more specific to storage) over producer's
         // secondary "send failed" symptom.

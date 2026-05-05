@@ -22,10 +22,10 @@ tree-sitter-java.workspace = true
 # exponential-backtracking edge cases that tree-sitter-typescript hits on
 # certain multi-line `as` union-type assertions. Versions pinned per
 # workspace convention.
-oxc_allocator = "=0.128.0"
-oxc_ast = "=0.128.0"
-oxc_parser = "=0.128.0"
-oxc_span = "=0.128.0"
+oxc_allocator = "=0.129.0"
+oxc_ast = "=0.129.0"
+oxc_parser = "=0.129.0"
+oxc_span = "=0.129.0"
 thiserror.workspace = true
 ignore.workspace = true
 globset.workspace = true
@@ -44,6 +44,7 @@ memchr.workspace = true
 tracing.workspace = true
 rayon.workspace = true
 regex.workspace = true
+regex-automata.workspace = true
 simdutf8.workspace = true
 
 [dev-dependencies]

@@ -12,7 +12,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use crossbeam_channel::bounded;
+use kanal::bounded;
 use gather_step_core::{
     DeploymentConfig, EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind,
     node_id, normalize_path_separators, ref_node_id,
@@ -1311,7 +1311,7 @@ impl RepoIndexer {
                     // Accumulator for the current write batch.
                     let mut pending: Vec<FileBatch> = Vec::with_capacity(batch_size);
 
-                    for message in &parse_receiver {
+                    while let Ok(message) = parse_receiver.recv() {
                         let parsed = message?;
                         files_parsed += 1;
                         let inferred_payloads = infer_payload_contracts(&parsed);

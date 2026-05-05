@@ -7,6 +7,7 @@ use redb::SavepointError;
 use thiserror::Error;
 use tracing::{error, warn};
 
+pub mod adjacency_blob;
 pub mod daemon_metadata;
 pub mod daemon_state;
 pub mod footprint;
