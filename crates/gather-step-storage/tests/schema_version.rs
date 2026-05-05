@@ -137,8 +137,8 @@ fn graph_store_rejects_future_schema_version_with_mismatch_error() {
 }
 
 #[test]
-fn graph_store_accepts_missing_schema_table_as_implicit_v0() {
-    let graph_path = temp_db_path("implicit-v0-missing-table");
+fn graph_store_rejects_missing_schema_table_as_unstamped() {
+    let graph_path = temp_db_path("strict-v0-missing-table");
     let _cleanup = Cleanup(graph_path.clone());
 
     {
@@ -151,14 +151,21 @@ fn graph_store_accepts_missing_schema_table_as_implicit_v0() {
             .expect("The empty graph database should commit.");
     }
 
-    let store = GraphStoreDb::open(&graph_path)
-        .expect("The unstamped graph store should open as implicit v0.");
-    drop(store);
+    let err = GraphStoreDb::open(&graph_path)
+        .err()
+        .expect("Opening a graph store without a schema table must fail under strict policy.");
+    assert!(
+        matches!(
+            err,
+            GraphStoreError::SchemaVersionMismatch { stored: 0, .. }
+        ),
+        "Expected SchemaVersionMismatch with stored=0, got {err:?}."
+    );
 }
 
 #[test]
-fn graph_store_accepts_missing_schema_version_row_as_implicit_v0() {
-    let graph_path = temp_db_path("implicit-v0-missing-row");
+fn graph_store_rejects_missing_schema_version_row_as_unstamped() {
+    let graph_path = temp_db_path("strict-v0-missing-row");
     let _cleanup = Cleanup(graph_path.clone());
 
     {
@@ -174,9 +181,16 @@ fn graph_store_accepts_missing_schema_version_row_as_implicit_v0() {
         write_txn.commit().expect("The schema table should commit.");
     }
 
-    let store = GraphStoreDb::open(&graph_path)
-        .expect("The graph store without a version row should open as implicit v0.");
-    drop(store);
+    let err = GraphStoreDb::open(&graph_path)
+        .err()
+        .expect("Opening a graph store without a version row must fail under strict policy.");
+    assert!(
+        matches!(
+            err,
+            GraphStoreError::SchemaVersionMismatch { stored: 0, .. }
+        ),
+        "Expected SchemaVersionMismatch with stored=0, got {err:?}."
+    );
 }
 
 #[test]

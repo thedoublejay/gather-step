@@ -81,12 +81,12 @@ impl AdjacencyBlob {
     /// Self-consistency check used by tests and (eventually) by the
     /// load path before handing the blob to the snapshot constructor.
     pub fn validate_lengths(&self) -> Result<(), AdjacencyBlobError> {
-        let node_count_usize: usize = self
-            .node_count
-            .try_into()
-            .map_err(|_| AdjacencyBlobError::NodeCountOverflow {
-                node_count: self.node_count,
-            })?;
+        let node_count_usize: usize =
+            self.node_count
+                .try_into()
+                .map_err(|_| AdjacencyBlobError::NodeCountOverflow {
+                    node_count: self.node_count,
+                })?;
 
         let expected_offsets = node_count_usize + 1;
         for (label, offsets) in [

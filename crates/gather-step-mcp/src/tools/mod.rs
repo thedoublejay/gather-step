@@ -13,5 +13,4 @@ pub mod pr_review;
 pub mod projection_impact;
 pub mod proof_builder;
 pub mod repo_intelligence;
-pub mod schema_summary;
 pub mod search;

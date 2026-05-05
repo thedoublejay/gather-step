@@ -435,7 +435,23 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     )?;
     let mut registry = RegistryStore::open(&registry_path)
         .with_context(|| format!("opening {}", registry_path.display()))?;
-    registry.register_from_config(&config, &config_root)?;
+    let dropped_repos = registry.register_from_config(&config, &config_root)?;
+    // Repos that were registered but are no longer in the config must have
+    // their graph + search + metadata state purged so subsequent queries do
+    // not return rows for repos the operator removed.
+    if !dropped_repos.is_empty() {
+        for name in &dropped_repos {
+            indexer
+                .storage()
+                .purge_repo(name)
+                .with_context(|| format!("purging removed repo `{name}` from generated state"))?;
+        }
+        output.line(format!(
+            "  Removed {} repo(s) from the registry: {}.",
+            dropped_repos.len(),
+            dropped_repos.join(", ")
+        ));
+    }
 
     // Defer all per-batch Tantivy commits to a single end-of-run flush —
     // this collapses ~250 segment commits (one per repo × batch) into 1 and
@@ -493,10 +509,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // equal to the run's repo count bounds retained jobs while avoiding writer
     // backpressure when analytics is slower than storage commits.
     let analytics_queue_depth = config.repos.len().max(1);
-    let (analytics_tx, analytics_rx) =
-        kanal::bounded::<AnalyticsJob>(analytics_queue_depth);
-    let (analytics_result_tx, analytics_result_rx) =
-        kanal::unbounded::<AnalyticsRepoResult>();
+    let (analytics_tx, analytics_rx) = kanal::bounded::<AnalyticsJob>(analytics_queue_depth);
+    let (analytics_result_tx, analytics_result_rx) = kanal::unbounded::<AnalyticsRepoResult>();
     let indexer_ref = &indexer;
     let config_ref = &config;
     let config_root_ref = &config_root;

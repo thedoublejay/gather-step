@@ -551,9 +551,15 @@ pub trait GraphStore {
 pub struct GraphStoreDb {
     db: Database,
     path: PathBuf,
-    /// When `true`, write transactions use `Durability::None` to skip fsync.
-    /// Set during bulk indexing, cleared after the last batch write.
-    bulk_mode: std::sync::atomic::AtomicBool,
+    /// Active-`BulkModeGuard` reference count. When > 0, write
+    /// transactions use `Durability::None` to skip fsync. The counter
+    /// (rather than a flat `AtomicBool`) is what makes
+    /// [`crate::indexer::BulkModeGuard`] safe under parallel workspace
+    /// indexing: the first guard to enter the bulk region increments to
+    /// 1, the last to leave decrements to 0 and fsyncs. Concurrent or
+    /// nested guards no longer race each other into prematurely
+    /// disabling bulk mode.
+    bulk_mode: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Error)]
@@ -654,7 +660,7 @@ impl GraphStoreDb {
         let store = Self {
             db,
             path,
-            bulk_mode: std::sync::atomic::AtomicBool::new(false),
+            bulk_mode: std::sync::atomic::AtomicUsize::new(0),
         };
         if is_new {
             store.write_schema_version()?;
@@ -678,27 +684,43 @@ impl GraphStoreDb {
     }
 
     /// Read the persisted schema version and reject the open when it does not
-    /// match [`GRAPH_SCHEMA_VERSION`]. A missing version row is treated as
-    /// version 0 (the v3.1 baseline) so unstamped fresh stores keep opening
-    /// cleanly. Stamped stores from a future schema fail with a typed
-    /// [`GraphStoreError::SchemaVersionMismatch`] instead of producing
-    /// shape-incompatible reads.
+    /// exactly match [`GRAPH_SCHEMA_VERSION`].
+    ///
+    /// **Strict policy**: every existing graph store must carry a stamped
+    /// schema row. A missing schema table or a missing version row is
+    /// treated as corruption and reported via
+    /// [`GraphStoreError::SchemaVersionMismatch`] with `stored = 0`, telling
+    /// the operator to wipe and reindex. This aligns with the
+    /// metadata/search stores which already enforce strict version checks;
+    /// gather-step has no production users yet, so no implicit-v0
+    /// compatibility shim is needed.
     fn validate_schema_version(&self) -> Result<(), GraphStoreError> {
         let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
         let table = match read_txn.open_table(GRAPH_SCHEMA) {
             Ok(t) => t,
-            // Missing schema table means the on-disk version is the implicit
-            // baseline (0); a future bump can require the table to exist.
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            // No schema table — the store predates the strict check and
+            // cannot be trusted on this binary. Surface a typed error so
+            // `gather-step index --auto-recover` can wipe and rebuild.
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Err(GraphStoreError::SchemaVersionMismatch {
+                    path: self.path.clone(),
+                    stored: 0,
+                    expected: GRAPH_SCHEMA_VERSION,
+                });
+            }
             Err(error) => return Err(GraphStoreError::storage(error)),
         };
-        let stored = match table
+        let Some(stored) = table
             .get(GRAPH_SCHEMA_VERSION_KEY)
             .map_err(GraphStoreError::storage)?
-        {
-            Some(v) => v.value(),
-            None => GRAPH_SCHEMA_VERSION, // baseline assumption
+        else {
+            return Err(GraphStoreError::SchemaVersionMismatch {
+                path: self.path.clone(),
+                stored: 0,
+                expected: GRAPH_SCHEMA_VERSION,
+            });
         };
+        let stored = stored.value();
         if stored == GRAPH_SCHEMA_VERSION {
             Ok(())
         } else {
@@ -854,15 +876,37 @@ impl GraphStoreDb {
         self.db.compact().map_err(GraphStoreError::storage)
     }
 
-    /// Enable or disable bulk mode. When enabled, write transactions use
-    /// `Durability::None` to skip fsync on each commit.  Flipping the flag
-    /// off does **not** by itself flush the unsynced pages; a follow-up
-    /// `Durability::Immediate` commit is required.  Callers should prefer
-    /// [`crate::indexer::BulkModeGuard`] over calling this directly — the
-    /// guard's `Drop` handles the flush via [`Self::commit_durable_marker`].
-    pub fn set_bulk_mode(&self, enabled: bool) {
+    /// Increment the bulk-mode reference count and return the new count.
+    ///
+    /// When the count transitions from `0 → 1`, the next write
+    /// transaction switches to `Durability::None` to skip fsync. The
+    /// counter (not a flat boolean) is what lets multiple
+    /// [`crate::indexer::BulkModeGuard`] instances coexist safely under
+    /// parallel workspace indexing — the first guard turns bulk mode
+    /// on, subsequent guards are no-ops on durability, and only the
+    /// last guard to drop fsyncs the accumulated pages.
+    ///
+    /// Callers should always go through [`crate::indexer::BulkModeGuard`]
+    /// — calling this directly from outside the indexer would skip the
+    /// fsync step on the matching decrement.
+    pub(crate) fn bulk_mode_acquire(&self) -> usize {
         self.bulk_mode
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1
+    }
+
+    /// Decrement the bulk-mode reference count and return the new count.
+    /// When the count transitions from `1 → 0`, the caller is responsible
+    /// for fsyncing accumulated pages via [`Self::commit_durable_marker`].
+    pub(crate) fn bulk_mode_release(&self) -> usize {
+        let prev = self
+            .bulk_mode
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(
+            prev > 0,
+            "bulk_mode_release called more times than bulk_mode_acquire",
+        );
+        prev.saturating_sub(1)
     }
 
     /// Commit an empty write transaction at whatever durability level the
@@ -875,9 +919,10 @@ impl GraphStoreDb {
         write_txn.commit().map_err(GraphStoreError::storage)
     }
 
-    /// Whether bulk mode is currently enabled.
+    /// Whether bulk mode is currently enabled (i.e. at least one
+    /// [`crate::indexer::BulkModeGuard`] is live).
     pub fn is_bulk_mode(&self) -> bool {
-        self.bulk_mode.load(std::sync::atomic::Ordering::Relaxed)
+        self.bulk_mode.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
     /// Count edges where source and target nodes belong to different repos,
@@ -1179,7 +1224,7 @@ impl GraphStoreDb {
         // loses the last committed batch, the coordinator can rebuild it by
         // reindexing files. In bulk mode we skip fsync entirely for speed; in
         // normal mode we use Immediate durability (one fsync per commit).
-        let durability = if self.bulk_mode.load(std::sync::atomic::Ordering::Relaxed) {
+        let durability = if self.bulk_mode.load(std::sync::atomic::Ordering::Acquire) > 0 {
             Durability::None
         } else {
             Durability::Immediate

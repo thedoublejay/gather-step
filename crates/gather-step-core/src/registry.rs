@@ -185,20 +185,26 @@ impl RegistryStore {
         Ok(removed)
     }
 
+    /// Reconcile the registry with the configured repos and persist the
+    /// result. Returns the names of repos that were removed (no longer in
+    /// the config); callers should also purge those repos' generated
+    /// state (graph, search, metadata).
     pub fn register_from_config(
         &mut self,
         config: &GatherStepConfig,
         config_root: impl AsRef<Path>,
-    ) -> Result<(), RegistryError> {
-        self.registry
+    ) -> Result<Vec<String>, RegistryError> {
+        let dropped = self
+            .registry
             .register_from_config(config, config_root.as_ref())?;
-        self.save()
+        self.save()?;
+        Ok(dropped)
     }
 
     pub fn register_from_config_file(
         &mut self,
         config_path: impl AsRef<Path>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<Vec<String>, RegistryError> {
         let config_path = config_path.as_ref();
         let config = GatherStepConfig::from_yaml_file(config_path)?;
         let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -354,12 +360,29 @@ impl WorkspaceRegistry {
         Ok(())
     }
 
+    /// Reconcile the registry with the configured repos.
+    ///
+    /// Upserts every repo present in `config` and removes any registered
+    /// repo whose name is no longer in the config. Returns the names of
+    /// repos that were dropped so callers can purge their generated
+    /// state (graph nodes, search documents, metadata rows) outside this
+    /// pure registry layer.
     pub fn register_from_config(
         &mut self,
         config: &GatherStepConfig,
         config_root: impl AsRef<Path>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<Vec<String>, RegistryError> {
         let config_root = config_root.as_ref();
+        let configured: std::collections::BTreeSet<String> =
+            config.repos.iter().map(|r| r.name.clone()).collect();
+
+        let stale: Vec<String> = self
+            .repos
+            .keys()
+            .filter(|name| !configured.contains(name.as_str()))
+            .cloned()
+            .collect();
+
         for repo in &config.repos {
             self.register_repo(
                 repo.name.clone(),
@@ -367,7 +390,12 @@ impl WorkspaceRegistry {
                 repo.depth,
             )?;
         }
-        Ok(())
+
+        for name in &stale {
+            let _removed = self.unregister_repo(name);
+        }
+
+        Ok(stale)
     }
 
     pub fn register_repo(
@@ -629,7 +657,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{RegistrySource, RegistryStore, RepoIndexMetadata, WorkspaceRegistry};
-    use crate::DepthLevel;
+    use crate::{DepthLevel, GatherStepConfig};
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -686,6 +714,67 @@ mod tests {
         let repo = reopened.repo("service-a").expect("repo should exist");
         assert_eq!(repo.depth_level, DepthLevel::Full);
         assert_eq!(repo.path, temp_dir.path().join("repos/service-a"));
+    }
+
+    #[test]
+    fn register_from_config_drops_repos_no_longer_in_config() {
+        let temp_dir = TestDir::new("dropped-repos");
+        let config_v1_path = temp_dir.path().join("gather-step.config.yaml");
+        fs::write(
+            &config_v1_path,
+            r"
+repos:
+  - name: service-a
+    path: ./repos/service-a
+  - name: service-b
+    path: ./repos/service-b
+",
+        )
+        .expect("v1 config should write");
+        let config_v1 =
+            GatherStepConfig::from_yaml_file(&config_v1_path).expect("v1 config should parse");
+
+        let registry_path = temp_dir.path().join("registry.json");
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        let dropped = registry
+            .register_from_config(&config_v1, temp_dir.path())
+            .expect("v1 register should succeed");
+        assert!(
+            dropped.is_empty(),
+            "Initial registration must not drop repos."
+        );
+        assert!(registry.registry().repo("service-a").is_some());
+        assert!(registry.registry().repo("service-b").is_some());
+
+        // Drop service-b from the config and re-register.
+        fs::write(
+            &config_v1_path,
+            r"
+repos:
+  - name: service-a
+    path: ./repos/service-a
+",
+        )
+        .expect("v2 config should write");
+        let config_v2 =
+            GatherStepConfig::from_yaml_file(&config_v1_path).expect("v2 config should parse");
+        let dropped = registry
+            .register_from_config(&config_v2, temp_dir.path())
+            .expect("v2 register should succeed");
+
+        assert_eq!(
+            dropped,
+            vec!["service-b".to_owned()],
+            "Repo removed from config must surface in dropped list.",
+        );
+        assert!(registry.registry().repo("service-a").is_some());
+        assert!(
+            registry.registry().repo("service-b").is_none(),
+            "service-b must be unregistered when no longer in the config.",
+        );
+
+        let reopened = WorkspaceRegistry::load_from_path(&registry_path).expect("registry loads");
+        assert!(reopened.repo("service-b").is_none());
     }
 
     #[test]

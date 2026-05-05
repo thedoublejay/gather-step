@@ -12,7 +12,6 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use kanal::bounded;
 use gather_step_core::{
     DeploymentConfig, EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind,
     node_id, normalize_path_separators, ref_node_id,
@@ -32,6 +31,7 @@ use gather_step_parser::{
     tsconfig::PathAliases,
     workspace_manifest::{WorkspacePackage, discover_workspace_packages, find_workspace_root},
 };
+use kanal::bounded;
 use rayon::prelude::*;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -222,56 +222,56 @@ enum WriteMessage {
 /// caller panics.
 ///
 /// Construct via [`BulkModeGuard::new`] and let the value drop at the end of
-/// the bulk region.  Do not call [`GraphStoreDb::set_bulk_mode`] directly
-/// inside a scope that uses this guard.
+/// the bulk region.
 ///
-/// # Nesting
+/// # Nesting and parallel callers
 ///
-/// The guard is backed by an [`AtomicBool`][std::sync::atomic::AtomicBool] —
-/// **not** a depth counter.  Creating an inner guard while an outer guard is
-/// live is therefore unsafe: the inner guard's `Drop` would prematurely
-/// disable bulk mode on the outer scope.  Call sites avoid this by checking
-/// [`GraphStoreDb::is_bulk_mode`] before constructing a nested guard and
-/// binding `None` when a workspace-level guard is already active (see
-/// `commit_repo_payload` for the pattern).
+/// The guard is backed by an [`AtomicUsize`][std::sync::atomic::AtomicUsize]
+/// reference count, so multiple guards can coexist safely. The first guard
+/// to enter the bulk region (count `0 → 1`) flips bulk mode on; the last
+/// guard to leave (count `1 → 0`) flushes accumulated pages and flips it
+/// off. Concurrent workspace-indexing threads no longer race each other
+/// into prematurely disabling bulk mode — every thread can hold its own
+/// guard without coordination.
 ///
 /// # Durability on drop
 ///
 /// While bulk mode is active [`GraphStoreDb::begin_write_txn`] uses
 /// `Durability::None`, so per-commit pages remain unsynced in the OS page
-/// cache.  On drop this guard (1) flips the atomic flag so any subsequent
-/// transactions default back to `Durability::Immediate`, then (2) commits
-/// an empty write transaction to force a fsync of everything written under
-/// None durability.  Without step 2 an `index` run that performs no further
-/// graph writes after the bulk session (e.g. a cold index on a workspace
-/// with no new git commits) would leave recent pages on disk but unsynced —
-/// a crash before the kernel flushed them would lose the index.
+/// cache.  On the **last** drop (count returns to `0`) this guard commits
+/// an empty `Durability::Immediate` transaction to fsync everything written
+/// under `None`. Without that step a cold index that performs no further
+/// graph writes would leave recent pages on disk but unsynced — a crash
+/// before the kernel flushed them would lose the index.
 pub struct BulkModeGuard<'a> {
     graph: &'a GraphStoreDb,
 }
 
 impl<'a> BulkModeGuard<'a> {
     pub(crate) fn new(graph: &'a GraphStoreDb) -> Self {
-        graph.set_bulk_mode(true);
+        let _new_count = graph.bulk_mode_acquire();
         Self { graph }
     }
 }
 
 impl Drop for BulkModeGuard<'_> {
     fn drop(&mut self) {
-        // Step 1: flip the flag so the empty commit below (and any caller
-        // work that happens after Drop returns) uses Immediate durability.
-        self.graph.set_bulk_mode(false);
-        // Step 2: force a fsync of accumulated None-durability pages by
-        // committing an empty Immediate-durability transaction.  Drop cannot
-        // propagate errors via `?`; log and continue — the alternative is
-        // silent data-loss risk if the caller never writes again before
-        // process exit.
+        let remaining = self.graph.bulk_mode_release();
+        if remaining > 0 {
+            // Outer guards are still live — they will fsync on their own
+            // drop; nothing for us to do.
+            return;
+        }
+        // Last guard out: force a fsync of accumulated None-durability
+        // pages by committing an empty Immediate-durability transaction.
+        // Drop cannot propagate errors via `?`; log and continue — the
+        // alternative is silent data-loss risk if the caller never writes
+        // again before process exit.
         if let Err(error) = self.graph.commit_durable_marker() {
             tracing::warn!(
                 %error,
-                "BulkModeGuard drop: durable marker commit failed; \
-                 bulk-mode writes may not be fsynced until the next commit",
+                "`BulkModeGuard` drop: durable marker commit failed; \
+                 bulk-mode writes may not be fsynced until the next commit.",
             );
         }
     }
@@ -353,13 +353,10 @@ impl RepoIndexer {
     ///
     /// # Panics
     ///
-    /// Panics if called while a bulk session is already active (i.e. this
-    /// method must not be nested).
+    /// Reference-counted: nesting another `BulkModeGuard` inside this
+    /// session is safe — the workspace-level guard remains live until
+    /// the last guard drops.
     pub fn begin_workspace_bulk_session(&self) -> BulkModeGuard<'_> {
-        assert!(
-            !self.storage.graph().is_bulk_mode(),
-            "begin_workspace_bulk_session called while a bulk session is already active"
-        );
         BulkModeGuard::new(self.storage.graph())
     }
 
@@ -416,18 +413,13 @@ impl RepoIndexer {
         let batch_size = self.options.batch_size.max(1);
         let mut stats = {
             let mut stats = IndexingStats::default();
-            // BulkModeGuard enables Durability::None for the duration of this
-            // block and restores normal durability on drop — even if the block
-            // exits via panic or early `?` return.
-            // If a workspace-level bulk session is already active (see
-            // `begin_workspace_bulk_session`), skip creating an inner guard so
-            // the workspace-level guard's lifetime controls when durability is
-            // restored.
-            let _bulk_guard = if self.storage.graph().is_bulk_mode() {
-                None
-            } else {
-                Some(BulkModeGuard::new(self.storage.graph()))
-            };
+            // `BulkModeGuard` enables `Durability::None` for the duration
+            // of this block and restores normal durability on drop — even
+            // if the block exits via panic or early `?` return. The guard
+            // is reference-counted, so an outer workspace-level guard
+            // (see `begin_workspace_bulk_session`) and an inner per-repo
+            // guard can coexist safely; the last drop fsyncs.
+            let _bulk_guard = BulkModeGuard::new(self.storage.graph());
             // Ship owned FileBatch values without deep-cloning their
             // Vec<NodeData>/Vec<EdgeData>.  Consuming with `by_ref().take()`
             // avoids the O(n) memmove that `Vec::drain(..take)` from the
@@ -486,7 +478,7 @@ impl RepoIndexer {
             .collect::<Vec<_>>();
         reconcile_changed_files_with_mode(&self.storage, repo, &changed_files, is_cold_index)
             .map_err(|error| {
-                warn!(repo, error = %error, "reconciliation failed after indexing");
+                warn!(repo, error = %error, "Reconciliation failed after indexing.");
                 error
             })?;
         info!(
@@ -592,6 +584,14 @@ impl RepoIndexer {
         let candidates = collect_deployment_artifact_paths(repo_root, &self.options.deployment)?;
         let mut stats = IndexingStats::default();
         if candidates.is_empty() {
+            // No deployment artifacts on disk right now — but the previous run
+            // may have indexed some that have since been deleted or renamed.
+            // Walk the repo's File nodes and purge any whose path the
+            // deployment classifier still recognises (Dockerfile, compose,
+            // kustomization, k8s manifests, GitHub Actions workflows, forced
+            // env files). Without this, removing the last deployment artifact
+            // leaves stale deployment topology in the graph.
+            self.purge_stale_deployment_artifacts(repo)?;
             stats.duration_ms = started_at.elapsed().as_millis();
             return Ok(stats);
         }
@@ -654,7 +654,12 @@ impl RepoIndexer {
             ) {
                 Ok(output) => output,
                 Err(error) => {
-                    warn!(repo, path = %file_path, error = %error, "skipping malformed deployment artifact");
+                    warn!(
+                        repo,
+                        path = %file_path,
+                        error = %error,
+                        "Skipping a malformed deployment artifact during indexing.",
+                    );
                     self.storage
                         .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
                     continue;
@@ -691,6 +696,45 @@ impl RepoIndexer {
         }
         stats.duration_ms = started_at.elapsed().as_millis();
         Ok(stats)
+    }
+
+    /// Purge File nodes whose path the deployment classifier recognises
+    /// but which are no longer on disk.
+    ///
+    /// The classifier runs in path-only mode (empty content) which catches
+    /// every artifact kind whose detection rule is filename-based:
+    /// Dockerfile, compose, kustomization, k8s manifests, GitHub Actions
+    /// workflows, and forced env files. Content-only Helm detection is
+    /// not covered by this purge — Helm artifacts under `charts/` /
+    /// `*/templates/` are filename-detectable, and a stranded Helm value
+    /// file outside those conventions is rare enough that we accept the
+    /// follow-up reindex cost.
+    fn purge_stale_deployment_artifacts(&self, repo: &str) -> Result<(), RepoIndexerError> {
+        let nodes = self.storage.graph().nodes_by_repo(repo)?;
+        let mut stale: Vec<String> = nodes
+            .into_iter()
+            .filter(|node| node.kind == NodeKind::File)
+            .filter_map(|node| {
+                let kind = detect_artifact_kind(&node.file_path, "");
+                let forced = self
+                    .options
+                    .deployment
+                    .forced_artifact_kind_for_path(&node.file_path)
+                    .is_some();
+                if kind != DeploymentArtifactKind::Unknown || forced {
+                    Some(node.file_path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        stale.sort();
+        stale.dedup();
+        self.storage.purge_deleted_files(repo, &stale)?;
+        Ok(())
     }
 
     pub fn index_repo_incremental(
@@ -1586,7 +1630,7 @@ impl RepoIndexer {
         let reconcile_stats =
             reconcile_changed_files_with_mode(&self.storage, repo, &changed_files, is_cold_index)
                 .map_err(|error| {
-                warn!(repo, error = %error, "reconciliation failed after indexing");
+                warn!(repo, error = %error, "Reconciliation failed after indexing.");
                 error
             })?;
         let reconcile_elapsed = reconcile_start.elapsed();
@@ -1688,7 +1732,11 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
         match extract_package_manifest(repo, &file_path, file_node.id, repo_node.id, &raw) {
             Ok(extraction) => extraction,
             Err(error) => {
-                warn!(repo, error = %error, "skipping malformed package manifest during indexing");
+                warn!(
+                    repo,
+                    error = %error,
+                    "Skipping a malformed package manifest during indexing.",
+                );
                 return None;
             }
         };
@@ -1766,7 +1814,7 @@ fn collect_deployment_artifact_paths(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                warn!(error = %error, "skipping deployment artifact walk entry");
+                warn!(error = %error, "Skipping a deployment-artifact walk entry that could not be read.");
                 continue;
             }
         };
@@ -1811,7 +1859,12 @@ fn append_compose_env_file_edges(
     let env_file_refs = match compose_env_file_refs(compose_content, compose_file_path) {
         Ok(refs) => refs,
         Err(error) => {
-            warn!(repo, path = %compose_file_path, error = %error, "skipping compose env_file expansion");
+            warn!(
+                repo,
+                path = %compose_file_path,
+                error = %error,
+                "Skipping the compose `env_file` expansion because the referenced file could not be read.",
+            );
             return Ok(());
         }
     };
@@ -1886,7 +1939,12 @@ fn append_compose_env_file_edges(
         ) {
             Ok(output) => output,
             Err(error) => {
-                warn!(repo, path = %env_file_path, error = %error, "skipping malformed compose env_file");
+                warn!(
+                    repo,
+                    path = %env_file_path,
+                    error = %error,
+                    "Skipping a malformed compose `env_file` referenced from this compose document.",
+                );
                 continue;
             }
         };
@@ -2610,6 +2668,67 @@ services:
                 .nodes_by_file("sample-service", "compose.yaml")
                 .expect("compose file nodes should load")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn full_reindex_with_no_remaining_deployment_artifacts_purges_stale_topology() {
+        let repo_root = TestDir::new("deployment-full-reindex-stale-repo");
+        let storage_root = TestDir::new("deployment-full-reindex-stale-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("src/app.ts"),
+            "export function run() { return true; }\n",
+        )
+        .expect("source fixture should write");
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            "services:\n  api:\n    environment:\n      DATABASE_URL: postgres://x\n",
+        )
+        .expect("compose fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("initial indexing should succeed");
+
+        // Sanity: deployment topology was indexed.
+        assert!(
+            !indexer
+                .storage()
+                .graph()
+                .nodes_by_file("sample-service", "compose.yaml")
+                .expect("compose file nodes should load")
+                .is_empty(),
+            "compose.yaml file node must exist after first index"
+        );
+
+        // Remove the only deployment artifact and run a full reindex.
+        fs::remove_file(repo_root.path().join("compose.yaml"))
+            .expect("compose fixture should delete");
+        indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("full reindex with no deployment artifacts should succeed");
+
+        assert!(
+            indexer
+                .storage()
+                .graph()
+                .nodes_by_file("sample-service", "compose.yaml")
+                .expect("compose file nodes should load")
+                .is_empty(),
+            "stale deployment topology must purge when the last artifact disappears"
+        );
+        assert!(
+            !indexer
+                .storage()
+                .graph()
+                .nodes_by_type(NodeKind::EnvVar)
+                .expect("env var nodes should load")
+                .iter()
+                .any(|node| node.qualified_name.as_deref() == Some("__env_var__database_url")),
+            "env vars produced from the deleted compose file must purge"
         );
     }
 
@@ -4215,6 +4334,64 @@ export class ItemController {
         assert!(
             !graph.is_bulk_mode(),
             "bulk mode must be off after the guard drops on panic"
+        );
+    }
+
+    #[test]
+    fn bulk_mode_guard_nesting_keeps_bulk_active_until_last_drop() {
+        let storage_root = TestDir::new("bulk-guard-nest");
+        let indexer = RepoIndexer::open(&storage_root.path, IndexingOptions::default())
+            .expect("indexer should open");
+        let graph = indexer.storage().graph();
+
+        let outer = super::BulkModeGuard::new(graph);
+        assert!(graph.is_bulk_mode(), "outer guard enables bulk mode");
+        {
+            let inner = super::BulkModeGuard::new(graph);
+            assert!(graph.is_bulk_mode(), "inner guard keeps bulk mode active");
+            drop(inner);
+            assert!(
+                graph.is_bulk_mode(),
+                "dropping the inner guard must not disable bulk mode while the outer guard is still live",
+            );
+        }
+        drop(outer);
+        assert!(
+            !graph.is_bulk_mode(),
+            "dropping the last guard finally disables bulk mode",
+        );
+    }
+
+    #[test]
+    fn bulk_mode_guards_in_parallel_threads_disable_only_on_last_drop() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let storage_root = TestDir::new("bulk-guard-parallel");
+        let indexer = Arc::new(
+            RepoIndexer::open(&storage_root.path, IndexingOptions::default())
+                .expect("indexer should open"),
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let indexer = Arc::clone(&indexer);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let guard = super::BulkModeGuard::new(indexer.storage().graph());
+                // All four threads must observe `is_bulk_mode == true` while
+                // any of them is holding a guard.
+                barrier.wait();
+                assert!(indexer.storage().graph().is_bulk_mode());
+                drop(guard);
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+        assert!(
+            !indexer.storage().graph().is_bulk_mode(),
+            "after every parallel guard drops, bulk mode must be off",
         );
     }
 }

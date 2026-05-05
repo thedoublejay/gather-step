@@ -263,7 +263,11 @@ impl StorageCoordinator {
             Err(error) => {
                 let _ = self.search().rollback();
                 let msg = error.to_string();
-                warn!(repo, error = %error, "reconcile_search could not rebuild search index");
+                warn!(
+                    repo,
+                    error = %error,
+                    "`reconcile_search` could not rebuild the search index for this repo; results may be stale.",
+                );
                 ReconcileOutcome::Partial { search_error: msg }
             }
         }
@@ -542,6 +546,45 @@ impl StorageCoordinator {
         }
 
         Ok(result)
+    }
+
+    /// Remove all generated state for `repo` — graph nodes/edges, search
+    /// documents, and metadata rows. Used when a repo is dropped from
+    /// the workspace config so subsequent queries do not surface rows
+    /// for repos the operator removed.
+    pub fn purge_repo(&self, repo: &str) -> Result<(), StorageCoordinatorError> {
+        let nodes = self.graph().nodes_by_repo(repo)?;
+        let mut file_paths: Vec<String> = nodes
+            .into_iter()
+            .filter(|node| node.kind == gather_step_core::NodeKind::File)
+            .map(|node| node.file_path)
+            .collect();
+        file_paths.sort();
+        file_paths.dedup();
+        if !file_paths.is_empty() {
+            self.purge_deleted_files(repo, &file_paths)?;
+        }
+        // Drop the search-side repo projection in case any search docs
+        // remained outside file-keyed deletion (defensive).
+        if let Err(error) = self.search().delete_by_repo(repo) {
+            warn!(
+                repo,
+                error = %error,
+                "Search delete-by-repo failed while purging the removed repo; the repo may still surface in search results.",
+            );
+        }
+        // Best-effort metadata sweep for any rows orphaned by file purges.
+        let _ = self
+            .metadata()
+            .clear_index_metadata_for_files(repo, &[])
+            .map_err(|error| {
+                warn!(
+                    repo,
+                    error = %error,
+                    "Metadata sweep failed while purging the removed repo; orphaned rows may remain.",
+                );
+            });
+        Ok(())
     }
 
     pub fn purge_deleted_files(

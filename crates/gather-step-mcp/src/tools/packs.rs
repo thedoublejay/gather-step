@@ -374,16 +374,15 @@ pub struct ChangeImpactSummary {
     pub direct_repos: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cross_repo_callers: Vec<CrossRepoCaller>,
-    /// Downstream repos with confirmed graph-traversal proof (edge-chain evidence).
-    /// This is the authoritative set; `downstream_repos` is a backward-compat alias.
+    /// Downstream repos with confirmed graph-traversal proof (edge-chain
+    /// evidence). This is the authoritative set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub confirmed_downstream_repos: Vec<String>,
-    /// Downstream repos inferred from partial evidence (repo-level deps, transport
-    /// hints). Populated only when `confirmed_downstream_repos` is empty.
+    /// Downstream repos inferred from partial evidence (repo-level deps,
+    /// transport hints). Populated only when `confirmed_downstream_repos`
+    /// is empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probable_downstream_repos: Vec<String>,
-    /// Backward-compatibility alias for `confirmed_downstream_repos`.
-    pub downstream_repos: Vec<String>,
     pub unresolved_possible: Vec<String>,
     /// Structured metadata for repos dropped by a fan-out cap. Absent when no
     /// repos were truncated.
@@ -1250,13 +1249,12 @@ fn assemble_context_pack_for_symbol(
                     .filter(|repo| options.repo_filter.is_none_or(|selected| repo == selected))
                     .collect(),
                 cross_repo_callers,
-                confirmed_downstream_repos: downstream_repos.clone(),
                 probable_downstream_repos: if downstream_repos.is_empty() {
                     proof_probable_repos.clone()
                 } else {
                     Vec::new()
                 },
-                downstream_repos,
+                confirmed_downstream_repos: downstream_repos,
                 unresolved_possible,
                 truncated_repos: truncated_repos_meta,
             },
@@ -2651,7 +2649,6 @@ fn cached_context_pack_anchor_repo(
 fn refresh_cached_rollout_gap_state(response: &mut ContextPackResponse) {
     let impact = &response.data.change_impact;
     let has_rollout_signal = !impact.confirmed_downstream_repos.is_empty()
-        || !impact.downstream_repos.is_empty()
         || !impact.probable_downstream_repos.is_empty();
     if !has_rollout_signal {
         return;
@@ -4075,8 +4072,7 @@ fn apply_proof_derived_change_impact(
     let mut cross_repo_callers = cross_repo_callers_from_proofs(ctx, &proofs, anchor_repo)?;
     merge_cross_repo_callers(&mut cross_repo_callers, persisted_callers);
     response.data.change_impact.cross_repo_callers = cross_repo_callers;
-    response.data.change_impact.confirmed_downstream_repos = confirmed.clone();
-    response.data.change_impact.downstream_repos = confirmed;
+    response.data.change_impact.confirmed_downstream_repos = confirmed;
     response.data.change_impact.probable_downstream_repos = probable;
     if !response
         .data
@@ -4358,21 +4354,6 @@ mod tests {
 
     // ChangeImpactSummary dual-confidence tier
     #[test]
-    fn confirmed_repos_populate_backward_compat_downstream_repos() {
-        // downstream_repos must equal confirmed_downstream_repos for backward compat.
-        let summary = ChangeImpactSummary {
-            direct_repos: vec!["svc-a".to_owned()],
-            cross_repo_callers: Vec::new(),
-            confirmed_downstream_repos: vec!["svc-b".to_owned()],
-            probable_downstream_repos: Vec::new(),
-            downstream_repos: vec!["svc-b".to_owned()],
-            unresolved_possible: Vec::new(),
-            truncated_repos: None,
-        };
-        assert_eq!(summary.downstream_repos, summary.confirmed_downstream_repos);
-    }
-
-    #[test]
     fn probable_repos_surfaced_when_confirmed_is_empty() {
         // When confirmed is empty, probable should carry the fallback repos.
         let summary = ChangeImpactSummary {
@@ -4380,7 +4361,6 @@ mod tests {
             cross_repo_callers: Vec::new(),
             confirmed_downstream_repos: Vec::new(),
             probable_downstream_repos: vec!["svc-c".to_owned()],
-            downstream_repos: Vec::new(),
             unresolved_possible: vec!["svc-c".to_owned()],
             truncated_repos: None,
         };
@@ -4406,7 +4386,6 @@ mod tests {
             cross_repo_callers: Vec::new(),
             confirmed_downstream_repos: vec!["svc-b".to_owned()],
             probable_downstream_repos: Vec::new(),
-            downstream_repos: vec!["svc-b".to_owned()],
             unresolved_possible: Vec::new(),
             truncated_repos: None,
         };
@@ -5497,9 +5476,6 @@ mod tests {
                         .map(|index| format!("repo-{index}"))
                         .collect(),
                     probable_downstream_repos: Vec::new(),
-                    downstream_repos: (0..confirmed_repos)
-                        .map(|index| format!("repo-{index}"))
-                        .collect(),
                     unresolved_possible: Vec::new(),
                     truncated_repos: None,
                 },
@@ -5887,9 +5863,6 @@ mod tests {
                 }
               ],
               "direct_repos": [],
-              "downstream_repos": [
-                "string"
-              ],
               "truncated_repos": {
                 "count": "number",
                 "names": [
