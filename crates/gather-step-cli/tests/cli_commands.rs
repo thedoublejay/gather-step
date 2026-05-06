@@ -81,6 +81,26 @@ fn stdout_json(output: &process::Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should contain valid json")
 }
 
+fn sorted_json_keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("value should be a JSON object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn assert_json_keys(value: &Value, expected: &[&str]) {
+    let mut expected = expected
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(sorted_json_keys(value), expected);
+}
+
 #[test]
 fn no_args_non_interactive_prints_help() {
     let temp = TempDir::new("no-args-help");
@@ -389,6 +409,30 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
         ],
     );
     let qa_evidence_json = stdout_json(&qa_evidence);
+    assert_json_keys(
+        &qa_evidence_json,
+        &[
+            "base_ref",
+            "event",
+            "gaps",
+            "head_ref",
+            "manifest_summary",
+            "rows",
+            "schema_version",
+            "target",
+        ],
+    );
+    assert_json_keys(
+        &qa_evidence_json["manifest_summary"],
+        &[
+            "dropped_kinds",
+            "gap_count",
+            "omitted_rows",
+            "pack_modes",
+            "row_count",
+            "truncated",
+        ],
+    );
     assert_eq!(qa_evidence_json["event"], "qa_evidence_completed");
     assert_eq!(qa_evidence_json["schema_version"], "qa-evidence.v0.1");
     assert_eq!(qa_evidence_json["target"], "OrderList");
@@ -398,6 +442,24 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     let qa_rows = qa_evidence_json["rows"]
         .as_array()
         .expect("qa evidence rows array");
+    let required_row_keys = [
+        "citation_key",
+        "confidence",
+        "fact_kind",
+        "id",
+        "reason",
+        "source_resolver",
+        "surface",
+    ];
+    let optional_row_keys = [
+        "category",
+        "file_path",
+        "line_start",
+        "repo",
+        "symbol_id",
+        "symbol_kind",
+        "symbol_name",
+    ];
     assert!(
         qa_rows
             .iter()
@@ -414,6 +476,51 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .as_str()
             .is_some_and(|key| !key.is_empty())
     }));
+    for row in qa_rows {
+        let keys = sorted_json_keys(row);
+        for required in required_row_keys {
+            assert!(
+                keys.iter().any(|key| key == required),
+                "qa-evidence row must contain required key `{required}`: {row:?}"
+            );
+        }
+        assert!(
+            keys.iter()
+                .all(|key| required_row_keys.contains(&key.as_str())
+                    || optional_row_keys.contains(&key.as_str())),
+            "qa-evidence row contains an undocumented key set: {keys:?}"
+        );
+    }
+
+    let qa_evidence_missing_refs = run_ok(temp.path(), &["qa-evidence", "OrderList", "--json"]);
+    let qa_evidence_missing_refs_json = stdout_json(&qa_evidence_missing_refs);
+    let qa_gaps = qa_evidence_missing_refs_json["gaps"]
+        .as_array()
+        .expect("qa evidence gaps array");
+    for gap in qa_gaps {
+        assert_json_keys(
+            gap,
+            &[
+                "blocks_complete_coverage",
+                "id",
+                "kind",
+                "message",
+                "source_resolver",
+            ],
+        );
+    }
+    assert!(qa_gaps.iter().any(|gap| {
+        gap["kind"] == "missing_diff_refs" && gap["blocks_complete_coverage"] == false
+    }));
+
+    let invalid_qa_route = run_fail(
+        temp.path(),
+        &["qa-evidence", "--route-method", "GET", "--json"],
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid_qa_route.stderr)
+            .contains("--route-method and --route-path must be provided together")
+    );
 
     let repo_pack = run_ok(
         temp.path(),
