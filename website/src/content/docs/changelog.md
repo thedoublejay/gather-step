@@ -5,6 +5,25 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v3.5.3 (2026-05-06)
+
+Release status: **planned**.
+
+Patch on top of v3.5.2. Fixes JSON watch-mode automation by adding an explicit readiness event after filesystem watchers are registered, so scripts can wait before touching files and avoid racing startup.
+
+### Fixes
+
+#### CLI / watch mode
+
+- `gather-step watch --json` now emits `{"event":"watch_ready", ...}` after all configured repo watchers are installed.
+- `gather-step serve --watch` now emits a matching `watch:ready repos=N` line for embedded watcher sessions.
+- Count-limited watch flows (`watch 1`, `watch N`) can now be scripted reliably: wait for `watch_ready`, mutate files, then expect `watch_indexing_complete` and final `watch_status`.
+- Added an integration regression that waits for the ready event, edits a fixture file, and verifies the process exits after one indexing run.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, website package metadata, and landing-page version stamps to `3.5.3`.
+
 ## v3.5.2 (2026-05-06)
 
 Release status: **released**.

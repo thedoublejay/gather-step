@@ -77,6 +77,9 @@ pub enum WatchCause {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
+    Ready {
+        repos: Vec<String>,
+    },
     IndexingStart {
         repo: String,
         files: Vec<String>,
@@ -311,6 +314,9 @@ impl Watcher {
             watchers.push(watcher);
         }
         drop(notify_tx);
+        let _ = self.event_tx.send(WatchEvent::Ready {
+            repos: self.repos.keys().cloned().collect(),
+        });
 
         let mut interval = tokio::time::interval(self.config.poll_interval);
         let mut pending = BTreeMap::<String, PendingRepoChange>::new();
@@ -971,7 +977,8 @@ mod tests {
                         assert_eq!(changed.modified.len(), 1);
                         break;
                     }
-                    WatchEvent::IndexingStart { .. }
+                    WatchEvent::Ready { .. }
+                    | WatchEvent::IndexingStart { .. }
                     | WatchEvent::Overflow { .. }
                     | WatchEvent::Error { .. } => {}
                 }
@@ -1055,7 +1062,8 @@ repos:
             loop {
                 match events.recv().await.expect("event should arrive") {
                     WatchEvent::IndexingComplete { repo, .. } => break repo,
-                    WatchEvent::IndexingStart { .. }
+                    WatchEvent::Ready { .. }
+                    | WatchEvent::IndexingStart { .. }
                     | WatchEvent::Overflow { .. }
                     | WatchEvent::Error { .. } => {}
                 }

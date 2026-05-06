@@ -167,6 +167,9 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
             };
 
             let emit_result = match event {
+                WatchEvent::Ready { repos } => {
+                    emit_watch_line(&format!("watch:ready repos={}", repos.len()))
+                }
                 WatchEvent::IndexingStart { repo, files, cause } => {
                     let cause = match cause {
                         WatchCause::Paths => "paths",

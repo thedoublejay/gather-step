@@ -78,6 +78,12 @@ struct WatchEventOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct WatchReadyOutput {
+    event: &'static str,
+    repos: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct WatchStatusOutput {
     event: &'static str,
     events_seen: u64,
@@ -219,6 +225,23 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
             };
 
             let emit_result = match event {
+                WatchEvent::Ready { repos } => {
+                    if event_output.is_json() {
+                        event_output.emit(&WatchReadyOutput {
+                            event: "watch_ready",
+                            repos,
+                        })
+                    } else if progress_visible {
+                        let line = format!(
+                            "  {} Watcher ready for {} repos",
+                            style("*").green(),
+                            repos.len()
+                        );
+                        emit_watch_human_line(event_bar.as_ref(), line)
+                    } else {
+                        emit_watch_line(&format!("watch:ready repos={}", repos.len()))
+                    }
+                }
                 WatchEvent::IndexingStart { repo, files, cause } => {
                     let cause = match cause {
                         WatchCause::Paths => "paths",
