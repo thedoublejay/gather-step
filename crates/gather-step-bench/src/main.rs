@@ -457,7 +457,7 @@ fn run_command(
         Thresholds::load(thresholds_path)?
     } else {
         print_status(&format!(
-            "warning: thresholds file not found at {}; using defaults",
+            "Warning: Thresholds file not found at {}; using defaults.",
             thresholds_path.display()
         ));
         Thresholds::default_thresholds()
@@ -524,7 +524,7 @@ fn workspace_run_command(
         Thresholds::load(thresholds_path)?
     } else {
         print_status(&format!(
-            "warning: thresholds file not found at {}; using defaults",
+            "Warning: Thresholds file not found at {}; using defaults.",
             thresholds_path.display()
         ));
         Thresholds::default_thresholds()
@@ -706,7 +706,7 @@ fn planning_oracle_command(
         Thresholds::load(thresholds_path)?
     } else {
         print_status(&format!(
-            "warning: thresholds file not found at {}; using defaults",
+            "Warning: Thresholds file not found at {}; using defaults.",
             thresholds_path.display()
         ));
         Thresholds::default_thresholds()

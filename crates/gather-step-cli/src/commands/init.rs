@@ -49,7 +49,7 @@ pub struct InitArgs {
     pub no_watch: bool,
     #[arg(
         long,
-        help = "Generate .claude/rules/, CLAUDE.gather.md, and AGENTS.gather.md"
+        help = "Generate .claude/rules/, CLAUDE.gather.md, AGENTS.gather.md, and managed includes"
     )]
     pub generate_ai_files: bool,
     #[arg(long = "no-generate-ai-files", conflicts_with = "generate_ai_files")]
@@ -164,7 +164,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     } else {
         prompt_yes_no(
             3,
-            "Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md)",
+            "Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md, managed includes)",
             true,
         )?
     };

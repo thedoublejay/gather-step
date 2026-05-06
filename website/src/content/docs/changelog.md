@@ -23,6 +23,8 @@ Patch on top of v3.5.3. Fixes the AI-docs reach problem reported on a 32-repo mo
 
 - `gather-step init` (and `gather-step generate claude-md --target=summary --install-include` / `gather-step generate agents-md --install-include`) appends a sentinel-fenced managed block to `CLAUDE.md` and `AGENTS.md` at the workspace root. The block reads `@CLAUDE.gather.md` / `@AGENTS.gather.md` so the generated context is auto-loaded by Claude Code and Codex without any manual edit.
 - The managed block is bounded by `<!-- gather-step:start -->` / `<!-- gather-step:end -->` so re-runs are idempotent and never disturb user-authored content above or below the fence.
+- `--install-include` is guarded so it only runs with the default root summary sidecar. `claude-md --target=rules --install-include` and `--install-include --output <custom-file>` now fail fast instead of silently writing a main-file include that cannot load the generated summary.
+- Related error and warning output now uses consistent `Warning:` / `The ... flag ...` grammar for the include flow and destructive-clean confirmation.
 
 #### Restored "use it / cite it / report it" guidance
 
@@ -31,7 +33,7 @@ Patch on top of v3.5.3. Fixes the AI-docs reach problem reported on a 32-repo mo
 #### CLI + MCP surface always in sync
 
 - `crates/gather-step-mcp/src/catalog.rs` exports `MCP_TOOLS` as the canonical `(name, description)` table the renderer reads from. A new test (`mcp_tools_catalog_matches_registered_mcp_tools`) compares the catalog against `GatherStepMcpServer::registered_tool_names()` so any new tool added to the server fails CI until the catalog reflects it.
-- A matching `CLI_COMMANDS` catalog in `crates/gather-step-cli/src/commands/mod.rs` populates the new `## CLI Commands` section, so the master summary lists every user-visible subcommand (including `pr-review`, `projection-impact`, `deployment-topology`, `pack`, `events`, `conventions`).
+- A matching `CLI_COMMANDS` catalog in `crates/gather-step-cli/src/commands/mod.rs` populates the new `## CLI Commands` section, so the master summary lists every user-visible subcommand (including `pr-review`, `projection-impact`, `deployment-topology`, `pack`, `events`, `conventions`). A unit test compares the catalog to Clap's visible subcommands to catch drift.
 
 ### Release-wide
 

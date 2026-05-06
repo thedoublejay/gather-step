@@ -525,7 +525,60 @@ fn generate_claude_md_rejects_unknown_repo_filter() {
         &["generate", "claude-md", "--repo", "missing_repo", "--json"],
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("repo `missing_repo` is not present in the workspace registry"));
+    assert!(stderr.contains("Repo `missing_repo` is not present in the workspace registry."));
+}
+
+#[test]
+fn generate_install_include_requires_default_summary_sidecar() {
+    let temp = TempDir::new("generate-install-include");
+    write_fixture_workspace(temp.path());
+
+    run_ok(temp.path(), &["init"]);
+
+    let rules_target = run_fail(
+        temp.path(),
+        &["generate", "claude-md", "--install-include", "--json"],
+    );
+    assert!(
+        String::from_utf8_lossy(&rules_target.stderr)
+            .contains("The --install-include flag is only supported")
+    );
+
+    let custom_claude = temp.path().join("custom-claude.md");
+    let custom_claude = custom_claude.to_str().expect("utf-8 temp path");
+    let explicit_claude = run_fail(
+        temp.path(),
+        &[
+            "generate",
+            "claude-md",
+            "--target",
+            "summary",
+            "--output",
+            custom_claude,
+            "--install-include",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&explicit_claude.stderr)
+            .contains("Omit --output so the generated sidecar is written at the workspace root.")
+    );
+
+    let custom_agents = temp.path().join("custom-agents.md");
+    let custom_agents = custom_agents.to_str().expect("utf-8 temp path");
+    let explicit_agents = run_fail(
+        temp.path(),
+        &[
+            "generate",
+            "agents-md",
+            "--output",
+            custom_agents,
+            "--install-include",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&explicit_agents.stderr)
+            .contains("Omit --output so the generated sidecar is written at the workspace root.")
+    );
 }
 
 #[test]

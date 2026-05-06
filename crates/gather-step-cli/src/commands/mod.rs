@@ -254,17 +254,32 @@ fn cli_styles() -> Styles {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::BTreeSet, path::Path};
 
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use pretty_assertions::assert_eq;
 
-    use super::{Cli, Command};
+    use super::{CLI_COMMANDS, Cli, Command};
     use crate::commands::{
         clean::CleanArgs, compact::CompactArgs, index::IndexArgs,
         projection_impact::EvidenceVerbosityArg, reindex::ReindexArgs, serve::ServeArgs,
         setup_mcp::McpScope, trace::TraceCommand, tui::TuiArgs, watch::WatchArgs,
     };
+
+    #[test]
+    fn cli_commands_catalog_matches_visible_subcommands() {
+        let rendered_commands = CLI_COMMANDS
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        let clap_commands = Cli::command()
+            .get_subcommands()
+            .filter(|command| command.get_name() != "mcp")
+            .map(|command| command.get_name().to_owned())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(rendered_commands, clap_commands);
+    }
 
     #[test]
     fn parses_index_args_with_global_flags() {

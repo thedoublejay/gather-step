@@ -108,6 +108,12 @@ fn generate_claude_md_rules(
     app: &AppContext,
     args: GenerateClaudeMdArgs,
 ) -> Result<GenerateOutput> {
+    if args.install_include {
+        bail!(
+            "The --install-include flag is only supported with `gather-step generate claude-md --target=summary`."
+        );
+    }
+
     let repo_filter = args.repo.or_else(|| app.repo_filter.clone());
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
@@ -115,7 +121,7 @@ fn generate_claude_md_rules(
     if let Some(repo) = repo_filter.as_deref()
         && registry.registry().repo(repo).is_none()
     {
-        bail!("repo `{repo}` is not present in the workspace registry");
+        bail!("Repo `{repo}` is not present in the workspace registry.");
     }
     let graph = GraphStoreDb::open(&paths.graph_path)
         .with_context(|| format!("opening {}", paths.graph_path.display()))?;
@@ -150,8 +156,15 @@ fn generate_claude_md_summary(
     args: GenerateClaudeMdArgs,
 ) -> Result<GenerateOutput> {
     if args.repo.is_some() || app.repo_filter.is_some() {
-        bail!("--repo is only supported by `generate claude-md --target=rules`");
+        bail!(
+            "The --repo flag is only supported by `gather-step generate claude-md --target=rules`."
+        );
     }
+    ensure_default_output_for_install_include(
+        args.install_include,
+        args.output.as_deref(),
+        "CLAUDE.gather.md",
+    )?;
 
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
@@ -185,6 +198,12 @@ fn generate_claude_md_summary(
 }
 
 fn generate_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<GenerateOutput> {
+    ensure_default_output_for_install_include(
+        args.install_include,
+        args.output.as_deref(),
+        "AGENTS.gather.md",
+    )?;
+
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
         .with_context(|| format!("opening {}", paths.registry_path.display()))?;
@@ -237,8 +256,9 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
     let can_generate_rules = paths.graph_path.exists() && metadata_path.exists();
 
     if !can_generate_rules {
-        output
-            .line("Warning: Skipped generating .claude/rules/ because no workspace index exists.");
+        output.line(
+            "Warning: Skipped generating `.claude/rules/` because no workspace index exists.",
+        );
         output.line(
             "Hint: Run `gather-step index`, then `gather-step generate claude-md --target rules`.",
         );
@@ -413,6 +433,19 @@ fn write_text_output(output_path: &Path, content: &str) -> Result<GeneratedFileO
         path: output_path.display().to_string(),
         bytes: content.len(),
     })
+}
+
+fn ensure_default_output_for_install_include(
+    install_include: bool,
+    output: Option<&Path>,
+    generated_filename: &str,
+) -> Result<()> {
+    if install_include && output.is_some() {
+        bail!(
+            "The --install-include flag writes a managed include for `{generated_filename}`. Omit --output so the generated sidecar is written at the workspace root."
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
