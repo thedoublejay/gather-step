@@ -7,6 +7,7 @@ pub mod daemon_protocol;
 pub mod daemon_proxy;
 pub mod daemon_server;
 pub mod errors;
+pub mod managed_block;
 pub mod path_safety;
 
 pub mod app;

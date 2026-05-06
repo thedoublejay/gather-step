@@ -165,7 +165,7 @@ fn confirm_destructive_clean_io(
 ) -> Result<()> {
     writeln!(
         stdout,
-        "Warning: this will permanently delete indexed state."
+        "Warning: This will permanently delete indexed state."
     )?;
     writeln!(stdout, "  registry: {}", registry_path.display())?;
     writeln!(stdout, "  storage: {}", storage_root.display())?;
@@ -391,7 +391,7 @@ mod tests {
             .expect("confirmation should accept clean token");
 
         let printed = String::from_utf8(stdout).expect("prompt should be utf8");
-        assert!(printed.contains("Warning: this will permanently delete indexed state."));
+        assert!(printed.contains("Warning: This will permanently delete indexed state."));
         assert!(printed.contains("Type `clean` to proceed:"));
     }
 }

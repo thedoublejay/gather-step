@@ -90,8 +90,14 @@ fn init_generate_ai_files_without_index_writes_summaries_and_skips_rules() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Warning: Skipped generating .claude/rules/"));
+    assert!(stdout.contains("Warning: Skipped generating `.claude/rules/`"));
     assert!(tmp.path().join("CLAUDE.gather.md").exists());
     assert!(tmp.path().join("AGENTS.gather.md").exists());
+    let claude_md = fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("CLAUDE.md");
+    assert!(claude_md.contains("<!-- gather-step:start -->"));
+    assert!(claude_md.contains("@CLAUDE.gather.md"));
+    let agents_md = fs::read_to_string(tmp.path().join("AGENTS.md")).expect("AGENTS.md");
+    assert!(agents_md.contains("<!-- gather-step:start -->"));
+    assert!(agents_md.contains("@AGENTS.gather.md"));
     assert!(!tmp.path().join(".claude/rules").exists());
 }

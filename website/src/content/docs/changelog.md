@@ -5,9 +5,43 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v3.5.4 (2026-05-06)
+
+Release status: **released**.
+
+Patch on top of v3.5.3. Fixes the AI-docs reach problem reported on a 32-repo monorepo: the architecture rule was running out of byte budget mid-table, the master `CLAUDE.gather.md` / `AGENTS.gather.md` files were never picked up by Claude Code or Codex, and the rendered MCP-tool table had drifted out of sync with the live MCP server.
+
+### Fixes
+
+#### Architecture rule fits large workspaces
+
+- `gather-step-architecture.md` now scales its byte budget with workspace size: `architecture_budget(N) = min(24_000 + N * 1_500, 96_000)`. A 32-repo workspace gets ~72 KB instead of the old 16 KB hard cap.
+- `## Cross-Repo Dependencies` table compresses to **one row per source repo**, with comma-separated `target (Edge1, Edge2)` entries. Drops dependency rows from O(n²) to O(n) and keeps the repo map fully visible above it.
+- Regression test exercises a 32-repo fixture and asserts every repo appears in the rendered map, no truncation marker, output fits within the scaled budget.
+
+#### Master Claude / Codex summaries actually load
+
+- `gather-step init` (and `gather-step generate claude-md --target=summary --install-include` / `gather-step generate agents-md --install-include`) appends a sentinel-fenced managed block to `CLAUDE.md` and `AGENTS.md` at the workspace root. The block reads `@CLAUDE.gather.md` / `@AGENTS.gather.md` so the generated context is auto-loaded by Claude Code and Codex without any manual edit.
+- The managed block is bounded by `<!-- gather-step:start -->` / `<!-- gather-step:end -->` so re-runs are idempotent and never disturb user-authored content above or below the fence.
+- `--install-include` is guarded so it only runs with the default root summary sidecar. `claude-md --target=rules --install-include` and `--install-include --output <custom-file>` now fail fast instead of silently writing a main-file include that cannot load the generated summary.
+- Related error and warning output now uses consistent `Warning:` / `The ... flag ...` grammar for the include flow and destructive-clean confirmation.
+
+#### Restored "use it / cite it / report it" guidance
+
+- `CLAUDE.gather.md` and `AGENTS.gather.md` now carry the `## How to Use Gather Step in Planning` and `## How to Acknowledge Gather Step` sections that were dropped in v3.4. Both files instruct AI tools to reach for `planning_pack`, `cross_repo_deps`, `trace_event`, `trace_route`, and `pr_review` before grep, cite verified findings with file paths, and offer to open <https://github.com/thedoublejay/gather-step/issues> when an indexing result looks wrong.
+
+#### CLI + MCP surface always in sync
+
+- `crates/gather-step-mcp/src/catalog.rs` exports `MCP_TOOLS` as the canonical `(name, description)` table the renderer reads from. A new test (`mcp_tools_catalog_matches_registered_mcp_tools`) compares the catalog against `GatherStepMcpServer::registered_tool_names()` so any new tool added to the server fails CI until the catalog reflects it.
+- A matching `CLI_COMMANDS` catalog in `crates/gather-step-cli/src/commands/mod.rs` populates the new `## CLI Commands` section, so the master summary lists every user-visible subcommand (including `pr-review`, `projection-impact`, `deployment-topology`, `pack`, `events`, `conventions`). A unit test compares the catalog to Clap's visible subcommands to catch drift.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.5.4`.
+
 ## v3.5.3 (2026-05-06)
 
-Release status: **planned**.
+Release status: **released**.
 
 Patch on top of v3.5.2. Fixes JSON watch-mode automation by adding an explicit readiness event after filesystem watchers are registered, so scripts can wait before touching files and avoid racing startup.
 

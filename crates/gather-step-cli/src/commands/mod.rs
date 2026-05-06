@@ -40,6 +40,58 @@ const VERSION_LONG: &str = concat!(
     "\nCopyright (c) 2026 JJ Adonis. Licensed under the MIT License.",
 );
 
+/// Canonical catalog of user-visible CLI subcommands.
+///
+/// Generated docs (`CLAUDE.gather.md`, `AGENTS.gather.md`) read from this
+/// list, so adding or renaming a subcommand needs to be reflected here.
+/// Hidden commands (`mcp`) and arg-less invocations (`no-args`) are
+/// intentionally omitted.
+pub const CLI_COMMANDS: &[(&str, &str)] = &[
+    (
+        "init",
+        "Discover repos, write a config, and run the setup wizard",
+    ),
+    ("index", "Index configured repos into the workspace graph"),
+    ("reindex", "Re-index repos with full or selective coverage"),
+    (
+        "watch",
+        "Watch repos for changes and incrementally re-index",
+    ),
+    ("clean", "Remove indexed state and storage artifacts"),
+    ("compact", "Compact storage in place to reclaim space"),
+    ("status", "Show indexing status and counts per repo"),
+    ("storage-report", "Print storage size and segment breakdown"),
+    ("doctor", "Run health checks against the workspace"),
+    ("search", "Search indexed symbols, files, and concepts"),
+    ("trace", "Trace impact, events, or routes from a target"),
+    ("impact", "Inspect change-impact for a symbol or file"),
+    (
+        "projection-impact",
+        "Trace projected fields, filters, and backfill evidence",
+    ),
+    (
+        "deployment-topology",
+        "Inspect deployment topology and shared infra",
+    ),
+    ("events", "Inspect events, queues, and orphan topics"),
+    ("conventions", "Summarize detected workspace conventions"),
+    (
+        "pack",
+        "Render task / planning / debug / review context packs",
+    ),
+    (
+        "generate",
+        "Generate AI docs (claude-md, agents-md, codeowners)",
+    ),
+    ("setup-mcp", "Register gather-step as an MCP server"),
+    ("serve", "Run the long-lived JSON-API server"),
+    (
+        "pr-review",
+        "Build a disposable PR-scoped review and emit the delta report",
+    ),
+    ("tui", "Launch the interactive terminal UI"),
+];
+
 #[derive(Debug, Parser)]
 #[command(
     name = "gather-step",
@@ -202,17 +254,32 @@ fn cli_styles() -> Styles {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::BTreeSet, path::Path};
 
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use pretty_assertions::assert_eq;
 
-    use super::{Cli, Command};
+    use super::{CLI_COMMANDS, Cli, Command};
     use crate::commands::{
         clean::CleanArgs, compact::CompactArgs, index::IndexArgs,
         projection_impact::EvidenceVerbosityArg, reindex::ReindexArgs, serve::ServeArgs,
         setup_mcp::McpScope, trace::TraceCommand, tui::TuiArgs, watch::WatchArgs,
     };
+
+    #[test]
+    fn cli_commands_catalog_matches_visible_subcommands() {
+        let rendered_commands = CLI_COMMANDS
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        let clap_commands = Cli::command()
+            .get_subcommands()
+            .filter(|command| command.get_name() != "mcp")
+            .map(|command| command.get_name().to_owned())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(rendered_commands, clap_commands);
+    }
 
     #[test]
     fn parses_index_args_with_global_flags() {

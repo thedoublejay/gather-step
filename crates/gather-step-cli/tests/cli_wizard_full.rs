@@ -38,6 +38,10 @@ fn init_flag_overrides_run_full_setup_without_prompting() {
     assert!(tmp.path().join(".gather-step/registry.json").exists());
     assert!(tmp.path().join("CLAUDE.gather.md").exists());
     assert!(tmp.path().join("AGENTS.gather.md").exists());
+    let claude_md = fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("CLAUDE.md");
+    assert!(claude_md.contains("@CLAUDE.gather.md"));
+    let agents_md = fs::read_to_string(tmp.path().join("AGENTS.md")).expect("AGENTS.md");
+    assert!(agents_md.contains("@AGENTS.gather.md"));
     assert!(
         tmp.path()
             .join(".claude/rules/gather-step-architecture.md")
