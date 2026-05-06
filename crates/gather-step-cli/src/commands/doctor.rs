@@ -235,7 +235,7 @@ fn inspect_repo(
     })
 }
 
-fn count_actionable_unresolved_inputs(inputs: &[ResolutionInput]) -> usize {
+pub(crate) fn count_actionable_unresolved_inputs(inputs: &[ResolutionInput]) -> usize {
     inputs
         .iter()
         .flat_map(|input| input.call_sites.iter())
@@ -365,19 +365,28 @@ fn is_non_actionable_test_file(path: &std::path::Path) -> bool {
 }
 
 fn is_global_runtime_function(name: &str) -> bool {
+    let mut name = name.to_owned();
+    name.make_ascii_lowercase();
     matches!(
-        name,
-        "setTimeout"
-            | "clearTimeout"
-            | "setInterval"
-            | "clearInterval"
-            | "requestAnimationFrame"
-            | "cancelAnimationFrame"
-            | "parseInt"
-            | "parseFloat"
-            | "encodeURIComponent"
-            | "decodeURIComponent"
-            | "isNaN"
+        name.as_str(),
+        "settimeout"
+            | "cleartimeout"
+            | "setinterval"
+            | "clearinterval"
+            | "requestanimationframe"
+            | "cancelanimationframe"
+            | "parseint"
+            | "parsefloat"
+            | "encodeuricomponent"
+            | "decodeuricomponent"
+            | "isnan"
+            | "date"
+            | "promise"
+            | "map"
+            | "set"
+            | "resolve"
+            | "reject"
+            | "toisostring"
     )
 }
 
@@ -392,6 +401,7 @@ fn is_non_actionable_runtime_hint(hint: &str, name: &str) -> bool {
         hint,
         h if h.starts_with("cy.")
             || h.starts_with("console.")
+            || h.starts_with("process.")
             || h.starts_with("snackbar.")
             || h.starts_with("document.")
             || h.starts_with("window.location.")
@@ -406,11 +416,18 @@ fn is_non_actionable_runtime_hint(hint: &str, name: &str) -> bool {
             || h.starts_with("queryclient.")
             || h.starts_with("theme.")
             || h.starts_with("urlsearchparams")
+            || h == "promise"
+            || h == "date"
+            || h == "map"
     ) {
         return true;
     }
 
     let receiver = hint.rsplit_once('.').map_or("", |(recv, _)| recv);
+    if is_external_runtime_receiver(receiver) {
+        return true;
+    }
+
     if receiver.eq_ignore_ascii_case("this") {
         return false;
     }
@@ -422,6 +439,7 @@ fn is_non_actionable_runtime_hint(hint: &str, name: &str) -> bool {
             | "find"
             | "push"
             | "foreach"
+            | "join"
             | "keys"
             | "replace"
             | "tolowercase"
@@ -454,6 +472,67 @@ fn is_non_actionable_runtime_hint(hint: &str, name: &str) -> bool {
             | "bind"
             | "entries"
             | "isarray"
+            | "all"
+            | "allsettled"
+            | "catch"
+            | "watch"
+            | "listen"
+            | "writehead"
+            | "end"
+            | "admin"
+            | "collection"
+            | "db"
+            | "createindex"
+            | "deleteone"
+            | "findone"
+            | "replaceone"
+            | "toarray"
+            | "delete"
+            | "clear"
+            | "set"
+            | "values"
+            | "every"
+    )
+}
+
+fn is_external_runtime_receiver(receiver: &str) -> bool {
+    let mut receiver = receiver.to_owned();
+    receiver.make_ascii_lowercase();
+    matches!(
+        receiver.as_str(),
+        "array"
+            | "array.from"
+            | "object"
+            | "json"
+            | "math"
+            | "date"
+            | "promise"
+            | "process"
+            | "console"
+            | "res"
+            | "response"
+            | "client"
+            | "client.db"
+            | "database"
+            | "database.collection"
+            | "this.db"
+            | "this.collection"
+            | "this.collection.find"
+            | "this.client"
+            | "this.mongo_client"
+            | "this.mongoclient"
+            | "this.server"
+            | "this.retryattempts"
+            | "this.changestreams"
+            | "groups"
+            | "groups.get"
+            | "messagesbytopic"
+            | "updatedfields"
+            | "field"
+            | "config.kafkabrokers"
+            | "config.watchcollections"
+            | "this.kafkaproducer"
+            | "changestream"
     )
 }
 
@@ -521,9 +600,11 @@ fn semantic_issues(health: &SemanticHealthReport) -> Vec<String> {
             health.payload_contract_links.ambiguous_targets
         ));
     }
-    if health.orphan_topics > 0 {
-        issues.push(format!("{} orphan topic(s) remain", health.orphan_topics));
-    }
+    // Orphan event topics are surfaced in `semantic_health` and via
+    // `events orphans`. They are not a hard doctor failure because real
+    // workspaces often index only one side of an event boundary: producer-only
+    // topics can have external consumers, and consumer-only topics can be
+    // driven by infrastructure or services outside the configured repo set.
     issues
 }
 
@@ -582,7 +663,18 @@ mod tests {
     use gather_step_core::{NodeId, SourceSpan};
     use gather_step_parser::resolve::CallSite;
 
-    use super::looks_like_non_actionable_runtime_call;
+    use super::{looks_like_non_actionable_runtime_call, semantic_issues};
+
+    fn healthy_link() -> gather_step_analysis::SemanticLinkHealth {
+        gather_step_analysis::SemanticLinkHealth {
+            total_targets: 0,
+            linked_targets: 0,
+            partially_linked_targets: 0,
+            unlinked_targets: 0,
+            ambiguous_targets: 0,
+            coverage_ratio: 1.0,
+        }
+    }
 
     fn call_site(name: &str, hint: Option<&str>, source_path: &str) -> CallSite {
         CallSite {
@@ -642,6 +734,56 @@ mod tests {
             None,
             "app/src/utils/url.ts",
         )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "Date",
+            Some("Date"),
+            "app/src/lib/logger.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "allSettled",
+            Some("Promise.allSettled"),
+            "app/src/services/change-stream.service.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "on",
+            Some("process.on"),
+            "app/src/main.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "writeHead",
+            Some("res.writeHead"),
+            "app/src/services/health-check.service.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "findOne",
+            Some("this.collection.findOne"),
+            "app/src/services/resume-token.service.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "clear",
+            Some("this.changeStreams.clear"),
+            "app/src/services/change-stream.service.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "send",
+            Some("this.kafkaProducer.send"),
+            "app/src/connections/kafka-producer-client.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "join",
+            Some("Config.kafkaBrokers.join"),
+            "app/src/main.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "toISOString",
+            Some("toISOString"),
+            "app/src/lib/logger.ts",
+        )));
+        assert!(looks_like_non_actionable_runtime_call(&call_site(
+            "on",
+            Some("changeStream.on"),
+            "app/src/services/change-stream.service.ts",
+        )));
     }
 
     #[test]
@@ -656,5 +798,19 @@ mod tests {
             Some("translate"),
             "app/src/entities/form/validation.ts",
         )));
+    }
+
+    #[test]
+    fn orphan_topics_remain_diagnostic_not_hard_failures() {
+        let health = gather_step_analysis::SemanticHealthReport {
+            route_links: healthy_link(),
+            event_links: healthy_link(),
+            shared_symbol_links: healthy_link(),
+            payload_contract_links: healthy_link(),
+            orphan_topics: 1,
+            unresolved_call_inputs: 0,
+        };
+
+        assert!(semantic_issues(&health).is_empty());
     }
 }
