@@ -19,10 +19,10 @@ This fixture proves the v4 MVP loop closes without requiring Gather Step to gene
 - Downstream integration: `order.list.refreshed` reaches the notification subscriber.
 - Regression: existing `OrderListPage.test.tsx` is cited as nearby regression evidence.
 
-## Expected Source Labels
+## Expected Evidence Metadata
 
-- `GS-PLAN-*` for intended implementation scope.
-- `GS-REVIEW-*` for changed behavior and nearby tests.
-- `GS-IMPACT-*` for downstream event subscriber evidence.
+- `source: planning_pack` for intended implementation scope.
+- `source: review_pack` for changed behavior and nearby tests.
+- `source: change_impact_pack` or `kind: event_consumer` for downstream event subscriber evidence.
+- `GS-EVID-*` IDs for stable evidence rows.
 - `GS-GAP-*` for the ambiguous cancelled-order behavior.
-

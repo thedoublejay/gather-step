@@ -43,9 +43,9 @@ Planning and implementation context are already stronger when Braingent provides
    - → verify: every changed entry point has at least one risk note or an explicit "no user-visible behavior expected" note.
 
 3. Build the evidence bundle.
-   - Braingent calls existing Gather Step pack and impact tools, then normalizes source labels for requirements, code evidence, graph evidence, test evidence, and inference.
+   - Braingent calls existing Gather Step pack and impact tools, then consumes canonical evidence metadata for requirements, code evidence, graph evidence, test evidence, and inference.
    - Gather Step evidence stays factual. It should not invent QA cases or expected product behavior.
-   - → verify: every evidence item has a source kind, target, and confidence or gap label.
+   - → verify: every evidence item has a closed evidence kind, structured citation, source, subject, and support method where the producer can justify one.
 
 4. Generate the QA reference in Braingent.
    - Output: one Markdown file with a traceability matrix and test cases.
@@ -109,12 +109,12 @@ Gather Step v4 work should focus on making the following evidence stable and eas
 
 | Evidence Need | Gather Step Source | Required QA Label | Verify |
 | --- | --- | --- | --- |
-| Intended implementation scope | `pack --mode planning` | `GS-PLAN-*` | target, primary anchor, and likely affected areas are present or explicitly ambiguous |
-| Actual changed behavior | `pack --mode review` plus git diff metadata | `GS-REVIEW-*` | changed entry points, changed tests, and risk notes are present |
-| Cross-system blast radius | `pack --mode change_impact`, `trace_impact`, `cross_repo_deps` | `GS-IMPACT-*` | downstream repos, shared virtual nodes, and consumers are listed or marked absent |
-| Route/UI/API coverage | `trace_route`, `crud_trace`, route virtual nodes | `GS-ROUTE-*` | handlers, callers, and persistence touchpoints are cited |
-| Event/async coverage | `trace_event`, `event_blast_radius`, orphan-topic checks | `GS-EVENT-*` | producers, consumers, and transitive subscribers are cited |
-| Contract/data-shape coverage | `payload_schema`, shared type usage, projection impact | `GS-CONTRACT-*` | request/response fields, shared readers/writers, and stale projection gaps are cited |
+| Intended implementation scope | `pack --mode planning` | `source: planning_pack` | target, primary anchor, and likely affected areas are present or explicitly ambiguous |
+| Actual changed behavior | `pack --mode review` plus git diff metadata | `source: review_pack` | changed entry points, changed tests, and risk notes are present |
+| Cross-system blast radius | `pack --mode change_impact`, `trace_impact`, `cross_repo_deps` | `source: change_impact_pack` | downstream repos, shared virtual nodes, and consumers are listed or marked absent |
+| Route/UI/API coverage | `trace_route`, `crud_trace`, route virtual nodes | `kind: route_*` | handlers, callers, and persistence touchpoints are cited |
+| Event/async coverage | `trace_event`, `event_blast_radius`, orphan-topic checks | `kind: event_*` | producers, consumers, and transitive subscribers are cited |
+| Contract/data-shape coverage | `payload_schema`, shared type usage, projection impact | `kind: payload_contract` | request/response fields, shared readers/writers, and stale projection gaps are cited |
 | Known evidence gaps | pack follow-ups, missing anchors, unindexed repos | `GS-GAP-*` | every missing source needed for QA appears in "Gaps And Assumptions" |
 
 ELI5: The QA workflow needs receipts. Gather Step should hand Braingent labeled receipts for what changed and what might break; Braingent decides what tests a human should run.
@@ -131,7 +131,8 @@ ELI5: Build the smallest useful loop first: Gather Step supplies labeled facts, 
   - `review` for what changed.
   - `change_impact` for integration edges.
   - targeted trace tools for routes, events, contracts, projections, fields, and consumers.
-- Define source labels, required fields, gap labels, and citation rules in this planning file.
+- Define closed evidence kinds, source labels, structured citations, stable IDs, gap labels, and support-method rules in this planning file.
+- Compute evidence metadata at query time from current pack, trace, and PR-review surfaces. No storage migration is required for this v4 break; unreadable or stale local indexes should be reindexed rather than auto-migrated.
 - → verify: this document names the Gather Step evidence inputs, Braingent workflow owner, output sections, and gap handling rules.
 
 Phase 2: Coverage heuristics.
@@ -197,7 +198,7 @@ No exact open-source project found that combines Jira AC, durable engineering me
 - Huge diffs: output may become too broad. Mitigation: risk ranking, max case budgets, and "exploratory charter" grouping.
 - Weak Jira input: tickets may lack AC. Mitigation: generate clarification questions and assumption-marked cases.
 - Sensitive data: QA examples may leak customer details. Mitigation: synthetic data defaults and Braingent no-secret policy.
-- False confidence: Markdown cases are guidance, not proof. Mitigation: include "manual reference only" and explicit unverified gaps.
+- False certainty: Markdown cases are guidance, not proof. Mitigation: include "manual reference only" and explicit unverified gaps.
 
 ## Acceptance Criteria For The V4 Planning Materials
 
@@ -205,7 +206,7 @@ No exact open-source project found that combines Jira AC, durable engineering me
 - The plan rejects a first-class Gather Step `generate qa-reference` command for v4 MVP.
 - The Markdown output schema includes summary, coverage map, impact map, cases, E2E candidates, API/contract cases, regression set, gaps, and source links.
 - The committed template gives Braingent a concrete starting shape for generated QA references.
-- Gather Step evidence inputs are named with stable QA labels and verification checks.
+- Gather Step evidence inputs use canonical evidence metadata with closed kinds, structured citations, stable IDs, and verification checks.
 - The first fixture covers AC traceability, changed API/UI/event surfaces, downstream integration, negative case, boundary/data variation, and ambiguous AC handling.
 - The workflow separates fact from inference and treats missing AC, missing env, missing data, and unindexed repos as visible gaps.
 - The plan keeps executable test generation and web UI work out of v4 MVP.

@@ -11,6 +11,10 @@ use crate::{
     budget::{BudgetedTool, ResponseBudget, apply_response_budget, response_schema_version},
     config::{McpContext, validate_input_length},
     error::McpServerError,
+    evidence::{
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
+        EvidenceSupportMethod,
+    },
     ids::encode_node_id,
     tools::labels::{edge_kind_label, node_kind_label},
 };
@@ -174,6 +178,7 @@ pub struct TopologySymbol {
     pub edge_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    pub evidence: Evidence,
     pub file_path: String,
     pub framework_context: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -518,16 +523,50 @@ fn topology_symbol(
         .map(|registered| registered.frameworks.clone())
         .unwrap_or_default();
 
-    TopologySymbol {
-        edge_kind: edge_kind_label(edge_kind).to_owned(),
+    let role_label = role.label().to_owned();
+    let symbol_id = encode_node_id(node_id);
+    let symbol_kind = node_kind_label(symbol_kind).to_owned();
+    let edge_kind_label = edge_kind_label(edge_kind).to_owned();
+    let evidence = Evidence::new(
+        role.evidence_kind(),
+        role.evidence_source(),
+        EvidenceCitation::symbol(
+            repo.clone(),
+            file_path.clone(),
+            line_start,
+            symbol_id.clone(),
+            symbol_kind.clone(),
+            symbol_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new(
+            if matches!(role.evidence_source(), EvidenceSource::TraceEvent) {
+                "event"
+            } else {
+                "route"
+            },
+        )
+        .with_category(role_label.clone())
+        .with_name(symbol_name.clone())
+        .with_reason(format!("{} edge", edge_kind_label)),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
         confidence,
+    ));
+
+    TopologySymbol {
+        edge_kind: edge_kind_label,
+        confidence,
+        evidence,
         file_path,
         framework_context,
         line_start,
         repo,
-        role: role.label().to_owned(),
-        symbol_id: encode_node_id(node_id),
-        symbol_kind: node_kind_label(symbol_kind).to_owned(),
+        role: role_label,
+        symbol_id,
+        symbol_kind,
         symbol_name,
     }
 }
@@ -592,6 +631,8 @@ fn trim_blast_radius_response(response: &mut EventBlastRadiusResponse) -> bool {
 
 trait TopologyRole {
     fn label(&self) -> &'static str;
+    fn evidence_kind(&self) -> EvidenceKind;
+    fn evidence_source(&self) -> EvidenceSource;
 }
 
 impl TopologyRole for EventRole {
@@ -601,6 +642,17 @@ impl TopologyRole for EventRole {
             Self::Consumer => "consumer",
         }
     }
+
+    fn evidence_kind(&self) -> EvidenceKind {
+        match self {
+            Self::Producer => EvidenceKind::EventProducer,
+            Self::Consumer => EvidenceKind::EventConsumer,
+        }
+    }
+
+    fn evidence_source(&self) -> EvidenceSource {
+        EvidenceSource::TraceEvent
+    }
 }
 
 impl TopologyRole for RouteRole {
@@ -609,6 +661,17 @@ impl TopologyRole for RouteRole {
             Self::Handler => "handler",
             Self::Caller => "caller",
         }
+    }
+
+    fn evidence_kind(&self) -> EvidenceKind {
+        match self {
+            Self::Handler => EvidenceKind::RouteHandler,
+            Self::Caller => EvidenceKind::RouteCaller,
+        }
+    }
+
+    fn evidence_source(&self) -> EvidenceSource {
+        EvidenceSource::TraceRoute
     }
 }
 
@@ -627,7 +690,10 @@ mod tests {
     };
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
-    use crate::{McpServerConfig, config::McpContext, ids::encode_node_id};
+    use crate::{
+        McpServerConfig, config::McpContext, evidence::EvidenceKind, evidence::EvidenceSource,
+        ids::encode_node_id,
+    };
 
     use super::{
         EventBlastRadiusRequest, ListOrphanTopicsRequest, TraceEventRequest, TraceRouteRequest,
@@ -815,6 +881,14 @@ mod tests {
             response.data.matches[0].consumers[0].framework_context,
             vec!["react"]
         );
+        assert_eq!(
+            response.data.matches[0].producers[0].evidence.kind,
+            EvidenceKind::EventProducer
+        );
+        assert_eq!(
+            response.data.matches[0].consumers[0].evidence.source,
+            EvidenceSource::TraceEvent
+        );
     }
 
     #[test]
@@ -905,8 +979,16 @@ mod tests {
         assert_eq!(response.data.target_id, Some(encode_node_id(route.id)));
         assert_eq!(response.data.handlers.len(), 1);
         assert_eq!(response.data.handlers[0].role, "handler");
+        assert_eq!(
+            response.data.handlers[0].evidence.kind,
+            EvidenceKind::RouteHandler
+        );
         assert_eq!(response.data.callers.len(), 1);
         assert_eq!(response.data.callers[0].role, "caller");
+        assert_eq!(
+            response.data.callers[0].evidence.source,
+            EvidenceSource::TraceRoute
+        );
         assert_eq!(response.data.callers[0].line_start, Some(20));
     }
 

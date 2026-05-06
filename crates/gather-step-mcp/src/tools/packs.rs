@@ -31,6 +31,11 @@ use crate::{
     },
     config::{McpContext, validate_input_length},
     error::McpServerError,
+    evidence::{
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSubject, EvidenceSupport,
+        EvidenceSupportMethod, evidence_kind_for_pack_item, evidence_source_for_pack_mode,
+        infer_surface as infer_evidence_surface,
+    },
     ids::{decode_node_id, encode_node_id},
     tools::{
         cross_repo::{
@@ -208,6 +213,8 @@ pub struct ContextPackData {
     pub target: String,
     pub found: bool,
     pub items: Vec<PackItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
     pub semantic_bridges: Vec<PackBridge>,
     pub next_steps: Vec<String>,
     pub unresolved_gaps: Vec<String>,
@@ -359,6 +366,8 @@ pub struct PackItem {
     /// the anchor itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_chain: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Evidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -406,6 +415,8 @@ pub struct CrossRepoCaller {
     pub symbol_id: String,
     pub symbol_kind: String,
     pub symbol_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Evidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -493,6 +504,7 @@ fn build_ranked_alternate_items(candidates: &[RankedPackCandidate]) -> Vec<PackI
             symbol_kind: "unknown".to_owned(),
             symbol_name: candidate.symbol_name.clone(),
             evidence_chain: None,
+            evidence: None,
         })
         .collect()
 }
@@ -684,6 +696,7 @@ pub fn context_pack_tool(
                     target: request.target.clone(),
                     found: true,
                     items,
+                    evidence: Vec::new(),
                     semantic_bridges: Vec::new(),
                     next_steps: vec!["search".to_owned(), "brief".to_owned()],
                     unresolved_gaps: Vec::new(),
@@ -723,6 +736,7 @@ pub fn context_pack_tool(
                         .push("response was truncated to fit the requested budget".to_owned());
                 }
             }
+            attach_context_pack_evidence(&mut response);
             let (cache_deps, generation) =
                 compute_cache_deps_and_generation(ctx, &response, request.repo.as_deref())?;
             if let Some(meta) = &mut response.meta {
@@ -748,6 +762,7 @@ pub fn context_pack_tool(
                 target: request.target.clone(),
                 found: false,
                 items: Vec::new(),
+                evidence: Vec::new(),
                 semantic_bridges: Vec::new(),
                 next_steps: vec!["search".to_owned(), "brief".to_owned()],
                 unresolved_gaps: vec![
@@ -795,6 +810,7 @@ pub fn context_pack_tool(
                 apply_planning_rescue_metadata(&mut response, &resolved, rescue);
             }
         }
+        attach_context_pack_evidence(&mut response);
         let (cache_deps, generation) =
             compute_cache_deps_and_generation(ctx, &response, request.repo.as_deref())?;
         if let Some(meta) = &mut response.meta {
@@ -877,6 +893,7 @@ pub fn context_pack_tool(
         }
     }
 
+    attach_context_pack_evidence(&mut response);
     let (cache_deps, generation) =
         compute_cache_deps_and_generation(ctx, &response, request.repo.as_deref())?;
     if let Some(meta) = &mut response.meta {
@@ -1032,6 +1049,7 @@ fn assemble_context_pack_for_symbol(
                 .clone()
                 .unwrap_or_else(|| request.target.clone()),
             evidence_chain: None,
+            evidence: None,
         });
     }
     items.extend(upstream_nodes.into_iter().map(|node| PackItem {
@@ -1045,6 +1063,7 @@ fn assemble_context_pack_for_symbol(
         symbol_kind: node.kind,
         symbol_name: node.symbol_name,
         evidence_chain: None,
+        evidence: None,
     }));
     items.extend(downstream_nodes.into_iter().map(|node| PackItem {
         category: "callee".to_owned(),
@@ -1057,6 +1076,7 @@ fn assemble_context_pack_for_symbol(
         symbol_kind: node.kind,
         symbol_name: node.symbol_name,
         evidence_chain: None,
+        evidence: None,
     }));
     let fallback_contract_repos = contract_impact_items
         .iter()
@@ -1238,6 +1258,7 @@ fn assemble_context_pack_for_symbol(
             target: request.target.clone(),
             found: symbol.found,
             items,
+            evidence: Vec::new(),
             semantic_bridges,
             next_steps,
             unresolved_gaps,
@@ -2425,6 +2446,7 @@ fn shared_contract_pack_items(
                 symbol_kind: "file".to_owned(),
                 symbol_name: impacted.file_path,
                 evidence_chain: None,
+                evidence: None,
             });
         }
     }
@@ -2607,14 +2629,163 @@ fn refresh_cached_context_pack_response(
     repo_filter: Option<&str>,
     response: &mut ContextPackResponse,
 ) -> Result<(), McpServerError> {
-    if response.data.planning_proofs.is_empty() {
-        return Ok(());
+    if !response.data.planning_proofs.is_empty() {
+        let anchor_repo = cached_context_pack_anchor_repo(ctx, resolved, response)?;
+        apply_proof_derived_change_impact(ctx, anchor_repo.as_deref(), repo_filter, response)?;
+        refresh_cached_rollout_gap_state(response);
     }
-    let anchor_repo = cached_context_pack_anchor_repo(ctx, resolved, response)?;
-    apply_proof_derived_change_impact(ctx, anchor_repo.as_deref(), repo_filter, response)?;
-    refresh_cached_rollout_gap_state(response);
+    attach_context_pack_evidence(response);
     refresh_context_pack_completeness(response);
     Ok(())
+}
+
+fn attach_context_pack_evidence(response: &mut ContextPackResponse) {
+    let mode = response.data.mode.as_str();
+    let mut evidence = Vec::new();
+
+    for item in &mut response.data.items {
+        let row = pack_item_evidence(mode, item);
+        item.evidence = Some(row.clone());
+        evidence.push(row);
+    }
+
+    for caller in &mut response.data.change_impact.cross_repo_callers {
+        let row = cross_repo_caller_evidence(mode, caller);
+        caller.evidence = Some(row.clone());
+        evidence.push(row);
+    }
+
+    for repo in &response.data.change_impact.confirmed_downstream_repos {
+        evidence.push(repo_impact_evidence(
+            mode,
+            EvidenceKind::ConfirmedDownstreamRepo,
+            repo,
+            EvidenceSupportMethod::GraphTraversal,
+            "confirmed downstream repository",
+        ));
+    }
+    for repo in &response.data.change_impact.probable_downstream_repos {
+        evidence.push(repo_impact_evidence(
+            mode,
+            EvidenceKind::ProbableDownstreamRepo,
+            repo,
+            EvidenceSupportMethod::StaticAnalyzer,
+            "probable downstream repository",
+        ));
+    }
+    for repo in &response.data.change_impact.unresolved_possible {
+        evidence.push(repo_impact_evidence(
+            mode,
+            EvidenceKind::UnresolvedPossibleRepo,
+            repo,
+            EvidenceSupportMethod::StaticAnalyzer,
+            "unresolved possible downstream repository",
+        ));
+    }
+    if let Some(truncated) = &response.data.change_impact.truncated_repos {
+        for repo in &truncated.names {
+            evidence.push(
+                repo_impact_evidence(
+                    mode,
+                    EvidenceKind::TruncatedRepos,
+                    repo,
+                    EvidenceSupportMethod::StaticAnalyzer,
+                    &format!(
+                        "truncated repository set: {}",
+                        truncated.reason_codes.join(",")
+                    ),
+                )
+                .with_subject(
+                    EvidenceSubject::new("repo_impact")
+                        .with_category("truncated_repos")
+                        .with_reason(format!("{} repositories omitted", truncated.count)),
+                ),
+            );
+        }
+    }
+
+    response.data.evidence = evidence;
+}
+
+fn pack_item_evidence(mode: &str, item: &PackItem) -> Evidence {
+    let surface = infer_evidence_surface(
+        &item.symbol_kind,
+        &item.category,
+        &item.file_path,
+        &item.symbol_name,
+    );
+    Evidence::new(
+        evidence_kind_for_pack_item(mode, &item.category, &item.file_path),
+        evidence_source_for_pack_mode(mode),
+        EvidenceCitation::symbol(
+            item.repo.clone(),
+            item.file_path.clone(),
+            item.line_start,
+            item.symbol_id.clone(),
+            item.symbol_kind.clone(),
+            item.symbol_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new(surface)
+            .with_category(item.category.clone())
+            .with_name(item.symbol_name.clone())
+            .with_reason(item.reason.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::RetrievalRank,
+        Some(item.score),
+    ))
+}
+
+fn cross_repo_caller_evidence(mode: &str, caller: &CrossRepoCaller) -> Evidence {
+    Evidence::new(
+        EvidenceKind::CrossRepoCaller,
+        evidence_source_for_pack_mode(mode),
+        EvidenceCitation::symbol(
+            caller.repo.clone(),
+            caller.file_path.clone(),
+            caller.line_start,
+            caller.symbol_id.clone(),
+            caller.symbol_kind.clone(),
+            caller.symbol_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new(infer_evidence_surface(
+            &caller.symbol_kind,
+            "caller",
+            &caller.file_path,
+            &caller.symbol_name,
+        ))
+        .with_category("caller")
+        .with_name(caller.symbol_name.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        Some(1000),
+    ))
+}
+
+fn repo_impact_evidence(
+    mode: &str,
+    kind: EvidenceKind,
+    repo: &str,
+    method: EvidenceSupportMethod,
+    reason: &str,
+) -> Evidence {
+    Evidence::new(
+        kind,
+        evidence_source_for_pack_mode(mode),
+        EvidenceCitation::repo(repo.to_owned()),
+    )
+    .with_subject(
+        EvidenceSubject::new("repo_impact")
+            .with_category("downstream_repo")
+            .with_name(repo.to_owned())
+            .with_reason(reason.to_owned()),
+    )
+    .with_support(EvidenceSupport::new(method, None))
 }
 
 fn cached_context_pack_anchor_repo(
@@ -3888,6 +4059,7 @@ fn planning_cross_repo_callers(
             symbol_id: node.symbol_id.clone(),
             symbol_kind: node.kind.clone(),
             symbol_name: node.symbol_name.clone(),
+            evidence: None,
         })
         .collect::<Vec<_>>();
     callers.sort_by(|left, right| {
@@ -3953,6 +4125,7 @@ fn merge_supplemental_cross_repo_callers(
             symbol_id,
             symbol_kind: node_kind_label(caller.node.kind).to_owned(),
             symbol_name: caller.node.name.clone(),
+            evidence: None,
         });
     }
     callers.sort_by(|left, right| {
@@ -4041,6 +4214,7 @@ fn cross_repo_callers_from_proofs(
             symbol_id: encode_node_id(node.id),
             symbol_kind: node_kind_label(node.kind).to_owned(),
             symbol_name: node.name,
+            evidence: None,
         });
     }
     callers.sort_by(|left, right| {
@@ -4439,6 +4613,7 @@ mod tests {
                 symbol_id: "identity-caller".to_owned(),
                 symbol_kind: "function".to_owned(),
                 symbol_name: "renewAuthSession".to_owned(),
+                evidence: None,
             }]
         );
     }
@@ -4536,6 +4711,7 @@ mod tests {
             } else {
                 None
             },
+            evidence: None,
         }
     }
 
@@ -5043,6 +5219,7 @@ mod tests {
             target: "SomeService".to_owned(),
             found: false,
             items: Vec::new(),
+            evidence: Vec::new(),
             semantic_bridges: Vec::new(),
             next_steps: Vec::new(),
             unresolved_gaps: Vec::new(),
@@ -5448,6 +5625,7 @@ mod tests {
                 target: "Target".to_owned(),
                 found: true,
                 items,
+                evidence: Vec::new(),
                 semantic_bridges: (0..semantic_bridges)
                     .map(|index| RescueAnchor {
                         anchor_form: "symbol".to_owned(),
@@ -5723,6 +5901,7 @@ mod tests {
             symbol_id: "caller-id".to_owned(),
             symbol_kind: "function".to_owned(),
             symbol_name: "callTarget".to_owned(),
+            evidence: None,
         }];
         response.data.change_impact.truncated_repos = Some(TruncatedRepos {
             count: 1,

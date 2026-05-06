@@ -38,15 +38,15 @@ manual_reference_only: true
 
 | Requirement | Status | Linked Cases | Sources | Gap |
 | --- | --- | --- | --- | --- |
-| AC-1 | covered | TC-001 | ticket, GS-PLAN-1 | none |
+| AC-1 | covered | TC-001 | ticket, GS-EVID-... | none |
 | AC-2 | needs clarification | none | ticket | ambiguous expected result |
 
 ## Impact Map
 
-| Surface | Evidence Label | Impact | Linked Cases | Gap |
+| Surface | Evidence Metadata | Impact | Linked Cases | Gap |
 | --- | --- | --- | --- | --- |
-| API route | GS-ROUTE-1 | changed validation path | TC-002, TC-003 | none |
-| Event topic | GS-EVENT-1 | downstream subscriber reads changed payload | TC-004 | test data missing |
+| API route | kind: route_definition | changed validation path | TC-002, TC-003 | none |
+| Event topic | kind: event_consumer | downstream subscriber reads changed payload | TC-004 | test data missing |
 
 ## Test Cases
 
@@ -54,7 +54,7 @@ manual_reference_only: true
 
 - Type: Manual UI | Manual API | E2E Candidate | Contract Check | Exploratory Charter
 - Priority: High | Medium | Low
-- Sources: AC-1, GS-REVIEW-1, GS-IMPACT-1
+- Sources: AC-1, GS-EVID-..., GS-GAP-...
 - Fact / Inference: Fact | Inference
 - Preconditions:
 - Steps:
