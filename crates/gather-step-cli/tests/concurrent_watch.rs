@@ -179,8 +179,8 @@ fn daemon_bind_unavailable_in_test_env(stderr: &str) -> bool {
 }
 
 fn watcher_backend_unavailable_in_test_env(stderr: &str) -> bool {
-    stderr.contains("The filesystem watcher failed: Unable to start the FSEvent stream.")
-        || stderr.contains("The filesystem watcher failed: Unable to start FSEvent stream.")
+    stderr.contains("filesystem watcher failed: unable to start the FSEvent stream")
+        || stderr.contains("filesystem watcher failed: unable to start FSEvent stream")
         || stderr.contains("unable to start FSEvent stream")
 }
 

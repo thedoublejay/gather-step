@@ -77,6 +77,9 @@ pub enum WatchCause {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchEvent {
+    /// Emitted exactly once after every configured notify backend has been
+    /// registered, before filesystem events can be drained into indexing
+    /// events such as [`WatchEvent::IndexingStart`].
     Ready {
         repos: Vec<String>,
     },
@@ -911,6 +914,62 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_ready_event_reports_registered_repos_before_indexing_events() {
+        let repo_alpha = TestDir::new("ready-alpha");
+        let repo_beta = TestDir::new("ready-beta");
+        let storage_root = TestDir::new("ready-storage");
+        fs::create_dir_all(repo_alpha.path().join("src")).expect("alpha src should exist");
+        fs::create_dir_all(repo_beta.path().join("src")).expect("beta src should exist");
+
+        let mut watcher = Watcher::new(
+            storage_root.path(),
+            IndexingOptions::default(),
+            WatcherConfig {
+                poll_interval: Duration::from_millis(50),
+                debounce_duration: Duration::from_millis(150),
+                ..WatcherConfig::default()
+            },
+        )
+        .expect("watcher should open");
+        watcher
+            .add_repo("beta", repo_beta.path())
+            .expect("beta repo should register");
+        watcher
+            .add_repo("alpha", repo_alpha.path())
+            .expect("alpha repo should register");
+
+        let mut events = watcher.subscribe();
+        let cancel = CancellationToken::new();
+        let run = watcher.run(cancel.clone());
+        tokio::pin!(run);
+
+        let repos = timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut run => {
+                    panic!("watcher exited before ready event: {result:?}");
+                }
+                event = events.recv() => match event.expect("watch event should arrive") {
+                    WatchEvent::Ready { repos } => repos,
+                    other => panic!("ready should precede indexing events, got {other:?}"),
+                },
+            }
+        })
+        .await
+        .expect("ready event should arrive");
+
+        assert_eq!(repos, vec!["alpha".to_owned(), "beta".to_owned()]);
+
+        cancel.cancel();
+        let result = timeout(Duration::from_secs(5), &mut run)
+            .await
+            .expect("watcher should stop after cancellation");
+        assert!(
+            result.is_ok(),
+            "watcher run should stop cleanly: {result:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

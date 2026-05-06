@@ -1914,6 +1914,7 @@ mod tests {
                 Some("queryClient.fetchQuery"),
                 "app/src/hooks/query.ts",
             ),
+            call_site("FeTcH", None, "app/src/services/api.ts"),
             call_site("encodeURIComponent", None, "app/src/utils/url.ts"),
             call_site("Date", Some("Date"), "app/src/lib/logger.ts"),
             call_site(
