@@ -187,7 +187,15 @@ pub(crate) fn run_rendered(
         );
     }
 
+    let scan_gap_start = gaps.len();
     let scan_rows = filesystem_evidence(app, ctx, &target, args.scan_limit, &mut gaps)?;
+    if gaps[scan_gap_start..]
+        .iter()
+        .any(|gap| gap.kind == "scan_limit_truncated")
+    {
+        truncated = true;
+        omitted_rows += 1;
+    }
     rows.extend(scan_rows);
 
     let row_count = rows.len();
@@ -454,7 +462,7 @@ fn filesystem_evidence(
 fn filesystem_evidence_row(target: &str, evidence: FileLineEvidence) -> Option<Evidence> {
     let (kind, surface, score) = if is_test_file(&evidence.file_path) {
         (EvidenceKind::ExistingTestSignal, "test", Some(650))
-    } else if feature_flag_key(&evidence.text).is_some() {
+    } else if is_feature_flag_line(&evidence.text) {
         let score = if evidence.text.contains(target) {
             Some(1000)
         } else if has_static_flag_key(&evidence.text) {
@@ -507,7 +515,11 @@ fn scan_dir(
     evidence: &mut Vec<FileLineEvidence>,
     gaps: &mut Vec<QaEvidenceGap>,
 ) -> Result<()> {
-    if evidence.len() >= limit || is_ignored_dir(dir) {
+    if evidence.len() >= limit {
+        push_scan_limit_gap(gaps);
+        return Ok(());
+    }
+    if is_ignored_dir(dir) {
         return Ok(());
     }
     let entries = match fs::read_dir(dir) {
@@ -528,6 +540,7 @@ fn scan_dir(
 
     for entry in entries {
         if evidence.len() >= limit {
+            push_scan_limit_gap(gaps);
             break;
         }
         let path = entry.path();
@@ -578,6 +591,7 @@ fn scan_file(
     let test_file = is_test_file(&relative);
     for (index, line) in text.lines().enumerate() {
         if evidence.len() >= limit {
+            push_scan_limit_gap(gaps);
             break;
         }
         let has_target_test = test_file && line.contains(target);
@@ -589,6 +603,18 @@ fn scan_file(
                 line_start: u32::try_from(index + 1).ok(),
                 text: line.to_owned(),
             });
+        }
+        if has_flag && !has_static_flag_key(line) {
+            push_gap(
+                gaps,
+                "workspace_scan",
+                "dynamic_feature_flag",
+                format!(
+                    "Feature flag call in `{relative}` line {} does not expose a static flag key.",
+                    index + 1
+                ),
+                true,
+            );
         }
     }
     Ok(())
@@ -665,6 +691,19 @@ fn push_gap(
     });
 }
 
+fn push_scan_limit_gap(gaps: &mut Vec<QaEvidenceGap>) {
+    if gaps.iter().any(|gap| gap.kind == "scan_limit_truncated") {
+        return;
+    }
+    push_gap(
+        gaps,
+        "workspace_scan",
+        "scan_limit_truncated",
+        "The workspace scan reached --scan-limit before traversal completed; Braingent must not claim complete coverage.",
+        true,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +740,49 @@ mod tests {
         assert_eq!(
             row.support.as_ref().map(|support| &support.method),
             Some(&EvidenceSupportMethod::HeuristicScan)
+        );
+    }
+
+    #[test]
+    fn dynamic_feature_flag_calls_emit_unresolved_scan_evidence() {
+        assert!(is_feature_flag_line("const enabled = useFlag(flagName);"));
+        assert_eq!(feature_flag_key("const enabled = useFlag(flagName);"), None);
+
+        let row = filesystem_evidence_row(
+            "OrderList",
+            FileLineEvidence {
+                repo: "frontend".to_owned(),
+                file_path: "src/flags.ts".to_owned(),
+                line_start: Some(8),
+                text: "const enabled = useFlag(flagName);".to_owned(),
+            },
+        )
+        .expect("dynamic feature flag evidence");
+
+        assert_eq!(row.kind, EvidenceKind::FeatureFlag);
+        assert_eq!(
+            row.support.as_ref().and_then(|support| support.score),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn scan_limit_truncation_pushes_blocking_gap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("a.ts"),
+            "const first = useFlag('orders-a');\nconst second = useFlag('orders-b');\n",
+        )
+        .expect("fixture write");
+        let mut gaps = Vec::new();
+
+        let evidence = scan_repo_files("frontend", temp.path(), "OrderList", 1, &mut gaps)
+            .expect("scan succeeds");
+
+        assert_eq!(evidence.len(), 1);
+        assert!(
+            gaps.iter()
+                .any(|gap| { gap.kind == "scan_limit_truncated" && gap.blocks_complete_coverage })
         );
     }
 }

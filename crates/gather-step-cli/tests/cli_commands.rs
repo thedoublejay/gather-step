@@ -506,6 +506,39 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
         gap["kind"] == "missing_diff_refs" && gap["blocks_complete_coverage"] == false
     }));
 
+    let qa_evidence_scan_limited = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "OrderList",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--scan-limit",
+            "1",
+            "--json",
+        ],
+    );
+    let qa_evidence_scan_limited_json = stdout_json(&qa_evidence_scan_limited);
+    assert_eq!(
+        qa_evidence_scan_limited_json["manifest_summary"]["truncated"],
+        true
+    );
+    assert!(
+        qa_evidence_scan_limited_json["manifest_summary"]["omitted_rows"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert!(
+        qa_evidence_scan_limited_json["gaps"]
+            .as_array()
+            .expect("scan-limited gaps array")
+            .iter()
+            .any(|gap| gap["kind"] == "scan_limit_truncated"
+                && gap["blocks_complete_coverage"] == true)
+    );
+
     let invalid_qa_route = run_fail(
         temp.path(),
         &["qa-evidence", "--route-method", "GET", "--json"],
