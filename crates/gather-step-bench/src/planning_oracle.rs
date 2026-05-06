@@ -868,7 +868,6 @@ fn impact_payload_as_context_pack_response(
                 cross_repo_callers: Vec::new(),
                 confirmed_downstream_repos: confirmed_downstream_repos.clone(),
                 probable_downstream_repos: Vec::new(),
-                downstream_repos: confirmed_downstream_repos,
                 unresolved_possible: Vec::new(),
                 truncated_repos: None,
             },
@@ -935,7 +934,6 @@ fn projection_impact_payload_as_context_pack_response(
                 cross_repo_callers: Vec::new(),
                 confirmed_downstream_repos: Vec::new(),
                 probable_downstream_repos: Vec::new(),
-                downstream_repos: Vec::new(),
                 unresolved_possible: Vec::new(),
                 truncated_repos: None,
             },
@@ -1944,7 +1942,14 @@ fn python_oracle_observed_repos(response: &ContextPackResponse) -> BTreeSet<Stri
             .iter()
             .cloned(),
     );
-    repos.extend(response.data.change_impact.downstream_repos.iter().cloned());
+    repos.extend(
+        response
+            .data
+            .change_impact
+            .confirmed_downstream_repos
+            .iter()
+            .cloned(),
+    );
     for proof in &response.data.planning_proofs {
         if let Some(repo) = proof.get("source_repo").and_then(serde_json::Value::as_str) {
             repos.insert(repo.to_owned());
@@ -2700,7 +2705,6 @@ mod tests {
                     }],
                     confirmed_downstream_repos: vec!["py_shared_models".to_owned()],
                     probable_downstream_repos: Vec::new(),
-                    downstream_repos: vec!["py_shared_models".to_owned()],
                     unresolved_possible: Vec::new(),
                     truncated_repos: None,
                 },

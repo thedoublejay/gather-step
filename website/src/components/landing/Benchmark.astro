@@ -47,7 +47,7 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
           through repos. Right bar is a single Gather Step pack query.
         </p>
       </div>
-      <span class="bp-stamp">v3.1 · 2026-05-04</span>
+      <span class="bp-stamp">v3.5 · 2026-05-06</span>
     </div>
 
     <div class="bp-bench__hero">
@@ -58,7 +58,7 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         </div>
         <div class="bp-bench__stat__small">
           <b>{totalManual}s</b> of manual exploration, compressed into <b>{totalGatherStep.toFixed(2)}s</b> of
-          pack queries once the graph is built. v3.1 keeps the v3.0 deployment-topology and
+          pack queries once the graph is built. v3.5 keeps the v3.5 deployment-topology and
           PR-review surfaces and tightens the indexing pipeline behind them.
         </div>
       </div>
@@ -123,9 +123,9 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         <line x1="12" y1="16" x2="12.01" y2="16"></line>
       </svg>
       <div>
-        <b>v3.1 release.</b> Replaces the SWC TypeScript and JavaScript path with Oxc, lands
+        <b>v3.5 release.</b> Replaces the SWC TypeScript and JavaScript path with Oxc, lands
         indexing performance work, compacts metadata/search/graph storage, and hardens the
-        watch and config surface against symlink and oversize-file abuse. v3.0 deployment
+        watch and config surface against symlink and oversize-file abuse. v3.5 deployment
         topology and `gather-step pr-review` carry over unchanged.
       </div>
     </div>

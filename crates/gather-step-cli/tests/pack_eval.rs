@@ -604,7 +604,7 @@ fn run_pack_eval_suite(workspace: &Path) {
         impact
             .data
             .change_impact
-            .downstream_repos
+            .confirmed_downstream_repos
             .contains(&"frontend_standard".to_owned())
     );
     assert!(impact.data.change_impact.unresolved_possible.is_empty());

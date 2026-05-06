@@ -22,13 +22,25 @@ jobs:
           toolchain: 1.94.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2.9.1
-      - uses: taiki-e/install-action@v2
+      # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
+      # mutable major-version tag as a supply-chain risk on this privileged
+      # release workflow because attestations:write + id-token:write make
+      # the build job a high-value target for a malicious tag retag.
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3
         with:
           tool: cargo-nextest
-      - uses: taiki-e/install-action@v2
+      # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
+      # mutable major-version tag as a supply-chain risk on this privileged
+      # release workflow because attestations:write + id-token:write make
+      # the build job a high-value target for a malicious tag retag.
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3
         with:
           tool: cargo-deny
-      - uses: taiki-e/install-action@v2
+      # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
+      # mutable major-version tag as a supply-chain risk on this privileged
+      # release workflow because attestations:write + id-token:write make
+      # the build job a high-value target for a malicious tag retag.
+      - uses: taiki-e/install-action@cca35edeb1d01366c2843b68fc3ca441446d73d3
         with:
           tool: cargo-shear
       - name: Check formatting

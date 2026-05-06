@@ -19,7 +19,7 @@ First-class languages produce a complete graph: file nodes, module nodes, class 
 | JavaScript | Oxc | `package.json` workspaces, `exports` conditions | Yes |
 | Python | tree-sitter | Absolute current-package imports for `src/<pkg>` and flat `<pkg>` layouts; sibling-package imports across configured repos; `pyproject.toml [project].name` for standalone repo identity; detection-only FastAPI pack | Yes |
 
-Python is first-class as of v2.1.0. TypeScript and JavaScript have been first-class since v1.0.0; v3.1.0 swapped the underlying TS/JS parser from SWC to Oxc with no observable change to the emitted graph.
+Python is first-class as of v2.1.0. TypeScript and JavaScript have been first-class since v1.0.0; v3.5.0 swapped the underlying TS/JS parser from SWC to Oxc with no observable change to the emitted graph.
 
 ### Tier 2 — File-Discovery Only
 

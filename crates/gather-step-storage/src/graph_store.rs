@@ -12,7 +12,7 @@ use redb::{
     Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadableDatabase,
     ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -282,6 +282,158 @@ pub struct EdgeCountSummary {
     pub virtual_other_cross_repo_edges: usize,
 }
 
+/// Read-only compressed-sparse-row snapshot of graph nodes and edge adjacency.
+///
+/// The snapshot is built from a consistent read transaction and is intended for
+/// frozen read paths that need many adjacency lookups without repeatedly
+/// opening redb tables.
+#[derive(Clone, Debug, Default)]
+pub struct GraphCsrSnapshot {
+    nodes: Vec<NodeData>,
+    node_positions: FxHashMap<NodeId, usize>,
+    edges: Vec<EdgeData>,
+    outgoing_offsets: Vec<usize>,
+    outgoing_edge_indices: Vec<usize>,
+    incoming_offsets: Vec<usize>,
+    incoming_edge_indices: Vec<usize>,
+    owner_offsets: Vec<usize>,
+    owner_edge_indices: Vec<usize>,
+}
+
+impl GraphCsrSnapshot {
+    pub fn from_parts(mut nodes: Vec<NodeData>, edges: Vec<EdgeData>) -> Self {
+        nodes.sort_by_key(|node| node.id.as_bytes());
+        let node_positions = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id, index))
+            .collect::<FxHashMap<_, _>>();
+
+        let (outgoing_offsets, outgoing_edge_indices) =
+            Self::build_edge_index(nodes.len(), &node_positions, &edges, |edge| edge.source);
+        let (incoming_offsets, incoming_edge_indices) =
+            Self::build_edge_index(nodes.len(), &node_positions, &edges, |edge| edge.target);
+        let (owner_offsets, owner_edge_indices) =
+            Self::build_edge_index(nodes.len(), &node_positions, &edges, |edge| edge.owner_file);
+
+        Self {
+            nodes,
+            node_positions,
+            edges,
+            outgoing_offsets,
+            outgoing_edge_indices,
+            incoming_offsets,
+            incoming_edge_indices,
+            owner_offsets,
+            owner_edge_indices,
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn nodes(&self) -> &[NodeData] {
+        &self.nodes
+    }
+
+    pub fn edges(&self) -> &[EdgeData] {
+        &self.edges
+    }
+
+    pub fn outgoing_edges(&self, node_id: NodeId) -> impl Iterator<Item = &EdgeData> {
+        self.edge_indices_for(&self.outgoing_offsets, &self.outgoing_edge_indices, node_id)
+            .iter()
+            .map(|&edge_index| &self.edges[edge_index])
+    }
+
+    pub fn incoming_edges(&self, node_id: NodeId) -> impl Iterator<Item = &EdgeData> {
+        self.edge_indices_for(&self.incoming_offsets, &self.incoming_edge_indices, node_id)
+            .iter()
+            .map(|&edge_index| &self.edges[edge_index])
+    }
+
+    pub fn owner_edges(&self, owner_file: NodeId) -> impl Iterator<Item = &EdgeData> {
+        self.edge_indices_for(&self.owner_offsets, &self.owner_edge_indices, owner_file)
+            .iter()
+            .map(|&edge_index| &self.edges[edge_index])
+    }
+
+    fn build_edge_index<F>(
+        node_count: usize,
+        node_positions: &FxHashMap<NodeId, usize>,
+        edges: &[EdgeData],
+        node_for_edge: F,
+    ) -> (Vec<usize>, Vec<usize>)
+    where
+        F: Fn(&EdgeData) -> NodeId,
+    {
+        let mut offsets = vec![0; node_count + 1];
+        for edge in edges {
+            if let Some(&node_position) = node_positions.get(&node_for_edge(edge)) {
+                offsets[node_position + 1] += 1;
+            }
+        }
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+
+        let mut cursors = offsets.clone();
+        let mut edge_indices = vec![0; offsets[node_count]];
+        for (edge_index, edge) in edges.iter().enumerate() {
+            if let Some(&node_position) = node_positions.get(&node_for_edge(edge)) {
+                let write_index = cursors[node_position];
+                edge_indices[write_index] = edge_index;
+                cursors[node_position] += 1;
+            }
+        }
+
+        (offsets, edge_indices)
+    }
+
+    fn edge_indices_for<'a>(
+        &'a self,
+        offsets: &'a [usize],
+        edge_indices: &'a [usize],
+        node_id: NodeId,
+    ) -> &'a [usize] {
+        let Some(&node_position) = self.node_positions.get(&node_id) else {
+            return &[];
+        };
+        &edge_indices[offsets[node_position]..offsets[node_position + 1]]
+    }
+
+    /// Export the snapshot's adjacency arrays as an
+    /// [`crate::adjacency_blob::AdjacencyBlob`] suitable for rkyv
+    /// serialization.  Node and edge payloads are intentionally not
+    /// included — the blob captures only the dense adjacency layout.
+    #[must_use]
+    pub fn to_adjacency_blob(&self) -> crate::adjacency_blob::AdjacencyBlob {
+        crate::adjacency_blob::AdjacencyBlob {
+            node_count: self.nodes.len() as u64,
+            edge_count: self.edges.len() as u64,
+            outgoing_offsets: self.outgoing_offsets.iter().map(|&n| n as u64).collect(),
+            outgoing_edge_indices: self
+                .outgoing_edge_indices
+                .iter()
+                .map(|&n| n as u64)
+                .collect(),
+            incoming_offsets: self.incoming_offsets.iter().map(|&n| n as u64).collect(),
+            incoming_edge_indices: self
+                .incoming_edge_indices
+                .iter()
+                .map(|&n| n as u64)
+                .collect(),
+            owner_offsets: self.owner_offsets.iter().map(|&n| n as u64).collect(),
+            owner_edge_indices: self.owner_edge_indices.iter().map(|&n| n as u64).collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphTableFootprint {
     pub name: String,
@@ -304,6 +456,22 @@ pub trait GraphStore {
     fn get_outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
     fn get_incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
     fn edges_by_owner(&self, owner_file: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+    fn csr_snapshot(&self) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        let mut nodes_by_id = FxHashMap::default();
+        for &kind in NodeKind::all() {
+            for node in self.nodes_by_type(kind)? {
+                nodes_by_id.insert(node.id, node);
+            }
+        }
+
+        let nodes = nodes_by_id.into_values().collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        for node in &nodes {
+            edges.extend(self.get_outgoing(node.id)?);
+        }
+
+        Ok(GraphCsrSnapshot::from_parts(nodes, edges))
+    }
     fn delete_edges_for_owner(&self, owner_file: NodeId) -> Result<(), GraphStoreError>;
     fn delete_edges_for_owner_by_kind(
         &self,
@@ -383,9 +551,15 @@ pub trait GraphStore {
 pub struct GraphStoreDb {
     db: Database,
     path: PathBuf,
-    /// When `true`, write transactions use `Durability::None` to skip fsync.
-    /// Set during bulk indexing, cleared after the last batch write.
-    bulk_mode: std::sync::atomic::AtomicBool,
+    /// Active-`BulkModeGuard` reference count. When > 0, write
+    /// transactions use `Durability::None` to skip fsync. The counter
+    /// (rather than a flat `AtomicBool`) is what makes
+    /// [`crate::indexer::BulkModeGuard`] safe under parallel workspace
+    /// indexing: the first guard to enter the bulk region increments to
+    /// 1, the last to leave decrements to 0 and fsyncs. Concurrent or
+    /// nested guards no longer race each other into prematurely
+    /// disabling bulk mode.
+    bulk_mode: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Error)]
@@ -486,7 +660,7 @@ impl GraphStoreDb {
         let store = Self {
             db,
             path,
-            bulk_mode: std::sync::atomic::AtomicBool::new(false),
+            bulk_mode: std::sync::atomic::AtomicUsize::new(0),
         };
         if is_new {
             store.write_schema_version()?;
@@ -510,27 +684,43 @@ impl GraphStoreDb {
     }
 
     /// Read the persisted schema version and reject the open when it does not
-    /// match [`GRAPH_SCHEMA_VERSION`]. A missing version row is treated as
-    /// version 0 (the v3.1 baseline) so unstamped fresh stores keep opening
-    /// cleanly. Stamped stores from a future schema fail with a typed
-    /// [`GraphStoreError::SchemaVersionMismatch`] instead of producing
-    /// shape-incompatible reads.
+    /// exactly match [`GRAPH_SCHEMA_VERSION`].
+    ///
+    /// **Strict policy**: every existing graph store must carry a stamped
+    /// schema row. A missing schema table or a missing version row is
+    /// treated as corruption and reported via
+    /// [`GraphStoreError::SchemaVersionMismatch`] with `stored = 0`, telling
+    /// the operator to wipe and reindex. This aligns with the
+    /// metadata/search stores which already enforce strict version checks;
+    /// gather-step has no production users yet, so no implicit-v0
+    /// compatibility shim is needed.
     fn validate_schema_version(&self) -> Result<(), GraphStoreError> {
         let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
         let table = match read_txn.open_table(GRAPH_SCHEMA) {
             Ok(t) => t,
-            // Missing schema table means the on-disk version is the implicit
-            // baseline (0); a future bump can require the table to exist.
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            // No schema table — the store predates the strict check and
+            // cannot be trusted on this binary. Surface a typed error so
+            // `gather-step index --auto-recover` can wipe and rebuild.
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Err(GraphStoreError::SchemaVersionMismatch {
+                    path: self.path.clone(),
+                    stored: 0,
+                    expected: GRAPH_SCHEMA_VERSION,
+                });
+            }
             Err(error) => return Err(GraphStoreError::storage(error)),
         };
-        let stored = match table
+        let Some(stored) = table
             .get(GRAPH_SCHEMA_VERSION_KEY)
             .map_err(GraphStoreError::storage)?
-        {
-            Some(v) => v.value(),
-            None => GRAPH_SCHEMA_VERSION, // baseline assumption
+        else {
+            return Err(GraphStoreError::SchemaVersionMismatch {
+                path: self.path.clone(),
+                stored: 0,
+                expected: GRAPH_SCHEMA_VERSION,
+            });
         };
+        let stored = stored.value();
         if stored == GRAPH_SCHEMA_VERSION {
             Ok(())
         } else {
@@ -686,15 +876,37 @@ impl GraphStoreDb {
         self.db.compact().map_err(GraphStoreError::storage)
     }
 
-    /// Enable or disable bulk mode. When enabled, write transactions use
-    /// `Durability::None` to skip fsync on each commit.  Flipping the flag
-    /// off does **not** by itself flush the unsynced pages; a follow-up
-    /// `Durability::Immediate` commit is required.  Callers should prefer
-    /// [`crate::indexer::BulkModeGuard`] over calling this directly — the
-    /// guard's `Drop` handles the flush via [`Self::commit_durable_marker`].
-    pub fn set_bulk_mode(&self, enabled: bool) {
+    /// Increment the bulk-mode reference count and return the new count.
+    ///
+    /// When the count transitions from `0 → 1`, the next write
+    /// transaction switches to `Durability::None` to skip fsync. The
+    /// counter (not a flat boolean) is what lets multiple
+    /// [`crate::indexer::BulkModeGuard`] instances coexist safely under
+    /// parallel workspace indexing — the first guard turns bulk mode
+    /// on, subsequent guards are no-ops on durability, and only the
+    /// last guard to drop fsyncs the accumulated pages.
+    ///
+    /// Callers should always go through [`crate::indexer::BulkModeGuard`]
+    /// — calling this directly from outside the indexer would skip the
+    /// fsync step on the matching decrement.
+    pub(crate) fn bulk_mode_acquire(&self) -> usize {
         self.bulk_mode
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1
+    }
+
+    /// Decrement the bulk-mode reference count and return the new count.
+    /// When the count transitions from `1 → 0`, the caller is responsible
+    /// for fsyncing accumulated pages via [`Self::commit_durable_marker`].
+    pub(crate) fn bulk_mode_release(&self) -> usize {
+        let prev = self
+            .bulk_mode
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(
+            prev > 0,
+            "bulk_mode_release called more times than bulk_mode_acquire",
+        );
+        prev.saturating_sub(1)
     }
 
     /// Commit an empty write transaction at whatever durability level the
@@ -707,9 +919,10 @@ impl GraphStoreDb {
         write_txn.commit().map_err(GraphStoreError::storage)
     }
 
-    /// Whether bulk mode is currently enabled.
+    /// Whether bulk mode is currently enabled (i.e. at least one
+    /// [`crate::indexer::BulkModeGuard`] is live).
     pub fn is_bulk_mode(&self) -> bool {
-        self.bulk_mode.load(std::sync::atomic::Ordering::Relaxed)
+        self.bulk_mode.load(std::sync::atomic::Ordering::Acquire) > 0
     }
 
     /// Count edges where source and target nodes belong to different repos,
@@ -1011,7 +1224,7 @@ impl GraphStoreDb {
         // loses the last committed batch, the coordinator can rebuild it by
         // reindexing files. In bulk mode we skip fsync entirely for speed; in
         // normal mode we use Immediate durability (one fsync per commit).
-        let durability = if self.bulk_mode.load(std::sync::atomic::Ordering::Relaxed) {
+        let durability = if self.bulk_mode.load(std::sync::atomic::Ordering::Acquire) > 0 {
             Durability::None
         } else {
             Durability::Immediate
@@ -2817,6 +3030,64 @@ impl GraphStoreDb {
             .map_err(|_| GraphStoreError::storage(redb::StorageError::ValueTooLarge(usize::MAX)))
     }
 
+    pub fn csr_snapshot(&self) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        let read_txn = self.begin_read_txn()?;
+        Self::csr_snapshot_in_read_txn(&read_txn)
+    }
+
+    fn csr_snapshot_in_read_txn(
+        read_txn: &redb::ReadTransaction,
+    ) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        let nodes_table = match read_txn.open_table(NODES) {
+            Ok(table) => table,
+            Err(error) if Self::is_missing_table_error(&error) => {
+                return Ok(GraphCsrSnapshot::default());
+            }
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+
+        let node_capacity =
+            usize::try_from(nodes_table.len().map_err(GraphStoreError::storage)?).unwrap_or(0);
+        let mut nodes = Vec::with_capacity(node_capacity);
+        let mut repo_cache = FxHashMap::default();
+        let mut file_path_cache = FxHashMap::default();
+        let mut signature_cache = FxHashMap::default();
+        let node_iter = nodes_table.iter().map_err(GraphStoreError::storage)?;
+        for entry in node_iter {
+            let (_node_id, raw) = entry.map_err(GraphStoreError::storage)?;
+            let stored = Self::decode_stored_node(raw.value())?;
+            nodes.push(Self::rehydrate_node_with_cache(
+                read_txn,
+                stored,
+                &mut repo_cache,
+                &mut file_path_cache,
+                &mut signature_cache,
+            )?);
+        }
+
+        let edges_table = match read_txn.open_table(EDGES) {
+            Ok(table) => Some(table),
+            Err(error) if Self::is_missing_table_error(&error) => None,
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let edge_capacity = edges_table
+            .as_ref()
+            .map(|table| table.len().map_err(GraphStoreError::storage))
+            .transpose()?
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or(0);
+        let mut edges = Vec::with_capacity(edge_capacity);
+        if let Some(edges_table) = edges_table {
+            let edge_iter = edges_table.iter().map_err(GraphStoreError::storage)?;
+            for entry in edge_iter {
+                let (_edge_id, raw) = entry.map_err(GraphStoreError::storage)?;
+                edges.push(Self::decode_edge(raw.value())?);
+            }
+        }
+
+        Ok(GraphCsrSnapshot::from_parts(nodes, edges))
+    }
+
     /// Compute all five cross-repo edge counters in a single EDGES-table scan
     /// and one read transaction, replacing the previous five sequential calls.
     ///
@@ -3126,6 +3397,10 @@ impl GraphStore for GraphStoreDb {
             }
         }
         Ok(result)
+    }
+
+    fn csr_snapshot(&self) -> Result<GraphCsrSnapshot, GraphStoreError> {
+        GraphStoreDb::csr_snapshot(self)
     }
 
     fn delete_edges_for_owner(&self, owner_file: NodeId) -> Result<(), GraphStoreError> {
@@ -3487,6 +3762,7 @@ mod tests {
     };
     use pretty_assertions::assert_eq;
     use redb::ReadableDatabase;
+    use rustc_hash::FxHashSet;
 
     use super::{
         BY_EXTERNAL_ID, CROSS_FILE_CANDIDATES, EDGE_KIND_COUNTS, GraphStore, GraphStoreDb,
@@ -3728,6 +4004,48 @@ mod tests {
         let incoming = store.get_incoming(b.id).expect("incoming should load");
 
         assert_eq!(incoming, vec![relation]);
+    }
+
+    #[test]
+    fn csr_snapshot_builds_forward_reverse_and_owner_adjacency() {
+        let store = test_store("csr-snapshot");
+        let file = node("service-a", "src/foo.ts", NodeKind::File, "src/foo.ts", 0);
+        let a = node("service-a", "src/foo.ts", NodeKind::Function, "a", 0);
+        let b = node("service-a", "src/foo.ts", NodeKind::Function, "b", 1);
+        let c = node("service-a", "src/foo.ts", NodeKind::Function, "c", 2);
+        let a_to_b = edge(a.id, b.id, file.id);
+        let a_to_c = edge(a.id, c.id, file.id);
+
+        store
+            .bulk_insert(
+                &[file.clone(), a.clone(), b.clone(), c.clone()],
+                &[a_to_b.clone(), a_to_c.clone()],
+            )
+            .expect("batch should insert");
+
+        let snapshot = store.csr_snapshot().expect("snapshot should build");
+
+        assert_eq!(snapshot.node_count(), 4);
+        assert_eq!(snapshot.edge_count(), 2);
+        assert!(snapshot.nodes().iter().any(|node| node.id == a.id));
+        assert_eq!(
+            snapshot
+                .outgoing_edges(a.id)
+                .map(|edge| edge.target)
+                .collect::<FxHashSet<_>>(),
+            [b.id, c.id].into_iter().collect::<FxHashSet<_>>()
+        );
+        assert_eq!(
+            snapshot.incoming_edges(b.id).cloned().collect::<Vec<_>>(),
+            vec![a_to_b.clone()]
+        );
+        assert_eq!(
+            snapshot
+                .owner_edges(file.id)
+                .map(|edge| edge.target)
+                .collect::<FxHashSet<_>>(),
+            [b.id, c.id].into_iter().collect::<FxHashSet<_>>()
+        );
     }
 
     #[test]

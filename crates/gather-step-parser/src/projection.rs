@@ -3,6 +3,7 @@ use std::{
     sync::LazyLock,
 };
 
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use rustc_hash::FxHashSet;
 
 use gather_step_core::{
@@ -15,6 +16,58 @@ use crate::{traverse::Language, tree_sitter::ParsedFile};
 
 const CONFIDENCE_HIGH: u16 = 900;
 const CONFIDENCE_MEDIUM: u16 = 700;
+
+/// Sentinel literals that mark a TS/JS source as containing schema-field
+/// definitions worth scanning for projection facts.  Compiled into a single
+/// aho-corasick DFA at startup so a `should_scan_projection_fields` call is
+/// O(N) over the source bytes regardless of how many sentinels are checked
+/// — replacing the prior chain of `source.contains(...)` calls which was
+/// O(N × needles).
+const SCHEMA_FIELD_SENTINELS: &[&str] = &[
+    "@Prop",
+    "@Schema",
+    "SchemaFactory",
+    "new Schema",
+    "mongoose.Schema",
+];
+
+const PROJECTION_CONTEXT_SENTINELS: &[&str] = &[
+    "$project",
+    "$addFields",
+    "$lookup",
+    "$set",
+    "$unset",
+    "$inc",
+    "$push",
+    "$pull",
+    "$addToSet",
+    "find(",
+    "findOne(",
+    "where(",
+    "updateOne(",
+    "updateMany(",
+    "insertOne(",
+    "insertMany(",
+    ".index(",
+    "createIndex",
+    "searchIndex",
+    "backfill",
+    "migration",
+];
+
+static SCHEMA_FIELD_DFA: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasickBuilder::new()
+        .match_kind(MatchKind::LeftmostFirst)
+        .build(SCHEMA_FIELD_SENTINELS)
+        .expect("schema-field sentinel DFA must build")
+});
+
+static PROJECTION_CONTEXT_DFA: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasickBuilder::new()
+        .match_kind(MatchKind::LeftmostFirst)
+        .build(PROJECTION_CONTEXT_SENTINELS)
+        .expect("projection-context sentinel DFA must build")
+});
 
 static PROPERTY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -42,10 +95,10 @@ static OBJECT_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?m)(^|[,{]\s*)["']?([A-Za-z_$][A-Za-z0-9_$.]*)["']?\s*:\s*([^,\n}{;]+)"#)
         .expect("The object-field regex should compile.")
 });
-static DOTTED_ACCESS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:this|[A-Za-z_$][A-Za-z0-9_$]*)\??\.([A-Za-z_$][A-Za-z0-9_$]*)")
-        .expect("The dotted-access regex should compile.")
-});
+// Note: the dotted-access pattern previously lived here as a `regex::Regex`.
+// It was moved to `crate::regex_dfa` so the matcher is built directly via
+// `regex_automata::meta::Regex` — same DFA-backed engine, but reaches it
+// without going through the `regex` 1.x facade for this hot path.
 static DOTTED_STRING_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"["']([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)["']"#)
         .expect("The dotted-string regex should compile.")
@@ -739,11 +792,7 @@ fn property_declarations(source: &str) -> BTreeSet<String> {
 }
 
 fn has_schema_field_context(source: &str) -> bool {
-    source.contains("@Prop")
-        || source.contains("@Schema")
-        || source.contains("SchemaFactory")
-        || source.contains("new Schema")
-        || source.contains("mongoose.Schema")
+    SCHEMA_FIELD_DFA.is_match(source)
 }
 
 fn should_scan_projection_fields(source: &str, file_path: &str) -> bool {
@@ -755,27 +804,7 @@ fn should_scan_projection_fields(source: &str, file_path: &str) -> bool {
 }
 
 fn has_projection_context_token(source: &str) -> bool {
-    source.contains("$project")
-        || source.contains("$addFields")
-        || source.contains("$lookup")
-        || source.contains("$set")
-        || source.contains("$unset")
-        || source.contains("$inc")
-        || source.contains("$push")
-        || source.contains("$pull")
-        || source.contains("$addToSet")
-        || source.contains("find(")
-        || source.contains("findOne(")
-        || source.contains("where(")
-        || source.contains("updateOne(")
-        || source.contains("updateMany(")
-        || source.contains("insertOne(")
-        || source.contains("insertMany(")
-        || source.contains(".index(")
-        || source.contains("createIndex")
-        || source.contains("searchIndex")
-        || source.contains("backfill")
-        || source.contains("migration")
+    PROJECTION_CONTEXT_DFA.is_match(source)
 }
 
 fn has_projected_object_key(source: &str) -> bool {
@@ -910,19 +939,16 @@ fn object_field_assignments(source: &str) -> Vec<(String, String)> {
 }
 
 fn source_fields_from_value(value: &str) -> BTreeSet<String> {
-    dotted_access_re()
-        .captures_iter(value)
-        .filter_map(|capture| normalize_field_name(capture.get(1)?.as_str()))
+    crate::regex_dfa::iter_dotted_access_captures(value)
+        .filter_map(normalize_field_name)
         .filter(|field| !is_method_or_noise(field))
         .collect()
 }
 
 fn line_fields(line: &str, known_fields: &BTreeSet<String>) -> BTreeSet<String> {
     let mut fields = object_line_fields(line, known_fields);
-    for capture in dotted_access_re().captures_iter(line) {
-        if let Some(field) = capture
-            .get(1)
-            .and_then(|value| normalize_field_name(value.as_str()))
+    for raw in crate::regex_dfa::iter_dotted_access_captures(line) {
+        if let Some(field) = normalize_field_name(raw)
             && !is_method_or_noise(&field)
         {
             fields.insert(field);
@@ -1250,10 +1276,6 @@ fn destructured_alias_re() -> &'static Regex {
 
 fn object_field_re() -> &'static Regex {
     &OBJECT_FIELD_RE
-}
-
-fn dotted_access_re() -> &'static Regex {
-    &DOTTED_ACCESS_RE
 }
 
 fn dotted_string_re() -> &'static Regex {

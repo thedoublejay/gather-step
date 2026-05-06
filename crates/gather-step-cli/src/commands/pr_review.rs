@@ -69,10 +69,6 @@ const MAX_CHANGED_FILES: usize = 200;
 static TEMP_INDEX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Args, Debug, Clone)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "pr-review has several independent opt-in flag fields; a state machine would obscure intent"
-)]
 pub struct PrReviewArgs {
     #[command(subcommand)]
     pub command: Option<PrReviewSubcommand>,
@@ -96,11 +92,6 @@ pub struct PrReviewArgs {
     #[arg(long)]
     pub keep_cache: bool,
 
-    /// Emit JSON output instead of Markdown.  Overrides the global `--json`
-    /// flag for this command (the global flag also works).
-    #[arg(long)]
-    pub json: bool,
-
     /// Override the OS cache root used for review artifacts.
     /// Useful for CI and tests.
     #[arg(long, value_name = "PATH", hide = true)]
@@ -115,14 +106,6 @@ pub struct PrReviewArgs {
     /// bootstrap), or to override the committed one for a single run.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
-
-    /// Exit with code 2 if any removed-surface risk has severity `High`.
-    /// Without this flag the report is always emitted with exit code 0.
-    ///
-    /// Deprecated: use `--severity strict` instead.  This flag will be
-    /// removed in a future release.
-    #[arg(long)]
-    pub strict: bool,
 
     /// Severity mode controlling when the command exits with code 2.
     /// `warn` (default) always exits 0.  `strict` exits 2 on High risks or
@@ -313,25 +296,8 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
                 .context("--head is required when running a review with no subcommand.")?
                 .to_owned();
 
-            // --strict is a deprecated alias for --severity strict.
-            let effective_severity = if args.strict && args.severity == SeverityMode::Warn {
-                tracing::warn!(
-                    "--strict is deprecated; use --severity strict instead. \
-                     --strict will be removed in a future release."
-                );
-                SeverityMode::Strict
-            } else {
-                args.severity
-            };
-
-            // --json is a deprecated alias for --format json.
-            let effective_format = if args.json || app.json_output {
-                if args.json {
-                    tracing::warn!(
-                        "--json is deprecated; use --format json instead. \
-                         --json will be removed in a future release."
-                    );
-                }
+            let effective_severity = args.severity;
+            let effective_format = if app.json_output {
                 OutputFormat::Json
             } else {
                 args.format
@@ -343,10 +309,8 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
                 head,
                 engine: args.engine,
                 keep_cache: args.keep_cache,
-                json: args.json,
                 cache_root: args.cache_root,
                 config: args.config,
-                strict: args.strict,
                 severity: effective_severity,
                 format: effective_format,
                 github_comment_file: args.github_comment_file,
@@ -383,28 +347,19 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
 ///
 /// Extracted from `PrReviewArgs` after confirming `--base` and `--head` are
 /// present.  Used internally so `run_inner` can still take typed fields.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "mirrors PrReviewArgs — each bool is an independent CLI flag; a state machine would obscure intent"
-)]
 pub struct PrReviewRunArgs {
     pub base: String,
     pub head: String,
     pub engine: ReviewEngine,
     pub keep_cache: bool,
-    pub json: bool,
     pub cache_root: Option<PathBuf>,
     /// Optional override for the worktree-root config. When set, the file at
     /// this path is copied into the materialized worktree before indexing,
     /// so callers can review workspaces that do not check in their
     /// `gather-step.config.yaml`.
     pub config: Option<PathBuf>,
-    /// Deprecated: kept for backward-compat.  Callers should prefer `severity`.
-    pub strict: bool,
     pub severity: SeverityMode,
-    /// Output format.  Defaults to `Markdown`.
-    ///
-    /// When `json = true` (the legacy flag) is set, this is overridden to `Json`.
+    /// Output format. Defaults to `Markdown`.
     pub format: OutputFormat,
     /// If `Some`, write the GitHub-comment rendering to this path in addition to stdout.
     pub github_comment_file: Option<PathBuf>,
@@ -565,13 +520,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         None
     };
 
-    // Legacy --json flag coerces to Json format.
-    let effective_format = if args.json || app.json_output {
+    let effective_format = if app.json_output {
         OutputFormat::Json
     } else {
         args.format
     };
-    // `effective_format` is used directly for render dispatch; no separate bool needed.
 
     // ── 1. Resolve refs ────────────────────────────────────────────────────
     let resolved =
@@ -2108,7 +2061,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
         .clone()
         .unwrap_or_else(|| default_cache_root(&app.workspace_path));
 
-    let emit_json = top.json || app.json_output;
+    let emit_json = app.json_output;
 
     // Discover all review artifacts for this workspace.
     let all_artifacts = list_review_artifacts(&app.workspace_path, &cache_root)
@@ -2738,12 +2691,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -2801,12 +2752,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -2868,12 +2817,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -2934,12 +2881,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3000,12 +2945,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3068,12 +3011,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3252,12 +3193,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3316,12 +3255,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3355,12 +3292,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3399,12 +3334,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3438,12 +3371,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_root.clone()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3476,12 +3407,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3525,12 +3454,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3578,12 +3505,10 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3707,12 +3632,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3773,12 +3696,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3832,12 +3753,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3924,12 +3843,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -3988,12 +3905,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: Some(cfg_a.clone()),
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4035,12 +3950,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4066,12 +3979,10 @@ mod tests {
             head: new_head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4134,12 +4045,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4279,12 +4188,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4377,12 +4284,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4452,12 +4357,10 @@ mod tests {
             head: None,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache.to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4704,10 +4607,8 @@ mod tests {
             head: head_sha,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: false,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
             format: OutputFormat::GithubComment,
             github_comment_file: Some(comment_path.clone()),
@@ -4758,12 +4659,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: true,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4786,12 +4685,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
@@ -4832,12 +4729,10 @@ mod tests {
             head: head_sha.clone(),
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
-            json: true,
             cache_root: Some(cache_tmp.path().to_path_buf()),
             config: None,
-            strict: false,
             severity: SeverityMode::Warn,
-            format: OutputFormat::Markdown,
+            format: OutputFormat::Json,
             github_comment_file: None,
             no_baseline_check: false,
         };
