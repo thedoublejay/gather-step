@@ -602,7 +602,7 @@ gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] <T
 gather-step --workspace /path/to/workspace qa-evidence OrdersService --base main --head feature/orders --json
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v0.1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are canonical evidence objects with `id`, closed enum `kind`, closed enum `source`, structured `citation`, optional `subject`, and optional `support { method, score }`. IDs are stable for a given source, kind, citation, and subject; support changes do not change the ID. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.
+**Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are canonical evidence objects with `id`, closed enum `kind`, closed enum `source`, structured `citation`, optional `subject`, and optional `support { method, score }`. IDs are stable for a given source, kind, citation, and subject; support changes do not change the ID. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.
 
 **When to use** — before generating a QA reference in Braingent or another planning tool that needs grounded code evidence without asking Gather Step to write test-plan prose.
 
@@ -825,7 +825,7 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 8`) populates `metadata`, `safety`, `changed_files`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
+The report (`schema_version: 1`) populates `metadata`, `safety`, `changed_files`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
 
 The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
 

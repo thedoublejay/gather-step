@@ -55,7 +55,7 @@ fn serialize_path_forward_slash<S: Serializer>(
 /// [`DeltaReport`] (JSON + Markdown + Braingent frontmatter). Bump this when
 /// the report shape changes; callers must reference it instead of hard-coding
 /// the literal so the JSON, Markdown, frontmatter, and tests stay aligned.
-pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 8;
+pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Top-level output struct for `gather-step pr-review`.
 #[derive(Debug, Clone, Serialize)]
@@ -2456,14 +2456,13 @@ mod tests {
         assert_eq!(json["schema_version"], 3);
     }
 
-    /// The canonical schema version is `DELTA_REPORT_SCHEMA_VERSION` (changed
-    /// payload impact and deployment change reasons added at v7).
+    /// The canonical schema version is `DELTA_REPORT_SCHEMA_VERSION`.
     #[test]
     fn schema_version_matches_constant() {
         let report = make_empty_report(super::DELTA_REPORT_SCHEMA_VERSION);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["schema_version"], super::DELTA_REPORT_SCHEMA_VERSION);
-        // Confirm the `deployment` key is present (added in v7).
+        // Confirm the current report shape includes the `deployment` key.
         assert!(
             json.as_object().unwrap().contains_key("deployment"),
             "current-version report must include the `deployment` key"

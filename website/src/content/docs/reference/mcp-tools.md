@@ -166,7 +166,7 @@ Used automatically when the user asks to review a pull request, do a structural 
 | `keep_cache` | bool | no | Preserve the review artifact for follow-up `impact`/`trace`/`pack` queries. Default: `false` — the artifact is deleted after the report is returned. |
 | `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. `strict` and `pedantic` cause non-zero exit on threshold violations; `warn` always returns the report regardless. |
 
-**Returns.** A JSON `DeltaReport` (`schema_version: 8`) with these top-level sections:
+**Returns.** A JSON `DeltaReport` (`schema_version: 1`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
 - `safety` — review storage path, run id, cleanup policy, cache key.

@@ -496,7 +496,7 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
         ],
     );
     assert_eq!(qa_evidence_json["event"], "qa_evidence_completed");
-    assert_eq!(qa_evidence_json["schema_version"], "qa-evidence.v0.1");
+    assert_eq!(qa_evidence_json["schema_version"], "qa-evidence.v1");
     assert_eq!(qa_evidence_json["target"], "OrderList");
     assert_eq!(qa_evidence_json["manifest_summary"]["truncated"], false);
     assert!(qa_evidence_json["base_ref"] == "main");

@@ -32,7 +32,7 @@ use crate::app::AppContext;
 use crate::command_render::RenderedCommand;
 use crate::storage_context::StorageContext;
 
-const QA_EVIDENCE_SCHEMA_VERSION: &str = "qa-evidence.v0.1";
+const QA_EVIDENCE_SCHEMA_VERSION: &str = "qa-evidence.v1";
 
 #[derive(Debug, Args)]
 pub struct QaEvidenceArgs {

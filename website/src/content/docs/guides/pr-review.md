@@ -41,7 +41,7 @@ and prints the delta report.
 gather-step pr-review --base main --head feat/my-change --json
 ```
 
-The JSON form emits a `DeltaReport` (`schema_version: 8`) suitable for
+The JSON form emits a `DeltaReport` (`schema_version: 1`) suitable for
 piping into other tools or reading programmatically. It includes canonical
 evidence metadata computed from the typed delta surfaces at query time.
 
