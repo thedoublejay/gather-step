@@ -177,11 +177,21 @@ export class ServiceAController {
         frontend.join("src/OrderList.tsx"),
         r"
 export function OrderList() {
+  // useFlag('orders-list-v2')
   return <div>Orders</div>;
 }
 ",
     )
     .expect("frontend source");
+    fs::write(
+        frontend.join("src/OrderList.test.tsx"),
+        r"
+import { OrderList } from './OrderList';
+
+export const orderListTestTarget = OrderList;
+",
+    )
+    .expect("frontend test source");
 }
 
 #[test]
@@ -365,6 +375,45 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .expect("pack items array")
             .is_empty()
     );
+
+    let qa_evidence = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "OrderList",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--json",
+        ],
+    );
+    let qa_evidence_json = stdout_json(&qa_evidence);
+    assert_eq!(qa_evidence_json["event"], "qa_evidence_completed");
+    assert_eq!(qa_evidence_json["schema_version"], "qa-evidence.v0.1");
+    assert_eq!(qa_evidence_json["target"], "OrderList");
+    assert_eq!(qa_evidence_json["manifest_summary"]["truncated"], false);
+    assert!(qa_evidence_json["base_ref"] == "main");
+    assert!(qa_evidence_json["head_ref"] == "HEAD");
+    let qa_rows = qa_evidence_json["rows"]
+        .as_array()
+        .expect("qa evidence rows array");
+    assert!(
+        qa_rows
+            .iter()
+            .any(|row| row["source_resolver"] == "planning_pack")
+    );
+    assert!(qa_rows.iter().any(|row| row["fact_kind"] == "feature_flag"));
+    assert!(
+        qa_rows
+            .iter()
+            .any(|row| row["fact_kind"] == "existing_test_signal")
+    );
+    assert!(qa_rows.iter().all(|row| {
+        row["citation_key"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty())
+    }));
 
     let repo_pack = run_ok(
         temp.path(),

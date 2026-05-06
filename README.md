@@ -46,6 +46,7 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 - Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
 - Route, event, shared-symbol, payload-contract, projection-impact, and deployment-topology graph surfaces
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
+- Evidence-only QA planning manifests for downstream Braingent test-plan workflows
 - Workspace health commands such as `status`, `doctor`, and `watch`
 - Derived outputs for assistant summaries, rules, and ownership files
 - Local release validation with high-contract probes and PR-oracle scoring
@@ -168,6 +169,7 @@ gather-step --workspace /path/to/workspace impact CreateOrderInput
 gather-step --workspace /path/to/workspace projection-impact --target subtaskIds
 gather-step --workspace /path/to/workspace deployment-topology where-deployed --service api
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
+gather-step --workspace /path/to/workspace qa-evidence createOrder --base main --head feature/my-branch --json
 gather-step --workspace /path/to/workspace conventions
 gather-step --workspace /path/to/workspace generate claude-md
 gather-step --workspace /path/to/workspace generate claude-md --target summary
@@ -180,6 +182,8 @@ gather-step --workspace /path/to/workspace pr-review --base main --head feature/
 ```
 
 `pr-review` builds an isolated review index for a PR branch and emits a structured delta report covering changed files, safety signals, and suggested follow-up commands. See [CLI reference](website/src/content/docs/reference/cli.md#pr-review) for the full flag list.
+
+`qa-evidence` emits structured code evidence for QA planning tools. It combines planning/review/change-impact packs with local feature-flag and existing-test signals, but it does not generate test cases or interpret product requirements.
 
 ## Security
 
