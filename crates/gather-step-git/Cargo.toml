@@ -15,7 +15,6 @@ gix.workspace = true
 hashbrown.workspace = true
 regex.workspace = true
 blake3.workspace = true
-rustc-hash.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

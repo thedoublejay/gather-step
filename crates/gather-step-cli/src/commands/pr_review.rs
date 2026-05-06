@@ -385,28 +385,29 @@ enum RunOutcome {
 /// Best-effort cleanup guard for the review artifact and worktree.
 ///
 /// Runs cleanup on `Drop` unless [`Self::disarm`] has been called or the
-/// guard was constructed with `keep_cache = true`. This keeps the disposable
-/// cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/` is removed
-/// unless `--keep-cache`) under panic, signal, and early-return paths —
-/// not just the happy-return path.
+/// guard was constructed with [`CacheRetention::Keep`]. This keeps the
+/// disposable cache contract (`<cache>/gather-step/pr-review/<hash>/<id>/`
+/// is removed unless `--keep-cache`) under panic, signal, and early-return
+/// paths — not just the happy-return path.
 ///
-/// When `keep_cache` is `true`, the guard does NOT remove anything on Drop.
-/// The user explicitly opted to inspect this run's artifact, including
-/// failures. Failed runs reach Drop with the artifact marker already set to
-/// [`ReviewStatus::Quarantined`] by [`quarantine_on_error`], so the artifact
-/// remains discoverable by `pr-review clean --include-active`.
+/// When `retention` is [`CacheRetention::Keep`], the guard does NOT remove
+/// anything on Drop. The user explicitly opted to inspect this run's
+/// artifact, including failures. Failed runs reach Drop with the artifact
+/// marker already set to [`ReviewStatus::Quarantined`] by
+/// [`quarantine_on_error`], so the artifact remains discoverable by
+/// `pr-review clean --run-id <id>` or `pr-review clean --older-than <duration>`.
 struct ReviewCleanupGuard {
     artifact_root_path: Option<std::path::PathBuf>,
     worktree: Option<ReviewWorktree>,
-    keep_cache: bool,
+    retention: CacheRetention,
 }
 
 impl ReviewCleanupGuard {
-    fn new(keep_cache: bool) -> Self {
+    fn new(retention: CacheRetention) -> Self {
         Self {
             artifact_root_path: None,
             worktree: None,
-            keep_cache,
+            retention,
         }
     }
 
@@ -423,7 +424,7 @@ impl ReviewCleanupGuard {
 
 impl Drop for ReviewCleanupGuard {
     fn drop(&mut self) {
-        if self.keep_cache {
+        if self.retention.keeps_cache() {
             // User opted to inspect the artifact (including failures).
             // Drop the references so we don't double-cleanup if a later
             // explicit cleanup path runs, but do not touch disk.
@@ -450,11 +451,20 @@ impl Drop for ReviewCleanupGuard {
         }
         if let Some(path) = self.artifact_root_path.take() {
             if !worktree_removed {
-                tracing::warn!(
-                    path = %path.display(),
-                    "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. \
-                     Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
-                );
+                let quarantined = quarantine_artifact_path(&path);
+                if quarantined {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. The artifact marker was moved to the Quarantined state. \
+                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                    );
+                } else {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed, and the marker could not be transitioned to Quarantined. \
+                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                    );
+                }
                 return;
             }
             if path.exists()
@@ -467,6 +477,26 @@ impl Drop for ReviewCleanupGuard {
                 );
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheRetention {
+    Discard,
+    Keep,
+}
+
+impl CacheRetention {
+    fn from_keep_cache(keep_cache: bool) -> Self {
+        if keep_cache {
+            Self::Keep
+        } else {
+            Self::Discard
+        }
+    }
+
+    fn keeps_cache(self) -> bool {
+        matches!(self, Self::Keep)
     }
 }
 
@@ -612,7 +642,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // takes over. If the function panics or returns Err between arming and
     // disarming, the Drop impl removes the worktree and artifact root rather
     // than leaving them as InProgress orphans in the user's OS cache.
-    let mut cleanup_guard = ReviewCleanupGuard::new(args.keep_cache);
+    let mut cleanup_guard =
+        ReviewCleanupGuard::new(CacheRetention::from_keep_cache(args.keep_cache));
 
     // Try to reuse a prior completed artifact with the same cache key.
     // Cache reuse is independent of `keep_cache` — `keep_cache` controls
@@ -620,7 +651,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let mut was_cache_hit = false;
     let outcome: RunOutcome = if let Some(hit_root) =
         try_reuse_cache(&cache_root, &cache_key_struct).unwrap_or_else(|e| {
-            tracing::debug!(error = %e, "cache lookup failed; falling back to cold run");
+            tracing::warn!(error = %e, "Cache lookup failed; falling back to a cold run.");
             None
         }) {
         let workspace_ctx = StorageContext::workspace_read_only(app);
@@ -1561,10 +1592,57 @@ fn map_changed_repos_from_config(
     result_set.into_iter().collect()
 }
 
-/// Mark the artifact root as Quarantined on error, ignoring any secondary
-/// failure to write the marker.
+/// Mark the artifact root as Quarantined on error.
 fn quarantine_on_error(artifact_root: &ReviewArtifactRoot) {
-    let _ = write_marker_quarantined(artifact_root);
+    if let Err(e) = write_marker_quarantined(artifact_root) {
+        tracing::warn!(
+            error = %e,
+            root = %artifact_root.root.display(),
+            run_id = %artifact_root.run_id,
+            "Failed to mark the pr-review artifact as Quarantined after an error.",
+        );
+    }
+}
+
+/// Best-effort quarantine for an artifact root identified only by path.
+///
+/// Returns `true` when the on-disk marker was successfully transitioned to
+/// [`ReviewStatus::Quarantined`], `false` otherwise (marker unreadable,
+/// transition rejected, or write failed). Callers use the return value to
+/// keep user-facing log messages truthful — claiming the marker was moved
+/// when it was not is worse than logging the failure.
+fn quarantine_artifact_path(artifact_root_path: &Path) -> bool {
+    let marker_path = artifact_root_path.join(MARKER_FILENAME);
+    let marker = match read_marker(&marker_path) {
+        Ok(marker) => marker,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %marker_path.display(),
+                "Failed to read the pr-review artifact marker before quarantine.",
+            );
+            return false;
+        }
+    };
+
+    let artifact_root = ReviewArtifactRoot::from_existing(
+        artifact_root_path.to_path_buf(),
+        marker.workspace_root,
+        marker.run_id,
+        marker.workspace_hash,
+    );
+    match write_marker_quarantined(&artifact_root) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %artifact_root.root.display(),
+                run_id = %artifact_root.run_id,
+                "Failed to mark the pr-review artifact as Quarantined after worktree cleanup failed.",
+            );
+            false
+        }
+    }
 }
 
 // ─── pr-review clean ──────────────────────────────────────────────────────────
@@ -2517,6 +2595,63 @@ mod tests {
         fs::write(&marker_path, json).expect("write marker");
 
         root
+    }
+
+    #[test]
+    fn cleanup_guard_with_keep_cache_does_not_touch_disk_on_drop() {
+        let ws_tmp = TempDir::new("keep-cache-ws");
+        let cache_tmp = TempDir::new("keep-cache-cache");
+        let artifact_root = write_fake_artifact(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "review-keep-cache",
+            "baseKC",
+            "headKC",
+            ReviewStatus::InProgress,
+            None,
+        );
+
+        let mut guard = ReviewCleanupGuard::new(CacheRetention::Keep);
+        guard.arm(artifact_root.clone(), None);
+        drop(guard);
+
+        assert!(
+            artifact_root.exists(),
+            "The cleanup guard must not remove artifacts when cache retention is Keep."
+        );
+        let marker = read_marker(&artifact_root.join(MARKER_FILENAME)).unwrap();
+        assert_eq!(marker.status, ReviewStatus::InProgress);
+    }
+
+    #[test]
+    fn cleanup_guard_quarantines_artifact_when_worktree_remove_fails() {
+        let ws_tmp = TempDir::new("drop-worktree-fail-ws");
+        let cache_tmp = TempDir::new("drop-worktree-fail-cache");
+        let artifact_root = write_fake_artifact(
+            cache_tmp.path(),
+            ws_tmp.path(),
+            "review-drop-worktree-fail",
+            "baseWF",
+            "headWF",
+            ReviewStatus::InProgress,
+            None,
+        );
+        let worktree = ReviewWorktree {
+            repo: ws_tmp.path().to_path_buf(),
+            root: artifact_root.join("worktree"),
+            sha: "0000000000000000000000000000000000000000".to_owned(),
+        };
+
+        let mut guard = ReviewCleanupGuard::new(CacheRetention::Discard);
+        guard.arm(artifact_root.clone(), Some(worktree));
+        drop(guard);
+
+        assert!(
+            artifact_root.exists(),
+            "The artifact root must stay on disk when worktree removal fails."
+        );
+        let marker = read_marker(&artifact_root.join(MARKER_FILENAME)).unwrap();
+        assert_eq!(marker.status, ReviewStatus::Quarantined);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -6,6 +6,8 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
 };
 
+// parking_lot mutexes do not poison after panics, so callers do not need
+// WriterPoisoned or ReaderPoisoned recovery states.
 use parking_lot::{Mutex, MutexGuard};
 use smallvec::SmallVec;
 

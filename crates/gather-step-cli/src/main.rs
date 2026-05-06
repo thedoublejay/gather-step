@@ -33,12 +33,12 @@ static GLOBAL: Alloc = Alloc;
 #[tokio::main]
 async fn main() -> ExitCode {
     match run_main().await {
-        Ok(code) => ExitCode::from(code),
+        Ok(outcome) => outcome.exit_code(),
         Err(error) => print_operator_error_and_code(&error),
     }
 }
 
-async fn run_main() -> Result<u8> {
+async fn run_main() -> Result<commands::CliOutcome> {
     #[cfg(feature = "dhat-heap")]
     let _heap_profiler = dhat::Profiler::new_heap();
 

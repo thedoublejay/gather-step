@@ -707,6 +707,43 @@ fn assert_stderr_has_no_progress_output(stderr: &[u8]) {
     }
 }
 
+fn plant_review_artifact(
+    cache_root: &Path,
+    workspace_root: &Path,
+    run_id: &str,
+    marker_workspace_hash: &str,
+    status: gather_step::pr_review::artifact_root::ReviewStatus,
+) -> PathBuf {
+    use gather_step::pr_review::artifact_root::{
+        MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker,
+    };
+
+    let root = cache_root.join(marker_workspace_hash).join(run_id);
+    fs::create_dir_all(&root).expect("artifact root");
+    let storage_path = root.join("storage");
+    let registry_path = root.join("registry.json");
+    fs::create_dir_all(&storage_path).expect("artifact storage");
+    fs::write(&registry_path, b"{}").expect("artifact registry");
+    let marker = ReviewMarker::new_for_test_fixture(
+        MARKER_SCHEMA_VERSION,
+        marker_workspace_hash.to_owned(),
+        workspace_root.to_path_buf(),
+        "aabbccddeeff".to_owned(),
+        "112233445566".to_owned(),
+        run_id.to_owned(),
+        storage_path,
+        registry_path,
+        env!("CARGO_PKG_VERSION").to_owned(),
+        chrono::Utc::now().to_rfc3339(),
+        status,
+        None,
+        None,
+    );
+    let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
+    fs::write(root.join(MARKER_FILENAME), json).expect("write marker");
+    root
+}
+
 #[test]
 fn index_stderr_is_clean_on_non_tty_and_when_ci_env_set() {
     let temp = TempDir::new("stderr-clean");
@@ -754,4 +791,74 @@ fn index_stderr_is_clean_on_non_tty_and_when_ci_env_set() {
         String::from_utf8_lossy(&out_ci.stderr)
     );
     assert_stderr_has_no_progress_output(&out_ci.stderr);
+}
+
+/// Pin the wipe-before-precompute ordering in `commands::index::run`.
+///
+/// Plants two review artifacts under `default_cache_root(<workspace>)`:
+/// one `Completed` (must be wiped after a full reindex) and one
+/// `InProgress` (must survive — it represents a concurrent `pr-review`
+/// run mid-write). A regression that re-orders the cleanup pass, drops
+/// the wipe entirely, or flips `include_active` would fail this test.
+#[test]
+fn full_reindex_wipes_completed_review_artifacts_but_skips_in_progress() {
+    use gather_step::pr_review::artifact_root::{ReviewStatus, default_cache_root, workspace_hash};
+
+    let temp = TempDir::new("reindex-review-wipe");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+
+    // The binary canonicalizes the workspace path before deriving the cache
+    // root and workspace hash (e.g. /var/folders → /private/var/folders on
+    // macOS). Fixtures must use the SAME canonical path or the markers they
+    // plant will not match what the binary discovers via `list_review_artifacts`.
+    let canonical_ws = fs::canonicalize(temp.path()).expect("canonical workspace path");
+
+    // Plant fixture artifacts BEFORE the index run.  The cache root is
+    // derived from the OS cache dir + a workspace hash so other tests'
+    // artifacts cannot collide with these.
+    let cache_root = default_cache_root(&canonical_ws);
+    let hash = workspace_hash(&canonical_ws);
+    let workspace_cache = cache_root.join(&hash);
+    let _ = fs::remove_dir_all(&workspace_cache);
+    fs::create_dir_all(&workspace_cache).expect("workspace cache dir");
+
+    let completed_root = plant_review_artifact(
+        &cache_root,
+        &canonical_ws,
+        "run-completed-reindex-fixture",
+        &hash,
+        ReviewStatus::Completed,
+    );
+    let in_progress_root = plant_review_artifact(
+        &cache_root,
+        &canonical_ws,
+        "run-inprogress-reindex-fixture",
+        &hash,
+        ReviewStatus::InProgress,
+    );
+
+    // Sanity: both fixtures exist before the index run.
+    assert!(completed_root.exists(), "completed fixture must be planted");
+    assert!(
+        in_progress_root.exists(),
+        "in-progress fixture must be planted"
+    );
+
+    let _index = run_ok(temp.path(), &["index"]);
+
+    assert!(
+        !completed_root.exists(),
+        "Completed review artifact must be wiped by `gather-step index` (full reindex invalidates the baseline). \
+         A regression that drops or re-orders the `clean_all_for_workspace` call would leave it on disk.",
+    );
+    assert!(
+        in_progress_root.exists(),
+        "InProgress review artifact must survive `gather-step index`. \
+         A regression that flips `include_active = true` in the clean selector \
+         would corrupt a concurrent `pr-review` run by deleting its mid-write artifact.",
+    );
+
+    // Best-effort cleanup of the surviving InProgress fixture.
+    let _ = fs::remove_dir_all(&workspace_cache);
 }

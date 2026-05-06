@@ -256,4 +256,4 @@ That runs formatting, linting, tests, dependency checks, and typo checks.
 
 MIT
 
-Copyright (c) 2026 Gather Step contributors
+Copyright (c) 2026 JJ Adonis

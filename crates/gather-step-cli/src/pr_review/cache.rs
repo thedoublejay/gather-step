@@ -27,13 +27,46 @@ use super::artifact_root::{
     CacheKey, MARKER_FILENAME, ReviewArtifactRoot, ReviewStatus, read_marker, workspace_hash,
 };
 
-/// Compute the 16-char blake3 hex prefix used for cache-key fingerprints.
+/// A 16-character lowercase blake3 hex prefix.
 ///
-/// Single source of truth so [`compute_cache_key`], [`pick_seed_source`],
-/// and the unit-test helpers cannot drift.
-fn blake3_hex16(bytes: &[u8]) -> String {
-    let hash = blake3::hash(bytes);
-    hash.to_hex()[..16].to_owned()
+/// Newtype wrapper so call sites cannot accidentally drift on length or
+/// substitute an arbitrary `String`.  Construction is restricted to
+/// [`Hash16::blake3_prefix`] (single source of truth); the value can be
+/// compared, displayed, and turned into a `String` for serde-stable
+/// storage in `CacheKey` / `ReviewMarker`, but cannot be reconstructed
+/// from external bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct Hash16(String);
+
+impl Hash16 {
+    /// Compute the 16-char blake3 hex prefix of `bytes`.
+    ///
+    /// Single source of truth so [`compute_cache_key`],
+    /// [`pick_seed_source`], and the unit-test helpers cannot drift on
+    /// length or hash family.
+    pub(super) fn blake3_prefix(bytes: &[u8]) -> Self {
+        let hash = blake3::hash(bytes);
+        let hex = hash.to_hex();
+        debug_assert!(
+            hex.len() >= 16,
+            "blake3 hex output must be at least 16 chars",
+        );
+        Self(hex[..16].to_owned())
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(super) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Hash16 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 // ─── Cache lookup ─────────────────────────────────────────────────────────────
@@ -164,13 +197,13 @@ pub fn compute_cache_key(
     let ws_hash = workspace_hash(workspace_root);
 
     // blake3 of config bytes (or empty → hash of empty bytes).
-    let config_hash = blake3_hex16(config_content);
+    let config_hash = Hash16::blake3_prefix(config_content);
 
     CacheKey {
         workspace_hash: ws_hash,
         base_sha: base_sha.to_owned(),
         head_sha: head_sha.to_owned(),
-        config_hash,
+        config_hash: config_hash.into_string(),
         schema_version: super::artifact_root::MARKER_SCHEMA_VERSION,
         gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -213,12 +246,12 @@ pub fn pick_seed_source(
     // Condition 3: config hash must match so the schema is compatible.
     let config_file = workspace_root.join("gather-step.config.yaml");
     let config_bytes = std::fs::read(&config_file).unwrap_or_default();
-    let ws_config_hash = blake3_hex16(&config_bytes);
+    let ws_config_hash = Hash16::blake3_prefix(&config_bytes);
 
-    if ws_config_hash != review_config_hash {
+    if ws_config_hash.as_str() != review_config_hash {
         tracing::debug!(
             ws_hash = %ws_config_hash,
-            review_hash = %review_config_hash,
+            review_hash = review_config_hash,
             "workspace config hash differs from review config hash; skipping seed"
         );
         return Ok(None);
@@ -626,7 +659,7 @@ mod tests {
     /// Compute a 16-char blake3 hex hash of `bytes`. Thin wrapper around
     /// the production helper to keep the call sites readable in tests.
     fn config_hash_of(bytes: &[u8]) -> String {
-        super::blake3_hex16(bytes)
+        super::Hash16::blake3_prefix(bytes).into_string()
     }
 
     /// Build a minimal workspace fixture:

@@ -1113,7 +1113,6 @@ dependencies = [
  "comfy-table",
  "console",
  "criterion",
- "crossbeam-channel",
  "crossterm",
  "dhat",
  "dirs",
@@ -1226,7 +1225,6 @@ dependencies = [
  "hashbrown 0.17.0",
  "pretty_assertions",
  "regex",
- "rustc-hash 2.1.2",
  "serde",
  "tempfile",
  "thiserror",
@@ -1324,7 +1322,6 @@ version = "3.5.0"
 dependencies = [
  "bitcode",
  "blake3",
- "crossbeam-channel",
  "gather-step-core",
  "gather-step-deploy",
  "gather-step-parser",

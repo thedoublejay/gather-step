@@ -30,7 +30,6 @@ dirs.workspace = true
 rand.workspace = true
 comfy-table.workspace = true
 console.workspace = true
-crossbeam-channel.workspace = true
 kanal.workspace = true
 dhat = { workspace = true, optional = true }
 gather-step-analysis = { path = "../gather-step-analysis", version = "3.5.0" }
@@ -57,7 +56,6 @@ ratatui = { version = "0.30.0", default-features = false, features = ["crossterm
 [dev-dependencies]
 criterion.workspace = true
 pretty_assertions.workspace = true
-rustc-hash.workspace = true
 rusqlite.workspace = true
 tempfile = "3.27.0"
 toml.workspace = true
