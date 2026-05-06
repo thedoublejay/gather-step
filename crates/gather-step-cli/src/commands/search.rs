@@ -158,10 +158,10 @@ pub(crate) fn execute(
             ]);
             if let Some(qualified_name) = &hit.qualified_name {
                 table.add_row(vec![
-                    Cell::new(style("  qn").color256(245).to_string()),
+                    Cell::new(style("  qn").dim().to_string()),
                     Cell::new(""),
                     Cell::new(""),
-                    Cell::new(style(qualified_name).color256(245).to_string()),
+                    Cell::new(style(qualified_name).dim().to_string()),
                 ]);
             }
         }

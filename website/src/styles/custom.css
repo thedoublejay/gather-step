@@ -133,16 +133,23 @@ h4 {
 
 .sl-markdown-content :is(table, pre) {
   display: block;
+  width: 100%;
   max-width: 100%;
   overflow-x: auto;
 }
 
-.sl-markdown-content table :is(th, td) {
-  overflow-wrap: normal;
-  word-break: normal;
+.sl-markdown-content table {
+  border-collapse: collapse;
 }
 
-.sl-markdown-content table :is(th, td):not(:last-child) {
+.sl-markdown-content table :is(th, td) {
+  overflow-wrap: anywhere;
+  word-break: normal;
+  vertical-align: top;
+  padding: 0.55rem 0.85rem;
+}
+
+.sl-markdown-content table :is(th, td) > code {
   white-space: nowrap;
 }
 

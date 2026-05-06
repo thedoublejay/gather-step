@@ -32,12 +32,12 @@ comfy-table.workspace = true
 console.workspace = true
 kanal.workspace = true
 dhat = { workspace = true, optional = true }
-gather-step-analysis = { path = "../gather-step-analysis", version = "3.5.1" }
+gather-step-analysis = { path = "../gather-step-analysis", version = "3.5.2" }
 gather-step-core.workspace = true
 rustc-hash.workspace = true
-gather-step-git = { path = "../gather-step-git", version = "3.5.1" }
-gather-step-mcp = { path = "../gather-step-mcp", version = "3.5.1" }
-gather-step-output = { path = "../gather-step-output", version = "3.5.1" }
+gather-step-git = { path = "../gather-step-git", version = "3.5.2" }
+gather-step-mcp = { path = "../gather-step-mcp", version = "3.5.2" }
+gather-step-output = { path = "../gather-step-output", version = "3.5.2" }
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
 indicatif.workspace = true

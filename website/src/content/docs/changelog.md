@@ -5,6 +5,33 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v3.5.2 (2026-05-06)
+
+Release status: **released**.
+
+Patch on top of v3.5.1. Fixes the contrast regression introduced when v3.5.1 swapped `.dim()` for `color256(245)` (#8a8a8a — medium gray that disappears on both dark and light terminals), and the docs table layout where wide tables didn't fill the content column and long-cell phrases overflowed.
+
+### Fixes
+
+#### CLI / init UX contrast
+
+- `init` welcome banner, `Workspace:` line, `Existing config:` path, "Found N Git repositories" label, and the `Wrote config <path>` confirmation now print at the terminal's default foreground color instead of `color256(245)`. The path and repo count are visible on every standard light and dark terminal, not just terminals with a specific palette.
+- `index` summary numbers (files, symbols, edges, cross-repo, time, index size) now use cyan-bold for the value and default foreground for labels, matching the `✓ Indexed` header. The storage path on the same line is plain default foreground.
+- `gather-step --version` banner footer (`v3.5.x · https://gatherstep.dev/`) switched from `color256(245)` to plain cyan so the version stamp and link are readable.
+- Repo picker's secondary help text (`↑/↓ move  Space toggle ...`, `Use numbers or ranges to toggle ...`) and `watch` cause/file-count detail text moved to `.dim()` (SGR 2, terminal-relative) so they stay visibly subdued without disappearing.
+- `search` per-row `qn` qualified-name annotation moved to `.dim()` for the same reason.
+
+#### Docs / website
+
+- Markdown tables now fill the content column width by default. Previously the `display: block` rule sized them to content and `white-space: nowrap` on non-last cells forced narrow columns to overflow.
+- Long phrases in cells (e.g. "required — no path separators", "array of glob strings") wrap inside the cell instead of widening the column or pushing other content out of the row.
+- Tighter cell padding and top vertical-alignment so multi-line cells in the workspace-setup config reference table read as a clean grid.
+- Inline `<code>` inside cells stays on one line, so identifiers like `indexing.workspace_concurrency` are not broken across lines.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.5.2`.
+
 ## v3.5.1 (2026-05-06)
 
 Release status: **released**.

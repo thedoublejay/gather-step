@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "3.5.1"
+version = "3.5.2"
 authors = ["JJ Adonis"]
 edition = "2024"
 rust-version = "1.94.1"
@@ -24,12 +24,12 @@ homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "3.5.1" }
-gather-step-core = { path = "crates/gather-step-core", version = "3.5.1" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "3.5.1" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "3.5.1" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "3.5.1" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "3.5.1" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "3.5.2" }
+gather-step-core = { path = "crates/gather-step-core", version = "3.5.2" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "3.5.2" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "3.5.2" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "3.5.2" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "3.5.2" }
 
 tree-sitter = "=0.26.8"
 tree-sitter-typescript = "0.23.2"

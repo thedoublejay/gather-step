@@ -1076,27 +1076,31 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     output.line(format!(
         "\n  {} {} {}  {}",
         style("✓ Indexed").green().bold(),
-        style(payload.stats.indexed_repos).cyan(),
+        style(payload.stats.indexed_repos).cyan().bold(),
         repo_label,
-        style(&payload.storage_root).color256(245)
+        &payload.storage_root
     ));
     output.line(format!(
         "    {} files  {} symbols  {} edges  {} cross-repo",
-        style(payload.stats.total_files).color256(245),
-        style(payload.stats.total_symbols).color256(245),
-        style(payload.stats.total_edges).color256(245),
-        style(payload.stats.cross_repo_edges).color256(245)
+        style(payload.stats.total_files).cyan().bold(),
+        style(payload.stats.total_symbols).cyan().bold(),
+        style(payload.stats.total_edges).cyan().bold(),
+        style(payload.stats.cross_repo_edges).cyan().bold()
     ));
     if let Some(index_size_bytes) = payload.index_size_bytes {
         output.line(format!(
             "    Time: {}  Index size: {}",
-            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).color256(245),
-            style(format_bytes(index_size_bytes)).color256(245),
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms))
+                .cyan()
+                .bold(),
+            style(format_bytes(index_size_bytes)).cyan().bold(),
         ));
     } else {
         output.line(format!(
             "    Time: {}",
-            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).color256(245),
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms))
+                .cyan()
+                .bold(),
         ));
     }
     for warning in &payload.warnings {
