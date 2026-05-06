@@ -231,7 +231,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
         Some(Command::ProjectionImpact(args)) => success(projection_impact::run(&app, args)),
         Some(Command::DeploymentTopology(args)) => success(deployment_topology::run(&app, args)),
-        Some(Command::QaEvidence(args)) => success(qa_evidence::run(&app, args)),
+        Some(Command::QaEvidence(args)) => success(qa_evidence::run(&app, &args)),
         Some(Command::Pack(args)) => success(pack::run(&app, &args)),
         Some(Command::Events(args)) => success(events::run(&app, args)),
         Some(Command::Conventions(args)) => success(conventions::run(&app, args)),

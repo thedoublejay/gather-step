@@ -875,6 +875,7 @@ fn impact_payload_as_context_pack_response(
             planning_rescue: None,
             planning_proofs: Vec::new(),
             migration_siblings: None,
+            evidence: Vec::new(),
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -941,6 +942,7 @@ fn projection_impact_payload_as_context_pack_response(
             planning_rescue: None,
             planning_proofs: Vec::new(),
             migration_siblings: None,
+            evidence: Vec::new(),
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -1011,6 +1013,7 @@ fn impact_match_as_pack_item(index: usize, item: &serde_json::Value) -> PackItem
             .unwrap_or_default()
             .to_owned(),
         evidence_chain: None,
+        evidence: None,
     }
 }
 
@@ -1038,6 +1041,7 @@ fn projection_field_as_pack_item(index: usize, item: &serde_json::Value) -> Pack
             .unwrap_or_default()
             .to_owned(),
         evidence_chain: None,
+        evidence: None,
     }
 }
 
@@ -2671,6 +2675,7 @@ mod tests {
                         symbol_kind: "function".to_owned(),
                         symbol_name: "transform_batch".to_owned(),
                         evidence_chain: None,
+                        evidence: None,
                     },
                     PackItem {
                         category: "structural_neighbor".to_owned(),
@@ -2683,6 +2688,7 @@ mod tests {
                         symbol_kind: "class".to_owned(),
                         symbol_name: "ParsedDocument".to_owned(),
                         evidence_chain: None,
+                        evidence: None,
                     },
                 ],
                 semantic_bridges: vec![PackBridge {
@@ -2702,6 +2708,7 @@ mod tests {
                         symbol_id: "py-api-caller".to_owned(),
                         symbol_kind: "function".to_owned(),
                         symbol_name: "transform_service.pipeline.transform_batch".to_owned(),
+                        evidence: None,
                     }],
                     confirmed_downstream_repos: vec!["py_shared_models".to_owned()],
                     probable_downstream_repos: Vec::new(),
@@ -2719,6 +2726,7 @@ mod tests {
                     "target_file": "src/shared_models/records.py",
                 })],
                 migration_siblings: None,
+                evidence: Vec::new(),
             },
             meta: Some(ContextPackMeta {
                 response_schema_version: response_schema_version(),

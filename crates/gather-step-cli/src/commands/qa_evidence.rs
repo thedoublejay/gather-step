@@ -124,7 +124,7 @@ struct FileLineEvidence {
     text: String,
 }
 
-pub fn run(app: &AppContext, args: QaEvidenceArgs) -> Result<()> {
+pub fn run(app: &AppContext, args: &QaEvidenceArgs) -> Result<()> {
     let ctx = if args.registry.is_some() || args.storage.is_some() {
         StorageContext::workspace_read_only_with_overrides(
             app,
@@ -134,7 +134,7 @@ pub fn run(app: &AppContext, args: QaEvidenceArgs) -> Result<()> {
     } else {
         StorageContext::workspace_read_only(app)
     };
-    run_rendered(app, &ctx, &args)?.emit(&app.output())
+    run_rendered(app, &ctx, args)?.emit(&app.output())
 }
 
 pub(crate) fn run_rendered(
@@ -827,7 +827,7 @@ fn scan_dir(
         }
     };
     let mut entries = entries.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.path());
+    entries.sort_by_key(std::fs::DirEntry::path);
 
     for entry in entries {
         if evidence.len() >= limit {
@@ -839,7 +839,7 @@ fn scan_dir(
         if file_type.is_dir() {
             scan_dir(repo, root, &path, target, limit, evidence, gaps)?;
         } else if file_type.is_file() && should_scan_file(&path) {
-            scan_file(repo, root, &path, target, limit, evidence, gaps)?;
+            scan_file(repo, root, &path, target, limit, evidence, gaps);
         } else if should_scan_file(&path) {
             push_gap(
                 gaps,
@@ -861,7 +861,7 @@ fn scan_file(
     limit: usize,
     evidence: &mut Vec<FileLineEvidence>,
     gaps: &mut Vec<QaEvidenceGap>,
-) -> Result<()> {
+) {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => {
@@ -872,11 +872,11 @@ fn scan_file(
                 format!("Could not read file `{}`: {error}.", path.display()),
                 true,
             );
-            return Ok(());
+            return;
         }
     };
     let Ok(relative) = path.strip_prefix(root) else {
-        return Ok(());
+        return;
     };
     let relative = relative.display().to_string();
     let test_file = is_test_file(&relative);
@@ -908,7 +908,6 @@ fn scan_file(
             );
         }
     }
-    Ok(())
 }
 
 fn is_ignored_dir(path: &Path) -> bool {
@@ -957,12 +956,23 @@ fn has_static_flag_key(line: &str) -> bool {
 }
 
 fn is_test_file(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains(".test.")
-        || lower.contains(".spec.")
-        || lower.contains("_test.")
-        || lower.contains("/tests/")
-        || lower.contains("\\tests\\")
+    contains_ascii_case_insensitive(path, ".test.")
+        || contains_ascii_case_insensitive(path, ".spec.")
+        || contains_ascii_case_insensitive(path, "_test.")
+        || contains_ascii_case_insensitive(path, "/tests/")
+        || contains_ascii_case_insensitive(path, "\\tests\\")
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle.iter())
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
 }
 
 fn push_gap(

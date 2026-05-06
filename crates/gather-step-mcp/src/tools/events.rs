@@ -609,7 +609,7 @@ fn topology_symbol(
         )
         .with_category(role_label.clone())
         .with_name(symbol_name.clone())
-        .with_reason(format!("{} edge", edge_kind_label)),
+        .with_reason(format!("{edge_kind_label} edge")),
     )
     .with_support(EvidenceSupport::new(
         EvidenceSupportMethod::GraphTraversal,

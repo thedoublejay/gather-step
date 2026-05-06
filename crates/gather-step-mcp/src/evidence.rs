@@ -388,20 +388,25 @@ pub fn infer_surface(
     file_path: &str,
     symbol_name: &str,
 ) -> String {
-    let kind = symbol_kind.to_ascii_lowercase();
-    let category = category.to_ascii_lowercase();
-    let file_path = file_path.to_ascii_lowercase();
-    let symbol_name = symbol_name.to_ascii_lowercase();
-
-    if category.contains("payload") || kind.contains("payload") || symbol_name.contains("dto") {
+    if contains_ascii_case_insensitive(category, "payload")
+        || contains_ascii_case_insensitive(symbol_kind, "payload")
+        || contains_ascii_case_insensitive(symbol_name, "dto")
+    {
         "payload_contract".to_owned()
-    } else if category.contains("route") || kind.contains("route") || file_path.contains("route") {
+    } else if contains_ascii_case_insensitive(category, "route")
+        || contains_ascii_case_insensitive(symbol_kind, "route")
+        || contains_ascii_case_insensitive(file_path, "route")
+    {
         "route".to_owned()
-    } else if kind.contains("event") || file_path.contains("event") {
+    } else if contains_ascii_case_insensitive(symbol_kind, "event")
+        || contains_ascii_case_insensitive(file_path, "event")
+    {
         "event".to_owned()
-    } else if is_test_path(&file_path) {
+    } else if is_test_path(file_path) {
         "test".to_owned()
-    } else if kind.contains("class") || kind.contains("component") {
+    } else if contains_ascii_case_insensitive(symbol_kind, "class")
+        || contains_ascii_case_insensitive(symbol_kind, "component")
+    {
         "ui_or_service".to_owned()
     } else {
         "symbol".to_owned()
@@ -409,12 +414,33 @@ pub fn infer_surface(
 }
 
 fn is_test_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    path.contains(".test.")
-        || path.contains(".spec.")
-        || path.contains("/test/")
-        || path.contains("/tests/")
-        || path.ends_with("_test.rs")
+    contains_ascii_case_insensitive(path, ".test.")
+        || contains_ascii_case_insensitive(path, ".spec.")
+        || contains_ascii_case_insensitive(path, "/test/")
+        || contains_ascii_case_insensitive(path, "/tests/")
+        || ends_with_ascii_case_insensitive(path, "_test.rs")
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle.iter())
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+}
+
+fn ends_with_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    haystack.len() >= needle.len()
+        && haystack[haystack.len() - needle.len()..]
+            .iter()
+            .zip(needle.iter())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
 fn evidence_id(
@@ -442,7 +468,7 @@ fn evidence_id(
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
