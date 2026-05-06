@@ -40,6 +40,58 @@ const VERSION_LONG: &str = concat!(
     "\nCopyright (c) 2026 JJ Adonis. Licensed under the MIT License.",
 );
 
+/// Canonical catalog of user-visible CLI subcommands.
+///
+/// Generated docs (`CLAUDE.gather.md`, `AGENTS.gather.md`) read from this
+/// list, so adding or renaming a subcommand needs to be reflected here.
+/// Hidden commands (`mcp`) and arg-less invocations (`no-args`) are
+/// intentionally omitted.
+pub const CLI_COMMANDS: &[(&str, &str)] = &[
+    (
+        "init",
+        "Discover repos, write a config, and run the setup wizard",
+    ),
+    ("index", "Index configured repos into the workspace graph"),
+    ("reindex", "Re-index repos with full or selective coverage"),
+    (
+        "watch",
+        "Watch repos for changes and incrementally re-index",
+    ),
+    ("clean", "Remove indexed state and storage artifacts"),
+    ("compact", "Compact storage in place to reclaim space"),
+    ("status", "Show indexing status and counts per repo"),
+    ("storage-report", "Print storage size and segment breakdown"),
+    ("doctor", "Run health checks against the workspace"),
+    ("search", "Search indexed symbols, files, and concepts"),
+    ("trace", "Trace impact, events, or routes from a target"),
+    ("impact", "Inspect change-impact for a symbol or file"),
+    (
+        "projection-impact",
+        "Trace projected fields, filters, and backfill evidence",
+    ),
+    (
+        "deployment-topology",
+        "Inspect deployment topology and shared infra",
+    ),
+    ("events", "Inspect events, queues, and orphan topics"),
+    ("conventions", "Summarize detected workspace conventions"),
+    (
+        "pack",
+        "Render task / planning / debug / review context packs",
+    ),
+    (
+        "generate",
+        "Generate AI docs (claude-md, agents-md, codeowners)",
+    ),
+    ("setup-mcp", "Register gather-step as an MCP server"),
+    ("serve", "Run the long-lived JSON-API server"),
+    (
+        "pr-review",
+        "Build a disposable PR-scoped review and emit the delta report",
+    ),
+    ("tui", "Launch the interactive terminal UI"),
+];
+
 #[derive(Debug, Parser)]
 #[command(
     name = "gather-step",

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod budget;
+pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod ids;
@@ -9,6 +10,7 @@ pub mod server;
 pub mod tool_trace;
 pub mod tools;
 
+pub use catalog::MCP_TOOLS;
 pub use config::{DEFAULT_MCP_MAX_LIMIT, MAX_INPUT_LENGTH, McpContext, McpServerConfig};
 pub use error::McpServerError;
 pub use server::GatherStepMcpServer;

@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use gather_step_core::{RegistryStore, WorkspaceRegistry};
+use gather_step_mcp::MCP_TOOLS;
 use gather_step_output::{
     ClaudeMdOptions, generate_rule_files, render_workspace_summary_agents,
     render_workspace_summary_claude,
@@ -15,7 +16,11 @@ use gather_step_storage::{GraphStoreDb, MetadataStore, MetadataStoreDb};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 
-use crate::app::AppContext;
+use crate::{
+    app::AppContext,
+    commands::CLI_COMMANDS,
+    managed_block::{ManagedBlockTarget, install_managed_block_for_target},
+};
 
 #[derive(Debug, Args)]
 pub struct GenerateCommand {
@@ -47,12 +52,22 @@ pub struct GenerateClaudeMdArgs {
     pub repo: Option<String>,
     #[arg(long, value_enum, default_value = "rules")]
     pub target: ClaudeMdTarget,
+    #[arg(
+        long = "install-include",
+        help = "Append a managed include block to CLAUDE.md so it loads CLAUDE.gather.md (only with --target=summary)"
+    )]
+    pub install_include: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct GenerateAgentsMdArgs {
     #[arg(long, help = "Optional explicit output path")]
     pub output: Option<PathBuf>,
+    #[arg(
+        long = "install-include",
+        help = "Append a managed include block to AGENTS.md so Codex loads AGENTS.gather.md"
+    )]
+    pub install_include: bool,
 }
 
 #[derive(Debug, Args)]
@@ -68,9 +83,9 @@ struct GenerateOutput {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct GeneratedFileOutput {
-    path: String,
-    bytes: usize,
+pub struct GeneratedFileOutput {
+    pub path: String,
+    pub bytes: usize,
 }
 
 pub fn run(app: &AppContext, command: GenerateCommand) -> Result<()> {
@@ -141,15 +156,31 @@ fn generate_claude_md_summary(
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
         .with_context(|| format!("opening {}", paths.registry_path.display()))?;
-    let content = render_workspace_summary_claude(registry.registry(), env!("CARGO_PKG_VERSION"));
+    let content = render_workspace_summary_claude(
+        registry.registry(),
+        env!("CARGO_PKG_VERSION"),
+        MCP_TOOLS,
+        CLI_COMMANDS,
+    );
     let target = args
         .output
         .unwrap_or_else(|| app.workspace_path.join("CLAUDE.gather.md"));
     let written = write_text_output(&target, &content)?;
+    let mut files = vec![written];
+
+    if args.install_include
+        && let Some(installed) = install_managed_block_for_target(
+            &app.workspace_path,
+            ManagedBlockTarget::Claude,
+            env!("CARGO_PKG_VERSION"),
+        )?
+    {
+        files.push(installed);
+    }
 
     Ok(GenerateOutput {
         event: "generate_claude_md_completed",
-        files: vec![written],
+        files,
     })
 }
 
@@ -157,15 +188,31 @@ fn generate_agents_md(app: &AppContext, args: GenerateAgentsMdArgs) -> Result<Ge
     let paths = app.workspace_paths();
     let registry = RegistryStore::open(&paths.registry_path)
         .with_context(|| format!("opening {}", paths.registry_path.display()))?;
-    let content = render_workspace_summary_agents(registry.registry(), env!("CARGO_PKG_VERSION"));
+    let content = render_workspace_summary_agents(
+        registry.registry(),
+        env!("CARGO_PKG_VERSION"),
+        MCP_TOOLS,
+        CLI_COMMANDS,
+    );
     let target = args
         .output
         .unwrap_or_else(|| app.workspace_path.join("AGENTS.gather.md"));
     let written = write_text_output(&target, &content)?;
+    let mut files = vec![written];
+
+    if args.install_include
+        && let Some(installed) = install_managed_block_for_target(
+            &app.workspace_path,
+            ManagedBlockTarget::Agents,
+            env!("CARGO_PKG_VERSION"),
+        )?
+    {
+        files.push(installed);
+    }
 
     Ok(GenerateOutput {
         event: "generate_agents_md_completed",
-        files: vec![written],
+        files,
     })
 }
 
@@ -207,6 +254,7 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
                 output: None,
                 repo: None,
                 target: ClaudeMdTarget::Rules,
+                install_include: false,
             },
         )?;
         generated_outputs.push(payload);
@@ -222,6 +270,7 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
             output: None,
             repo: None,
             target: ClaudeMdTarget::Summary,
+            install_include: true,
         },
     )?);
     if let Some(bar) = &generation_bar {
@@ -230,7 +279,10 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
     }
     generated_outputs.push(generate_agents_md(
         app,
-        GenerateAgentsMdArgs { output: None },
+        GenerateAgentsMdArgs {
+            output: None,
+            install_include: true,
+        },
     )?);
     if let Some(bar) = generation_bar {
         bar.inc(1);
