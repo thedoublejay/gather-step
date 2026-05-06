@@ -28,6 +28,18 @@ pub enum OmittedReason {
     Ambiguity,
 }
 
+impl OmittedReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Budget => "budget",
+            Self::LowConfidence => "low_confidence",
+            Self::FanOutCap => "fan_out_cap",
+            Self::Ambiguity => "ambiguity",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ResponseBudget {
     pub budget_bytes: usize,

@@ -2716,7 +2716,7 @@ fn pack_item_evidence(mode: &str, item: &PackItem) -> Evidence {
     );
     Evidence::new(
         evidence_kind_for_pack_item(mode, &item.category, &item.file_path),
-        evidence_source_for_pack_mode(mode),
+        evidence_source_for_pack_mode(mode).expect("context pack mode must be canonical"),
         EvidenceCitation::symbol(
             item.repo.clone(),
             item.file_path.clone(),
@@ -2741,7 +2741,7 @@ fn pack_item_evidence(mode: &str, item: &PackItem) -> Evidence {
 fn cross_repo_caller_evidence(mode: &str, caller: &CrossRepoCaller) -> Evidence {
     Evidence::new(
         EvidenceKind::CrossRepoCaller,
-        evidence_source_for_pack_mode(mode),
+        evidence_source_for_pack_mode(mode).expect("context pack mode must be canonical"),
         EvidenceCitation::symbol(
             caller.repo.clone(),
             caller.file_path.clone(),
@@ -2776,7 +2776,7 @@ fn repo_impact_evidence(
 ) -> Evidence {
     Evidence::new(
         kind,
-        evidence_source_for_pack_mode(mode),
+        evidence_source_for_pack_mode(mode).expect("context pack mode must be canonical"),
         EvidenceCitation::repo(repo.to_owned()),
     )
     .with_subject(

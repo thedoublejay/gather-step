@@ -56,9 +56,9 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 ///
 /// v3.1 is a fresh generated-state release. Search schema stamping starts at
 /// zero and does not carry migration or upgrade branches for older development
-/// indexes. Bumped to 1 when the `qualified_name` field was added so that
-/// indexes built before the field was reintroduced are rejected at open time.
-pub const SEARCH_INDEX_VERSION: u32 = 1;
+/// indexes. When the schema changes before external users exist, rebuild the
+/// generated search index instead of carrying compatibility branches.
+pub const SEARCH_INDEX_VERSION: u32 = 0;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -80,8 +80,7 @@ const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
 const FIELD_LANG: &str = "lang";
 /// Stored copy of the file path for query-aware rerank path-token boosting.
-/// Not indexed for search — retrieval only.  Absent on documents indexed
-/// before this field was added; callers treat an absent value as empty string.
+/// Not indexed for search — retrieval only.
 const FIELD_FILE_PATH_STORED: &str = "file_path_stored";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,7 +265,7 @@ pub enum SearchStoreError {
     #[error("invalid node kind tag `{0}`")]
     InvalidNodeKind(u64),
     #[error(
-        "search index schema version mismatch: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
+        "search index schema version mismatch: stored {stored}, expected {expected}; rebuild required (run `gather-step index --auto-recover`)"
     )]
     SchemaVersionMismatch { stored: String, expected: u32 },
 }
@@ -767,7 +766,7 @@ impl SearchDocument {
     }
 }
 
-/// Ensure the search directory carries the v3.1 fresh-release schema stamp.
+/// Ensure the search directory carries the current fresh-release schema stamp.
 ///
 /// The version file is a plain decimal `u32` followed by a newline. If a stamp
 /// is present, it must match [`SEARCH_INDEX_VERSION`]; otherwise a
@@ -2185,12 +2184,11 @@ mod tests {
     }
 
     /// Round-trip: index a fresh store at the current schema version and
-    /// confirm that search still returns the expected hit after the field
-    /// removal (i.e., no regression from removing `FIELD_FILE_PATH`).
+    /// confirm that search returns the expected hit.
     #[test]
     fn fresh_index_at_current_schema_version_returns_search_hits() {
-        let store =
-            TantivySearchStore::open(temp_search_dir("schema-v2-roundtrip")).expect("store opens");
+        let store = TantivySearchStore::open(temp_search_dir("schema-current-roundtrip"))
+            .expect("store opens");
 
         let doc = SearchDocument::from_node(
             &node("processOrderEvent", "src/events/order-processor.ts"),

@@ -374,6 +374,16 @@ pub enum RiskSeverity {
     High,
 }
 
+impl RiskSeverity {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 // ─── Contract alignments (Phase 3 Task 3) ────────────────────────────────────
 
 /// Cross-repo payload-contract alignment findings.
@@ -663,24 +673,30 @@ fn collect_delta_report_evidence(report: &DeltaReport) -> Vec<Evidence> {
 
     for route in &report.routes.added {
         rows.push(route_evidence(route, "added"));
+        rows.push(route_risk_note(route, "added"));
     }
     for route in &report.routes.removed {
         rows.push(route_evidence(route, "removed"));
+        rows.push(route_risk_note(route, "removed"));
     }
     for change in &report.routes.changed {
         if let Some(after) = &change.after {
             rows.push(route_evidence(after, "changed"));
+            rows.push(route_risk_note(after, "changed"));
         }
     }
 
     for symbol in &report.symbols.added {
         rows.push(symbol_evidence(symbol, "added"));
+        rows.push(symbol_risk_note(symbol, "added"));
     }
     for symbol in &report.symbols.removed {
         rows.push(symbol_evidence(symbol, "removed"));
+        rows.push(symbol_risk_note(symbol, "removed"));
     }
     for change in &report.symbols.changed {
         rows.push(symbol_evidence(&change.after, "changed"));
+        rows.push(symbol_risk_note(&change.after, "changed"));
     }
 
     for contract in &report.payload_contracts.added {
@@ -691,16 +707,21 @@ fn collect_delta_report_evidence(report: &DeltaReport) -> Vec<Evidence> {
     }
     for change in &report.payload_contracts.changed {
         rows.push(payload_contract_change_evidence(change));
+        rows.push(payload_contract_risk_note(change));
+        rows.extend(payload_field_change_evidence(change));
     }
 
     for event in &report.events.added {
         rows.push(event_evidence(event, "added"));
+        rows.push(event_risk_note(event, "added"));
     }
     for event in &report.events.removed {
         rows.push(event_evidence(event, "removed"));
+        rows.push(event_risk_note(event, "removed"));
     }
     for change in &report.events.changed {
         rows.push(event_change_evidence(change));
+        rows.push(event_change_risk_note(change));
     }
 
     for risk in &report.removed_surface_risks {
@@ -790,6 +811,60 @@ fn symbol_evidence(symbol: &SymbolDelta, category: &str) -> Evidence {
     ))
 }
 
+fn route_risk_note(route: &RouteDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation {
+            kind: CitationKind::Route,
+            repo: route.repo.clone(),
+            path: route.file.clone(),
+            line: route.line,
+            symbol_id: None,
+            symbol_kind: None,
+            symbol_name: route.handler_qualified_name.clone(),
+            route_method: Some(route.method.clone()),
+            route_path: Some(route.path.clone()),
+            event_target: None,
+        },
+    )
+    .with_subject(
+        EvidenceSubject::new("route")
+            .with_category("risk_note")
+            .with_name(format!("{} {}", route.method, route.path))
+            .with_reason(format!("{category} route entry point needs QA coverage.")),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn symbol_risk_note(symbol: &SymbolDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            symbol.repo.clone(),
+            symbol.file.clone().unwrap_or_default(),
+            symbol.line,
+            symbol.qualified_name.clone(),
+            symbol.kind.clone(),
+            symbol.qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("symbol")
+            .with_category("risk_note")
+            .with_name(symbol.qualified_name.clone())
+            .with_reason(format!("{category} symbol needs targeted QA review.")),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
 fn payload_contract_evidence(contract: &PayloadContractDelta, category: &str) -> Evidence {
     Evidence::new(
         EvidenceKind::PayloadContract,
@@ -840,6 +915,132 @@ fn payload_contract_change_evidence(change: &PayloadContractDeltaChange) -> Evid
     ))
 }
 
+fn payload_contract_risk_note(change: &PayloadContractDeltaChange) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            change.repo.clone(),
+            change.file.clone(),
+            None,
+            change.target_qualified_name.clone(),
+            "payload_contract",
+            change.target_qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category("risk_note")
+            .with_name(change.target_qualified_name.clone())
+            .with_reason("Changed payload contract needs request, response, and downstream consumer coverage."),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn payload_field_change_evidence(change: &PayloadContractDeltaChange) -> Vec<Evidence> {
+    let mut rows = Vec::new();
+    rows.extend(change.fields_added.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldAdded,
+            "field_added",
+            &field.name,
+            format!(
+                "{}{}",
+                field.type_name.as_deref().unwrap_or("unknown"),
+                if field.optional {
+                    " optional"
+                } else {
+                    " required"
+                }
+            ),
+        )
+    }));
+    rows.extend(change.fields_removed.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldRemoved,
+            "field_removed",
+            &field.name,
+            format!(
+                "{}{}",
+                field.type_name.as_deref().unwrap_or("unknown"),
+                if field.optional {
+                    " optional"
+                } else {
+                    " required"
+                }
+            ),
+        )
+    }));
+    rows.extend(change.fields_optional_to_required.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldChanged,
+            "field_optional_to_required",
+            field,
+            "optional to required".to_owned(),
+        )
+    }));
+    rows.extend(change.fields_required_to_optional.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldChanged,
+            "field_required_to_optional",
+            field,
+            "required to optional".to_owned(),
+        )
+    }));
+    rows.extend(change.fields_type_changed.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldChanged,
+            "field_type_changed",
+            &field.name,
+            format!(
+                "{} to {}",
+                field.before_type.as_deref().unwrap_or("unknown"),
+                field.after_type.as_deref().unwrap_or("unknown")
+            ),
+        )
+    }));
+    rows
+}
+
+fn payload_field_evidence(
+    change: &PayloadContractDeltaChange,
+    kind: EvidenceKind,
+    category: &str,
+    field_name: &str,
+    reason: String,
+) -> Evidence {
+    Evidence::new(
+        kind,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            change.repo.clone(),
+            change.file.clone(),
+            None,
+            change.target_qualified_name.clone(),
+            "payload_contract_field",
+            field_name.to_owned(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category(category.to_owned())
+            .with_name(format!("{}.{field_name}", change.target_qualified_name))
+            .with_reason(reason),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
 fn event_evidence(event: &EventDelta, category: &str) -> Evidence {
     Evidence::new(
         EvidenceKind::EventDefinition,
@@ -875,6 +1076,47 @@ fn event_change_evidence(change: &EventDeltaChange) -> Evidence {
     ))
 }
 
+fn event_risk_note(event: &EventDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::event(event.external_id.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category("risk_note")
+            .with_name(format!("{}:{}", event.event_kind, event.event_name))
+            .with_reason(format!(
+                "{category} event surface needs producer, consumer, and async regression coverage."
+            )),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn event_change_risk_note(change: &EventDeltaChange) -> Evidence {
+    let target = format!("{}:{}", change.event_kind, change.event_name);
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::event(target.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category("risk_note")
+            .with_name(target)
+            .with_reason(
+                "Changed event surface needs producer, consumer, and async regression coverage.",
+            ),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
 fn removed_surface_evidence(risk: &RemovedSurfaceRisk) -> Evidence {
     Evidence::new(
         EvidenceKind::RemovedSurface,
@@ -894,7 +1136,7 @@ fn removed_surface_evidence(risk: &RemovedSurfaceRisk) -> Evidence {
     )
     .with_subject(
         EvidenceSubject::new("removed_surface")
-            .with_category(format!("{:?}", risk.severity).to_ascii_lowercase())
+            .with_category(risk.severity.as_str())
             .with_name(risk.identity.clone()),
     )
     .with_support(EvidenceSupport::new(
@@ -2645,7 +2887,7 @@ mod tests {
                     && row.source == EvidenceSource::PrReview)
         );
         assert!(report.evidence.iter().all(|row| {
-            row.id.starts_with("GS-EVID-")
+            row.id().starts_with("GS-EVID-")
                 && row.subject.is_some()
                 && matches!(row.source, EvidenceSource::PrReview)
         }));

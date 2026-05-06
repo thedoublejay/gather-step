@@ -1,10 +1,10 @@
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct Evidence {
-    pub id: String,
+    id: String,
     pub kind: EvidenceKind,
     pub source: EvidenceSource,
     pub citation: EvidenceCitation,
@@ -15,6 +15,11 @@ pub struct Evidence {
 }
 
 impl Evidence {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     #[must_use]
     pub fn new(kind: EvidenceKind, source: EvidenceSource, citation: EvidenceCitation) -> Self {
         let mut evidence = Self {
@@ -52,6 +57,43 @@ impl Evidence {
     }
 }
 
+impl<'de> Deserialize<'de> for Evidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawEvidence {
+            #[serde(default)]
+            id: String,
+            kind: EvidenceKind,
+            source: EvidenceSource,
+            citation: EvidenceCitation,
+            #[serde(default)]
+            subject: Option<EvidenceSubject>,
+            #[serde(default)]
+            support: Option<EvidenceSupport>,
+        }
+
+        let raw = RawEvidence::deserialize(deserializer)?;
+        let expected_id = evidence_id(&raw.kind, &raw.source, &raw.citation, raw.subject.as_ref());
+        if !raw.id.is_empty() && raw.id != expected_id {
+            return Err(de::Error::custom(format!(
+                "evidence id `{}` does not match canonical id `{expected_id}`",
+                raw.id
+            )));
+        }
+        Ok(Self {
+            id: expected_id,
+            kind: raw.kind,
+            source: raw.source,
+            citation: raw.citation,
+            subject: raw.subject,
+            support: raw.support,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
@@ -69,11 +111,19 @@ pub enum EvidenceKind {
     EventDefinition,
     EventProducer,
     EventConsumer,
+    EventBlastRadiusNode,
+    OrphanTopic,
     PayloadContract,
+    PayloadField,
+    PayloadFieldAdded,
+    PayloadFieldRemoved,
+    PayloadFieldChanged,
+    ProjectionImpact,
     ExistingTestSignal,
     FeatureFlag,
     ChangedSymbol,
     RemovedSurface,
+    RiskNote,
     Decorator,
     ContractAlignment,
     DeploymentTouchpoint,
@@ -83,10 +133,19 @@ pub enum EvidenceKind {
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceSource {
     PlanningPack,
+    DebugPack,
+    FixPack,
     ReviewPack,
     ChangeImpactPack,
     TraceRoute,
     TraceEvent,
+    CrudTrace,
+    EventBlastRadius,
+    CrossRepoDeps,
+    TraceImpact,
+    PayloadSchema,
+    ProjectionImpact,
+    OrphanTopicScan,
     WorkspaceScan,
     PrReview,
 }
@@ -201,6 +260,22 @@ impl EvidenceCitation {
             event_target: Some(target.into()),
         }
     }
+
+    #[must_use]
+    pub fn symbol_id(symbol_id: impl Into<String>, symbol_kind: impl Into<String>) -> Self {
+        Self {
+            kind: CitationKind::Symbol,
+            repo: None,
+            path: None,
+            line: None,
+            symbol_id: Some(symbol_id.into()),
+            symbol_kind: Some(symbol_kind.into()),
+            symbol_name: None,
+            route_method: None,
+            route_path: None,
+            event_target: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -279,12 +354,14 @@ pub enum EvidenceSupportMethod {
 }
 
 #[must_use]
-pub fn evidence_source_for_pack_mode(mode: &str) -> EvidenceSource {
+pub fn evidence_source_for_pack_mode(mode: &str) -> Option<EvidenceSource> {
     match mode {
-        "planning" => EvidenceSource::PlanningPack,
-        "review" => EvidenceSource::ReviewPack,
-        "change_impact" => EvidenceSource::ChangeImpactPack,
-        _ => EvidenceSource::PlanningPack,
+        "planning" => Some(EvidenceSource::PlanningPack),
+        "debug" => Some(EvidenceSource::DebugPack),
+        "fix" => Some(EvidenceSource::FixPack),
+        "review" => Some(EvidenceSource::ReviewPack),
+        "change_impact" => Some(EvidenceSource::ChangeImpactPack),
+        _ => None,
     }
 }
 
@@ -360,7 +437,7 @@ fn evidence_id(
         citation,
         subject,
     };
-    let bytes = serde_json::to_vec(&identity).unwrap_or_else(|_| b"invalid-evidence".to_vec());
+    let bytes = serde_json::to_vec(&identity).expect("Evidence identity is always serializable.");
     format!("GS-EVID-{:016x}", fnv1a64(&bytes))
 }
 
@@ -415,5 +492,22 @@ mod tests {
         ));
 
         assert_eq!(base.id, supported.id);
+    }
+
+    #[test]
+    fn deserialization_rejects_id_drift() {
+        let raw = serde_json::json!({
+            "id": "GS-EVID-deadbeefdeadbeef",
+            "kind": "feature_flag",
+            "source": "workspace_scan",
+            "citation": {
+                "kind": "file_line",
+                "repo": "frontend",
+                "path": "src/flags.ts",
+                "line": 12
+            }
+        });
+        let err = serde_json::from_value::<Evidence>(raw).expect_err("drifted id must fail");
+        assert!(err.to_string().contains("does not match canonical id"));
     }
 }

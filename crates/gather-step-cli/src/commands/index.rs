@@ -67,7 +67,7 @@ pub struct IndexArgs {
     pub release_gate: bool,
     #[arg(
         long,
-        help = "Delete generated index state before rebuilding, recovering corrupt or old-schema state."
+        help = "Delete generated index state before rebuilding corrupt or incompatible state."
     )]
     pub auto_recover: bool,
     #[arg(long, help = "Enter watch mode after indexing completes")]
@@ -1621,8 +1621,8 @@ mod tests {
                 last_called_at: 42,
             },
             PackCallLogEntry {
-                target: "legacy".to_owned(),
-                mode: "legacy_mode".to_owned(),
+                target: "unknown".to_owned(),
+                mode: "unknown_mode".to_owned(),
                 call_count: 9,
                 last_called_at: 50,
             },

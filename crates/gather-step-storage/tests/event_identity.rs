@@ -157,7 +157,7 @@ fn make_edge(
 /// - Exactly one `NodeKind::Event` node with the canonical qualified name exists.
 /// - The producer node has an outgoing `ProducesEventFor` edge to that node.
 /// - The consumer node has an outgoing `UsesEventFrom` edge to that node.
-/// - No `NodeKind::Topic` nodes exist (legacy sibling fallback is absent).
+/// - No `NodeKind::Topic` sibling nodes exist.
 #[test]
 fn producer_and_consumer_share_canonical_event_identity_for_kafka_event_type() {
     let event_qn = "__event__kafka__OrderCreated";

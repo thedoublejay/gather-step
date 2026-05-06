@@ -64,9 +64,7 @@ pub fn format_operator_error(error: &Error) -> String {
     {
         return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
     }
-    if contains_ascii_case_insensitive(&full, "schema version mismatch")
-        || contains_ascii_case_insensitive(&full, "manual upgrade required")
-    {
+    if contains_ascii_case_insensitive(&full, "schema version mismatch") {
         return SCHEMA_VERSION_MISMATCH_MESSAGE.to_owned();
     }
 

@@ -7,7 +7,14 @@ use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{McpContext, McpServerError, config::validate_input_length};
+use crate::{
+    McpContext, McpServerError,
+    config::validate_input_length,
+    evidence::{
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
+        EvidenceSupportMethod,
+    },
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ProjectionImpactRequest {
@@ -57,6 +64,7 @@ pub struct ProjectionImpactData {
     pub filters: Vec<ProjectionEvidenceItem>,
     pub indexes: Vec<ProjectionEvidenceItem>,
     pub backfills: Vec<ProjectionEvidenceItem>,
+    pub evidence: Vec<Evidence>,
     pub risk_hints: Vec<String>,
     pub missing_evidence: Vec<String>,
     pub confidence: String,
@@ -128,36 +136,95 @@ pub fn projection_impact_tool(
         &payload_contracts,
     )?;
 
-    Ok(ProjectionImpactResponse {
-        data: ProjectionImpactData {
-            target: report.target,
-            resolved: report.resolved,
-            ambiguity: report.ambiguity,
-            candidates: report.candidates.into_iter().map(Into::into).collect(),
-            source_fields: report.source_fields.into_iter().map(Into::into).collect(),
-            projected_fields: report
-                .projected_fields
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            derivation_edges: report
-                .derivation_edges
-                .into_iter()
-                .map(|edge| ProjectionDerivationItem {
-                    source: edge.source.into(),
-                    projected: edge.projected.into(),
-                })
-                .collect(),
-            readers: report.readers.into_iter().map(Into::into).collect(),
-            writers: report.writers.into_iter().map(Into::into).collect(),
-            filters: report.filters.into_iter().map(Into::into).collect(),
-            indexes: report.indexes.into_iter().map(Into::into).collect(),
-            backfills: report.backfills.into_iter().map(Into::into).collect(),
-            risk_hints: report.risk_hints,
-            missing_evidence: report.missing_evidence,
-            confidence: report.confidence,
-        },
-    })
+    let mut data = ProjectionImpactData {
+        target: report.target,
+        resolved: report.resolved,
+        ambiguity: report.ambiguity,
+        candidates: report.candidates.into_iter().map(Into::into).collect(),
+        source_fields: report.source_fields.into_iter().map(Into::into).collect(),
+        projected_fields: report
+            .projected_fields
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        derivation_edges: report
+            .derivation_edges
+            .into_iter()
+            .map(|edge| ProjectionDerivationItem {
+                source: edge.source.into(),
+                projected: edge.projected.into(),
+            })
+            .collect(),
+        readers: report.readers.into_iter().map(Into::into).collect(),
+        writers: report.writers.into_iter().map(Into::into).collect(),
+        filters: report.filters.into_iter().map(Into::into).collect(),
+        indexes: report.indexes.into_iter().map(Into::into).collect(),
+        backfills: report.backfills.into_iter().map(Into::into).collect(),
+        evidence: Vec::new(),
+        risk_hints: report.risk_hints,
+        missing_evidence: report.missing_evidence,
+        confidence: report.confidence,
+    };
+    data.evidence = projection_impact_evidence(&data);
+
+    Ok(ProjectionImpactResponse { data })
+}
+
+fn projection_impact_evidence(data: &ProjectionImpactData) -> Vec<Evidence> {
+    let mut rows = Vec::new();
+    for (category, items) in [
+        ("reader", data.readers.as_slice()),
+        ("writer", data.writers.as_slice()),
+        ("filter", data.filters.as_slice()),
+        ("index", data.indexes.as_slice()),
+        ("backfill", data.backfills.as_slice()),
+    ] {
+        rows.extend(
+            items
+                .iter()
+                .map(|item| projection_evidence_item(data, category, item)),
+        );
+    }
+    rows.extend(data.risk_hints.iter().enumerate().map(|(index, hint)| {
+        Evidence::new(
+            EvidenceKind::RiskNote,
+            EvidenceSource::ProjectionImpact,
+            EvidenceCitation::repo(format!("projection_impact:{}", index + 1)),
+        )
+        .with_subject(
+            EvidenceSubject::new("projection_impact")
+                .with_category("risk_note")
+                .with_name(data.target.clone())
+                .with_reason(hint.clone()),
+        )
+        .with_support(EvidenceSupport::new(
+            EvidenceSupportMethod::StaticAnalyzer,
+            None,
+        ))
+    }));
+    rows
+}
+
+fn projection_evidence_item(
+    data: &ProjectionImpactData,
+    category: &str,
+    item: &ProjectionEvidenceItem,
+) -> Evidence {
+    Evidence::new(
+        EvidenceKind::ProjectionImpact,
+        EvidenceSource::ProjectionImpact,
+        EvidenceCitation::file_line(item.repo.clone(), item.file_path.clone(), None),
+    )
+    .with_subject(
+        EvidenceSubject::new("projection_impact")
+            .with_category(category.to_owned())
+            .with_name(item.field_path.clone())
+            .with_reason(format!("{} evidence for {}.", item.edge_kind, data.target)),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        item.confidence,
+    ))
 }
 
 fn validate_projection_impact_limit(limit: usize) -> Result<(), McpServerError> {
@@ -218,6 +285,7 @@ mod tests {
             filters: Vec::new(),
             indexes: Vec::new(),
             backfills: Vec::new(),
+            evidence: Vec::new(),
             risk_hints: Vec::new(),
             missing_evidence: Vec::new(),
             confidence: "low".to_owned(),

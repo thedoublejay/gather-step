@@ -2146,16 +2146,10 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                     );
                     return false;
                 }
-                // Compute age. Prefer `last_accessed_at` (refreshed on every
-                // cache hit) over `created_at` so artifacts that are still
-                // being reused don't age out from under an active workflow.
-                // If `last_accessed_at` is absent (older marker, or no hit
-                // yet), fall back to `created_at`.
-                let age_anchor = a
-                    .marker
-                    .last_accessed_at
-                    .as_deref()
-                    .unwrap_or(&a.marker.created_at);
+                // Compute age from `last_accessed_at` so artifacts that are
+                // still being reused don't age out from under an active
+                // workflow. Fresh markers initialize it to `created_at`.
+                let age_anchor = &a.marker.last_accessed_at;
                 chrono::DateTime::parse_from_rfc3339(age_anchor)
                     .ok()
                     .is_some_and(|dt| {
@@ -2587,10 +2581,10 @@ mod tests {
             storage_path,
             registry_path,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at,
+            created_at: created_at.clone(),
             status,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: created_at,
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -2907,7 +2901,7 @@ mod tests {
     }
 
     #[test]
-    fn older_than_prefers_last_accessed_at_when_present() {
+    fn older_than_uses_last_accessed_at() {
         let ws_tmp = TempDir::new("age-accessed-ws");
         let cache_tmp = TempDir::new("age-accessed-cache");
         let ws = ws_tmp.path();
@@ -2927,15 +2921,15 @@ mod tests {
         let marker_path = root_recent_access.join(MARKER_FILENAME);
         let mut marker: ReviewMarker =
             serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
-        marker.last_accessed_at = Some(recent_ts);
+        marker.last_accessed_at = recent_ts;
         fs::write(&marker_path, serde_json::to_vec_pretty(&marker).unwrap()).unwrap();
 
-        let root_legacy_old = write_fake_artifact(
+        let root_stale_access = write_fake_artifact(
             cache,
             ws,
-            "review-legacy-old",
-            "baseLEGACY",
-            "headLEGACY",
+            "review-stale-access",
+            "baseOLD",
+            "headOLD",
             ReviewStatus::Completed,
             Some(&old_ts),
         );
@@ -2971,8 +2965,8 @@ mod tests {
             "Recently accessed artifacts must remain even when created_at is old."
         );
         assert!(
-            !root_legacy_old.exists(),
-            "Legacy artifacts without last_accessed_at should fall back to created_at."
+            !root_stale_access.exists(),
+            "Artifacts whose last_accessed_at remains old should be removed."
         );
     }
 
@@ -3076,7 +3070,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: chrono::Utc::now().to_rfc3339(),
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -3129,7 +3123,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: chrono::Utc::now().to_rfc3339(),
         };
 
         // Write the marker INTO the baseline storage path so re-read works.
@@ -3222,7 +3216,6 @@ mod tests {
                 .any(|f| f.as_str().unwrap().contains("added.ts")),
             "expected added.ts in changed_files; got {files:?}"
         );
-
         // baseline_storage_path != review_storage_path
         let safety = &report["safety"];
         assert_ne!(
@@ -3559,6 +3552,20 @@ mod tests {
                     && deployment["file"] == "Dockerfile"
             }),
             "Deployment topology deltas must include the added Dockerfile: {added_deployments:?}."
+        );
+
+        let evidence = report["evidence"].as_array().expect("evidence array");
+        assert!(
+            evidence
+                .iter()
+                .any(|row| row["source"] == "pr_review" && row["kind"] == "changed_symbol"),
+            "real pr-review JSON should populate canonical symbol evidence from typed deltas: {evidence:?}"
+        );
+        assert!(
+            evidence
+                .iter()
+                .any(|row| row["source"] == "pr_review" && row["kind"] == "deployment_touchpoint"),
+            "real pr-review JSON should populate canonical deployment evidence from typed deltas: {evidence:?}"
         );
     }
 
@@ -4034,7 +4041,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             status: ReviewStatus::Completed,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: chrono::Utc::now().to_rfc3339(),
         };
         let planted_json = serde_json::to_vec_pretty(&planted_marker).unwrap();
         fs::write(planted_root.join(MARKER_FILENAME), planted_json).unwrap();
@@ -4085,7 +4092,6 @@ mod tests {
         status: ReviewStatus,
         created_at_override: Option<&str>,
         cache_key: Option<crate::pr_review::artifact_root::CacheKey>,
-        last_accessed_at: Option<&str>,
     ) -> PathBuf {
         let hash = workspace_hash(workspace_root);
         let root = cache_root.join(&hash).join(run_id);
@@ -4110,10 +4116,10 @@ mod tests {
             storage_path,
             registry_path,
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at,
+            created_at: created_at.clone(),
             status,
             cache_key,
-            last_accessed_at: last_accessed_at.map(ToOwned::to_owned),
+            last_accessed_at: created_at,
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -4158,7 +4164,6 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(active_key),
-            None,
         );
 
         // Artifact 2: has a cache key with SHAs that do NOT resolve in this
@@ -4180,7 +4185,6 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(inactive_key),
-            None,
         );
 
         let app = make_app(&ws);
@@ -4255,7 +4259,6 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(active_key),
-            None,
         );
 
         // Artifact with inactive key.
@@ -4276,7 +4279,6 @@ mod tests {
             ReviewStatus::Completed,
             Some(&old_ts),
             Some(inactive_key),
-            None,
         );
 
         let app = make_app(&ws);
@@ -4349,7 +4351,6 @@ mod tests {
             ReviewStatus::Completed,
             None,
             Some(active_key),
-            None,
         );
 
         let app = make_app(&ws);
@@ -4560,28 +4561,6 @@ mod tests {
         assert!(
             !evaluate_severity_threshold(SeverityMode::Strict, &report),
             "Strict must NOT trigger when only fields_added (no type changes)"
-        );
-    }
-
-    /// `--strict` (old flag) is treated as severity = Strict by `run()` but we can
-    /// verify the mapping logic at the args level.
-    ///
-    /// The actual `tracing::warn` deprecation notice is emitted by `run()`; this
-    /// test verifies the semantic: strict==true && severity==Warn → Strict.
-    #[test]
-    fn legacy_strict_flag_maps_to_severity_strict() {
-        // Simulate the logic inside run() that maps --strict to Strict.
-        let strict_flag = true;
-        let severity_arg = SeverityMode::Warn; // default, user did not pass --severity
-        let effective = if strict_flag && severity_arg == SeverityMode::Warn {
-            SeverityMode::Strict
-        } else {
-            severity_arg
-        };
-        assert_eq!(
-            effective,
-            SeverityMode::Strict,
-            "--strict flag must map to SeverityMode::Strict when --severity is default Warn"
         );
     }
 

@@ -102,6 +102,7 @@ pub struct EventBlastRadiusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct EventBlastRadiusData {
     pub edges: Vec<BlastRadiusEdgeItem>,
+    pub evidence: Vec<Evidence>,
     pub nodes: Vec<BlastRadiusNodeItem>,
     pub target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +139,7 @@ pub struct ListOrphanTopicsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListOrphanTopicsData {
+    pub evidence: Vec<Evidence>,
     pub orphans: Vec<OrphanTopicItem>,
     pub returned: usize,
 }
@@ -406,6 +408,7 @@ pub fn event_blast_radius_tool(
                     target_id: encode_node_id(edge.target),
                 })
                 .collect(),
+            evidence: Vec::new(),
             nodes: blast
                 .nodes
                 .into_iter()
@@ -441,6 +444,7 @@ pub fn event_blast_radius_tool(
         meta.budget = budget;
         meta.truncated |= meta.budget.truncated;
     }
+    response.data.evidence = blast_radius_evidence(&response.data);
     Ok(response)
 }
 
@@ -493,12 +497,68 @@ pub fn list_orphan_topics_tool(
             target_id: encode_node_id(orphan.target.id),
         })
         .collect::<Vec<_>>();
+    let evidence = orphans.iter().map(orphan_topic_evidence).collect();
     Ok(ListOrphanTopicsResponse {
         data: ListOrphanTopicsData {
+            evidence,
             returned: orphans.len(),
             orphans,
         },
     })
+}
+
+fn blast_radius_evidence(data: &EventBlastRadiusData) -> Vec<Evidence> {
+    data.nodes
+        .iter()
+        .map(|node| {
+            Evidence::new(
+                EvidenceKind::EventBlastRadiusNode,
+                EvidenceSource::EventBlastRadius,
+                EvidenceCitation::symbol(
+                    node.repo.clone(),
+                    node.file_path.clone(),
+                    node.line_start,
+                    node.symbol_id.clone(),
+                    node.kind.clone(),
+                    node.symbol_name.clone(),
+                ),
+            )
+            .with_subject(
+                EvidenceSubject::new("event")
+                    .with_category("blast_radius")
+                    .with_name(node.symbol_name.clone())
+                    .with_reason(format!(
+                        "Event blast radius node at depth {} for {}.",
+                        node.depth, data.target
+                    )),
+            )
+            .with_support(EvidenceSupport::new(
+                EvidenceSupportMethod::GraphTraversal,
+                node.confidence,
+            ))
+        })
+        .collect()
+}
+
+fn orphan_topic_evidence(topic: &OrphanTopicItem) -> Evidence {
+    Evidence::new(
+        EvidenceKind::OrphanTopic,
+        EvidenceSource::OrphanTopicScan,
+        EvidenceCitation::event(topic.name.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category(topic.classification.clone())
+            .with_name(topic.name.clone())
+            .with_reason(format!(
+                "{} orphan-topic check: {} producer(s), {} consumer(s).",
+                topic.severity, topic.producers, topic.consumers
+            )),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        None,
+    ))
 }
 
 #[expect(

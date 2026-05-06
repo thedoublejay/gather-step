@@ -1,8 +1,8 @@
 import { Controller, Get, Query } from '@nestjs/common';
 
-@Controller('orders')
+@Controller()
 export class OrdersController {
-  @Get()
+  @Get('/orders')
   listOrders(@Query('status') status?: string, @Query('limit') limit?: string) {
     if (status && !['pending', 'shipped', 'cancelled'].includes(status)) {
       throw new Error('Invalid status');
@@ -14,4 +14,3 @@ export class OrdersController {
     };
   }
 }
-

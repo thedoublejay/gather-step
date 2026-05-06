@@ -214,6 +214,56 @@ export const orderListTestTarget = OrderList;
     .expect("frontend test source");
 }
 
+fn write_qa_reference_v4_workspace(root: &Path) {
+    let backend = root.join("apps/backend_standard");
+    let frontend = root.join("apps/frontend_standard");
+    let notifications = root.join("apps/notifications_standard");
+    for repo in [&backend, &frontend, &notifications] {
+        fs::create_dir_all(repo.join(".git")).expect("repo git dir");
+        fs::create_dir_all(repo.join("src")).expect("repo src");
+    }
+    fs::write(
+        backend.join("package.json"),
+        r#"{"name":"backend-standard","dependencies":{"@nestjs/common":"^11.0.0","@nestjs/core":"^11.0.0"}}"#,
+    )
+    .expect("backend package");
+    fs::write(
+        frontend.join("package.json"),
+        r#"{"name":"frontend-standard","dependencies":{"react":"^19.0.0"}}"#,
+    )
+    .expect("frontend package");
+    fs::write(
+        notifications.join("package.json"),
+        r#"{"name":"notifications-standard","dependencies":{"@nestjs/common":"^11.0.0","@nestjs/core":"^11.0.0","@nestjs/microservices":"^11.0.0"}}"#,
+    )
+    .expect("notifications package");
+
+    fs::write(
+        backend.join("src/orders.controller.ts"),
+        include_str!(
+            "../../../fixtures/qa-reference-v4/changed-files/apps/backend/src/orders.controller.ts"
+        ),
+    )
+    .expect("backend fixture source");
+    fs::write(
+        frontend.join("src/OrderListPage.tsx"),
+        include_str!(
+            "../../../fixtures/qa-reference-v4/changed-files/apps/frontend/src/OrderListPage.tsx"
+        ),
+    )
+    .expect("frontend fixture source");
+    fs::write(
+        frontend.join("src/OrderListPage.test.tsx"),
+        include_str!("../../../fixtures/qa-reference-v4/changed-files/apps/frontend/src/OrderListPage.test.tsx"),
+    )
+    .expect("frontend fixture test source");
+    fs::write(
+        notifications.join("src/order-list-refreshed.consumer.ts"),
+        include_str!("../../../fixtures/qa-reference-v4/changed-files/apps/notifications/src/order-list-refreshed.consumer.ts"),
+    )
+    .expect("notifications fixture source");
+}
+
 #[test]
 fn cli_commands_work_on_indexed_fixture_workspace() {
     let temp = TempDir::new("cli-commands");
@@ -484,6 +534,41 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             "qa-evidence row contains an undocumented key set: {keys:?}"
         );
     }
+    let qa_ids = qa_rows
+        .iter()
+        .map(|row| row["id"].as_str().expect("row id").to_owned())
+        .collect::<Vec<_>>();
+    let qa_evidence_repeat = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "OrderList",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--json",
+        ],
+    );
+    let repeat_json = stdout_json(&qa_evidence_repeat);
+    let repeat_ids = repeat_json["rows"]
+        .as_array()
+        .expect("repeat qa evidence rows")
+        .iter()
+        .map(|row| row["id"].as_str().expect("repeat row id").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(qa_ids, repeat_ids, "CLI evidence IDs must be deterministic");
+
+    fs::write(
+        temp.path()
+            .join("apps/frontend_standard/src/DynamicFlag.ts"),
+        r"
+export function useDynamicFlag(flagName: string) {
+  return useFlag(flagName);
+}
+",
+    )
+    .expect("dynamic flag fixture should write");
 
     let qa_evidence_missing_refs = run_ok(temp.path(), &["qa-evidence", "OrderList", "--json"]);
     let qa_evidence_missing_refs_json = stdout_json(&qa_evidence_missing_refs);
@@ -504,6 +589,9 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     }
     assert!(qa_gaps.iter().any(|gap| {
         gap["kind"] == "missing_diff_refs" && gap["blocks_complete_coverage"] == false
+    }));
+    assert!(qa_gaps.iter().any(|gap| {
+        gap["kind"] == "dynamic_feature_flag" && gap["blocks_complete_coverage"] == true
     }));
 
     let qa_evidence_scan_limited = run_ok(
@@ -692,6 +780,96 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     assert_eq!(codeowners_json["event"], "generate_codeowners_completed");
     let rendered = fs::read_to_string(temp.path().join("CODEOWNERS")).expect("CODEOWNERS");
     assert!(rendered.contains("/apps/backend_standard/src/controller.ts owner@example.com"));
+}
+
+#[test]
+fn qa_reference_v4_fixture_emits_required_evidence_surfaces() {
+    let temp = TempDir::new("qa-reference-v4");
+    write_qa_reference_v4_workspace(temp.path());
+
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["index"]);
+
+    let ui = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "OrderListPage",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--json",
+        ],
+    );
+    let ui_json = stdout_json(&ui);
+    let ui_rows = ui_json["rows"].as_array().expect("ui evidence rows");
+    assert!(
+        ui_rows.iter().any(|row| row["kind"] == "feature_flag"),
+        "AC-1 should cite the feature-flagged UI page."
+    );
+    assert!(
+        ui_rows
+            .iter()
+            .any(|row| row["kind"] == "existing_test_signal"),
+        "The fixture should cite the existing regression test."
+    );
+
+    let route = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "--route-method",
+            "GET",
+            "--route-path",
+            "/orders",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--json",
+        ],
+    );
+    let route_json = stdout_json(&route);
+    let route_rows = route_json["rows"].as_array().expect("route evidence rows");
+    assert!(
+        route_rows
+            .iter()
+            .any(|row| row["source"] == "trace_route" && row["kind"] == "route_handler"),
+        "AC-2 should cite the changed route handler."
+    );
+    assert!(
+        route_rows.iter().any(|row| row["source"] == "crud_trace"),
+        "Route QA evidence should include crud_trace rows."
+    );
+
+    let event = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "--event-target",
+            "order.list.refreshed",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--json",
+        ],
+    );
+    let event_json = stdout_json(&event);
+    let event_rows = event_json["rows"].as_array().expect("event evidence rows");
+    assert!(
+        event_rows
+            .iter()
+            .any(|row| row["source"] == "trace_event" && row["kind"] == "event_consumer"),
+        "AC-3 should cite the downstream event consumer."
+    );
+    assert!(
+        event_rows
+            .iter()
+            .any(|row| row["source"] == "event_blast_radius"),
+        "Event QA evidence should include blast-radius evidence."
+    );
 }
 
 #[test]
@@ -959,6 +1137,7 @@ fn plant_review_artifact(
     let registry_path = root.join("registry.json");
     fs::create_dir_all(&storage_path).expect("artifact storage");
     fs::write(&registry_path, b"{}").expect("artifact registry");
+    let accessed_at = chrono::Utc::now().to_rfc3339();
     let marker = ReviewMarker::new_for_test_fixture(
         MARKER_SCHEMA_VERSION,
         marker_workspace_hash.to_owned(),
@@ -969,10 +1148,10 @@ fn plant_review_artifact(
         storage_path,
         registry_path,
         env!("CARGO_PKG_VERSION").to_owned(),
-        chrono::Utc::now().to_rfc3339(),
+        accessed_at.clone(),
         status,
         None,
-        None,
+        accessed_at,
     );
     let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
     fs::write(root.join(MARKER_FILENAME), json).expect("write marker");

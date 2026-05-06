@@ -12,8 +12,19 @@ use gather_step_mcp::evidence::{
     infer_surface,
 };
 use gather_step_mcp::tools::{
-    events::{TraceEventRequest, TraceRouteRequest, trace_event_tool, trace_route_tool},
+    contract::{PayloadSchemaRequest, payload_schema_tool},
+    cross_repo::{
+        CrossRepoDepsRequest, TraceImpactRequest, cross_repo_deps_tool, trace_impact_tool,
+    },
+    crud_trace::{CrudTraceRequest, crud_trace_tool},
+    events::{
+        EventBlastRadiusRequest, ListOrphanTopicsRequest, TraceEventRequest, TraceRouteRequest,
+        event_blast_radius_tool, list_orphan_topics_tool, trace_event_tool, trace_route_tool,
+    },
     packs::{ContextPackRequest, ContextPackResponse, context_pack_tool},
+    projection_impact::{
+        ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact_tool,
+    },
 };
 use serde::Serialize;
 
@@ -95,6 +106,8 @@ struct QaEvidenceSummary {
 }
 
 #[derive(Debug, Serialize)]
+/// Gap IDs are stable only within a single `qa-evidence` run. Consumers should
+/// key durable decisions from `kind`, `source_resolver`, and message text.
 struct QaEvidenceGap {
     id: String,
     source_resolver: String,
@@ -157,7 +170,7 @@ pub(crate) fn run_rendered(
             truncated |= meta.budget.truncated;
             omitted_rows += meta.budget.omitted_items;
             if let Some(reason) = meta.budget.omission_reason {
-                let reason = format!("{reason:?}").to_ascii_lowercase();
+                let reason = reason.as_str().to_owned();
                 if !dropped_kinds.contains(&reason) {
                     dropped_kinds.push(reason);
                 }
@@ -187,6 +200,8 @@ pub(crate) fn run_rendered(
         );
     }
 
+    collect_tool_surface_rows(app, &mcp_ctx, args, &target, &mut rows, &mut gaps);
+
     let scan_gap_start = gaps.len();
     let scan_rows = filesystem_evidence(app, ctx, &target, args.scan_limit, &mut gaps)?;
     if gaps[scan_gap_start..]
@@ -197,6 +212,7 @@ pub(crate) fn run_rendered(
         omitted_rows += 1;
     }
     rows.extend(scan_rows);
+    stabilize_rows(&mut rows);
 
     let row_count = rows.len();
     let gap_count = gaps.len();
@@ -231,6 +247,281 @@ pub(crate) fn run_rendered(
         ),
     ];
     RenderedCommand::success_serialized(&output, lines)
+}
+
+fn collect_tool_surface_rows(
+    app: &AppContext,
+    ctx: &gather_step_mcp::McpContext,
+    args: &QaEvidenceArgs,
+    target: &str,
+    rows: &mut Vec<Evidence>,
+    gaps: &mut Vec<QaEvidenceGap>,
+) {
+    if let (Some(method), Some(path)) = (&args.route_method, &args.route_path) {
+        match trace_route_tool(
+            ctx,
+            TraceRouteRequest {
+                budget_bytes: args.budget_bytes,
+                limit: Some(args.limit),
+                method: method.clone(),
+                path: path.clone(),
+            },
+        ) {
+            Ok(response) => {
+                rows.extend(
+                    response
+                        .data
+                        .handlers
+                        .iter()
+                        .chain(&response.data.callers)
+                        .map(|symbol| symbol.evidence.clone()),
+                );
+                collect_topology_meta_gap("trace_route", response.meta.as_ref(), gaps);
+            }
+            Err(error) => push_gap(
+                gaps,
+                "trace_route",
+                "trace_route_unavailable",
+                error.to_string(),
+                true,
+            ),
+        }
+
+        match crud_trace_tool(
+            ctx,
+            CrudTraceRequest {
+                budget_bytes: args.budget_bytes,
+                limit: Some(args.limit),
+                method: Some(method.clone()),
+                path: Some(path.clone()),
+                symbol_id: None,
+            },
+        ) {
+            Ok(response) => {
+                rows.extend(response.data.evidence);
+                collect_crud_meta_gap(response.meta.as_ref(), gaps);
+            }
+            Err(error) => push_gap(
+                gaps,
+                "crud_trace",
+                "crud_trace_unavailable",
+                error.to_string(),
+                true,
+            ),
+        }
+    } else if args.route_method.is_none()
+        && args.route_path.is_none()
+        && let Ok(response) = crud_trace_tool(
+            ctx,
+            CrudTraceRequest {
+                budget_bytes: args.budget_bytes,
+                limit: Some(args.limit),
+                method: None,
+                path: None,
+                symbol_id: Some(target.to_owned()),
+            },
+        )
+    {
+        rows.extend(response.data.evidence);
+        collect_crud_meta_gap(response.meta.as_ref(), gaps);
+    }
+
+    if let Some(event_target) = &args.event_target {
+        match trace_event_tool(
+            ctx,
+            TraceEventRequest {
+                budget_bytes: args.budget_bytes,
+                limit: Some(args.limit),
+                target: event_target.clone(),
+            },
+        ) {
+            Ok(response) => {
+                for result in &response.data.matches {
+                    rows.extend(
+                        result
+                            .producers
+                            .iter()
+                            .map(|symbol| symbol.evidence.clone()),
+                    );
+                    rows.extend(
+                        result
+                            .consumers
+                            .iter()
+                            .map(|symbol| symbol.evidence.clone()),
+                    );
+                }
+                collect_topology_meta_gap("trace_event", response.meta.as_ref(), gaps);
+            }
+            Err(error) => push_gap(
+                gaps,
+                "trace_event",
+                "trace_event_unavailable",
+                error.to_string(),
+                true,
+            ),
+        }
+
+        match event_blast_radius_tool(
+            ctx,
+            EventBlastRadiusRequest {
+                budget_bytes: args.budget_bytes,
+                depth: Some(args.depth),
+                limit: Some(args.limit),
+                target: event_target.clone(),
+            },
+        ) {
+            Ok(response) => {
+                rows.extend(response.data.evidence);
+                collect_topology_meta_gap("event_blast_radius", response.meta.as_ref(), gaps);
+            }
+            Err(error) => push_gap(
+                gaps,
+                "event_blast_radius",
+                "event_blast_radius_unavailable",
+                error.to_string(),
+                true,
+            ),
+        }
+    }
+
+    if let Ok(response) = trace_impact_tool(
+        ctx,
+        TraceImpactRequest {
+            budget_bytes: args.budget_bytes,
+            depth: Some(args.depth),
+            target: target.to_owned(),
+        },
+    ) {
+        rows.extend(response.data.evidence);
+        if response
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.truncated || meta.budget.truncated)
+        {
+            push_gap(
+                gaps,
+                "trace_impact",
+                "trace_impact_truncated",
+                "Trace impact evidence was truncated; downstream coverage is incomplete.",
+                true,
+            );
+        }
+    }
+
+    if let Ok(response) = payload_schema_tool(
+        ctx,
+        PayloadSchemaRequest {
+            budget_bytes: args.budget_bytes,
+            include_weak: Some(true),
+            target: target.to_owned(),
+        },
+    ) {
+        rows.extend(response.data.evidence);
+        if response
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta.budget.truncated)
+        {
+            push_gap(
+                gaps,
+                "payload_schema",
+                "payload_schema_truncated",
+                "Payload schema evidence was truncated; field-level coverage is incomplete.",
+                true,
+            );
+        }
+    }
+
+    if let Ok(response) = projection_impact_tool(
+        ctx,
+        ProjectionImpactRequest {
+            target: target.to_owned(),
+            repo: app.repo_filter.clone(),
+            limit: args.limit.max(1),
+            evidence_verbosity: ProjectionEvidenceVerbosity::Full,
+        },
+    ) {
+        rows.extend(response.data.evidence);
+        for missing in response.data.missing_evidence {
+            push_gap(
+                gaps,
+                "projection_impact",
+                "projection_missing_evidence",
+                missing,
+                true,
+            );
+        }
+    }
+
+    for repo in evidence_repos(app, ctx) {
+        if let Ok(response) = cross_repo_deps_tool(ctx, CrossRepoDepsRequest { repo: repo.clone() })
+        {
+            rows.extend(response.data.evidence);
+        }
+    }
+
+    match list_orphan_topics_tool(
+        ctx,
+        ListOrphanTopicsRequest {
+            limit: Some(args.limit),
+            repo: app.repo_filter.clone(),
+        },
+    ) {
+        Ok(response) => rows.extend(response.data.evidence),
+        Err(error) => push_gap(
+            gaps,
+            "orphan_topics",
+            "orphan_topic_scan_unavailable",
+            error.to_string(),
+            true,
+        ),
+    }
+}
+
+fn evidence_repos(app: &AppContext, ctx: &gather_step_mcp::McpContext) -> Vec<String> {
+    if let Some(repo) = &app.repo_filter {
+        return vec![repo.clone()];
+    }
+    let Ok(registry) = ctx.registry_snapshot() else {
+        return Vec::new();
+    };
+    registry.repos.keys().cloned().collect()
+}
+
+fn collect_topology_meta_gap(
+    source: &str,
+    meta: Option<&gather_step_mcp::tools::events::TopologyMeta>,
+    gaps: &mut Vec<QaEvidenceGap>,
+) {
+    if meta.is_some_and(|meta| meta.truncated || meta.budget.truncated) {
+        push_gap(
+            gaps,
+            source,
+            format!("{source}_truncated"),
+            "Topology evidence was truncated; QA coverage is incomplete.",
+            true,
+        );
+    }
+}
+
+fn collect_crud_meta_gap(
+    meta: Option<&gather_step_mcp::tools::crud_trace::CrudTraceMeta>,
+    gaps: &mut Vec<QaEvidenceGap>,
+) {
+    if meta.is_some_and(|meta| meta.truncated || meta.budget.truncated) {
+        push_gap(
+            gaps,
+            "crud_trace",
+            "crud_trace_truncated",
+            "CRUD trace evidence was truncated; route and persistence coverage is incomplete.",
+            true,
+        );
+    }
+}
+
+fn stabilize_rows(rows: &mut Vec<Evidence>) {
+    rows.sort_by(|left, right| left.id().cmp(right.id()));
+    rows.dedup_by(|left, right| left.id() == right.id());
 }
 
 fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &QaEvidenceArgs) -> Result<String> {
@@ -343,7 +634,7 @@ fn collect_pack_rows(
 fn pack_item_evidence(mode: &str, item: &gather_step_mcp::tools::packs::PackItem) -> Evidence {
     Evidence::new(
         evidence_kind_for_pack_item(mode, &item.category, &item.file_path),
-        evidence_source_for_pack_mode(mode),
+        evidence_source_for_pack_mode(mode).expect("qa-evidence uses a known pack mode"),
         EvidenceCitation::symbol(
             item.repo.clone(),
             item.file_path.clone(),
@@ -376,7 +667,7 @@ fn cross_repo_caller_evidence(
 ) -> Evidence {
     Evidence::new(
         EvidenceKind::CrossRepoCaller,
-        evidence_source_for_pack_mode(mode),
+        evidence_source_for_pack_mode(mode).expect("qa-evidence uses a known pack mode"),
         EvidenceCitation::symbol(
             caller.repo.clone(),
             caller.file_path.clone(),
