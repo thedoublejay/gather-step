@@ -100,14 +100,14 @@ The picker is fully keyboard-driven:
 ```text
   ↑/↓ move    Space toggle    Enter confirm    a all    n none    q cancel
   ─────────────────────────────────────────────────────────────────────────
-  [✓] alert
-  [✓] common-lib
-  [ ] dev-handbook              ← unchecked: stays out of the config
-  [✓] identity
-  [✓] reggenius
-  [ ] vectorizer
+  [✓] backend_api
+  [✓] frontend_app
+  [ ] docs_site                  ← unchecked: stays out of the config
+  [✓] shared_contracts
+  [✓] worker_service
+  [ ] internal_admin
   ...
-  6 of 12 selected
+  4 of 6 selected
 ```
 
 Toggle a repo to include or exclude it; press `a` to select every discovered
@@ -116,14 +116,14 @@ written straight to `gather-step.config.yaml`:
 
 ```yaml
 repos:
-  - name: alert
-    path: alert
-  - name: common-lib
-    path: common-lib
-  - name: identity
-    path: identity
-  - name: reggenius
-    path: reggenius
+  - name: backend_api
+    path: backend_api
+  - name: frontend_app
+    path: frontend_app
+  - name: shared_contracts
+    path: shared_contracts
+  - name: worker_service
+    path: worker_service
 indexing:
   workspace_concurrency: 1
 ```
