@@ -78,6 +78,12 @@ struct WatchEventOutput {
 }
 
 #[derive(Debug, Serialize)]
+struct WatchReadyOutput {
+    event: &'static str,
+    repos: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct WatchStatusOutput {
     event: &'static str,
     events_seen: u64,
@@ -109,25 +115,22 @@ fn log_value(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<invalid>\"".to_owned())
 }
 
-fn sentence_case_with_period(message: &str) -> String {
+fn operator_error_detail(message: &str) -> String {
     let trimmed = message.trim();
     if trimmed.is_empty() {
-        return "Unknown error.".to_owned();
+        return "unknown error".to_owned();
     }
     if trimmed.eq_ignore_ascii_case("unable to start FSEvent stream") {
-        return "Unable to start the FSEvent stream.".to_owned();
+        return "unable to start the FSEvent stream".to_owned();
     }
 
     let mut chars = trimmed.chars();
     let Some(first) = chars.next() else {
-        return "Unknown error.".to_owned();
+        return "unknown error".to_owned();
     };
-    let mut sentence = first.to_uppercase().collect::<String>();
-    sentence.push_str(chars.as_str());
-    if !matches!(sentence.chars().last(), Some('.' | '!' | '?')) {
-        sentence.push('.');
-    }
-    sentence
+    let mut detail = first.to_lowercase().collect::<String>();
+    detail.push_str(chars.as_str());
+    detail.trim_end_matches(['.', '!', '?']).to_owned()
 }
 
 pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
@@ -213,12 +216,29 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                 Ok(event) => event,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "The watch event subscriber lagged; continuing.");
+                    tracing::warn!(skipped, "watch event subscriber lagged; continuing");
                     continue;
                 }
             };
 
             let emit_result = match event {
+                WatchEvent::Ready { repos } => {
+                    if event_output.is_json() {
+                        event_output.emit(&WatchReadyOutput {
+                            event: "watch_ready",
+                            repos,
+                        })
+                    } else if progress_visible {
+                        let line = format!(
+                            "  {} Watcher ready for {} repos",
+                            style("*").green(),
+                            repos.len()
+                        );
+                        emit_watch_human_line(event_bar.as_ref(), line)
+                    } else {
+                        emit_watch_line(&format!("watch:ready repos={}", repos.len()))
+                    }
+                }
                 WatchEvent::IndexingStart { repo, files, cause } => {
                     let cause = match cause {
                         WatchCause::Paths => "paths",
@@ -376,7 +396,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
             };
 
             if let Err(error) = emit_result {
-                tracing::warn!(%error, "Watch event output failed; stopping the event stream.");
+                tracing::warn!(%error, "watch event output failed; stopping the event stream");
                 break;
             }
         }
@@ -394,20 +414,20 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
         }
         () = cancel.cancelled() => {}
     }
-    let watch_result = watch_task.await.context("The watch task crashed.")?;
+    let watch_result = watch_task.await.context("watch task crashed")?;
     if let Err(error) = watch_result {
         bail!(
-            "The filesystem watcher failed: {}",
-            sentence_case_with_period(&error.to_string())
+            "filesystem watcher failed: {}",
+            operator_error_detail(&error.to_string())
         );
     }
-    daemon_task.await.context("The daemon task crashed.")??;
+    daemon_task.await.context("daemon task crashed")??;
     let status = watcher.status();
     drop(watcher);
     drop(stores);
     drop(daemon_metadata);
     if let Err(error) = event_task.await {
-        tracing::warn!(?error, "The watch event task crashed.");
+        tracing::warn!(?error, "watch event task crashed");
     }
     if output.is_json() {
         output.emit(&WatchStatusOutput {

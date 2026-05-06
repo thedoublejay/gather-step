@@ -171,7 +171,9 @@ pub fn resolve_calls_with_unresolved<'a>(
                         confidence,
                         strategy,
                     });
-                } else if !is_external_call(call_site, &external_names) {
+                } else if !is_external_call(call_site, &external_names)
+                    && !is_non_actionable_unresolved_call(call_site)
+                {
                     unresolved_call_sites.push(call_site.clone());
                 }
             }
@@ -264,6 +266,294 @@ fn is_external_call(call_site: &CallSite, external_names: &FxHashSet<String>) ->
         .find(|segment| !segment.is_empty() && *segment != "this" && *segment != "self")
         .unwrap_or(hint);
     external_names.contains(head)
+}
+
+/// Whether a call site should be omitted from unresolved-call health reporting.
+///
+/// This classification lives with resolution instead of CLI health commands so
+/// newly indexed metadata does not persist calls that cannot become useful
+/// in-workspace graph edges. `CallSite` does not currently carry inferred
+/// receiver types, so JavaScript/host runtime member calls still need a
+/// conservative intrinsic allowlist for arbitrary receivers like
+/// `value.toLowerCase()`.
+#[must_use]
+pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
+    if is_non_actionable_test_file(call_site.source_path.as_path()) {
+        return true;
+    }
+
+    if call_site.callee_name.eq_ignore_ascii_case("fetch") {
+        return true;
+    }
+
+    if is_global_runtime_function(call_site.callee_name.as_str()) {
+        return true;
+    }
+
+    if is_setter_like_name(call_site.callee_name.as_str()) || call_site.callee_name == "navigate" {
+        return true;
+    }
+
+    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let mut hint = hint.to_owned();
+    hint.make_ascii_lowercase();
+    let mut name = call_site.callee_name.clone();
+    name.make_ascii_lowercase();
+
+    if matches!(
+        name.as_str(),
+        "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "request"
+    ) && ["http", "api", "client", "fetch", "request"]
+        .iter()
+        .any(|segment| hint.contains(segment))
+    {
+        return true;
+    }
+
+    // Message bus / event clients are external transports even when injected
+    // into an in-workspace class without a resolvable type declaration.
+    if matches!(
+        name.as_str(),
+        "emit" | "send" | "sendmessage" | "publish" | "produce"
+    ) && ["bus", "client", "event", "kafka", "producer", "publisher"]
+        .iter()
+        .any(|segment| hint.contains(segment))
+    {
+        return true;
+    }
+
+    // ORM / persistence framework method calls: Mongoose / TypeORM / Prisma /
+    // Sequelize expose repository- or model-like instances whose method names
+    // collide with very common identifiers (`create`, `save`, `find`, ...).
+    if matches!(
+        name.as_str(),
+        "create"
+            | "save"
+            | "find"
+            | "findone"
+            | "findall"
+            | "findmany"
+            | "findoneandupdate"
+            | "findoneanddelete"
+            | "findbyidandupdate"
+            | "findbyidanddelete"
+            | "updateone"
+            | "updatemany"
+            | "deleteone"
+            | "deletemany"
+            | "insertmany"
+            | "count"
+            | "aggregate"
+            | "exec"
+    ) && [
+        "model",
+        "repository",
+        "orm",
+        "mongoose",
+        "prisma",
+        "typeorm",
+        "sequelize",
+    ]
+    .iter()
+    .any(|segment| hint.contains(segment))
+    {
+        return true;
+    }
+
+    if name == "createforclass" && hint.contains("schemafactory") {
+        return true;
+    }
+
+    is_non_actionable_runtime_hint(hint.as_str(), name.as_str())
+}
+
+fn is_non_actionable_test_file(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.contains("/cypress/")
+        || path.contains("/__tests__/")
+        || path.contains("/__mocks__/")
+        || path.ends_with(".cy.ts")
+        || path.ends_with(".cy.tsx")
+        || path.ends_with(".cy.js")
+        || path.ends_with(".cy.jsx")
+        || path.ends_with(".stories.ts")
+        || path.ends_with(".stories.tsx")
+        || path.ends_with(".stories.js")
+        || path.ends_with(".stories.jsx")
+}
+
+fn is_global_runtime_function(name: &str) -> bool {
+    let mut name = name.to_owned();
+    name.make_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "settimeout"
+            | "cleartimeout"
+            | "setinterval"
+            | "clearinterval"
+            | "requestanimationframe"
+            | "cancelanimationframe"
+            | "parseint"
+            | "parsefloat"
+            | "encodeuricomponent"
+            | "decodeuricomponent"
+            | "isnan"
+            | "date"
+            | "promise"
+            | "map"
+            | "set"
+            | "resolve"
+            | "reject"
+            | "toisostring"
+    )
+}
+
+fn is_setter_like_name(name: &str) -> bool {
+    name.strip_prefix("set")
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(char::is_uppercase)
+}
+
+fn is_non_actionable_runtime_hint(hint: &str, name: &str) -> bool {
+    if matches!(
+        hint,
+        h if h.starts_with("cy.")
+            || h.starts_with("console.")
+            || h.starts_with("process.")
+            || h.starts_with("snackbar.")
+            || h.starts_with("document.")
+            || h.starts_with("window.location.")
+            || h.starts_with("observer.")
+            || h.starts_with("intl.datetimeformat")
+            || h.starts_with("object.")
+            || h.starts_with("array.")
+            || h.starts_with("json.")
+            || h.starts_with("math.")
+            || h.starts_with("date.")
+            || h.starts_with("promise.")
+            || h.starts_with("queryclient.")
+            || h.starts_with("theme.")
+            || h.starts_with("urlsearchparams")
+            || h == "promise"
+            || h == "date"
+            || h == "map"
+    ) {
+        return true;
+    }
+
+    let receiver = hint.rsplit_once('.').map_or("", |(recv, _)| recv);
+    if is_external_runtime_receiver(receiver) {
+        return true;
+    }
+
+    if receiver.eq_ignore_ascii_case("this") {
+        return false;
+    }
+
+    matches!(
+        name,
+        "map"
+            | "includes"
+            | "find"
+            | "push"
+            | "foreach"
+            | "join"
+            | "keys"
+            | "replace"
+            | "tolowercase"
+            | "some"
+            | "slice"
+            | "trim"
+            | "reduce"
+            | "has"
+            | "sort"
+            | "from"
+            | "split"
+            | "tostring"
+            | "stoppropagation"
+            | "indexof"
+            | "localecompare"
+            | "parse"
+            | "addeventlistener"
+            | "removeeventlistener"
+            | "touppercase"
+            | "startswith"
+            | "max"
+            | "now"
+            | "then"
+            | "add"
+            | "gettime"
+            | "fill"
+            | "flatmap"
+            | "random"
+            | "click"
+            | "bind"
+            | "entries"
+            | "isarray"
+            | "all"
+            | "allsettled"
+            | "catch"
+            | "watch"
+            | "listen"
+            | "writehead"
+            | "end"
+            | "admin"
+            | "collection"
+            | "db"
+            | "createindex"
+            | "deleteone"
+            | "findone"
+            | "replaceone"
+            | "toarray"
+            | "delete"
+            | "clear"
+            | "set"
+            | "values"
+            | "every"
+    )
+}
+
+fn is_external_runtime_receiver(receiver: &str) -> bool {
+    let mut receiver = receiver.to_owned();
+    receiver.make_ascii_lowercase();
+    matches!(
+        receiver.as_str(),
+        "array"
+            | "array.from"
+            | "object"
+            | "json"
+            | "math"
+            | "date"
+            | "promise"
+            | "process"
+            | "console"
+            | "res"
+            | "response"
+            | "client"
+            | "client.db"
+            | "database"
+            | "database.collection"
+            | "this.db"
+            | "this.collection"
+            | "this.collection.find"
+            | "this.client"
+            | "this.mongo_client"
+            | "this.mongoclient"
+            | "this.server"
+            | "this.retryattempts"
+            | "this.changestreams"
+            | "groups"
+            | "groups.get"
+            | "messagesbytopic"
+            | "updatedfields"
+            | "field"
+            | "config.kafkabrokers"
+            | "config.watchcollections"
+            | "this.kafkaproducer"
+            | "changestream"
+    )
 }
 
 struct SymbolIndex<'a> {
@@ -937,13 +1227,14 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use gather_step_core::{NodeData, NodeKind, SourceSpan, Visibility, node_id};
+    use gather_step_core::{NodeData, NodeId, NodeKind, SourceSpan, Visibility, node_id};
     use pretty_assertions::assert_eq;
     use proptest::prelude::*;
 
     use super::{
         CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, SymbolIndex,
-        fuzzy_similarity, resolve_calls, resolve_calls_with_unresolved,
+        fuzzy_similarity, is_non_actionable_unresolved_call, resolve_calls,
+        resolve_calls_with_unresolved,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1021,6 +1312,22 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+        }
+    }
+
+    fn call_site(name: &str, hint: Option<&str>, source_path: &str) -> CallSite {
+        CallSite {
+            owner_id: NodeId([0; 16]),
+            owner_file: NodeId([1; 16]),
+            source_path: PathBuf::from(source_path),
+            callee_name: name.to_owned(),
+            callee_qualified_hint: hint.map(ToOwned::to_owned),
+            span: Some(SourceSpan {
+                line_start: 1,
+                line_len: 0,
+                column_start: 0,
+                column_len: 1,
+            }),
         }
     }
 
@@ -1575,6 +1882,140 @@ mod tests {
         assert!(outcome.resolved.is_empty());
         assert_eq!(outcome.unresolved.len(), 1);
         assert_eq!(outcome.unresolved[0].call_sites[0].callee_name, "missing");
+    }
+
+    #[test]
+    fn classifies_runtime_unresolved_calls_as_non_actionable() {
+        for call_site in [
+            call_site("setOpen", Some("setOpen"), "app/src/components/Modal.tsx"),
+            call_site(
+                "toLowerCase",
+                Some("value.toLowerCase"),
+                "app/src/utils/string.ts",
+            ),
+            call_site(
+                "intercept",
+                Some("cy.intercept"),
+                "app/cypress/support/mock.ts",
+            ),
+            call_site("setTimeout", None, "app/src/views/Dashboard.tsx"),
+            call_site(
+                "success",
+                Some("snackbar.success"),
+                "app/src/entities/details.tsx",
+            ),
+            call_site(
+                "getElementById",
+                Some("document.getElementById"),
+                "app/src/utils/dom.ts",
+            ),
+            call_site(
+                "fetchQuery",
+                Some("queryClient.fetchQuery"),
+                "app/src/hooks/query.ts",
+            ),
+            call_site("FeTcH", None, "app/src/services/api.ts"),
+            call_site("encodeURIComponent", None, "app/src/utils/url.ts"),
+            call_site("Date", Some("Date"), "app/src/lib/logger.ts"),
+            call_site(
+                "allSettled",
+                Some("Promise.allSettled"),
+                "app/src/services/change-stream.service.ts",
+            ),
+            call_site("on", Some("process.on"), "app/src/main.ts"),
+            call_site(
+                "writeHead",
+                Some("res.writeHead"),
+                "app/src/services/health-check.service.ts",
+            ),
+            call_site(
+                "findOne",
+                Some("this.collection.findOne"),
+                "app/src/services/resume-token.service.ts",
+            ),
+            call_site(
+                "clear",
+                Some("this.changeStreams.clear"),
+                "app/src/services/change-stream.service.ts",
+            ),
+            call_site(
+                "send",
+                Some("this.kafkaProducer.send"),
+                "app/src/connections/kafka-producer-client.ts",
+            ),
+            call_site("join", Some("Config.kafkaBrokers.join"), "app/src/main.ts"),
+            call_site("toISOString", Some("toISOString"), "app/src/lib/logger.ts"),
+            call_site(
+                "on",
+                Some("changeStream.on"),
+                "app/src/services/change-stream.service.ts",
+            ),
+        ] {
+            assert!(
+                is_non_actionable_unresolved_call(&call_site),
+                "{call_site:?} should be non-actionable"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_this_calls_and_app_symbols_actionable_when_unresolved() {
+        for call_site in [
+            call_site(
+                "handleSortChange",
+                Some("this.handleSortChange"),
+                "app/src/views/containers/Dashboard.jsx",
+            ),
+            call_site(
+                "translate",
+                Some("translate"),
+                "app/src/entities/form/validation.ts",
+            ),
+        ] {
+            assert!(
+                !is_non_actionable_unresolved_call(&call_site),
+                "{call_site:?} should remain actionable"
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_drops_non_actionable_unresolved_calls_from_outcome() {
+        let root = PathBuf::from("/repo");
+        let owner = function_node("src/caller.ts", "caller");
+
+        let mut runtime_call = call_site("allSettled", Some("Promise.allSettled"), "src/caller.ts");
+        runtime_call.owner_id = owner.id;
+        runtime_call.owner_file = owner.id;
+        runtime_call.source_path = root.join("src/caller.ts");
+
+        let mut app_call = call_site(
+            "missingAppCall",
+            Some("this.missingAppCall"),
+            "src/caller.ts",
+        );
+        app_call.owner_id = owner.id;
+        app_call.owner_file = owner.id;
+        app_call.source_path = root.join("src/caller.ts");
+
+        let outcome = resolve_calls_with_unresolved(
+            &root,
+            std::slice::from_ref(&owner),
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/caller.ts"),
+                import_bindings: Vec::new(),
+                call_sites: vec![runtime_call, app_call],
+            }],
+        );
+
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].call_sites.len(), 1);
+        assert_eq!(
+            outcome.unresolved[0].call_sites[0].callee_name,
+            "missingAppCall"
+        );
     }
 
     proptest! {

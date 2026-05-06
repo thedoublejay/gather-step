@@ -4,7 +4,7 @@ use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
 use gather_step_analysis::{SemanticHealthReport, semantic_health_for_repo};
 use gather_step_core::NodeKind;
 use gather_step_core::RegistryStore;
-use gather_step_parser::resolve::ResolutionInput;
+use gather_step_parser::resolve::{ResolutionInput, is_non_actionable_unresolved_call};
 use gather_step_storage::{GraphStore, SearchStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::json;
@@ -235,226 +235,12 @@ fn inspect_repo(
     })
 }
 
-fn count_actionable_unresolved_inputs(inputs: &[ResolutionInput]) -> usize {
+pub(crate) fn count_actionable_unresolved_inputs(inputs: &[ResolutionInput]) -> usize {
     inputs
         .iter()
         .flat_map(|input| input.call_sites.iter())
-        .filter(|call_site| !looks_like_non_actionable_runtime_call(call_site))
+        .filter(|call_site| !is_non_actionable_unresolved_call(call_site))
         .count()
-}
-
-fn looks_like_non_actionable_runtime_call(
-    call_site: &gather_step_parser::resolve::CallSite,
-) -> bool {
-    if call_site.callee_name.eq_ignore_ascii_case("fetch") {
-        return true;
-    }
-
-    if is_non_actionable_test_file(call_site.source_path.as_path()) {
-        return true;
-    }
-
-    if is_global_runtime_function(call_site.callee_name.as_str()) {
-        return true;
-    }
-
-    if is_setter_like_name(call_site.callee_name.as_str()) || call_site.callee_name == "navigate" {
-        return true;
-    }
-
-    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
-        return false;
-    };
-    let mut hint = hint.to_owned();
-    hint.make_ascii_lowercase();
-    let mut name = call_site.callee_name.clone();
-    name.make_ascii_lowercase();
-
-    if matches!(
-        name.as_str(),
-        "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "request"
-    ) && ["http", "api", "client", "fetch", "request"]
-        .iter()
-        .any(|segment| hint.contains(segment))
-    {
-        return true;
-    }
-
-    // `sendmessage` lowercased matches `sendMessage`, the NestJS messaging
-    // client shape. Without it here, `this.bus.sendMessage(...)` on a
-    // workspace where the bus is injected without a resolvable type
-    // declaration (existing fixture pattern) trips doctor's unresolved-call
-    // counter and masks genuine resolution gaps.
-    if matches!(
-        name.as_str(),
-        "emit" | "send" | "sendmessage" | "publish" | "produce"
-    ) && ["bus", "client", "event", "kafka", "producer", "publisher"]
-        .iter()
-        .any(|segment| hint.contains(segment))
-    {
-        return true;
-    }
-
-    // ORM / persistence framework method calls: Mongoose / TypeORM / Prisma /
-    // Sequelize expose repository- or model-like instances whose method names
-    // collide with very common identifiers (`create`, `save`, `find`, …).
-    // These rarely resolve to in-workspace symbols because the method comes
-    // from an external dependency, so counting them as "unresolved" drowns
-    // out real parser-resolution gaps in doctor output.
-    if matches!(
-        name.as_str(),
-        "create"
-            | "save"
-            | "find"
-            | "findone"
-            | "findall"
-            | "findmany"
-            | "findoneandupdate"
-            | "findoneanddelete"
-            | "findbyidandupdate"
-            | "findbyidanddelete"
-            | "updateone"
-            | "updatemany"
-            | "deleteone"
-            | "deletemany"
-            | "insertmany"
-            | "count"
-            | "aggregate"
-            | "exec"
-    ) && [
-        "model",
-        "repository",
-        "orm",
-        "mongoose",
-        "prisma",
-        "typeorm",
-        "sequelize",
-    ]
-    .iter()
-    .any(|segment| hint.contains(segment))
-    {
-        return true;
-    }
-
-    // NestJS Mongoose `SchemaFactory.createForClass(Entity)` — a framework
-    // constructor, not a workspace call.
-    if name == "createforclass" && hint.contains("schemafactory") {
-        return true;
-    }
-
-    if is_non_actionable_runtime_hint(hint.as_str(), name.as_str()) {
-        return true;
-    }
-
-    false
-}
-
-fn is_non_actionable_test_file(path: &std::path::Path) -> bool {
-    let path = path.to_string_lossy();
-    path.contains("/cypress/")
-        || path.contains("/__tests__/")
-        || path.contains("/__mocks__/")
-        || path.ends_with(".cy.ts")
-        || path.ends_with(".cy.tsx")
-        || path.ends_with(".cy.js")
-        || path.ends_with(".cy.jsx")
-        || path.ends_with(".stories.ts")
-        || path.ends_with(".stories.tsx")
-        || path.ends_with(".stories.js")
-        || path.ends_with(".stories.jsx")
-}
-
-fn is_global_runtime_function(name: &str) -> bool {
-    matches!(
-        name,
-        "setTimeout"
-            | "clearTimeout"
-            | "setInterval"
-            | "clearInterval"
-            | "requestAnimationFrame"
-            | "cancelAnimationFrame"
-            | "parseInt"
-            | "parseFloat"
-            | "encodeURIComponent"
-            | "decodeURIComponent"
-            | "isNaN"
-    )
-}
-
-fn is_setter_like_name(name: &str) -> bool {
-    name.strip_prefix("set")
-        .and_then(|suffix| suffix.chars().next())
-        .is_some_and(char::is_uppercase)
-}
-
-fn is_non_actionable_runtime_hint(hint: &str, name: &str) -> bool {
-    if matches!(
-        hint,
-        h if h.starts_with("cy.")
-            || h.starts_with("console.")
-            || h.starts_with("snackbar.")
-            || h.starts_with("document.")
-            || h.starts_with("window.location.")
-            || h.starts_with("observer.")
-            || h.starts_with("intl.datetimeformat")
-            || h.starts_with("object.")
-            || h.starts_with("array.")
-            || h.starts_with("json.")
-            || h.starts_with("math.")
-            || h.starts_with("date.")
-            || h.starts_with("promise.")
-            || h.starts_with("queryclient.")
-            || h.starts_with("theme.")
-            || h.starts_with("urlsearchparams")
-    ) {
-        return true;
-    }
-
-    let receiver = hint.rsplit_once('.').map_or("", |(recv, _)| recv);
-    if receiver.eq_ignore_ascii_case("this") {
-        return false;
-    }
-
-    matches!(
-        name,
-        "map"
-            | "includes"
-            | "find"
-            | "push"
-            | "foreach"
-            | "keys"
-            | "replace"
-            | "tolowercase"
-            | "some"
-            | "slice"
-            | "trim"
-            | "reduce"
-            | "has"
-            | "sort"
-            | "from"
-            | "split"
-            | "tostring"
-            | "stoppropagation"
-            | "indexof"
-            | "localecompare"
-            | "parse"
-            | "addeventlistener"
-            | "removeeventlistener"
-            | "touppercase"
-            | "startswith"
-            | "max"
-            | "now"
-            | "then"
-            | "add"
-            | "gettime"
-            | "fill"
-            | "flatmap"
-            | "random"
-            | "click"
-            | "bind"
-            | "entries"
-            | "isarray"
-    )
 }
 
 fn count_dangling_edges(
@@ -521,9 +307,11 @@ fn semantic_issues(health: &SemanticHealthReport) -> Vec<String> {
             health.payload_contract_links.ambiguous_targets
         ));
     }
-    if health.orphan_topics > 0 {
-        issues.push(format!("{} orphan topic(s) remain", health.orphan_topics));
-    }
+    // Orphan event topics are surfaced in `semantic_health` and via
+    // `events orphans`. They are not a hard doctor failure because real
+    // workspaces often index only one side of an event boundary: producer-only
+    // topics can have external consumers, and consumer-only topics can be
+    // driven by infrastructure or services outside the configured repo set.
     issues
 }
 
@@ -577,84 +365,30 @@ fn pack_metrics(metadata: &gather_step_storage::MetadataStoreDb) -> Result<PackD
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use super::semantic_issues;
 
-    use gather_step_core::{NodeId, SourceSpan};
-    use gather_step_parser::resolve::CallSite;
-
-    use super::looks_like_non_actionable_runtime_call;
-
-    fn call_site(name: &str, hint: Option<&str>, source_path: &str) -> CallSite {
-        CallSite {
-            owner_id: NodeId([0; 16]),
-            owner_file: NodeId([1; 16]),
-            source_path: PathBuf::from(source_path),
-            callee_name: name.to_owned(),
-            callee_qualified_hint: hint.map(ToOwned::to_owned),
-            span: Some(SourceSpan {
-                line_start: 1,
-                line_len: 0,
-                column_start: 0,
-                column_len: 1,
-            }),
+    fn healthy_link() -> gather_step_analysis::SemanticLinkHealth {
+        gather_step_analysis::SemanticLinkHealth {
+            total_targets: 0,
+            linked_targets: 0,
+            partially_linked_targets: 0,
+            unlinked_targets: 0,
+            ambiguous_targets: 0,
+            coverage_ratio: 1.0,
         }
     }
 
     #[test]
-    fn suppresses_frontend_runtime_noise() {
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "setOpen",
-            Some("setOpen"),
-            "app/src/components/Modal.tsx",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "toLowerCase",
-            Some("value.toLowerCase"),
-            "app/src/utils/string.ts",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "intercept",
-            Some("cy.intercept"),
-            "app/cypress/support/mock.ts",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "setTimeout",
-            None,
-            "app/src/views/Dashboard.tsx",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "success",
-            Some("snackbar.success"),
-            "app/src/entities/details.tsx",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "getElementById",
-            Some("document.getElementById"),
-            "app/src/utils/dom.ts",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "fetchQuery",
-            Some("queryClient.fetchQuery"),
-            "app/src/hooks/query.ts",
-        )));
-        assert!(looks_like_non_actionable_runtime_call(&call_site(
-            "encodeURIComponent",
-            None,
-            "app/src/utils/url.ts",
-        )));
-    }
+    fn orphan_topics_remain_diagnostic_not_hard_failures() {
+        let health = gather_step_analysis::SemanticHealthReport {
+            route_links: healthy_link(),
+            event_links: healthy_link(),
+            shared_symbol_links: healthy_link(),
+            payload_contract_links: healthy_link(),
+            orphan_topics: 1,
+            unresolved_call_inputs: 0,
+        };
 
-    #[test]
-    fn keeps_this_calls_and_app_symbols_actionable() {
-        assert!(!looks_like_non_actionable_runtime_call(&call_site(
-            "handleSortChange",
-            Some("this.handleSortChange"),
-            "app/src/views/containers/Dashboard.jsx",
-        )));
-        assert!(!looks_like_non_actionable_runtime_call(&call_site(
-            "translate",
-            Some("translate"),
-            "app/src/entities/form/validation.ts",
-        )));
+        assert!(semantic_issues(&health).is_empty());
     }
 }
