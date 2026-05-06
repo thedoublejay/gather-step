@@ -5,6 +5,15 @@ description: "Complete command and flag reference for the Gather Step CLI. Cover
 
 The `gather-step` binary is the primary interface for managing workspace indexes and running the local MCP server. Every command reads its defaults from `gather-step.config.yaml` and the workspace-local state directory at `.gather-step/`.
 
+> **You usually don't run these by hand.** After `gather-step init`,
+> Claude Code (and any MCP-aware assistant) calls Gather Step
+> automatically when it needs graph context. The reference below is
+> here so you can see what the assistant has access to and reach for it
+> directly when you want to — not as a sequence you're expected to
+> memorize. The two commands you'll touch directly are
+> `gather-step init` (one-time setup) and `gather-step pr-review`
+> (structured PR review before merge).
+
 ## Global flags
 
 These flags apply to every command. Pass them before the subcommand name.

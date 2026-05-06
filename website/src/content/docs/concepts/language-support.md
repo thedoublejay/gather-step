@@ -13,11 +13,18 @@ Languages are grouped by how much information the indexer recovers. A higher tie
 
 First-class languages produce a complete graph: file nodes, module nodes, class and function symbols with qualified names, import bindings with resolved targets, and call sites with owner and callee qualified names. Cross-repo identity resolution honors `gather-step.config.yaml` so the same on-disk file produces the same node ID across runs.
 
-| Language | Parser | Resolution | Cross-Repo Edges |
-| --- | --- | --- | --- |
-| TypeScript | Oxc | tsconfig path aliases, `package.json` workspaces, `exports` conditions | Yes |
-| JavaScript | Oxc | `package.json` workspaces, `exports` conditions | Yes |
-| Python | tree-sitter | Absolute current-package imports for `src/<pkg>` and flat `<pkg>` layouts; sibling-package imports across configured repos; `pyproject.toml [project].name` for standalone repo identity; detection-only FastAPI pack | Yes |
+**TypeScript** — parsed by Oxc. Resolves tsconfig path aliases, `package.json` workspaces, and `exports` conditions. Emits cross-repo edges.
+
+**JavaScript** — parsed by Oxc. Resolves `package.json` workspaces and `exports` conditions. Emits cross-repo edges.
+
+**Python** — parsed by tree-sitter. Resolves:
+
+- Absolute current-package imports for `src/<pkg>` and flat `<pkg>` layouts.
+- Sibling-package imports across configured repos.
+- Standalone repo identity from `pyproject.toml [project].name`.
+- Detection-only FastAPI pack.
+
+Emits cross-repo edges.
 
 Python is first-class as of v2.1.0. TypeScript and JavaScript have been first-class since v1.0.0; v3.5.0 swapped the underlying TS/JS parser from SWC to Oxc with no observable change to the emitted graph.
 
@@ -25,11 +32,11 @@ Python is first-class as of v2.1.0. TypeScript and JavaScript have been first-cl
 
 File-discovery languages are indexed for presence and content hashing. The parser walks the source tree, captures the file in the graph, and detects framework or build markers, but does not yet extract symbols, imports, or call sites. They participate in workspace topology but not in symbol-level queries.
 
-| Language | Parser Wired | Symbol Extraction | Notes |
-| --- | --- | --- | --- |
-| Rust | tree-sitter grammar attached | No | File and crate detection only. |
-| Go | tree-sitter grammar attached | No | File detection only. |
-| Java | tree-sitter grammar attached | No | File detection only. |
+**Rust** — tree-sitter grammar attached. No symbol extraction yet. File and crate detection only.
+
+**Go** — tree-sitter grammar attached. No symbol extraction yet. File detection only.
+
+**Java** — tree-sitter grammar attached. No symbol extraction yet. File detection only.
 
 If you index a Rust, Go, or Java repository, you will see the files appear in the graph and contribute to file counts, but cross-file edges and call sites for those languages are not yet emitted. The grammars are in place, so promoting them to Tier 1 is a matter of writing the equivalent of `visit_python` for each.
 

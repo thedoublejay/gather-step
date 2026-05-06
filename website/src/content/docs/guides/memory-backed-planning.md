@@ -25,6 +25,28 @@ tool, but it uses [Braingent Manifesto](https://github.com/thedoublejay/braingen
 as the concrete example because it is open source, Markdown-first, and
 designed exactly for this loop.
 
+Recent Braingent releases ship features that compose directly with this
+loop:
+
+- **MCP-first retrieval.** `braingent_find`, `braingent_get`, and
+  `braingent_guide` give an AI assistant deterministic, depth-controlled
+  access to memory records without rereading the full repository.
+- **Capture policy.** `preferences/capture-policy.md` lists the trigger
+  phrases ("save to braingent", "task done thanks", and so on) that
+  signal when a record is worth writing — explicit enough that an agent
+  can follow it without guessing.
+- **Workflow recipes.** `workflows/index-repo.md`,
+  `workflows/cleanup-braingent.md`, and `workflows/retrieve-context.md`
+  document repeatable procedures for ingesting a new repo, pruning
+  stale records, and assembling a focused context pack.
+- **Validation and search scripts.** `scripts/validate.sh`,
+  `scripts/find.sh`, and `scripts/reindex.sh` keep the memory store
+  greppable and consistent without depending on a database.
+
+These features keep the memory side of the loop maintainable as it
+grows. Pairing them with Gather Step's current code graph is what
+delivers plans that respect both prior intent and current reality.
+
 ## The Loop
 
 ```text

@@ -24,17 +24,27 @@ const steps: Step[] = [
     ],
   },
   {
-    num: '02 · WATCH',
+    num: '02 · INDEX',
+    heading: 'Build the cross-repo graph.',
+    body:
+      'A full index walks every configured repo, parses TS / JS / Python / Rust / Go / Java, extracts framework structure, and writes the graph + search + metadata stores under `.gather-step/`. `--auto-recover` rebuilds stale generated state on the fly.',
+    code: [
+      { dim: '# initial or full reindex' },
+      { line: 'gather-step index' },
+    ],
+  },
+  {
+    num: '03 · WATCH',
     heading: 'Keep the graph fresh.',
     body:
-      'Run watch during active development, or let `init --watch` continue after the first index pass. The MCP server can also run with `--watch` in one process.',
+      'Watch mode incrementally re-indexes on every file save. `init --watch` continues after the first index pass, and `mcp serve --watch` runs the MCP server and watcher in a single process.',
     code: [
       { dim: '# incremental updates while you edit' },
       { line: 'gather-step watch' },
     ],
   },
   {
-    num: '03 · SHIP',
+    num: '04 · ASK',
     heading: 'Ask what actually matters.',
     body:
       'Every prompt arrives with structural ground truth. Blast radius. Event consumers. Ownership. Conventions. No more large exploratory prompts before the actual work starts.',
@@ -44,7 +54,17 @@ const steps: Step[] = [
     ],
   },
   {
-    num: '04 · REVIEW',
+    num: '05 · PACK',
+    heading: 'Hand the graph to your assistant.',
+    body:
+      'Plan, debug, fix, review, and change-impact packs ship as one structured response. The MCP server makes them callable from Claude Code; the CLI emits the same JSON for any other tool.',
+    code: [
+      { dim: '# a planning pack for a target symbol' },
+      { line: 'gather-step pack planning --target order.created' },
+    ],
+  },
+  {
+    num: '06 · REVIEW',
     heading: 'Review PRs with structural evidence.',
     body:
       'Run `gather-step pr-review` before merge to get a cross-repo surface delta: added and removed routes, exported symbols, payload contracts, event wiring, deployment surfaces, and removal risks — without sending code off-machine.',
@@ -59,7 +79,7 @@ const steps: Step[] = [
 <section class="bp-sec" id="how">
   <div class="bp-sec__head">
     <span class="bp-sec__num">DET-08 · From zero to answered questions</span>
-    <h2 class="bp-h2">Initialize, watch, ask, <span class="u">review.</span></h2>
+    <h2 class="bp-h2">Init, index, watch, ask, pack, <span class="u">review.</span></h2>
     <p class="bp-lede">No API keys. No account. No data leaves your machine.</p>
   </div>
 

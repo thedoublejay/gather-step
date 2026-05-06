@@ -21,11 +21,20 @@ const tasks = [
 ];
 
 const scale = [
-  { label: 'Repos', value: '26' },
-  { label: 'Files', value: '13.6K' },
-  { label: 'Symbols', value: '171K' },
-  { label: 'Edges', value: '405K' },
-  { label: 'Cross-repo edges', value: '88K' },
+  { label: 'Repos', value: '31' },
+  { label: 'Files', value: '14.3K' },
+  { label: 'Symbols', value: '216K' },
+  { label: 'Edges', value: '484K' },
+  { label: 'Cross-repo edges', value: '96K' },
+];
+
+const planningOracle = [
+  { label: 'Scenarios', value: '25 / 25' },
+  { label: 'Coverage', value: '1.000' },
+  { label: 'Top-1 / Top-3', value: '1.000 / 1.000' },
+  { label: 'p50 latency', value: '3 ms' },
+  { label: 'p95 latency', value: '8 ms' },
+  { label: 'p99 latency', value: '15 ms' },
 ];
 
 const totalManual = tasks.reduce((sum, task) => sum + task.manual, 0);
@@ -43,7 +52,7 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
           Manual planning, in the time your assistant <span class="u">needs to read an answer.</span>
         </h2>
         <p class="bp-lede" style="margin-top: 14px;">
-          Same three planning tasks, same 26-repo workspace. Left bar is an operator clicking
+          Same three planning tasks, same 31-repo workspace. Left bar is an operator clicking
           through repos. Right bar is a single Gather Step pack query.
         </p>
       </div>
@@ -108,6 +117,25 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
     <div class="bp-bench__scale">
       {
         scale.map((item) => (
+          <div class="bp-bench__chip">
+            <span class="bp-bench__chip__k">{item.label}</span>
+            <span class="bp-bench__chip__v">{item.value}</span>
+          </div>
+        ))
+      }
+    </div>
+
+    <div class="bp-bench__head" style="margin-top: 32px;">
+      <div>
+        <span class="bp-sec__num">Planning oracle (v3.5.0)</span>
+        <p class="bp-lede" style="margin-top: 12px;">
+          Full 25-scenario suite, every metric at the HIGH ceiling, latency well under release-gate thresholds (p50 ≤ 50 ms, p95 ≤ 300 ms, p99 ≤ 1000 ms).
+        </p>
+      </div>
+    </div>
+    <div class="bp-bench__scale">
+      {
+        planningOracle.map((item) => (
           <div class="bp-bench__chip">
             <span class="bp-bench__chip__k">{item.label}</span>
             <span class="bp-bench__chip__v">{item.value}</span>

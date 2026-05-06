@@ -1526,10 +1526,16 @@ fn topic_names_from_decorator(
         .filter_map(|value| resolve_topic_decorator_argument(parsed, &value))
         .collect();
     if names.is_empty() {
-        tracing::warn!(
+        // Demoted from `warn` to `debug` because real NestJS codebases use
+        // `@MessagePattern(SOME_CONSTANT)` everywhere, which can never be
+        // resolved to a literal at parse time. Logging at warn produced
+        // dozens of identical lines per indexing run that drowned out
+        // actionable warnings. Operators who want this signal can opt
+        // back in via `RUST_LOG=gather_step_parser=debug`.
+        tracing::debug!(
             decorator = %decorator.name,
             handler = %handler_name,
-            "skipping NestJS topic decorator with no extractable literal topic"
+            "Skipping a NestJS topic decorator that has no extractable literal topic.",
         );
     }
     names

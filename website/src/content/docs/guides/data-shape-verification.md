@@ -7,7 +7,7 @@ Source types and schemas do not prove the current shape of production data. A
 Mongo migration can be type-correct and still miss records because the filter
 assumes an old field distribution.
 
-Gather Step v2.3 adds these best-effort source-code signals:
+Gather Step extracts these best-effort source-code signals:
 
 - direct field access edges for typed TypeScript receivers, including local
   aliases and destructuring rebinds,

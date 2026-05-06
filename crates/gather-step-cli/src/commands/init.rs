@@ -137,23 +137,23 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         style(
             "Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context."
         )
-        .dim()
+        .color256(245)
     ));
     output.line(format!(
         "  Workspace: {}",
-        style(app.workspace_path.display()).dim()
+        style(app.workspace_path.display()).color256(245)
     ));
     if existing_config_repos.is_some() {
         output.line(format!(
             "  {} {}",
             style("Existing config:").yellow().bold(),
-            style(config_path.display()).dim()
+            style(config_path.display()).color256(245)
         ));
     }
     output.line(format!(
         "\n  Found {} {}",
         style(repos.len()).cyan().bold(),
-        style(git_repository_count_label(repos.len())).dim(),
+        style(git_repository_count_label(repos.len())).color256(245),
     ));
     let selected_repos = prompt_repo_selection(1, &repos, existing_config_repos.as_deref())?;
 
@@ -346,12 +346,12 @@ fn emit_config_summary(
     output.line(format!(
         "{} {}",
         style(action).green().bold(),
-        style(&payload.config_path).dim()
+        style(&payload.config_path).color256(245)
     ));
     output.line(format!(
         "  {} {}",
         style(payload.repo_count).cyan().bold(),
-        style(repository_count_label(payload.repo_count)).dim()
+        style(repository_count_label(payload.repo_count)).color256(245)
     ));
 
     Ok(())
@@ -515,7 +515,7 @@ fn prompt_repo_selection_text(
             stdout,
             "   {}",
             style("Use numbers or ranges to toggle, `all`, `none`, or press Enter to confirm.")
-                .dim()
+                .color256(245)
         )?;
         for (idx, repo) in repos.iter().enumerate() {
             let checked = selected.contains(&idx);
@@ -690,12 +690,12 @@ fn draw_repo_picker(
         )),
         Print(format!(
             "   {}\r\n",
-            style("↑/↓ move  Space toggle  Enter confirm  a all  n none  q cancel").dim()
+            style("↑/↓ move  Space toggle  Enter confirm  a all  n none  q cancel").color256(245)
         )),
         Print(format!(
             "   {} {} selected\r\n\r\n",
             style(selected.len()).cyan().bold(),
-            style(selection_count_label(selected.len())).dim()
+            style(selection_count_label(selected.len())).color256(245)
         )),
     )?;
 

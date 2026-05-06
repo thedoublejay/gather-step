@@ -21,13 +21,6 @@ const pillars = [
     body:
       'Re-indexes incrementally on every file save. What the code looks like today, not what a README said two years ago.',
   },
-  {
-    ix: '04',
-    tag: 'v3.5',
-    heading: 'Faster indexing, lighter storage, Oxc TS/JS.',
-    body:
-      'TypeScript and JavaScript parsing now runs on Oxc. Indexing pipeline avoids redundant work and ships compact metadata, search, and graph stores. Cross-repo PR review and deployment topology carry over from v3.5.',
-  },
 ];
 
 const before = [
@@ -58,7 +51,7 @@ const after = [
     {
       pillars.map((pillar) => (
         <div class="bp-pillar">
-          <div class="bp-pillar__num">{pillar.ix} / 04</div>
+          <div class="bp-pillar__num">{pillar.ix} / 03</div>
           <div class="bp-pillar__tag">{pillar.tag}</div>
           <h3>{pillar.heading}</h3>
           <p>{pillar.body}</p>
