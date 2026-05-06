@@ -416,7 +416,7 @@ impl Watcher {
                     self.update_status(|status| {
                         status.overflows = status.overflows.saturating_add(1);
                     });
-                    warn!(repo, "watcher backend requested rescan");
+                    warn!(repo, "Watcher backend requested a rescan.");
                     let _ = self.event_tx.send(WatchEvent::Overflow {
                         repo: repo.clone(),
                         dropped_events,

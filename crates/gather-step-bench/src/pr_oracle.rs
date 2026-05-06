@@ -356,9 +356,9 @@ fn collect_merge_candidates(
 
         let author_time = commit
             .author()
-            .map_err(|e| anyhow::anyhow!("decoding author: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Decoding author: {e}."))?
             .time()
-            .map_err(|e| anyhow::anyhow!("decoding author time: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Decoding author time: {e}."))?
             .seconds;
 
         if author_time < since_unix {
@@ -646,7 +646,7 @@ fn run_score(args: &ScoreArgs) -> anyhow::Result<()> {
     let sample: PrSample = serde_json::from_str(&raw).context("parsing pr_sample.json")?;
 
     if sample.prs.is_empty() {
-        anyhow::bail!("sample contains no PRs; nothing to score");
+        anyhow::bail!("Sample contains no PRs; nothing to score.");
     }
 
     print_status(&format!(

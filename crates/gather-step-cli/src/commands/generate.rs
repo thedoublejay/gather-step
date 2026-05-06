@@ -538,7 +538,7 @@ fn render_codeowners(
     }
 
     if entries.is_empty() {
-        bail!("no ownership data available to generate CODEOWNERS");
+        bail!("No ownership data is available to generate CODEOWNERS.");
     }
 
     for (path, owner) in entries {

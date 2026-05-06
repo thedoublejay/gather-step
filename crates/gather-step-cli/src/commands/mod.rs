@@ -81,6 +81,10 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
         "Render task / planning / debug / review context packs",
     ),
     (
+        "qa-evidence",
+        "Emit canonical code-evidence metadata for QA planning",
+    ),
+    (
         "generate",
         "Generate AI docs (claude-md, agents-md, codeowners)",
     ),
@@ -201,7 +205,7 @@ impl CliOutcome {
         match code {
             0 => Ok(Self::Success),
             2 => Ok(Self::ReviewThresholdExceeded),
-            other => bail!("pr-review returned an unexpected exit code: {other}."),
+            other => bail!("The `pr-review` command returned an unexpected exit code: {other}."),
         }
     }
 }

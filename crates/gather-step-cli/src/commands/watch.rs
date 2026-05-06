@@ -216,7 +216,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                 Ok(event) => event,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "watch event subscriber lagged; continuing");
+                    tracing::warn!(skipped, "Watch event subscriber lagged; continuing.");
                     continue;
                 }
             };
@@ -396,7 +396,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
             };
 
             if let Err(error) = emit_result {
-                tracing::warn!(%error, "watch event output failed; stopping the event stream");
+                tracing::warn!(%error, "Watch event output failed; stopping the event stream.");
                 break;
             }
         }
@@ -427,7 +427,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
     drop(stores);
     drop(daemon_metadata);
     if let Err(error) = event_task.await {
-        tracing::warn!(?error, "watch event task crashed");
+        tracing::warn!(?error, "Watch event task crashed.");
     }
     if output.is_json() {
         output.emit(&WatchStatusOutput {

@@ -632,7 +632,7 @@ fn prompt_repo_selection_interactive(
                 }
             }
             KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
-                bail!("repository selection cancelled");
+                bail!("Repository selection cancelled.");
             }
             _ => {}
         }
@@ -783,7 +783,7 @@ fn parse_selection_index(token: &str, repo_count: usize) -> Result<usize> {
         .parse::<usize>()
         .with_context(|| format!("invalid repository selection `{token}`"))?;
     if !(1..=repo_count).contains(&number) {
-        bail!("repository selection `{number}` is outside 1..={repo_count}");
+        bail!("Repository selection `{number}` is outside 1..={repo_count}.");
     }
     Ok(number - 1)
 }

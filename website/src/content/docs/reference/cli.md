@@ -604,7 +604,13 @@ gather-step --workspace /path/to/workspace qa-evidence OrdersService --base main
 
 **Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are canonical evidence objects with `id`, closed enum `kind`, closed enum `source`, structured `citation`, optional `subject`, and optional `support { method, score }`. IDs are stable for a given source, kind, citation, and subject; support changes do not change the ID. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.
 
-**When to use** — before generating a QA reference in Braingent or another planning tool that needs grounded code evidence without asking Gather Step to write test-plan prose.
+**Questions it supports**
+
+- "What code evidence should a QA planning tool cite for this changed route or symbol?"
+- "Which existing tests, feature flags, downstream repos, event consumers, payload fields, and projection risks are relevant to this target?"
+- "Is coverage incomplete because refs are missing, scans were truncated, or a feature flag key is dynamic?"
+
+**When to use** — before generating a QA reference in a planning tool that needs grounded code evidence without asking Gather Step to write test-plan prose.
 
 ---
 

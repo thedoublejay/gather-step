@@ -94,7 +94,7 @@ pub fn try_reuse_cache(cache_root: &Path, key: &CacheKey) -> Result<Option<Revie
     // Collect all run sub-dirs with their mtime so we can sort newest-first.
     let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> =
         std::fs::read_dir(&hash_dir)
-            .map_err(|e| anyhow::anyhow!("reading cache hash-dir `{}`: {e}", hash_dir.display()))?
+            .map_err(|e| anyhow::anyhow!("Reading cache hash-dir `{}`: {e}", hash_dir.display()))?
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();

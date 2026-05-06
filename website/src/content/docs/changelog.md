@@ -5,6 +5,28 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.0 (2026-05-06)
+
+Release status: **released**.
+
+Builds on v3.5.4 with the v4 QA planning evidence contract. Gather Step now emits factual, canonical code evidence for downstream QA planning while leaving requirement interpretation and test-case generation outside the CLI.
+
+### Added
+
+- New `gather-step qa-evidence` command emits `qa-evidence.v1` JSON with stable evidence IDs, closed evidence kinds/sources, structured citations, manifest summary data, and explicit coverage gaps.
+- Canonical evidence metadata is shared across planning/review/change-impact packs, route/event traces, CRUD traces, cross-repo dependency impact, payload schema fields, projection impact, orphan-topic checks, and PR-review delta reports.
+- The v4 QA reference fixture covers route evidence, changed UI/API/event surfaces, existing-test signals, dynamic feature-flag gaps, scan truncation gaps, and deterministic CLI evidence IDs.
+- Generated AI summary files now include `qa-evidence` in the CLI command catalog, so `CLAUDE.gather.md` and `AGENTS.gather.md` stay in sync with the visible CLI surface.
+
+### Changed
+
+- Public JSON contract baselines are reset to version `1` while there are no known external consumers: MCP `response_schema_version: 1`, PR-review `DeltaReport.schema_version: 1`, and `qa-evidence.v1`.
+- Generated search/review cache compatibility is flattened: stale generated state should be rebuilt or cleaned instead of migrated.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.0`.
+
 ## v3.5.4 (2026-05-06)
 
 Release status: **released**.

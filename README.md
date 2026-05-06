@@ -156,6 +156,7 @@ If you want the full walkthrough, start with [Getting started](website/src/conte
 - Which repos depend on this shared contract?
 - Where is `api` deployed, and which services read `DATABASE_URL`?
 - Give me a review-oriented pack for `createOrder`.
+- Export QA planning evidence for `OrderList` on this branch.
 
 ## Common Commands
 

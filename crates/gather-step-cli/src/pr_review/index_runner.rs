@@ -92,7 +92,7 @@ pub fn run_review_index(
 
             if subset.is_empty() {
                 // No repos match — nothing to reindex; short-circuit.
-                tracing::info!("affected-repo filter produced an empty set; skipping reindex");
+                tracing::info!("The affected-repo filter produced an empty set; skipping reindex.");
                 return Ok(gather_step_core::WorkspaceStats {
                     total_repos: 0,
                     indexed_repos: 0,
@@ -105,7 +105,7 @@ pub fn run_review_index(
 
             tracing::info!(
                 repos = ?subset.iter().map(|r| &r.name).collect::<Vec<_>>(),
-                "reindexing only affected repos"
+                "Reindexing only affected repositories."
             );
 
             effective_config = GatherStepConfig {

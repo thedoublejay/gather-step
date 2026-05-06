@@ -10,9 +10,9 @@ const pillars = [
   {
     ix: '02',
     tag: 'Cross-repo',
-    heading: 'Event flows and PR diffs across services.',
+    heading: 'Event flows, QA evidence, and PR diffs across services.',
     body:
-      'Producer-to-consumer event topology and cross-repo PR surface diffs, through shared virtual nodes. Your AI sees the edges between repos, not just inside them.',
+      'Producer-to-consumer event topology, canonical QA evidence, and cross-repo PR surface diffs through shared virtual nodes. Your AI sees the edges between repos, not just inside them.',
   },
   {
     ix: '03',
@@ -27,14 +27,14 @@ const before = [
   ['✕', 'Sees only the open repo'],
   ['✕', 'Guesses at downstream consumers'],
   ['✕', 'Re-explores the codebase each session'],
-  ['✕', 'No deployment or PR surface evidence'],
+  ['✕', 'No deployment, PR, or QA evidence surface'],
 ];
 
 const after = [
   ['✓', 'Sees every repo as one system'],
   ['✓', 'Traces producer to consumer across services'],
   ['✓', 'Starts with pre-computed structural context'],
-  ['✓', 'PR surface deltas and deployment topology, local-first'],
+  ['✓', 'PR deltas, deployment topology, and QA evidence, local-first'],
 ];
 ---
 

@@ -73,7 +73,7 @@ pub fn execute(
     args: DeploymentTopologyArgs,
 ) -> Result<RenderedCommand> {
     if !(1..=100).contains(&args.limit) {
-        bail!("deployment-topology --limit must be between 1 and 100");
+        bail!("The `deployment-topology --limit` flag must be between 1 and 100.");
     }
     let query = match args.command {
         DeploymentTopologyCommand::WhereDeployed { service } => {
@@ -100,7 +100,7 @@ pub fn execute(
 
 fn require_target(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
-        bail!("deployment-topology --{name} must not be empty");
+        bail!("The `deployment-topology --{name}` flag must not be empty.");
     }
     Ok(())
 }

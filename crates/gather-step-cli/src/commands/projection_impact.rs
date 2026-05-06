@@ -69,7 +69,7 @@ pub fn execute(
     args: ProjectionImpactArgs,
 ) -> Result<RenderedCommand> {
     if args.target.trim().is_empty() {
-        bail!("projection-impact --target must not be empty");
+        bail!("The `projection-impact --target` flag must not be empty.");
     }
 
     let payload_contracts = storage

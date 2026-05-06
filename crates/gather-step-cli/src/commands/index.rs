@@ -389,7 +389,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     apply_depth_override(&mut config, args.depth);
 
     if config.repos.is_empty() {
-        bail!("no repos remain after applying filters");
+        bail!("No repos remain after applying filters.");
     }
 
     path_safety::reject_symlinked_generated_state(&app.workspace_path, &storage_root)
@@ -698,10 +698,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         drop(tx);
         let writer_result = writer
             .join()
-            .map_err(|_| anyhow::anyhow!("writer thread panicked"))?;
+            .map_err(|_| anyhow::anyhow!("Writer thread panicked."))?;
         let analytics_timings = analytics_worker
             .join()
-            .map_err(|_| anyhow::anyhow!("analytics thread panicked"))?;
+            .map_err(|_| anyhow::anyhow!("Analytics thread panicked."))?;
         // kanal Receiver does not expose `try_iter`; drain explicitly until the
         // analytics worker has dropped its sender, which closes the channel.
         let mut analytics_results = Vec::new();
@@ -928,7 +928,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let durable_sync_start = Instant::now();
     drop(workspace_bulk);
     let durable_sync_ms = elapsed_ms(durable_sync_start);
-    info!(durable_sync_ms, "stage timing: graph durable sync complete",);
+    info!(
+        durable_sync_ms,
+        "Stage timing: graph durable sync complete.",
+    );
     // Per-batch graph commits synchronously invalidate packs that depend on
     // changed targets. Do not clear the whole cache here; unrelated packs can
     // survive the index run and generation checks still reject stale rows.
@@ -936,7 +939,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let context_pack_cache_clear_ms = 0;
     info!(
         context_pack_cache_clear_ms,
-        context_pack_cache_rows_removed, "stage timing: global context-pack cache clear skipped",
+        context_pack_cache_rows_removed, "Stage timing: global context-pack cache clear skipped.",
     );
     drop(indexer);
 
@@ -1423,7 +1426,7 @@ fn apply_repo_filter(config: &mut GatherStepConfig, repo_filter: Option<&str>) -
     config.allow_listed_repos.retain(|repo| repo == repo_filter);
 
     if config.repos.is_empty() {
-        bail!("repo `{repo_filter}` was not found in the workspace config");
+        bail!("Repo `{repo_filter}` was not found in the workspace config.");
     }
 
     if original_len != config.repos.len() {

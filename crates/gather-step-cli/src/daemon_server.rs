@@ -300,7 +300,7 @@ fn parse_pack_mode(mode: &str) -> Result<PackModeArg> {
         "fix" => Ok(PackModeArg::Fix),
         "review" => Ok(PackModeArg::Review),
         "change_impact" => Ok(PackModeArg::ChangeImpact),
-        _ => anyhow::bail!("unsupported pack mode `{mode}`"),
+        _ => anyhow::bail!("Unsupported pack mode `{mode}`."),
     }
 }
 
@@ -437,9 +437,9 @@ impl DaemonServer {
                         {
                             Ok(Ok(())) => {}
                             Ok(Err(error)) => {
-                                tracing::warn!(%error, "daemon client handling failed");
+                                tracing::warn!(%error, "Daemon client handling failed.");
                             }
-                            Err(_) => tracing::warn!("daemon client timed out"),
+                            Err(_) => tracing::warn!("Daemon client timed out."),
                         }
                     });
                 }
@@ -459,16 +459,16 @@ pub struct DaemonServer;
 #[cfg(not(unix))]
 impl DaemonServer {
     pub async fn bind(_app: &AppContext) -> Result<Self> {
-        anyhow::bail!("daemon IPC is unsupported on this platform")
+        anyhow::bail!("Daemon IPC is unsupported on this platform.")
     }
 
     pub async fn bind_with_runtime(_app: &AppContext, _runtime: DaemonRuntime) -> Result<Self> {
-        anyhow::bail!("daemon IPC is unsupported on this platform")
+        anyhow::bail!("Daemon IPC is unsupported on this platform.")
     }
 
     pub async fn serve_until_cancelled(self, _cancel: CancellationToken) -> Result<()> {
         let _ = self;
-        anyhow::bail!("daemon IPC is unsupported on this platform")
+        anyhow::bail!("Daemon IPC is unsupported on this platform.")
     }
 }
 
@@ -653,7 +653,7 @@ fn authorize_peer(stream: &tokio::net::UnixStream, allowed_uid: u32) -> Result<(
         .context("reading daemon peer credentials")?
         .uid();
     if peer_uid != allowed_uid {
-        anyhow::bail!("daemon client uid {peer_uid} does not match socket owner {allowed_uid}");
+        anyhow::bail!("Daemon client UID {peer_uid} does not match socket owner {allowed_uid}.");
     }
     Ok(())
 }
@@ -725,7 +725,7 @@ impl Drop for RuntimeCleanupGuard {
             if let Err(error) = fs::remove_file(path)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
-                tracing::warn!(path = %path.display(), %error, "failed to remove daemon file");
+                tracing::warn!(path = %path.display(), %error, "Failed to remove daemon file.");
             }
         }
     }
