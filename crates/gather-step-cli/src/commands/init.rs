@@ -132,28 +132,22 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         "\n  {}",
         style("Hi, welcome to Gather Step setup").cyan().bold()
     ));
-    output.line(format!(
-        "  {}",
-        style(
-            "Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context."
-        )
-        .color256(245)
-    ));
-    output.line(format!(
-        "  Workspace: {}",
-        style(app.workspace_path.display()).color256(245)
-    ));
+    output.line(
+        "  Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context."
+            .to_owned(),
+    );
+    output.line(format!("  Workspace: {}", app.workspace_path.display()));
     if existing_config_repos.is_some() {
         output.line(format!(
             "  {} {}",
             style("Existing config:").yellow().bold(),
-            style(config_path.display()).color256(245)
+            config_path.display()
         ));
     }
     output.line(format!(
         "\n  Found {} {}",
         style(repos.len()).cyan().bold(),
-        style(git_repository_count_label(repos.len())).color256(245),
+        git_repository_count_label(repos.len()),
     ));
     let selected_repos = prompt_repo_selection(1, &repos, existing_config_repos.as_deref())?;
 
@@ -346,12 +340,12 @@ fn emit_config_summary(
     output.line(format!(
         "{} {}",
         style(action).green().bold(),
-        style(&payload.config_path).color256(245)
+        &payload.config_path
     ));
     output.line(format!(
         "  {} {}",
         style(payload.repo_count).cyan().bold(),
-        style(repository_count_label(payload.repo_count)).color256(245)
+        repository_count_label(payload.repo_count)
     ));
 
     Ok(())
@@ -515,7 +509,7 @@ fn prompt_repo_selection_text(
             stdout,
             "   {}",
             style("Use numbers or ranges to toggle, `all`, `none`, or press Enter to confirm.")
-                .color256(245)
+                .dim()
         )?;
         for (idx, repo) in repos.iter().enumerate() {
             let checked = selected.contains(&idx);
@@ -690,12 +684,12 @@ fn draw_repo_picker(
         )),
         Print(format!(
             "   {}\r\n",
-            style("↑/↓ move  Space toggle  Enter confirm  a all  n none  q cancel").color256(245)
+            style("↑/↓ move  Space toggle  Enter confirm  a all  n none  q cancel").dim()
         )),
         Print(format!(
             "   {} {} selected\r\n\r\n",
             style(selected.len()).cyan().bold(),
-            style(selection_count_label(selected.len())).color256(245)
+            selection_count_label(selected.len())
         )),
     )?;
 

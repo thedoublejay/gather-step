@@ -350,11 +350,7 @@ pub fn maybe_print_banner(app: &AppContext) {
 
     eprintln!();
     eprintln!("{}", style(BANNER).blue().bold());
-    eprintln!(
-        "{}{}",
-        " ".repeat(footer_padding),
-        style(footer).color256(245)
-    );
+    eprintln!("{}{}", " ".repeat(footer_padding), style(footer).cyan());
     eprintln!();
 }
 
