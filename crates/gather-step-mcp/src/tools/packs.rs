@@ -454,7 +454,8 @@ struct ResolvedPackTarget {
     symbol_id: Option<String>,
     winner_margin: Option<u16>,
     /// Populated only when `resolution == "search_ranked_alternates"`.  Contains
-    /// all candidates that cleared the noise floor, sorted by descending score.
+    /// all candidates that cleared the noise floor, sorted by descending score
+    /// and stable target identity.
     ranked_alternates: Vec<RankedPackCandidate>,
 }
 
@@ -2853,6 +2854,7 @@ fn refresh_context_pack_completeness(response: &mut ContextPackResponse) {
     };
     let medium_confidence_resolution = meta.resolution == "search_ranked_resolved"
         && meta.resolution_confidence.as_deref() == Some("medium");
+    let ranked_alternates_resolution = meta.resolution == "search_ranked_alternates";
     let medium_confidence_warning = medium_confidence_warning(meta.candidate_count);
     let has_non_derived_warnings = meta.warnings.iter().any(|warning| {
         warning != &medium_confidence_warning && warning != TRUNCATED_RESPONSE_WARNING
@@ -2861,6 +2863,8 @@ fn refresh_context_pack_completeness(response: &mut ContextPackResponse) {
     meta.completeness.clear();
     meta.completeness.push_str(if !response.data.found {
         "unresolved"
+    } else if ranked_alternates_resolution {
+        "alternates"
     } else if response.data.unresolved_gaps.is_empty()
         && response.data.change_impact.unresolved_possible.is_empty()
         && !has_non_derived_warnings
@@ -3414,6 +3418,7 @@ fn select_pack_target(ranked: &[RankedPackCandidate], allow_medium: bool) -> Pac
         right
             .score
             .cmp(&left.score)
+            .then_with(|| left.repo.cmp(&right.repo))
             .then_with(|| left.file_path.cmp(&right.file_path))
             .then_with(|| left.symbol_id.cmp(&right.symbol_id))
     });
@@ -5704,6 +5709,39 @@ mod tests {
     }
 
     #[test]
+    fn completeness_refresh_preserves_ranked_alternates_state() {
+        let mut response = make_pack_response(0, 0, 0, 0);
+        response.data.found = true;
+        response.meta = Some(ContextPackMeta {
+            response_schema_version: crate::budget::response_schema_version(),
+            generation: 0,
+            ambiguity: None,
+            budget: crate::budget::ResponseBudget::not_truncated(
+                crate::budget::BudgetedTool::ContextPack,
+                0,
+                0,
+            ),
+            candidate_count: 5,
+            completeness: "partial".to_owned(),
+            confidence_model_version: Some(super::PACK_CONFIDENCE_MODEL_VERSION.to_owned()),
+            resolution: "search_ranked_alternates".to_owned(),
+            resolution_details: None,
+            resolution_confidence: Some("low".to_owned()),
+            resolved_symbol_id: None,
+            winner_margin: None,
+            warnings: vec![
+                "Multiple candidate symbols matched with similar confidence; review the ranked alternates and supply a `node_id` or repo filter to narrow."
+                    .to_owned(),
+            ],
+        });
+
+        super::refresh_context_pack_completeness(&mut response);
+
+        let meta = response.meta.expect("meta should be present");
+        assert_eq!(meta.completeness, "alternates");
+    }
+
+    #[test]
     fn context_pack_cache_key_includes_compatibility_versions() {
         let request = super::ContextPackRequest {
             budget_bytes: Some(4096),
@@ -6507,6 +6545,21 @@ mod tests {
                 for alt in &alternates {
                     assert_eq!(alt.symbol_name, "process_payment");
                 }
+                let repos = alternates
+                    .iter()
+                    .map(|alt| alt.repo.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    repos,
+                    [
+                        "service_a",
+                        "service_b",
+                        "service_c",
+                        "service_d",
+                        "service_e"
+                    ],
+                    "equal-score alternates must have stable repo ordering"
+                );
             }
             super::PackTargetSelection::Confident(..) => {
                 panic!("equal-scored candidates must not produce a confident winner")

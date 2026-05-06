@@ -1034,6 +1034,57 @@ fn assert_json_contains_subset(
     }
 }
 
+fn first_json_difference(
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    path: &str,
+) -> Option<String> {
+    match (left, right) {
+        (serde_json::Value::Object(left_map), serde_json::Value::Object(right_map)) => {
+            let left_keys = left_map.keys().collect::<BTreeSet<_>>();
+            let right_keys = right_map.keys().collect::<BTreeSet<_>>();
+            if left_keys != right_keys {
+                return Some(format!(
+                    "{path}: key mismatch left={left_keys:?} right={right_keys:?}"
+                ));
+            }
+            for key in left_keys {
+                let child_path = if path == "$" {
+                    format!("$.{key}")
+                } else {
+                    format!("{path}.{key}")
+                };
+                if let Some(diff) =
+                    first_json_difference(&left_map[key], &right_map[key], &child_path)
+                {
+                    return Some(diff);
+                }
+            }
+            None
+        }
+        (serde_json::Value::Array(left_items), serde_json::Value::Array(right_items)) => {
+            if left_items.len() != right_items.len() {
+                return Some(format!(
+                    "{path}: array length mismatch left={} right={}",
+                    left_items.len(),
+                    right_items.len()
+                ));
+            }
+            for (index, (left_item, right_item)) in
+                left_items.iter().zip(right_items.iter()).enumerate()
+            {
+                let child_path = format!("{path}[{index}]");
+                if let Some(diff) = first_json_difference(left_item, right_item, &child_path) {
+                    return Some(diff);
+                }
+            }
+            None
+        }
+        _ if left == right => None,
+        _ => Some(format!("{path}: left={left} right={right}")),
+    }
+}
+
 fn maybe_assert_golden_fragment(actual: &serde_json::Value, scenario: &OracleScenario) {
     let golden_path = scenario.dir.join("golden.json");
     if !golden_path.exists() {
@@ -1199,12 +1250,12 @@ fn run_pack_oracle_suite(workspace: &Path) {
         assert_oracle_scenario(&response, &scenario);
 
         let expected = expected_cli_wrapper(&response);
-        assert_eq!(
-            serde_json::to_vec(&cli_json).expect("cli json should serialize"),
-            serde_json::to_vec(&expected).expect("expected json should serialize"),
-            "CLI/MCP parity mismatch for scenario `{}`",
-            scenario.name
-        );
+        if let Some(diff) = first_json_difference(&cli_json, &expected, "$") {
+            panic!(
+                "CLI/MCP parity mismatch for scenario `{}`: {diff}",
+                scenario.name
+            );
+        }
         maybe_assert_golden_fragment(&cli_json, &scenario);
     }
 }
