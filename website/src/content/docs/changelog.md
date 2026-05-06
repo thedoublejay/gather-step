@@ -5,6 +5,52 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v3.5.1 (2026-05-06)
+
+Release status: **released**.
+
+Polish pass on top of v3.5.0. No new functionality, no schema changes, no breaking changes. Tightens the init experience that operators see first, scrubs noisy mid-stream warnings, repaints landing-page sections that didn't fill their grid cleanly, restructures the docs so the AI-assistant-driven workflow is first-class, and reshoots the planning benchmark with measured numbers from a real 31-repo workspace.
+
+### Improvements
+
+#### CLI / init UX
+
+- `gather-step --version --long` restores the `Copyright (c) 2026 JJ Adonis` line that earlier releases shipped (clap `long_version`).
+- Dropped the RFC 3339 timestamp prefix from interactive log lines so warnings align with the rest of the CLI output. `--json` mode keeps the timer.
+- Indexing label trimmed to the repo name only — the workspace root is already shown at the top.
+- Detail-text contrast lifted: every `.dim()` call site at the CLI surface (index, init, watch, status, search, storage_report, app footer) moved to `.color256(245)`. Detail text now reads on dark and light terminals.
+- Two noisy `tracing::warn` lines demoted to `debug`:
+  - NestJS `MessagePattern` skip warnings (fired per-handler when the topic is a constant).
+  - `list_orphan_topics` truncation warnings (page truncation is the documented behaviour).
+
+  Operators who need either signal can re-enable via `RUST_LOG=gather_step_parser=debug` / `RUST_LOG=gather_step_analysis=debug`.
+
+#### Landing page
+
+- "What it does": 4 → 3 pillars. The version-tagged "faster indexing" pillar was dropped.
+- "What actually makes it different": 7 → 9 features. New cards: Performance, Local-first.
+- "From zero to answered": 4 → 6 steps. Added INDEX and PACK between INIT/WATCH and ASK/REVIEW.
+- Hero workspace counts updated to v3.5.x measured numbers: 31 repos / 14,296 files / 216,663 symbols / 484,379 edges / 96,787 cross-repo.
+- Planning benchmark refreshed end-to-end. Stale "9× faster" hand-curated numbers replaced with measured wall-clock medians on a real 31-repo workspace: `useAuth` 0.79 s → 0.03 s (26×), `CommentCreatedEvent` 1.44 s → 0.03 s (48×), `CreateTaskUseCase` 0.32 s → 0.03 s (11×). Total 28× faster, with explicit methodology in the chart caption.
+- Planning oracle panel surfaces the v3.5 25 / 25 PASS, coverage 1.000, p50 3 ms / p95 8 ms / p99 15 ms.
+- Every external GitHub link now opens in a new tab with `rel="noopener noreferrer"` and an ARIA label for a11y / SEO.
+
+#### Docs
+
+- Getting Started gained a "How most people use Gather Step" quote block making the AI-assistant-driven workflow first-class. Next Steps promote the CLI reference.
+- CLI reference gained the same quote block at the top so users who land directly know they don't need to memorise commands.
+- Workspace setup gained an `init --force` subsection plus a richer interactive picker walkthrough showing the keybindings, sample output, and one-to-one mapping between checkbox state and `repos[]` entries.
+- Memory-Backed Planning's Braingent reference refreshed to mention `braingent_find` / `braingent_get` / `braingent_guide`, capture policy, workflow recipes, and validation scripts.
+- Data-Shape Verification: stale "v2.3 adds" wording removed.
+- Language-support tables converted to bullet lists so wide cells stop overflowing on narrow screens.
+- Changelog: v2.x releases moved into a collapsed `<details>` block under "Earlier releases", with heading levels demoted so the right-side TOC stays focused on the current release.
+- Operator workflows: release-gate benchmark table updated to the v3.5.0 baseline (31 repos / 14,296 files / 216,663 symbols / 484,379 edges / 96,787 cross-repo) plus planning-oracle latency percentiles.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.5.1`.
+- `cargo update` and `bun update` produced no transitive bumps.
+
 ## v3.5.0 (2026-05-06)
 
 Release status: **released**.
