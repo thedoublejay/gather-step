@@ -133,8 +133,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         style("Hi, welcome to Gather Step setup").cyan().bold()
     ));
     output.line(
-        "  Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context."
-            .to_owned(),
+        "  Gather Step builds a local code graph so your agent can plan with repo, route, event, and contract context.",
     );
     output.line(format!("  Workspace: {}", app.workspace_path.display()));
     if existing_config_repos.is_some() {
