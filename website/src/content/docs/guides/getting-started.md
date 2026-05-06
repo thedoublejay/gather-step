@@ -260,10 +260,30 @@ without deleting the index:
 gather-step --workspace /path/to/workspace compact
 ```
 
+## How Most People Use Gather Step
+
+> You almost never run Gather Step commands yourself. After `init`, the
+> AI assistant calls them. You ask a normal product or engineering
+> question, and Claude Code (or any MCP-aware assistant) chooses the
+> right Gather Step tools — `search`, `trace_impact`, `pr_review`,
+> `planning_pack`, and so on — to ground the answer in your code.
+
+The CLI is there for the cases the assistant cannot cover from its
+side: full reindex (`gather-step index`), watcher (`gather-step watch`),
+PR review on a branch (`gather-step pr-review`), and one-off graph
+queries from the terminal. For day-to-day work the assistant handles
+retrieval. Treat the [CLI reference](/reference/cli/) as the manual you
+keep open in another tab — not as a workflow you run by hand.
+
 ## Next Steps
 
-- [Workspace setup](/guides/workspace-setup/) for config and indexing depth
-- [MCP clients](/guides/mcp-clients/) for Claude Code, Cursor, and generic MCP setup
-- [Operator workflows](/guides/operator-workflows/) for direct CLI usage
-- [PR review guide](/guides/pr-review/) to run a structural cross-repo review on a branch before merge
-- [MCP tools reference](/reference/mcp-tools/) for the automatic tool surface
+- [Workspace setup](/guides/workspace-setup/) — config, depth, and the
+  interactive repo picker.
+- [CLI reference](/reference/cli/) — every command and flag, in one
+  place. Skim once so you know what the assistant has at its disposal.
+- [MCP clients](/guides/mcp-clients/) — Claude Code, Cursor, and
+  generic MCP setup.
+- [PR review guide](/guides/pr-review/) — structural cross-repo review
+  on a branch before merge.
+- [MCP tools reference](/reference/mcp-tools/) — the automatic tool
+  surface the assistant uses.

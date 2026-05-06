@@ -43,7 +43,12 @@ const withBase = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, '')
     <nav id="gs-mobile-nav" class="gs-header__nav" aria-label="Primary">
       <a href={withBase('/guides/getting-started/')}>Getting Started</a>
       <a href={withBase('/reference/cli/')}>Docs</a>
-      <a href="https://github.com/thedoublejay/gather-step">GitHub</a>
+      <a
+        href="https://github.com/thedoublejay/gather-step"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Open the Gather Step GitHub repository in a new tab"
+      >GitHub</a>
     </nav>
 
     <div class="sl-flex gs-header__search">

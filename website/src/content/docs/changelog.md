@@ -3,7 +3,53 @@ title: "Changelog"
 description: "User-visible changes to gather-step, listed by release. Updated manually until a release pipeline is wired up."
 ---
 
-This changelog lists significant user-visible changes. It is maintained manually until release notes and tagged releases become the automated source of truth.
+This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
+
+## v3.5.1 (2026-05-06)
+
+Release status: **released**.
+
+Polish pass on top of v3.5.0. No new functionality, no schema changes, no breaking changes. Tightens the init experience that operators see first, scrubs noisy mid-stream warnings, repaints landing-page sections that didn't fill their grid cleanly, restructures the docs so the AI-assistant-driven workflow is first-class, and reshoots the planning benchmark with measured numbers from a real 31-repo workspace.
+
+### Improvements
+
+#### CLI / init UX
+
+- `gather-step --version --long` restores the `Copyright (c) 2026 JJ Adonis` line that earlier releases shipped (clap `long_version`).
+- Dropped the RFC 3339 timestamp prefix from interactive log lines so warnings align with the rest of the CLI output. `--json` mode keeps the timer.
+- Indexing label trimmed to the repo name only — the workspace root is already shown at the top.
+- Detail-text contrast lifted: every `.dim()` call site at the CLI surface (index, init, watch, status, search, storage_report, app footer) moved to `.color256(245)`. Detail text now reads on dark and light terminals.
+- Two noisy `tracing::warn` lines demoted to `debug`:
+  - NestJS `MessagePattern` skip warnings (fired per-handler when the topic is a constant).
+  - `list_orphan_topics` truncation warnings (page truncation is the documented behaviour).
+
+  Operators who need either signal can re-enable via `RUST_LOG=gather_step_parser=debug` / `RUST_LOG=gather_step_analysis=debug`.
+
+#### Landing page
+
+- "What it does": 4 → 3 pillars. The version-tagged "faster indexing" pillar was dropped.
+- "What actually makes it different": 7 → 9 features. New cards: Performance, Local-first.
+- "From zero to answered": 4 → 6 steps. Added INDEX and PACK between INIT/WATCH and ASK/REVIEW.
+- Hero workspace counts updated to v3.5.x measured numbers: 31 repos / 14,296 files / 216,663 symbols / 484,379 edges / 96,787 cross-repo.
+- Planning benchmark refreshed end-to-end. Stale "9× faster" hand-curated numbers replaced with measured wall-clock medians on a real 31-repo workspace: `useAuth` 0.79 s → 0.03 s (26×), `CommentCreatedEvent` 1.44 s → 0.03 s (48×), `CreateTaskUseCase` 0.32 s → 0.03 s (11×). Total 28× faster, with explicit methodology in the chart caption.
+- Planning oracle panel surfaces the v3.5 25 / 25 PASS, coverage 1.000, p50 3 ms / p95 8 ms / p99 15 ms.
+- Every external GitHub link now opens in a new tab with `rel="noopener noreferrer"` and an ARIA label for a11y / SEO.
+
+#### Docs
+
+- Getting Started gained a "How most people use Gather Step" quote block making the AI-assistant-driven workflow first-class. Next Steps promote the CLI reference.
+- CLI reference gained the same quote block at the top so users who land directly know they don't need to memorise commands.
+- Workspace setup gained an `init --force` subsection plus a richer interactive picker walkthrough showing the keybindings, sample output, and one-to-one mapping between checkbox state and `repos[]` entries.
+- Memory-Backed Planning's Braingent reference refreshed to mention `braingent_find` / `braingent_get` / `braingent_guide`, capture policy, workflow recipes, and validation scripts.
+- Data-Shape Verification: stale "v2.3 adds" wording removed.
+- Language-support tables converted to bullet lists so wide cells stop overflowing on narrow screens.
+- Changelog: v2.x releases moved into a collapsed `<details>` block under "Earlier releases", with heading levels demoted so the right-side TOC stays focused on the current release.
+- Operator workflows: release-gate benchmark table updated to the v3.5.0 baseline (31 repos / 14,296 files / 216,663 symbols / 484,379 edges / 96,787 cross-repo) plus planning-oracle latency percentiles.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.5.1`.
+- `cargo update` and `bun update` produced no transitive bumps.
 
 ## v3.5.0 (2026-05-06)
 
@@ -148,13 +194,18 @@ Combined v3 release covering deployment-topology indexing, `gather-step pr-revie
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `3.5.0`.
 - Bumped `oxc_*` to `0.129.0`, `regex-automata` to `0.4.14`, `rkyv` to `0.8.16`, and `@astrojs/starlight` to `0.38.5`.
 
-## v2.4.0 (2026-05-01)
+## Earlier releases
+
+<details>
+<summary>v2.x — click to expand</summary>
+
+#### v2.4.0 (2026-05-01)
 
 Release status: **released**.
 
 Setup and indexing usability release for config-respecting onboarding, repo selection, clearer progress copy, watch-count runs, parser-warning cleanup, and docs layout stability.
 
-### Highlights
+#### Highlights
 
 - Changed `init` to reuse existing `gather-step.config.yaml` files instead of failing or silently regenerating repo lists.
 - Added a numbered, checkbox-style repo picker with `all` and `none` shortcuts; repos already present in the config are selected by default.
@@ -169,18 +220,18 @@ Setup and indexing usability release for config-respecting onboarding, repo sele
 - Fixed the docs content/sidebar overlap on the CLI reference page.
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.4.0`.
 
-### Verification Coverage
+#### Verification Coverage
 
 - Added regression coverage for existing config reuse, `watch N` argument parsing, static mapping parser routing, duplicate Python sibling package ambiguity, and indexing summary formatting.
 - Verified with Rust formatting, Cargo check, clippy, targeted CLI/parser tests, and website build during release preparation.
 
-## v2.3.0 (2026-05-01)
+### v2.3.0 (2026-05-01)
 
 Release status: **released**.
 
 Data-shape research carry-forward release for alias-aware field evidence, optional payload filter risk, generated migration probe plans, and broader migration sibling detection.
 
-### Highlights
+#### Highlights
 
 - Labeled field evidence as `direct_field_access` or `local_alias_field_access` when `projection-impact` / `projection_impact` can explain the origin.
 - Followed same-scope TypeScript aliases and object destructuring aliases for typed field-access evidence.
@@ -191,27 +242,27 @@ Data-shape research carry-forward release for alias-aware field evidence, option
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.3.0`.
 - Refreshed Cargo lock metadata and updated the website dependency set from Astro `6.2.0` to `6.2.1`.
 
-### Data-Shape Research
+#### Data-Shape Research
 
 - Optional payload mismatch stays a static review signal. It adds `optional_payload_filter_mismatch` and `runtime_shape_probe` instead of claiming production data distribution.
 - Planning packs now surface optional payload evidence on migration probe plans when an indexed payload contract marks the filtered field optional.
 - TypeORM support indexes table siblings only. SQL WHERE-field extraction remains intentionally out of scope, so SQL migrations do not produce Mongo-specific field probe guidance.
 - Generated probe plans remain static. Gather Step still does not connect to MongoDB or execute runtime probes.
 
-### Verification Coverage
+#### Verification Coverage
 
 - Added store-backed planning oracle coverage for field evidence, optional payload contracts, and migration filters.
 - Added parser coverage for alias/destructuring field evidence and TypeORM migration table detection.
 - Added MCP coverage for optionality mismatch summaries, migration sibling probe plans, response-shape stability, and payload-contract lookup warnings.
 - Verified format, clippy, cargo check, targeted parser/analysis/MCP tests, and website build during release preparation.
 
-## v2.2.0 (2026-04-30)
+### v2.2.0 (2026-04-30)
 
 Release status: **released**.
 
 Data-shape awareness release for field-level impact review and Mongo/Mongoose migration planning.
 
-### Highlights
+#### Highlights
 
 - Added direct TypeScript field reader/writer evidence for typed member access, including nested dotted paths such as `WorkItem.workflow.stepIds`.
 - Extended `projection-impact` and `projection_impact` so exact dotted field targets include direct readers, writers, filters, indexes, and backfills in one report.
@@ -219,13 +270,13 @@ Data-shape awareness release for field-level impact review and Mongo/Mongoose mi
 - Added Mongoose migration sibling awareness so planning packs can show prior migrations on the same collection, including captured filter literals.
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.2.0`.
 
-### Data-Shape Awareness
+#### Data-Shape Awareness
 
 - Direct field extraction is intentionally scoped to typed local receivers and parameters; dynamic keys, aliases, destructuring, broad `any`/`unknown`, generic containers, and deep optional chains remain unsupported.
 - Migration detection is intentionally conservative: files must look like Mongoose-style migration files and expose `up`/`down` behavior before sibling hints are emitted.
 - Deployment note: v2.2 changes generated graph/schema state for migration collection edges. Existing `.gather-step` storage should be rebuilt with `gather-step reindex` before relying on v2.2 migration-sibling output.
 
-### Verification Coverage
+#### Verification Coverage
 
 - Added parser extraction-fidelity coverage for direct field readers/writers and false-positive skips.
 - Added analysis and MCP coverage for direct field evidence in projection-impact reports.
@@ -233,13 +284,13 @@ Data-shape awareness release for field-level impact review and Mongo/Mongoose mi
 - Added planning-pack and oracle coverage for migration siblings, pack response shape, and follow-up budget behavior.
 - Verified format, clippy, all-features test build, targeted parser/analysis/MCP/CLI tests, and website build during release preparation.
 
-## v2.1.1 (2026-04-30)
+### v2.1.1 (2026-04-30)
 
 Release status: **released**.
 
 Patch release for setup recovery and upgrade UX.
 
-### Highlights
+#### Highlights
 
 - Fixed `gather-step init --index` so setup-triggered indexing rebuilds generated index state from source repos instead of exiting when old `.gather-step/storage` state is stale or incompatible.
 - Improved storage/schema operator messages with sentence-cased, actionable guidance. Graph schema mismatches now point to `gather-step index --auto-recover`.
@@ -247,18 +298,18 @@ Patch release for setup recovery and upgrade UX.
 - Clarified Homebrew upgrade docs to use `brew update` followed by `brew upgrade thedoublejay/tap/gather-step`.
 - Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `2.1.1`.
 
-### Verification Coverage
+#### Verification Coverage
 
 - Added regression coverage for `init --index` auto-recovering stale generated state.
 - Added unit coverage for graph schema mismatch operator guidance.
 - Re-ran existing corrupt graph and unsupported metadata schema recovery tests.
 - Verified manual smoke indexing with temporary generated state and direct graph/metadata/search store checks.
 
-## v2.1.0 (2026-04-30)
+### v2.1.0 (2026-04-30)
 
 This release polishes the v2 onboarding path, generated AI context, website build pipeline, and dependency graph, promotes Python to first-class parsing parity with TypeScript and JavaScript, and adds static projection-impact tracing.
 
-### Highlights
+#### Highlights
 
 - Made `gather-step init` the primary setup path in docs and landing copy, with a workspace directory diagram and explicit prompt defaults.
 - Updated init output casing to "Gather Step" and made the local MCP default visible in the interactive prompt.
@@ -270,7 +321,7 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Added projection-impact tracing for derived fields, persisted projections, filters, indexes, and backfills.
 - Marked v2.1 release readiness with a fresh release-build benchmark where release-scored Gather Step slices are all High/passing.
 
-### Projection Impact
+#### Projection Impact
 
 - Added the `projection-impact --target <FIELD>` CLI command and `projection_impact` MCP tool for static field-level projection tracing, including `evidence_verbosity` controls for summary versus full evidence.
 - Added `DataField` graph nodes plus `ReadsField`, `WritesField`, `DerivesFieldFrom`, `FiltersOnField`, `IndexesField`, and `BackfillsField` edges.
@@ -279,7 +330,7 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Deployment note: v2.1 projection impact changes the generated graph schema. Existing `.gather-step` storage should be rebuilt with `gather-step reindex` before relying on projection-impact output.
 - Projection impact intentionally does not infer deployed runtime ownership; verify deployment owners separately when duplicate or transitioning services exist.
 
-### Python Parsing
+#### Python Parsing
 
 - Resolved Python `src/<package>/...` and flat `<package>/...` layouts so absolute current-package imports produce stable cross-file edges.
 - Linked Python sibling packages across configured workspace repos using the `name` field from `gather-step.config.yaml`, falling back to `pyproject.toml [project].name` and finally the directory basename for standalone repos.
@@ -288,7 +339,7 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Preserved Python class relationships (base classes, implemented interfaces, constructor dependencies) and decorator metadata across nested scopes.
 - Added explicit diagnostics (`tracing::warn!`) when `gather-step.config.yaml` cannot be canonicalized or parsed, when configured repo paths fail to canonicalize, or when `read_dir` errors are encountered during sibling-package resolution. Prior behavior silently fell back to the directory-basename heuristic.
 
-### Benchmarking And Tooling
+#### Benchmarking And Tooling
 
 - Added `gather-step-bench workspace-run` to measure wall-clock index time, graph node/edge counts, cross-repo edge count, RSS growth, and storage byte breakdowns (graph, metadata, search, sidecar) for a configured workspace.
 - Added a neutral Python planning workspace fixture under `tests/fixtures/python_planning_workspace/` so the planning oracle and storage benchmark have a committed Python target.
@@ -297,20 +348,20 @@ This release polishes the v2 onboarding path, generated AI context, website buil
 - Promoted `HarnessError::Workspace` from a stringified message to a typed `Box<WorkspaceIndexError<RepoIndexerError>>` so `anyhow::downcast` and structured logging can recover the source chain.
 - Recorded the fresh 2026-04-30 release-build benchmark summary without checking in local benchmark artifacts.
 
-### Verification Coverage
+#### Verification Coverage
 
 - Fresh release benchmark from a clean release build at `3f0093e`: curated index High, link quality 3/3 passing, planning oracle 25/25 passing, Python planning 1/1 passing, projection CLI fixture index High, and all projection targets release-scored High.
 - Website build and Cloudflare Pages checks.
 - Rust CI summary: format, clippy, cargo-deny, cargo-shear, macOS tests, MVCC stress, and MSRV check.
 - Added regression tests for configured-repo identity resolution and malformed `gather-step.config.yaml` fallback.
 
-## v2.0.0 (2026-04-28)
+### v2.0.0 (2026-04-28)
 
 CLI onboarding, local MCP setup, release automation, and documentation refresh.
 
 This release builds on `v1.0.0` by making the local-first workflow easier to start, easier to keep fresh, and easier to ship from a tagged release.
 
-### Highlights
+#### Highlights
 
 - Added a richer no-args startup path: interactive unconfigured workspaces enter setup, configured workspaces show status, and non-interactive shells print help without hanging.
 - Completed the `init` wizard for repository discovery, config writing, optional indexing, AI context generation, MCP registration, and watch handoff.
@@ -321,7 +372,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Added release workflow automation to open Homebrew tap update pull requests.
 - Refreshed the website landing page, feature copy, getting-started docs, installation docs, and CLI reference.
 
-### CLI Startup And Status
+#### CLI Startup And Status
 
 - Added a no-args command path.
 - In an interactive workspace without `gather-step.config.yaml`, no-args mode starts the guided init flow.
@@ -331,7 +382,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Expanded `status` output with clearer workspace, index, framework, MCP, and semantic-health signals.
 - Improved progress reporting for `index`, `reindex`, `watch`, `clean`, and `serve`.
 
-### Init Wizard
+#### Init Wizard
 
 - Added end-to-end interactive setup through `gather-step init`.
 - Added `init --force` for explicit config overwrite.
@@ -342,7 +393,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Added a smooth handoff from setup/indexing into watch mode.
 - Kept repository discovery scoped to the init flow and excluded generated or dependency-heavy directories.
 
-### MCP And AI Files
+#### MCP And AI Files
 
 - Added the `setup-mcp` command.
 - `setup-mcp --scope local` writes `.claude/settings.json` under the workspace.
@@ -353,7 +404,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Added `generate agents-md` for Codex-style `AGENTS.gather.md` workflows.
 - Reused the same workspace summary renderer in the init wizard and explicit generate commands.
 
-### Release And CI
+#### Release And CI
 
 - Bumped the Cargo workspace, crates, fixture packages, and website package metadata to `2.0.0`.
 - Updated the release workflow to open Homebrew tap formula update pull requests after release artifacts are built.
@@ -361,7 +412,7 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Updated pinned GitHub Actions versions for CI and release support.
 - Removed the unused `sharp` website dependency.
 
-### Documentation And Website
+#### Documentation And Website
 
 - Refreshed the CLI command reference for the current command surface.
 - Updated getting-started guidance around the single-command setup path.
@@ -371,12 +422,14 @@ This release builds on `v1.0.0` by making the local-first workflow easier to sta
 - Updated landing page feature copy, release stamps, onboarding flow, and install command behavior.
 - Made the landing install command copyable with click feedback.
 
-### Verification Coverage
+#### Verification Coverage
 
 - Added CLI coverage for no-args behavior.
 - Added CLI coverage for init behavior, the full wizard path, setup-mcp, and index/watch parsing.
 - Added workspace summary output coverage.
 - Release preparation test plan includes `cargo test -p gather-step-cli`, `cargo test -p gather-step-output`, `cargo test --workspace`, and `cd website && bun run build`.
+
+</details>
 
 ## See Also
 

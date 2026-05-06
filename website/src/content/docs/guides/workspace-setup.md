@@ -83,6 +83,8 @@ gather-step init
 
 In an interactive terminal, pressing Enter accepts the default onboarding path: keep the selected repos, index now, generate AI context files, register local MCP settings, and leave watch mode off.
 
+### Repo picker
+
 `init` walks the workspace directory, discovers directories that contain a
 `.git` folder, and opens a checkbox-style repo picker before writing
 `gather-step.config.yaml`. It skips directories it should not traverse:
@@ -93,14 +95,58 @@ In an interactive terminal, pressing Enter accepts the default onboarding path: 
 - `dist`
 - `target`
 
-The generated config uses each repository's directory name as the logical
-`name`. Select only the repos you want to index, then adjust `depth` for large
-repos you want to scan shallowly and add any `indexing` scoping rules.
+The picker is fully keyboard-driven:
+
+```text
+  ↑/↓ move    Space toggle    Enter confirm    a all    n none    q cancel
+  ─────────────────────────────────────────────────────────────────────────
+  [✓] backend_api
+  [✓] frontend_app
+  [ ] docs_site                  ← unchecked: stays out of the config
+  [✓] shared_contracts
+  [✓] worker_service
+  [ ] internal_admin
+  ...
+  4 of 6 selected
+```
+
+Toggle a repo to include or exclude it; press `a` to select every discovered
+repo, `n` to deselect everything, and Enter to commit. The selected set is
+written straight to `gather-step.config.yaml`:
+
+```yaml
+repos:
+  - name: backend_api
+    path: backend_api
+  - name: frontend_app
+    path: frontend_app
+  - name: shared_contracts
+    path: shared_contracts
+  - name: worker_service
+    path: worker_service
+indexing:
+  workspace_concurrency: 1
+```
+
+Each row in the picker maps one-to-one with a `repos[]` entry: the
+checkbox state controls whether the repo is in the config, the directory
+name becomes the logical `name`, and the path under the workspace root
+becomes `path`. Adjust `depth` for large repos you want to scan
+shallowly, add `indexing` scoping rules per repo, or rename `name` to
+match a canonical service identifier.
 
 If a config already exists, `init` uses it as the starting point. Existing repos
 are preselected, removed repos stay unchecked, and repo-specific settings such
 as `name` and `depth` are preserved for selected repos. Use `--force` only when
 you intentionally want a fresh generated draft from repository discovery.
+
+### Removing a repo later
+
+Re-running `gather-step init` and unchecking a repo is the supported way
+to drop it from the workspace. The next `gather-step index` notices the
+config change, unregisters the repo, and purges its graph, search, and
+metadata state — so the workspace stays consistent without any manual
+cleanup.
 
 For scripts or CI, pass flags explicitly instead of relying on prompts:
 
@@ -268,6 +314,31 @@ gather-step --workspace /path/to/workspace reindex
 For smaller code changes during normal development, prefer
 `gather-step watch` (live incremental updates) or `gather-step index` (manual
 incremental re-run) over a full reindex.
+
+### `init --force`
+
+Recreate `gather-step.config.yaml` from scratch on top of an existing
+workspace. Use this when the config drifted (manual edits, merge artifacts)
+or when you want to rerun repo discovery and overwrite the persisted
+selection.
+
+```bash
+gather-step --workspace /path/to/workspace init --force
+```
+
+`--force` only rewrites the config — it does not touch generated state.
+Pair it with `gather-step reindex` when you also want to rebuild the
+graph against the regenerated config:
+
+```bash
+gather-step --workspace /path/to/workspace init --force
+gather-step --workspace /path/to/workspace reindex
+```
+
+Repos that disappear from the regenerated config are automatically
+unregistered, and their graph, search, and metadata state is purged on
+the next index run — so the combined sequence above is a complete
+"start over" from any workspace state.
 
 ## Next Steps
 

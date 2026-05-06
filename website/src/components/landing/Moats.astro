@@ -49,13 +49,27 @@ const moats = [
     body:
       'Plan, debug, fix, review, and change-impact packs pair with `.claude/rules/`, `CLAUDE.gather.md`, and `AGENTS.gather.md` instead of raw graph dumps.',
   },
+  {
+    n: '08',
+    tag: 'Performance',
+    title: 'Faster indexing, lighter storage, Oxc TS/JS',
+    body:
+      'Oxc-driven TypeScript and JavaScript parsing replaces SWC. The pipeline trims redundant work; metadata, search, and graph stores ship compact, with kanal channels and parking_lot mutexes on the hot path.',
+  },
+  {
+    n: '09',
+    tag: 'Local-first',
+    title: 'Strict schema, no vendor, no telemetry',
+    body:
+      'Generated state is stamped and version-checked across the graph, metadata, and search stores. Every pipeline runs locally; nothing leaves your machine.',
+  },
 ];
 ---
 
 <section class="bp-sec" id="moats">
   <div class="bp-sec__head">
     <span class="bp-sec__num">DET-04 · What actually makes it different</span>
-      <h2 class="bp-h2">Seven feature groups built for <span class="u">release-grade context.</span></h2>
+      <h2 class="bp-h2">Nine feature groups built for <span class="u">release-grade context.</span></h2>
       <p class="bp-lede">
       Partial context is worse than no context. Gather Step keeps topology, proof,
       storage health, and assistant retrieval in one local workflow.
@@ -65,7 +79,7 @@ const moats = [
     {
       moats.map((moat) => (
         <div class="bp-moat">
-          <span class="bp-moat__num">{moat.n} / 07</span>
+          <span class="bp-moat__num">{moat.n} / 09</span>
           <span class="bp-moat__tag">{moat.tag}</span>
           <h3>{moat.title}</h3>
           <p>{moat.body}</p>

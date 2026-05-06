@@ -833,11 +833,17 @@ pub fn list_orphan_topics<S: GraphStore>(
             .filter(|(_, count)| **count > 0)
             .map(|(kind, count)| format!("{kind:?}={count}"))
             .collect();
-        tracing::warn!(
+        // Demoted from `warn` to `debug`. Page truncation is the documented,
+        // intended behavior of `list_orphan_topics` (every public caller
+        // bounds the result with a `--limit` flag); raising it to operator
+        // attention every time the workspace had more orphans than fit on
+        // a page produced log noise during normal indexing. Operators who
+        // need this signal can opt in via `RUST_LOG=gather_step_analysis=debug`.
+        tracing::debug!(
             total_seen = page.total_seen,
             returned = page.items.len(),
             skipped_by_kind = %non_zero.join(", "),
-            "list_orphan_topics truncated: more orphans exist beyond the page limit",
+            "`list_orphan_topics` truncated: additional orphans exist beyond the page limit; raise `--limit` to surface them.",
         );
     }
     Ok(page.items)

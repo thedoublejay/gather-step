@@ -641,12 +641,15 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 let detected_frameworks: Vec<Framework> =
                     detect_frameworks(&repo_root).into_iter().collect();
                 if let Some(bar) = workspace_bar_ref {
+                    // Show the repo name, not the full path — the workspace
+                    // root is already displayed at the top of the run, so
+                    // repeating it for every repo is just noise.
                     bar.println(format!(
                         "  {} {}",
                         style("Indexing").cyan().bold(),
-                        style(repo_root.display()).dim()
+                        style(&repo.name).bright()
                     ));
-                    bar.set_message(format!("{}  {}", repo.name, repo_root.display()));
+                    bar.set_message(repo.name.clone());
                 }
                 info!(
                     repo = %repo.name,
@@ -1075,25 +1078,25 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         style("✓ Indexed").green().bold(),
         style(payload.stats.indexed_repos).cyan(),
         repo_label,
-        style(&payload.storage_root).dim()
+        style(&payload.storage_root).color256(245)
     ));
     output.line(format!(
         "    {} files  {} symbols  {} edges  {} cross-repo",
-        style(payload.stats.total_files).dim(),
-        style(payload.stats.total_symbols).dim(),
-        style(payload.stats.total_edges).dim(),
-        style(payload.stats.cross_repo_edges).dim()
+        style(payload.stats.total_files).color256(245),
+        style(payload.stats.total_symbols).color256(245),
+        style(payload.stats.total_edges).color256(245),
+        style(payload.stats.cross_repo_edges).color256(245)
     ));
     if let Some(index_size_bytes) = payload.index_size_bytes {
         output.line(format!(
             "    Time: {}  Index size: {}",
-            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
-            style(format_bytes(index_size_bytes)).dim(),
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).color256(245),
+            style(format_bytes(index_size_bytes)).color256(245),
         ));
     } else {
         output.line(format!(
             "    Time: {}",
-            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).dim(),
+            style(format_duration_hh_mm_ss(payload.timings.total_wall_ms)).color256(245),
         ));
     }
     for warning in &payload.warnings {

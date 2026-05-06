@@ -243,8 +243,8 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                             "  {} {}  {} {}",
                             style("[indexing]").cyan().bold(),
                             style(&repo).bold(),
-                            style(format!("({cause})")).dim(),
-                            style(format!("{} file(s)", files.len())).dim(),
+                            style(format!("({cause})")).color256(245),
+                            style(format!("{} file(s)", files.len())).color256(245),
                         );
                         emit_watch_human_line(event_bar.as_ref(), line)
                     } else {
@@ -320,7 +320,7 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
                                 changed.deleted.len(),
                                 stats.duration_ms,
                             ))
-                            .dim(),
+                            .color256(245),
                         );
                         emit_watch_human_line(event_bar.as_ref(), line)
                     } else {

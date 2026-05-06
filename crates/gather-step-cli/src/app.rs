@@ -215,10 +215,14 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
         MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
     };
     let writer = MultiProgressWriter::new(multi_progress.clone());
+    // Interactive runs drop the leading timestamp so log lines align
+    // visually with the rest of the CLI output. Operators who need
+    // machine-parseable timestamps should run with `--json`, which
+    // restores the RFC 3339 timer in the JSON formatter above.
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_writer(writer)
-        .with_timer(ChronoLocal::rfc_3339())
+        .without_time()
         .with_target(false)
         .with_ansi(color_enabled_for(cli.color, stderr_is_tty, cli.json))
         .init();
@@ -346,7 +350,11 @@ pub fn maybe_print_banner(app: &AppContext) {
 
     eprintln!();
     eprintln!("{}", style(BANNER).blue().bold());
-    eprintln!("{}{}", " ".repeat(footer_padding), style(footer).dim());
+    eprintln!(
+        "{}{}",
+        " ".repeat(footer_padding),
+        style(footer).color256(245)
+    );
     eprintln!();
 }
 

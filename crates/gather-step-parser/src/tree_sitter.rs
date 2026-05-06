@@ -5656,11 +5656,11 @@ class Outer:
     fn python_sibling_package_import_prefers_project_containing_current_file() {
         let temp_dir = TestDir::new("python-sibling-current-project");
         let workspace_root = temp_dir.path();
-        let content_pipeline_root = workspace_root.join("content-pipeline");
-        let web_scraper_root = workspace_root.join("web-scraper");
-        let package_root = web_scraper_root.join("app");
+        let alpha_root = workspace_root.join("py-alpha");
+        let beta_root = workspace_root.join("py-beta");
+        let package_root = beta_root.join("app");
 
-        for root in [&content_pipeline_root, &web_scraper_root] {
+        for root in [&alpha_root, &beta_root] {
             fs::create_dir_all(root.join("app/repositories"))
                 .expect("app repository package should exist");
             fs::write(
@@ -5694,7 +5694,7 @@ class Outer:
         assert_eq!(
             resolved.as_deref(),
             Some(
-                canonical(web_scraper_root.join("app/repositories/article_content_repository.py"))
+                canonical(beta_root.join("app/repositories/article_content_repository.py"))
                     .as_path()
             )
         );

@@ -1,31 +1,50 @@
 ---
+// Machine-time benchmark on a real 31-repo workspace (Apple M5 Pro,
+// Rust 1.94.1 release build, 14,296 files). For each task:
+//   manual    = wall-clock to `rg -l <symbol> | xargs cat > /dev/null`
+//               (median of three runs).
+//   gatherStep = wall-clock to `gather-step pack <symbol>` against an
+//                already-loaded index (median of three warm runs;
+//                cold first-load adds 1–3 s on top).
+// Both numbers are seconds. Human reading and reasoning time is not
+// included — the chart compares the two indexing strategies on the
+// same hardware, not human productivity.
 const tasks = [
   {
     id: 'Frontend hook',
-    title: 'Change a shared frontend auth/session type.',
-    manual: 42,
-    gatherStep: 2.48,
+    title: 'Trace where a shared frontend auth hook is used.',
+    manual: 0.79,
+    gatherStep: 0.03,
   },
   {
     id: 'Event flow',
-    title: 'Change a backend event/schema flow across repos.',
-    manual: 24,
-    gatherStep: 1.97,
+    title: 'Find every consumer of a Kafka event across services.',
+    manual: 1.44,
+    gatherStep: 0.03,
   },
   {
     id: 'Shared API',
-    title: 'Roll out a shared contracts API to backend services.',
-    manual: 16,
-    gatherStep: 4.7,
+    title: 'Plan a change to a cross-repo use-case class.',
+    manual: 0.32,
+    gatherStep: 0.03,
   },
 ];
 
 const scale = [
-  { label: 'Repos', value: '26' },
-  { label: 'Files', value: '13.6K' },
-  { label: 'Symbols', value: '171K' },
-  { label: 'Edges', value: '405K' },
-  { label: 'Cross-repo edges', value: '88K' },
+  { label: 'Repos', value: '31' },
+  { label: 'Files', value: '14.3K' },
+  { label: 'Symbols', value: '216K' },
+  { label: 'Edges', value: '484K' },
+  { label: 'Cross-repo edges', value: '96K' },
+];
+
+const planningOracle = [
+  { label: 'Scenarios', value: '25 / 25' },
+  { label: 'Coverage', value: '1.000' },
+  { label: 'Top-1 / Top-3', value: '1.000 / 1.000' },
+  { label: 'p50 latency', value: '3 ms' },
+  { label: 'p95 latency', value: '8 ms' },
+  { label: 'p99 latency', value: '15 ms' },
 ];
 
 const totalManual = tasks.reduce((sum, task) => sum + task.manual, 0);
@@ -40,30 +59,33 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
       <div>
         <span class="bp-sec__num">DET-06 · Planning benchmark</span>
         <h2 class="bp-h2" style="margin-top: 12px;">
-          Manual planning, in the time your assistant <span class="u">needs to read an answer.</span>
+          Cross-repo planning, in <span class="u">milliseconds, not seconds.</span>
         </h2>
         <p class="bp-lede" style="margin-top: 14px;">
-          Same three planning tasks, same 26-repo workspace. Left bar is an operator clicking
-          through repos. Right bar is a single Gather Step pack query.
+          Three planning tasks on the same 31-repo, 14,296-file workspace. Left bar is what
+          a workspace-wide grep walk takes (`rg -l &lt;symbol&gt; | xargs cat`). Right bar is a
+          single Gather Step pack query against the loaded index. Both measured wall-clock
+          on the same machine; medians of three runs.
         </p>
       </div>
-      <span class="bp-stamp">v3.5 · 2026-05-06</span>
+      <span class="bp-stamp">v3.5.1 · 2026-05-06</span>
     </div>
 
     <div class="bp-bench__hero">
       <div class="bp-bench__stat">
-        <span class="bp-bench__stat__label">End-to-end planning</span>
+        <span class="bp-bench__stat__label">End-to-end machine time</span>
         <div class="bp-bench__stat__big">
           {speedup}×<span class="unit"> faster</span>
         </div>
         <div class="bp-bench__stat__small">
-          <b>{totalManual}s</b> of manual exploration, compressed into <b>{totalGatherStep.toFixed(2)}s</b> of
-          pack queries once the graph is built. v3.5 keeps the v3.5 deployment-topology and
-          PR-review surfaces and tightens the indexing pipeline behind them.
+          <b>{totalManual.toFixed(2)}s</b> of unindexed grep, compressed into
+          <b>{totalGatherStep.toFixed(2)}s</b> of pack queries on a warm index. Cold first-load
+          adds 1–3 s on top; long-running MCP servers pay it once. Human reading and reasoning
+          time is on top of the manual side, not the Gather Step side.
         </div>
       </div>
 
-      <div class="bp-bench__chart" aria-label="Manual vs Gather Step planning time by task">
+      <div class="bp-bench__chart" aria-label="Unindexed grep vs Gather Step pack query by task">
         {
           tasks.map((task) => (
             <div class="bp-bench__row">
@@ -73,21 +95,21 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
               </div>
               <div class="bp-bench__bar">
                 <div class="bp-bench__bar__fill bp-bench__bar__fill--manual" style={`width: ${(task.manual / maxBar) * 100}%`}></div>
-                <span class="bp-bench__bar__val">{task.manual}s manual</span>
+                <span class="bp-bench__bar__val">{task.manual.toFixed(2)}s unindexed grep</span>
               </div>
               <div class="bp-bench__bar">
                 <div
                   class="bp-bench__bar__fill bp-bench__bar__fill--gather-step"
                   style={`width: ${Math.max((task.gatherStep / maxBar) * 100, 8)}%`}
                 ></div>
-                <span class="bp-bench__bar__val">{task.gatherStep.toFixed(2)}s Gather Step</span>
+                <span class="bp-bench__bar__val">{task.gatherStep.toFixed(2)}s Gather Step pack</span>
               </div>
             </div>
           ))
         }
         <div class="bp-bench__legend">
-          <span><i class="k-manual"></i>Manual exploration</span>
-          <span><i class="k-gather-step"></i>Gather Step pack</span>
+          <span><i class="k-manual"></i>Unindexed grep walk</span>
+          <span><i class="k-gather-step"></i>Gather Step pack query</span>
         </div>
       </div>
     </div>
@@ -98,8 +120,8 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
           <div class="bp-bench__task">
             <span class="bp-bench__task__tag">{task.id}</span>
             <h4>{task.title}</h4>
-            <div class="bp-bench__task__row"><span>Manual</span><b>{task.manual}s</b></div>
-            <div class="bp-bench__task__row"><span>Gather Step</span><b>{task.gatherStep.toFixed(2)}s</b></div>
+            <div class="bp-bench__task__row"><span>Unindexed grep</span><b>{task.manual.toFixed(2)}s</b></div>
+            <div class="bp-bench__task__row"><span>Gather Step pack</span><b>{task.gatherStep.toFixed(2)}s</b></div>
           </div>
         ))
       }
@@ -116,6 +138,25 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
       }
     </div>
 
+    <div class="bp-bench__head" style="margin-top: 32px;">
+      <div>
+        <span class="bp-sec__num">Planning oracle (v3.5.1)</span>
+        <p class="bp-lede" style="margin-top: 12px;">
+          Full 25-scenario suite, every metric at the HIGH ceiling, latency well under release-gate thresholds (p50 ≤ 50 ms, p95 ≤ 300 ms, p99 ≤ 1000 ms).
+        </p>
+      </div>
+    </div>
+    <div class="bp-bench__scale">
+      {
+        planningOracle.map((item) => (
+          <div class="bp-bench__chip">
+            <span class="bp-bench__chip__k">{item.label}</span>
+            <span class="bp-bench__chip__v">{item.value}</span>
+          </div>
+        ))
+      }
+    </div>
+
     <div class="bp-bench__note">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 2px;">
         <circle cx="12" cy="12" r="10"></circle>
@@ -123,10 +164,12 @@ const speedup = (totalManual / totalGatherStep).toFixed(1);
         <line x1="12" y1="16" x2="12.01" y2="16"></line>
       </svg>
       <div>
-        <b>v3.5 release.</b> Replaces the SWC TypeScript and JavaScript path with Oxc, lands
-        indexing performance work, compacts metadata/search/graph storage, and hardens the
-        watch and config surface against symlink and oversize-file abuse. v3.5 deployment
-        topology and `gather-step pr-review` carry over unchanged.
+        <b>Methodology.</b> Three planning targets on the same workspace:
+        <code>useAuth</code> (220 referencing files), <code>CommentCreatedEvent</code> (66
+        files), and <code>CreateTaskUseCase</code> (17 files). For each, the manual baseline
+        runs <code>rg -l &lt;symbol&gt; | xargs cat</code> end-to-end; the Gather Step
+        baseline runs <code>gather-step pack &lt;symbol&gt;</code> against an already-loaded
+        index. Both wall-clock, both medians of three runs, both on the same Apple M5 Pro.
       </div>
     </div>
   </div>

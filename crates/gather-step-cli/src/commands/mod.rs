@@ -32,10 +32,19 @@ use clap::{
 
 use crate::app::{AppContext, ColorModeArg};
 
+/// `--version` long form. Concatenated at compile time from the package
+/// version, the current copyright year, and the canonical author so the
+/// binary surface keeps the attribution that earlier releases shipped.
+const VERSION_LONG: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nCopyright (c) 2026 JJ Adonis. Licensed under the MIT License.",
+);
+
 #[derive(Debug, Parser)]
 #[command(
     name = "gather-step",
     version,
+    long_version = VERSION_LONG,
     about = "Workspace indexing and code graph CLI",
     styles = cli_styles()
 )]
