@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::command_render::RenderedCommand;
+use crate::commands::doctor::count_actionable_unresolved_inputs;
 use crate::daemon_protocol::DaemonRequest;
 use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
@@ -172,10 +173,12 @@ pub(crate) fn execute(
                 .metadata()
                 .file_index_states_by_repo(repo)
                 .with_context(|| format!("loading metadata file state for `{repo}`"))?;
-            let unresolved_inputs = storage
+            let unresolved_resolution_inputs = storage
                 .metadata()
-                .unresolved_resolution_input_count_by_repo(repo)
+                .unresolved_resolution_inputs_by_repo(repo)
                 .with_context(|| format!("loading unresolved calls for `{repo}`"))?;
+            let unresolved_inputs =
+                count_actionable_unresolved_inputs(&unresolved_resolution_inputs);
             let graph_node_count = storage
                 .graph()
                 .count_nodes_by_repo(repo)

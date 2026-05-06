@@ -2,10 +2,13 @@
 
 use std::{
     env, fs,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -152,6 +155,22 @@ fn read_child_stderr(child: &mut Child) -> String {
     stderr
 }
 
+fn spawn_stdout_lines(child: &mut Child) -> mpsc::Receiver<String> {
+    let stdout = child.stdout.take().expect("child stdout should be piped");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 fn daemon_bind_unavailable_in_test_env(stderr: &str) -> bool {
     // The CLI's stable operator error intentionally hides the OS errno, so a
     // sandboxed Unix-socket bind failure only reaches this test as the bind
@@ -160,8 +179,8 @@ fn daemon_bind_unavailable_in_test_env(stderr: &str) -> bool {
 }
 
 fn watcher_backend_unavailable_in_test_env(stderr: &str) -> bool {
-    stderr.contains("The filesystem watcher failed: Unable to start the FSEvent stream.")
-        || stderr.contains("The filesystem watcher failed: Unable to start FSEvent stream.")
+    stderr.contains("filesystem watcher failed: unable to start the FSEvent stream")
+        || stderr.contains("filesystem watcher failed: unable to start FSEvent stream")
         || stderr.contains("unable to start FSEvent stream")
 }
 
@@ -211,6 +230,87 @@ fn wait_for_child_exit(child: &mut Child) -> process::ExitStatus {
     let _ = child.wait();
     let stderr = read_child_stderr(child);
     panic!("timed out waiting for child exit\nstderr:\n{stderr}");
+}
+
+#[test]
+fn watch_json_ready_event_allows_scripts_to_avoid_startup_race() {
+    let workspace = stage_fixture_workspace();
+    run_ok_json(workspace.path(), &["index"]);
+
+    let mut child = gather_step()
+        .arg("--workspace")
+        .arg(workspace.path())
+        .arg("--json")
+        .arg("--no-banner")
+        .arg("watch")
+        .arg("--debounce-ms")
+        .arg("100")
+        .arg("--poll-interval-ms")
+        .arg("100")
+        .arg("1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("watch should spawn");
+
+    let stdout_lines = spawn_stdout_lines(&mut child);
+    let ready_line = match stdout_lines.recv_timeout(Duration::from_secs(10)) {
+        Ok(line) => line,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stderr = read_child_stderr(&mut child);
+            if daemon_bind_unavailable_in_test_env(&stderr)
+                || watcher_backend_unavailable_in_test_env(&stderr)
+            {
+                return;
+            }
+            panic!("watch did not emit ready event: {error}\nstderr:\n{stderr}");
+        }
+    };
+    let ready: Value = serde_json::from_str(&ready_line).expect("ready line should be json");
+    assert_eq!(ready["event"], "watch_ready");
+
+    let changed_file = workspace
+        .path()
+        .join("workspace/service_a/src/payment.service.ts");
+    fs::write(
+        &changed_file,
+        format!(
+            "{}\n// gather-step watch readiness regression\n",
+            fs::read_to_string(&changed_file).expect("fixture file should read")
+        ),
+    )
+    .expect("fixture file should update");
+
+    let exited = wait_for_child_exit(&mut child);
+    let stderr = read_child_stderr(&mut child);
+    assert!(
+        exited.success(),
+        "watch should exit after one indexing run\nstatus: {exited}\nstderr:\n{stderr}"
+    );
+
+    let mut events = vec![ready];
+    while let Ok(line) = stdout_lines.recv_timeout(Duration::from_millis(100)) {
+        events.push(serde_json::from_str(&line).expect("watch event should be json"));
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "watch_indexing_start"),
+        "missing watch_indexing_start in events: {events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "watch_indexing_complete"),
+        "missing watch_indexing_complete in events: {events:#?}"
+    );
+    assert!(
+        events.iter().any(|event| event["event"] == "watch_status"),
+        "missing watch_status in events: {events:#?}"
+    );
 }
 
 #[test]
