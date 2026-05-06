@@ -221,6 +221,8 @@ No exact open-source project found that combines Jira AC, durable engineering me
 
 ## Suggested First Fixture
 
+The committed fixture lives under [`fixtures/qa-reference-v4/`](../fixtures/qa-reference-v4/). It is intentionally Markdown/source-file material, not generated test code.
+
 Create a small fixture with:
 
 - one Jira-like Markdown ticket containing 3 AC,

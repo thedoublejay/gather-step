@@ -127,7 +127,7 @@ struct QaEvidenceGap {
 struct FileLineEvidence {
     repo: String,
     file_path: String,
-    line_start: u32,
+    line_start: Option<u32>,
     text: String,
 }
 
@@ -190,7 +190,7 @@ pub(crate) fn run_rendered(
                     &mut gaps,
                     mode,
                     "truncated",
-                    "response budget truncated evidence; Braingent must not claim complete coverage",
+                    "The response budget truncated evidence; Braingent must not claim complete coverage.",
                     true,
                 );
             }
@@ -202,12 +202,12 @@ pub(crate) fn run_rendered(
             &mut gaps,
             "git_diff",
             "missing_diff_refs",
-            "base/head refs were not supplied; changed-file coverage must come from supplied Braingent context",
+            "Base and head refs were not supplied; changed-file coverage must come from supplied Braingent context.",
             false,
         );
     }
 
-    let scan_rows = filesystem_evidence(app, ctx, &target, args.scan_limit)?;
+    let scan_rows = filesystem_evidence(app, ctx, &target, args.scan_limit, &mut gaps)?;
     rows.extend(scan_rows);
 
     let row_count = rows.len();
@@ -236,7 +236,7 @@ pub(crate) fn run_rendered(
             output.schema_version, output.target
         ),
         format!(
-            "rows={} gaps={} truncated={}",
+            "Rows: {}; gaps: {}; truncated: {}.",
             output.manifest_summary.row_count,
             output.manifest_summary.gap_count,
             output.manifest_summary.truncated
@@ -246,15 +246,19 @@ pub(crate) fn run_rendered(
 }
 
 fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &QaEvidenceArgs) -> Result<String> {
+    if args.route_method.is_some() != args.route_path.is_some() {
+        bail!("--route-method and --route-path must be provided together.");
+    }
+
     let mut provided = 0_u8;
     provided += u8::from(args.target.is_some());
     provided += u8::from(args.symbol.is_some());
     provided += u8::from(args.event_target.is_some());
-    provided += u8::from(args.route_method.is_some() || args.route_path.is_some());
+    provided += u8::from(args.route_method.is_some() && args.route_path.is_some());
 
     if provided != 1 {
         bail!(
-            "provide exactly one target source: positional target, --symbol, --event-target, or --route-method with --route-path"
+            "Provide exactly one target source: positional target, --symbol, --event-target, or --route-method with --route-path."
         );
     }
 
@@ -272,13 +276,13 @@ fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &QaEvidenceArgs) -> R
             },
         )?;
         let Some(match_) = response.data.matches.first() else {
-            bail!("no event-like target matched `{target}`");
+            bail!("No event-like target matched `{target}`.");
         };
         return Ok(match_.target_id.clone());
     }
 
     let (Some(method), Some(path)) = (args.route_method.as_ref(), args.route_path.as_ref()) else {
-        bail!("--route-method and --route-path must be provided together");
+        bail!("--route-method and --route-path must be provided together.");
     };
     let response = trace_route_tool(
         ctx,
@@ -290,7 +294,7 @@ fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &QaEvidenceArgs) -> R
         },
     )?;
     let Some(target_id) = response.data.target_id else {
-        bail!("no route target matched {method} {path}");
+        bail!("No route target matched {method} {path}.");
     };
     Ok(target_id)
 }
@@ -357,7 +361,7 @@ fn collect_pack_rows(
                 &caller.file_path,
                 &caller.symbol_name,
             ),
-            reason: "upstream caller reaches the QA evidence target".to_owned(),
+            reason: "Upstream caller reaches the QA evidence target.".to_owned(),
         });
     }
 
@@ -386,7 +390,7 @@ fn collect_pack_rows(
             gaps,
             mode,
             "unresolved_downstream_repo",
-            format!("possible downstream repo `{repo}` was not fully resolved"),
+            format!("Possible downstream repo `{repo}` was not fully resolved."),
             true,
         );
     }
@@ -396,7 +400,7 @@ fn collect_pack_rows(
             mode,
             "fanout_truncated",
             format!(
-                "{} downstream repo(s) were truncated by fan-out cap: {}",
+                "{} downstream repo(s) were truncated by the fan-out cap: {}.",
                 truncated.count,
                 truncated.names.join(", ")
             ),
@@ -430,7 +434,7 @@ fn repo_impact_row(
         symbol_name: None,
         category: Some("downstream".to_owned()),
         surface: "integration".to_owned(),
-        reason: "downstream repository should be considered for manual QA smoke coverage"
+        reason: "Downstream repository should be considered for manual QA smoke coverage."
             .to_owned(),
     }
 }
@@ -440,6 +444,7 @@ fn filesystem_evidence(
     ctx: &StorageContext,
     target: &str,
     limit: usize,
+    gaps: &mut Vec<QaEvidenceGap>,
 ) -> Result<Vec<QaEvidenceRow>> {
     if limit == 0 {
         return Ok(Vec::new());
@@ -448,7 +453,18 @@ fn filesystem_evidence(
         .with_context(|| format!("opening registry at {}", ctx.registry_path().display()))?;
     let mut rows = Vec::new();
 
-    for (repo_name, registered) in &registry.registry().repos {
+    let mut repos: Vec<_> = registry.registry().repos.iter().collect();
+    repos.sort_by(|(left_name, left_repo), (right_name, right_repo)| {
+        left_name.cmp(right_name).then_with(|| {
+            left_repo
+                .path
+                .display()
+                .to_string()
+                .cmp(&right_repo.path.display().to_string())
+        })
+    });
+
+    for (repo_name, registered) in repos {
         if app
             .repo_filter
             .as_ref()
@@ -466,6 +482,7 @@ fn filesystem_evidence(
             &repo_root,
             target,
             limit.saturating_sub(rows.len()),
+            gaps,
         )? {
             if rows.len() >= limit {
                 return Ok(rows);
@@ -477,12 +494,14 @@ fn filesystem_evidence(
             } else {
                 continue;
             };
-            let confidence = if fact_kind == "feature_flag" && evidence.text.contains(target) {
-                "high"
-            } else if fact_kind == "feature_flag" && has_static_flag_key(&evidence.text) {
-                "medium"
-            } else if fact_kind == "feature_flag" {
-                "unresolved"
+            let confidence = if fact_kind == "feature_flag" {
+                if evidence.text.contains(target) {
+                    "high"
+                } else if has_static_flag_key(&evidence.text) {
+                    "medium"
+                } else {
+                    "unresolved"
+                }
             } else {
                 "medium"
             };
@@ -496,11 +515,11 @@ fn filesystem_evidence(
                     "workspace_scan",
                     evidence.repo.as_str(),
                     evidence.file_path.as_str(),
-                    Some(evidence.line_start),
+                    evidence.line_start,
                 ),
                 repo: Some(evidence.repo),
                 file_path: Some(evidence.file_path.clone()),
-                line_start: Some(evidence.line_start),
+                line_start: evidence.line_start,
                 symbol_id: None,
                 symbol_kind: None,
                 symbol_name: None,
@@ -523,9 +542,10 @@ fn scan_repo_files(
     root: &Path,
     target: &str,
     limit: usize,
+    gaps: &mut Vec<QaEvidenceGap>,
 ) -> Result<Vec<FileLineEvidence>> {
     let mut evidence = Vec::new();
-    scan_dir(repo, root, root, target, limit, &mut evidence)?;
+    scan_dir(repo, root, root, target, limit, &mut evidence, gaps)?;
     Ok(evidence)
 }
 
@@ -536,24 +556,45 @@ fn scan_dir(
     target: &str,
     limit: usize,
     evidence: &mut Vec<FileLineEvidence>,
+    gaps: &mut Vec<QaEvidenceGap>,
 ) -> Result<()> {
     if evidence.len() >= limit || is_ignored_dir(dir) {
         return Ok(());
     }
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return Ok(()),
+        Err(error) => {
+            push_gap(
+                gaps,
+                "workspace_scan",
+                "scan_unreadable_dir",
+                format!("Could not read directory `{}`: {error}.", dir.display()),
+                true,
+            );
+            return Ok(());
+        }
     };
+    let mut entries = entries.collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
     for entry in entries {
         if evidence.len() >= limit {
             break;
         }
-        let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
-            scan_dir(repo, root, &path, target, limit, evidence)?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            scan_dir(repo, root, &path, target, limit, evidence, gaps)?;
+        } else if file_type.is_file() && should_scan_file(&path) {
+            scan_file(repo, root, &path, target, limit, evidence, gaps)?;
         } else if should_scan_file(&path) {
-            scan_file(repo, root, &path, target, limit, evidence)?;
+            push_gap(
+                gaps,
+                "workspace_scan",
+                "scan_unsupported_file_type",
+                format!("Skipped non-regular file `{}`.", path.display()),
+                true,
+            );
         }
     }
     Ok(())
@@ -566,9 +607,20 @@ fn scan_file(
     target: &str,
     limit: usize,
     evidence: &mut Vec<FileLineEvidence>,
+    gaps: &mut Vec<QaEvidenceGap>,
 ) -> Result<()> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Ok(());
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            push_gap(
+                gaps,
+                "workspace_scan",
+                "scan_unreadable_file",
+                format!("Could not read file `{}`: {error}.", path.display()),
+                true,
+            );
+            return Ok(());
+        }
     };
     let Ok(relative) = path.strip_prefix(root) else {
         return Ok(());
@@ -585,7 +637,7 @@ fn scan_file(
             evidence.push(FileLineEvidence {
                 repo: repo.to_owned(),
                 file_path: relative.clone(),
-                line_start: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                line_start: u32::try_from(index + 1).ok(),
                 text: line.to_owned(),
             });
         }
@@ -733,4 +785,62 @@ fn push_gap(
         message: message.into(),
         blocks_complete_coverage,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_functions_keep_schema_visible_values_stable() {
+        assert!(is_feature_flag_line(
+            "const enabled = useFlag('orders-v2');"
+        ));
+        assert_eq!(
+            feature_flag_key("const enabled = useFlag('orders-v2');"),
+            Some("orders-v2")
+        );
+        assert!(has_static_flag_key("variation(\"orders-v2\", false);"));
+        assert!(is_test_file("src/OrderList.test.tsx"));
+        assert!(is_test_file("src/tests/order_list.rs"));
+
+        assert_eq!(
+            pack_fact_kind("planning", "component", "src/OrderList.tsx"),
+            "planning_context"
+        );
+        assert_eq!(
+            pack_fact_kind("review", "component", "src/OrderList.test.tsx"),
+            "existing_test_signal"
+        );
+        assert_eq!(
+            infer_surface(
+                "class",
+                "controller",
+                "src/orders.controller.ts",
+                "OrdersController"
+            ),
+            "api"
+        );
+        assert_eq!(
+            infer_surface("function", "component", "src/OrderList.tsx", "OrderList"),
+            "ui"
+        );
+
+        assert_eq!(confidence_from_score(900), "high");
+        assert_eq!(confidence_from_score(700), "medium");
+        assert_eq!(confidence_from_score(200), "low");
+        assert_eq!(confidence_from_score(0), "unresolved");
+        assert_eq!(
+            citation_key("planning", "frontend", "src/OrderList.tsx", Some(12)),
+            "planning:frontend:src/OrderList.tsx:12"
+        );
+        assert_eq!(
+            citation_key("planning", "frontend", "src/OrderList.tsx", None),
+            "planning:frontend:src/OrderList.tsx"
+        );
+        assert_eq!(mode_label("planning"), "PLAN");
+        assert_eq!(mode_label("review"), "REVIEW");
+        assert_eq!(mode_label("change_impact"), "IMPACT");
+        assert_eq!(mode_label("other"), "PACK");
+    }
 }

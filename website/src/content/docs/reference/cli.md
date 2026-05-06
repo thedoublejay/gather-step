@@ -602,7 +602,7 @@ gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] <T
 gather-step --workspace /path/to/workspace qa-evidence OrdersService --base main --head feature/orders --json
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v0.1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows include `fact_kind`, `source_resolver`, `confidence`, `citation_key`, optional repository/file/symbol fields, `surface`, and a short evidence reason.
+**Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v0.1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are sparse evidence objects: `id`, `fact_kind`, `source_resolver`, `confidence`, `citation_key`, `surface`, and `reason` are always present; `repo`, `file_path`, `line_start`, `symbol_id`, `symbol_kind`, `symbol_name`, and `category` appear only when that evidence source has the value. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.
 
 **When to use** — before generating a QA reference in Braingent or another planning tool that needs grounded code evidence without asking Gather Step to write test-plan prose.
 
