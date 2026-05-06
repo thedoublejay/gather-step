@@ -395,6 +395,18 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .expect("pack items array")
             .is_empty()
     );
+    let pack_evidence = pack_json["data"]["evidence"]
+        .as_array()
+        .expect("pack evidence array");
+    assert!(!pack_evidence.is_empty());
+    assert!(pack_evidence.iter().all(|row| {
+        row["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("GS-EVID-"))
+            && row["kind"].is_string()
+            && row["source"].is_string()
+            && row["citation"].is_object()
+    }));
 
     let qa_evidence = run_ok(
         temp.path(),
@@ -442,39 +454,20 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     let qa_rows = qa_evidence_json["rows"]
         .as_array()
         .expect("qa evidence rows array");
-    let required_row_keys = [
-        "citation_key",
-        "confidence",
-        "fact_kind",
-        "id",
-        "reason",
-        "source_resolver",
-        "surface",
-    ];
-    let optional_row_keys = [
-        "category",
-        "file_path",
-        "line_start",
-        "repo",
-        "symbol_id",
-        "symbol_kind",
-        "symbol_name",
-    ];
+    let required_row_keys = ["citation", "id", "kind", "source"];
+    let optional_row_keys = ["subject", "support"];
+    assert!(qa_rows.iter().any(|row| row["source"] == "planning_pack"));
+    assert!(qa_rows.iter().any(|row| row["kind"] == "feature_flag"));
     assert!(
         qa_rows
             .iter()
-            .any(|row| row["source_resolver"] == "planning_pack")
-    );
-    assert!(qa_rows.iter().any(|row| row["fact_kind"] == "feature_flag"));
-    assert!(
-        qa_rows
-            .iter()
-            .any(|row| row["fact_kind"] == "existing_test_signal")
+            .any(|row| row["kind"] == "existing_test_signal")
     );
     assert!(qa_rows.iter().all(|row| {
-        row["citation_key"]
-            .as_str()
-            .is_some_and(|key| !key.is_empty())
+        row["citation"].is_object()
+            && row["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("GS-EVID-"))
     }));
     for row in qa_rows {
         let keys = sorted_json_keys(row);

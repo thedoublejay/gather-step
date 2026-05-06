@@ -4,6 +4,7 @@ pub mod budget;
 pub mod catalog;
 pub mod config;
 pub mod error;
+pub mod evidence;
 pub mod ids;
 pub mod output;
 pub mod server;

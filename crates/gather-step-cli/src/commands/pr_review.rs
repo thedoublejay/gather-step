@@ -1425,7 +1425,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .map(|(name, _)| name.to_owned())
     .collect();
 
-    let report = DeltaReport {
+    let mut report = DeltaReport {
         schema_version: DELTA_REPORT_SCHEMA_VERSION,
         metadata: ReviewMetadata {
             workspace: app.workspace_path.clone(),
@@ -1451,6 +1451,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         },
         changed_files: changed_files_display,
         changed_files_truncated,
+        evidence: Vec::new(),
         routes: route_deltas,
         symbols: symbol_deltas,
         payload_contracts: payload_contract_deltas,
@@ -1462,6 +1463,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         suggested_followups,
         unsupported_surfaces: derived_unsupported_surfaces,
     };
+    report.refresh_evidence();
 
     // ── 9. Update marker ───────────────────────────────────────────────────
     // Mark completed before cleanup so the marker is correct even if cleanup
@@ -4416,6 +4418,7 @@ mod tests {
             },
             changed_files: vec![],
             changed_files_truncated: false,
+            evidence: vec![],
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),

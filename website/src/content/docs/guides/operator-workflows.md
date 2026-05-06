@@ -218,7 +218,8 @@ gather-step qa-evidence createOrder --base main --head feature/create-order --js
 Use `qa-evidence` when a downstream Braingent workflow needs grounded code
 evidence for a QA reference. The command emits normalized rows from
 `planning`, `review`, and `change_impact` packs, plus local feature-flag and
-existing-test signals. It intentionally stops at evidence: Jira/Figma
+existing-test signals, using the same canonical evidence metadata shape as the
+underlying producers. It intentionally stops at evidence: Jira/Figma
 interpretation, test-case prose, and reviewer prompts belong in the planning
 tool that consumes the manifest.
 

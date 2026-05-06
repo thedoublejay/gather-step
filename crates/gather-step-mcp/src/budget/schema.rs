@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::writer::BudgetedTool;
 
-pub const RESPONSE_SCHEMA_VERSION: u8 = 3;
+pub const RESPONSE_SCHEMA_VERSION: u8 = 4;
 
 #[must_use]
 pub const fn response_schema_version() -> u8 {

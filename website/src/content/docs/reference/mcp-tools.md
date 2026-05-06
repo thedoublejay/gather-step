@@ -166,11 +166,12 @@ Used automatically when the user asks to review a pull request, do a structural 
 | `keep_cache` | bool | no | Preserve the review artifact for follow-up `impact`/`trace`/`pack` queries. Default: `false` — the artifact is deleted after the report is returned. |
 | `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. `strict` and `pedantic` cause non-zero exit on threshold violations; `warn` always returns the report regardless. |
 
-**Returns.** A JSON `DeltaReport` (`schema_version: 7`) with these top-level sections:
+**Returns.** A JSON `DeltaReport` (`schema_version: 8`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
 - `safety` — review storage path, run id, cleanup policy, cache key.
 - `changed_files` — list of repo-relative paths changed in `merge_base..head`.
+- `evidence` — canonical evidence rows computed from the typed delta surfaces at query time.
 - `routes` — added / removed / changed HTTP routes by `(method, canonical_path)`. Carry handler info via `Serves` edges and downstream impact summaries.
 - `symbols` — added / removed / changed exported symbols by `(repo, qualified_name)`. Detects `signature_changed` and `visibility_changed` flags. Removed and changed surfaces carry impact summaries.
 - `payload_contracts` — field-level diffs (added / removed / type-changed / `optional`-required flips). Removed and changed contracts can carry impact summaries.

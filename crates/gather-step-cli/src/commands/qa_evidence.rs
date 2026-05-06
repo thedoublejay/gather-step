@@ -6,6 +6,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use gather_step_core::RegistryStore;
+use gather_step_mcp::evidence::{
+    Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
+    EvidenceSupportMethod, evidence_kind_for_pack_item, evidence_source_for_pack_mode,
+    infer_surface,
+};
 use gather_step_mcp::tools::{
     events::{TraceEventRequest, TraceRouteRequest, trace_event_tool, trace_route_tool},
     packs::{ContextPackRequest, ContextPackResponse, context_pack_tool},
@@ -75,7 +80,7 @@ struct QaEvidenceOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     head_ref: Option<String>,
     manifest_summary: QaEvidenceSummary,
-    rows: Vec<QaEvidenceRow>,
+    rows: Vec<Evidence>,
     gaps: Vec<QaEvidenceGap>,
 }
 
@@ -87,31 +92,6 @@ struct QaEvidenceSummary {
     truncated: bool,
     omitted_rows: usize,
     dropped_kinds: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct QaEvidenceRow {
-    id: String,
-    fact_kind: String,
-    source_resolver: String,
-    confidence: String,
-    citation_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repo: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    file_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    line_start: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    symbol_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    symbol_kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    symbol_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    category: Option<String>,
-    surface: String,
-    reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,89 +282,28 @@ fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &QaEvidenceArgs) -> R
 fn collect_pack_rows(
     mode: &'static str,
     response: &ContextPackResponse,
-    rows: &mut Vec<QaEvidenceRow>,
+    rows: &mut Vec<Evidence>,
     gaps: &mut Vec<QaEvidenceGap>,
 ) {
-    for item in &response.data.items {
-        let ordinal = rows.len() + 1;
-        rows.push(QaEvidenceRow {
-            id: format!("GS-{}-{ordinal:03}", mode_label(mode)),
-            fact_kind: pack_fact_kind(mode, &item.category, &item.file_path),
-            source_resolver: format!("{mode}_pack"),
-            confidence: confidence_from_score(item.score),
-            citation_key: citation_key(
-                mode,
-                item.repo.as_str(),
-                item.file_path.as_str(),
-                item.line_start,
-            ),
-            repo: Some(item.repo.clone()),
-            file_path: Some(item.file_path.clone()),
-            line_start: item.line_start,
-            symbol_id: Some(item.symbol_id.clone()),
-            symbol_kind: Some(item.symbol_kind.clone()),
-            symbol_name: Some(item.symbol_name.clone()),
-            category: Some(item.category.clone()),
-            surface: infer_surface(
-                &item.symbol_kind,
-                &item.category,
-                &item.file_path,
-                &item.symbol_name,
-            ),
-            reason: item.reason.clone(),
-        });
+    rows.extend(response.data.evidence.iter().cloned());
+    if response.data.evidence.is_empty() {
+        rows.extend(
+            response
+                .data
+                .items
+                .iter()
+                .map(|item| pack_item_evidence(mode, item)),
+        );
+        rows.extend(
+            response
+                .data
+                .change_impact
+                .cross_repo_callers
+                .iter()
+                .map(|caller| cross_repo_caller_evidence(mode, caller)),
+        );
     }
 
-    for caller in &response.data.change_impact.cross_repo_callers {
-        let ordinal = rows.len() + 1;
-        rows.push(QaEvidenceRow {
-            id: format!("GS-IMPACT-{ordinal:03}"),
-            fact_kind: "cross_repo_caller".to_owned(),
-            source_resolver: format!("{mode}_pack"),
-            confidence: "high".to_owned(),
-            citation_key: citation_key(
-                mode,
-                caller.repo.as_str(),
-                caller.file_path.as_str(),
-                caller.line_start,
-            ),
-            repo: Some(caller.repo.clone()),
-            file_path: Some(caller.file_path.clone()),
-            line_start: caller.line_start,
-            symbol_id: Some(caller.symbol_id.clone()),
-            symbol_kind: Some(caller.symbol_kind.clone()),
-            symbol_name: Some(caller.symbol_name.clone()),
-            category: Some("caller".to_owned()),
-            surface: infer_surface(
-                &caller.symbol_kind,
-                "caller",
-                &caller.file_path,
-                &caller.symbol_name,
-            ),
-            reason: "Upstream caller reaches the QA evidence target.".to_owned(),
-        });
-    }
-
-    for repo in &response.data.change_impact.confirmed_downstream_repos {
-        let ordinal = rows.len() + 1;
-        rows.push(repo_impact_row(
-            ordinal,
-            mode,
-            repo,
-            "confirmed_downstream_repo",
-            "high",
-        ));
-    }
-    for repo in &response.data.change_impact.probable_downstream_repos {
-        let ordinal = rows.len() + 1;
-        rows.push(repo_impact_row(
-            ordinal,
-            mode,
-            repo,
-            "probable_downstream_repo",
-            "medium",
-        ));
-    }
     for repo in &response.data.change_impact.unresolved_possible {
         push_gap(
             gaps,
@@ -413,30 +332,66 @@ fn collect_pack_rows(
     }
 }
 
-fn repo_impact_row(
-    ordinal: usize,
-    mode: &'static str,
-    repo: &str,
-    fact_kind: &str,
-    confidence: &str,
-) -> QaEvidenceRow {
-    QaEvidenceRow {
-        id: format!("GS-IMPACT-{ordinal:03}"),
-        fact_kind: fact_kind.to_owned(),
-        source_resolver: format!("{mode}_pack"),
-        confidence: confidence.to_owned(),
-        citation_key: format!("{mode}:{repo}:repo-impact"),
-        repo: Some(repo.to_owned()),
-        file_path: None,
-        line_start: None,
-        symbol_id: None,
-        symbol_kind: None,
-        symbol_name: None,
-        category: Some("downstream".to_owned()),
-        surface: "integration".to_owned(),
-        reason: "Downstream repository should be considered for manual QA smoke coverage."
-            .to_owned(),
-    }
+fn pack_item_evidence(mode: &str, item: &gather_step_mcp::tools::packs::PackItem) -> Evidence {
+    Evidence::new(
+        evidence_kind_for_pack_item(mode, &item.category, &item.file_path),
+        evidence_source_for_pack_mode(mode),
+        EvidenceCitation::symbol(
+            item.repo.clone(),
+            item.file_path.clone(),
+            item.line_start,
+            item.symbol_id.clone(),
+            item.symbol_kind.clone(),
+            item.symbol_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new(infer_surface(
+            &item.symbol_kind,
+            &item.category,
+            &item.file_path,
+            &item.symbol_name,
+        ))
+        .with_category(item.category.clone())
+        .with_name(item.symbol_name.clone())
+        .with_reason(item.reason.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::RetrievalRank,
+        Some(item.score),
+    ))
+}
+
+fn cross_repo_caller_evidence(
+    mode: &str,
+    caller: &gather_step_mcp::tools::packs::CrossRepoCaller,
+) -> Evidence {
+    Evidence::new(
+        EvidenceKind::CrossRepoCaller,
+        evidence_source_for_pack_mode(mode),
+        EvidenceCitation::symbol(
+            caller.repo.clone(),
+            caller.file_path.clone(),
+            caller.line_start,
+            caller.symbol_id.clone(),
+            caller.symbol_kind.clone(),
+            caller.symbol_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new(infer_surface(
+            &caller.symbol_kind,
+            "caller",
+            &caller.file_path,
+            &caller.symbol_name,
+        ))
+        .with_category("caller")
+        .with_name(caller.symbol_name.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        Some(1000),
+    ))
 }
 
 fn filesystem_evidence(
@@ -445,7 +400,7 @@ fn filesystem_evidence(
     target: &str,
     limit: usize,
     gaps: &mut Vec<QaEvidenceGap>,
-) -> Result<Vec<QaEvidenceRow>> {
+) -> Result<Vec<Evidence>> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -487,54 +442,48 @@ fn filesystem_evidence(
             if rows.len() >= limit {
                 return Ok(rows);
             }
-            let fact_kind = if is_test_file(&evidence.file_path) {
-                "existing_test_signal"
-            } else if feature_flag_key(&evidence.text).is_some() {
-                "feature_flag"
-            } else {
-                continue;
-            };
-            let confidence = if fact_kind == "feature_flag" {
-                if evidence.text.contains(target) {
-                    "high"
-                } else if has_static_flag_key(&evidence.text) {
-                    "medium"
-                } else {
-                    "unresolved"
-                }
-            } else {
-                "medium"
-            };
-            let ordinal = rows.len() + 1;
-            rows.push(QaEvidenceRow {
-                id: format!("GS-SCAN-{ordinal:03}"),
-                fact_kind: fact_kind.to_owned(),
-                source_resolver: "workspace_scan".to_owned(),
-                confidence: confidence.to_owned(),
-                citation_key: citation_key(
-                    "workspace_scan",
-                    evidence.repo.as_str(),
-                    evidence.file_path.as_str(),
-                    evidence.line_start,
-                ),
-                repo: Some(evidence.repo),
-                file_path: Some(evidence.file_path.clone()),
-                line_start: evidence.line_start,
-                symbol_id: None,
-                symbol_kind: None,
-                symbol_name: None,
-                category: Some(fact_kind.to_owned()),
-                surface: if fact_kind == "feature_flag" {
-                    "feature_flag".to_owned()
-                } else {
-                    "test".to_owned()
-                },
-                reason: evidence.text.trim().to_owned(),
-            });
+            if let Some(row) = filesystem_evidence_row(target, evidence) {
+                rows.push(row);
+            }
         }
     }
 
     Ok(rows)
+}
+
+fn filesystem_evidence_row(target: &str, evidence: FileLineEvidence) -> Option<Evidence> {
+    let (kind, surface, score) = if is_test_file(&evidence.file_path) {
+        (EvidenceKind::ExistingTestSignal, "test", Some(650))
+    } else if feature_flag_key(&evidence.text).is_some() {
+        let score = if evidence.text.contains(target) {
+            Some(1000)
+        } else if has_static_flag_key(&evidence.text) {
+            Some(650)
+        } else {
+            Some(0)
+        };
+        (EvidenceKind::FeatureFlag, "feature_flag", score)
+    } else {
+        return None;
+    };
+
+    Some(
+        Evidence::new(
+            kind,
+            EvidenceSource::WorkspaceScan,
+            EvidenceCitation::file_line(evidence.repo, evidence.file_path, evidence.line_start),
+        )
+        .with_subject(
+            EvidenceSubject::new(surface)
+                .with_category(surface)
+                .with_name(target.to_owned())
+                .with_reason(evidence.text.trim().to_owned()),
+        )
+        .with_support(EvidenceSupport::new(
+            EvidenceSupportMethod::HeuristicScan,
+            score,
+        )),
+    )
 }
 
 fn scan_repo_files(
@@ -699,77 +648,6 @@ fn is_test_file(path: &str) -> bool {
         || lower.contains("\\tests\\")
 }
 
-fn pack_fact_kind(mode: &str, category: &str, file_path: &str) -> String {
-    if is_test_file(file_path) {
-        return "existing_test_signal".to_owned();
-    }
-    match mode {
-        "review" => "changed_behavior_candidate".to_owned(),
-        "change_impact" => "impact_candidate".to_owned(),
-        "planning" => "planning_context".to_owned(),
-        _ => category.to_owned(),
-    }
-}
-
-fn infer_surface(symbol_kind: &str, category: &str, file_path: &str, symbol_name: &str) -> String {
-    let text = format!("{symbol_kind} {category} {file_path} {symbol_name}").to_ascii_lowercase();
-    if text.contains("test") || is_test_file(file_path) {
-        "test".to_owned()
-    } else if text.contains("route")
-        || text.contains("controller")
-        || text.contains("endpoint")
-        || text.contains("api")
-    {
-        "api".to_owned()
-    } else if text.contains("event")
-        || text.contains("topic")
-        || text.contains("queue")
-        || text.contains("consumer")
-    {
-        "event".to_owned()
-    } else if text.contains("dto")
-        || text.contains("schema")
-        || text.contains("payload")
-        || text.contains("contract")
-    {
-        "contract".to_owned()
-    } else if text.contains("component")
-        || text.contains("page")
-        || text.contains("tsx")
-        || text.contains("jsx")
-    {
-        "ui".to_owned()
-    } else {
-        "code".to_owned()
-    }
-}
-
-fn confidence_from_score(score: u16) -> String {
-    match score {
-        850..=u16::MAX => "high",
-        650..=849 => "medium",
-        1..=649 => "low",
-        0 => "unresolved",
-    }
-    .to_owned()
-}
-
-fn citation_key(mode: &str, repo: &str, file_path: &str, line_start: Option<u32>) -> String {
-    match line_start {
-        Some(line) => format!("{mode}:{repo}:{file_path}:{line}"),
-        None => format!("{mode}:{repo}:{file_path}"),
-    }
-}
-
-fn mode_label(mode: &str) -> &'static str {
-    match mode {
-        "planning" => "PLAN",
-        "review" => "REVIEW",
-        "change_impact" => "IMPACT",
-        _ => "PACK",
-    }
-}
-
 fn push_gap(
     gaps: &mut Vec<QaEvidenceGap>,
     source_resolver: impl Into<String>,
@@ -804,43 +682,25 @@ mod tests {
         assert!(is_test_file("src/OrderList.test.tsx"));
         assert!(is_test_file("src/tests/order_list.rs"));
 
+        let row = filesystem_evidence_row(
+            "OrderList",
+            FileLineEvidence {
+                repo: "frontend".to_owned(),
+                file_path: "src/flags.ts".to_owned(),
+                line_start: Some(12),
+                text: "const enabled = useFlag('OrderList');".to_owned(),
+            },
+        )
+        .expect("feature flag evidence");
+        assert_eq!(row.kind, EvidenceKind::FeatureFlag);
+        assert_eq!(row.source, EvidenceSource::WorkspaceScan);
         assert_eq!(
-            pack_fact_kind("planning", "component", "src/OrderList.tsx"),
-            "planning_context"
+            row.citation.kind,
+            gather_step_mcp::evidence::CitationKind::FileLine
         );
         assert_eq!(
-            pack_fact_kind("review", "component", "src/OrderList.test.tsx"),
-            "existing_test_signal"
+            row.support.as_ref().map(|support| &support.method),
+            Some(&EvidenceSupportMethod::HeuristicScan)
         );
-        assert_eq!(
-            infer_surface(
-                "class",
-                "controller",
-                "src/orders.controller.ts",
-                "OrdersController"
-            ),
-            "api"
-        );
-        assert_eq!(
-            infer_surface("function", "component", "src/OrderList.tsx", "OrderList"),
-            "ui"
-        );
-
-        assert_eq!(confidence_from_score(900), "high");
-        assert_eq!(confidence_from_score(700), "medium");
-        assert_eq!(confidence_from_score(200), "low");
-        assert_eq!(confidence_from_score(0), "unresolved");
-        assert_eq!(
-            citation_key("planning", "frontend", "src/OrderList.tsx", Some(12)),
-            "planning:frontend:src/OrderList.tsx:12"
-        );
-        assert_eq!(
-            citation_key("planning", "frontend", "src/OrderList.tsx", None),
-            "planning:frontend:src/OrderList.tsx"
-        );
-        assert_eq!(mode_label("planning"), "PLAN");
-        assert_eq!(mode_label("review"), "REVIEW");
-        assert_eq!(mode_label("change_impact"), "IMPACT");
-        assert_eq!(mode_label("other"), "PACK");
     }
 }

@@ -183,7 +183,7 @@ gather-step --workspace /path/to/workspace pr-review --base main --head feature/
 
 `pr-review` builds an isolated review index for a PR branch and emits a structured delta report covering changed files, safety signals, and suggested follow-up commands. See [CLI reference](website/src/content/docs/reference/cli.md#pr-review) for the full flag list.
 
-`qa-evidence` emits structured code evidence for QA planning tools. It combines planning/review/change-impact packs with local feature-flag and existing-test signals, but it does not generate test cases or interpret product requirements.
+`qa-evidence` emits canonical code-evidence metadata for QA planning tools. It combines planning/review/change-impact packs with local feature-flag and existing-test signals, but it does not generate test cases or interpret product requirements.
 
 ## Security
 

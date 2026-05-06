@@ -387,7 +387,7 @@ mod tests {
 
     fn empty_report() -> DeltaReport {
         DeltaReport {
-            schema_version: 7,
+            schema_version: crate::pr_review::delta_report::DELTA_REPORT_SCHEMA_VERSION,
             metadata: ReviewMetadata {
                 workspace: PathBuf::from("/tmp/ws"),
                 base_input: "main".to_owned(),
@@ -412,6 +412,7 @@ mod tests {
             },
             changed_files: vec![],
             changed_files_truncated: false,
+            evidence: vec![],
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),
