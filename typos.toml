@@ -7,3 +7,5 @@ extend-exclude = [
 [default.extend-words]
 # Intentional typo used to exercise Tantivy's fuzzy-search fallback in tests.
 oreder = "oreder"
+# Project name in the v4 QA reference research notes.
+plaintest = "plaintest"
