@@ -81,6 +81,26 @@ fn stdout_json(output: &process::Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should contain valid json")
 }
 
+fn sorted_json_keys(value: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .as_object()
+        .expect("value should be a JSON object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn assert_json_keys(value: &Value, expected: &[&str]) {
+    let mut expected = expected
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(sorted_json_keys(value), expected);
+}
+
 #[test]
 fn no_args_non_interactive_prints_help() {
     let temp = TempDir::new("no-args-help");
@@ -177,11 +197,21 @@ export class ServiceAController {
         frontend.join("src/OrderList.tsx"),
         r"
 export function OrderList() {
+  // useFlag('orders-list-v2')
   return <div>Orders</div>;
 }
 ",
     )
     .expect("frontend source");
+    fs::write(
+        frontend.join("src/OrderList.test.tsx"),
+        r"
+import { OrderList } from './OrderList';
+
+export const orderListTestTarget = OrderList;
+",
+    )
+    .expect("frontend test source");
 }
 
 #[test]
@@ -364,6 +394,158 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .as_array()
             .expect("pack items array")
             .is_empty()
+    );
+    let pack_evidence = pack_json["data"]["evidence"]
+        .as_array()
+        .expect("pack evidence array");
+    assert!(!pack_evidence.is_empty());
+    assert!(pack_evidence.iter().all(|row| {
+        row["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("GS-EVID-"))
+            && row["kind"].is_string()
+            && row["source"].is_string()
+            && row["citation"].is_object()
+    }));
+
+    let qa_evidence = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "OrderList",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--json",
+        ],
+    );
+    let qa_evidence_json = stdout_json(&qa_evidence);
+    assert_json_keys(
+        &qa_evidence_json,
+        &[
+            "base_ref",
+            "event",
+            "gaps",
+            "head_ref",
+            "manifest_summary",
+            "rows",
+            "schema_version",
+            "target",
+        ],
+    );
+    assert_json_keys(
+        &qa_evidence_json["manifest_summary"],
+        &[
+            "dropped_kinds",
+            "gap_count",
+            "omitted_rows",
+            "pack_modes",
+            "row_count",
+            "truncated",
+        ],
+    );
+    assert_eq!(qa_evidence_json["event"], "qa_evidence_completed");
+    assert_eq!(qa_evidence_json["schema_version"], "qa-evidence.v0.1");
+    assert_eq!(qa_evidence_json["target"], "OrderList");
+    assert_eq!(qa_evidence_json["manifest_summary"]["truncated"], false);
+    assert!(qa_evidence_json["base_ref"] == "main");
+    assert!(qa_evidence_json["head_ref"] == "HEAD");
+    let qa_rows = qa_evidence_json["rows"]
+        .as_array()
+        .expect("qa evidence rows array");
+    let required_row_keys = ["citation", "id", "kind", "source"];
+    let optional_row_keys = ["subject", "support"];
+    assert!(qa_rows.iter().any(|row| row["source"] == "planning_pack"));
+    assert!(qa_rows.iter().any(|row| row["kind"] == "feature_flag"));
+    assert!(
+        qa_rows
+            .iter()
+            .any(|row| row["kind"] == "existing_test_signal")
+    );
+    assert!(qa_rows.iter().all(|row| {
+        row["citation"].is_object()
+            && row["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("GS-EVID-"))
+    }));
+    for row in qa_rows {
+        let keys = sorted_json_keys(row);
+        for required in required_row_keys {
+            assert!(
+                keys.iter().any(|key| key == required),
+                "qa-evidence row must contain required key `{required}`: {row:?}"
+            );
+        }
+        assert!(
+            keys.iter()
+                .all(|key| required_row_keys.contains(&key.as_str())
+                    || optional_row_keys.contains(&key.as_str())),
+            "qa-evidence row contains an undocumented key set: {keys:?}"
+        );
+    }
+
+    let qa_evidence_missing_refs = run_ok(temp.path(), &["qa-evidence", "OrderList", "--json"]);
+    let qa_evidence_missing_refs_json = stdout_json(&qa_evidence_missing_refs);
+    let qa_gaps = qa_evidence_missing_refs_json["gaps"]
+        .as_array()
+        .expect("qa evidence gaps array");
+    for gap in qa_gaps {
+        assert_json_keys(
+            gap,
+            &[
+                "blocks_complete_coverage",
+                "id",
+                "kind",
+                "message",
+                "source_resolver",
+            ],
+        );
+    }
+    assert!(qa_gaps.iter().any(|gap| {
+        gap["kind"] == "missing_diff_refs" && gap["blocks_complete_coverage"] == false
+    }));
+
+    let qa_evidence_scan_limited = run_ok(
+        temp.path(),
+        &[
+            "qa-evidence",
+            "OrderList",
+            "--base",
+            "main",
+            "--head",
+            "HEAD",
+            "--scan-limit",
+            "1",
+            "--json",
+        ],
+    );
+    let qa_evidence_scan_limited_json = stdout_json(&qa_evidence_scan_limited);
+    assert_eq!(
+        qa_evidence_scan_limited_json["manifest_summary"]["truncated"],
+        true
+    );
+    assert!(
+        qa_evidence_scan_limited_json["manifest_summary"]["omitted_rows"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert!(
+        qa_evidence_scan_limited_json["gaps"]
+            .as_array()
+            .expect("scan-limited gaps array")
+            .iter()
+            .any(|gap| gap["kind"] == "scan_limit_truncated"
+                && gap["blocks_complete_coverage"] == true)
+    );
+
+    let invalid_qa_route = run_fail(
+        temp.path(),
+        &["qa-evidence", "--route-method", "GET", "--json"],
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid_qa_route.stderr)
+            .contains("--route-method and --route-path must be provided together")
     );
 
     let repo_pack = run_ok(

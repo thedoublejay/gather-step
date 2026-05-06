@@ -46,6 +46,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`projection-impact`](#projection-impact) — Trace static source-to-projection field impact.
 - [`deployment-topology`](#deployment-topology) — Query indexed deployment artifacts, env vars, and shared runtime infrastructure.
 - [`pack`](#pack) — Return a bounded context pack for a target symbol.
+- [`qa-evidence`](#qa-evidence) — Emit canonical code-evidence metadata for downstream QA planning.
 - [`conventions`](#conventions) — Derive repeated structural conventions from the indexed graph.
 - [`generate claude-md`](#generate-claude-md) — Generate assistant-facing CLAUDE.md rule files from the index.
 - [`generate agents-md`](#generate-agents-md) — Generate a workspace summary for Codex-style `AGENTS.md` workflows.
@@ -569,9 +570,41 @@ gather-step --workspace /path/to/workspace pack OrdersService --mode planning
 gather-step --workspace /path/to/workspace pack OrdersService --mode debug --depth 3 --limit 8
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "context_pack_completed"`, top-level `response_schema_version`, `data`, and `meta`. The `data` payload contains `mode`, `target`, `found`, ranked `items`, `semantic_bridges`, `transport_links`, `next_steps`, `unresolved_gaps`, `planning_rescue`, and `change_impact`. The `change_impact` block includes `confirmed_downstream_repos`, `probable_downstream_repos`, `downstream_repos` (backward-compatible alias), and `truncated_repos`. The `meta` block includes `resolution`, `resolved_symbol_id`, `candidate_count`, `completeness`, `budget`, `ambiguity`, `resolution_confidence`, `confidence_model_version`, `winner_margin`, and any warnings.
+**Output shape (`--json`)** — emits one line with `event: "context_pack_completed"`, top-level `response_schema_version`, `data`, and `meta`. The `data` payload contains `mode`, `target`, `found`, ranked `items`, canonical `evidence`, `semantic_bridges`, `transport_links`, `next_steps`, `unresolved_gaps`, `planning_rescue`, and `change_impact`. The `change_impact` block includes `confirmed_downstream_repos`, `probable_downstream_repos`, `downstream_repos` (backward-compatible alias), `truncated_repos`, and canonical evidence on cross-repo callers. The `meta` block includes `resolution`, `resolved_symbol_id`, `candidate_count`, `completeness`, `budget`, `ambiguity`, `resolution_confidence`, `confidence_model_version`, `winner_margin`, and any warnings.
 
 **When to use** — to hand a bounded, task-shaped context payload to an AI assistant before starting a feature, debugging session, or review.
+
+---
+
+### `qa-evidence`
+
+Emits a normalized, evidence-only manifest for QA planning workflows. The command combines canonical evidence metadata from `planning`, `review`, and `change_impact` packs with local scans for feature-flag and existing-test signals. It does not generate test cases, interpret Jira or Figma, or make product assertions.
+
+```bash
+gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] <TARGET> [--base <REF>] [--head <REF>] [--limit <N>] [--depth <N>] [--budget-bytes <N>] [--scan-limit <N>]
+```
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `<TARGET>` | string (positional) | required | Target symbol name or hex `symbol_id`. |
+| `--base <REF>` | string | — | Optional base ref captured for downstream QA context. |
+| `--head <REF>` | string | — | Optional head ref captured for downstream QA context. |
+| `--limit <N>` | usize | 6 | Maximum ranked items to request from each pack mode. |
+| `--depth <N>` | usize | 2 | Traversal depth for caller and callee pack context. |
+| `--budget-bytes <N>` | usize | — | Optional response byte budget override for each pack. |
+| `--scan-limit <N>` | usize | 50 | Maximum filesystem-derived feature/test evidence rows. |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. |
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace qa-evidence OrdersService --base main --head feature/orders --json
+```
+
+**Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v0.1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are canonical evidence objects with `id`, closed enum `kind`, closed enum `source`, structured `citation`, optional `subject`, and optional `support { method, score }`. IDs are stable for a given source, kind, citation, and subject; support changes do not change the ID. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.
+
+**When to use** — before generating a QA reference in Braingent or another planning tool that needs grounded code evidence without asking Gather Step to write test-plan prose.
 
 ---
 
@@ -792,7 +825,7 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 7`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
+The report (`schema_version: 8`) populates `metadata`, `safety`, `changed_files`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
 
 The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
 

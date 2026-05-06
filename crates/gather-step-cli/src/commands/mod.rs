@@ -12,6 +12,7 @@ pub mod no_args;
 pub mod pack;
 pub mod pr_review;
 pub mod projection_impact;
+pub mod qa_evidence;
 pub mod reindex;
 pub mod search;
 pub mod serve;
@@ -102,6 +103,8 @@ pub enum Command {
     Impact(impact::ImpactArgs),
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
     DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
+    #[command(name = "qa-evidence")]
+    QaEvidence(qa_evidence::QaEvidenceArgs),
     Pack(pack::PackArgs),
     Events(events::EventsArgs),
     Conventions(conventions::ConventionsArgs),
@@ -176,6 +179,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
         Some(Command::ProjectionImpact(args)) => success(projection_impact::run(&app, args)),
         Some(Command::DeploymentTopology(args)) => success(deployment_topology::run(&app, args)),
+        Some(Command::QaEvidence(args)) => success(qa_evidence::run(&app, args)),
         Some(Command::Pack(args)) => success(pack::run(&app, &args)),
         Some(Command::Events(args)) => success(events::run(&app, args)),
         Some(Command::Conventions(args)) => success(conventions::run(&app, args)),

@@ -41,8 +41,9 @@ and prints the delta report.
 gather-step pr-review --base main --head feat/my-change --json
 ```
 
-The JSON form emits a `DeltaReport` (`schema_version: 7`) suitable for
-piping into other tools or reading programmatically.
+The JSON form emits a `DeltaReport` (`schema_version: 8`) suitable for
+piping into other tools or reading programmatically. It includes canonical
+evidence metadata computed from the typed delta surfaces at query time.
 
 ### Keeping the cache for follow-up queries
 
@@ -87,6 +88,7 @@ in that surface category.
 | `metadata` | Base/head SHAs, checkout mode, indexed repos, elapsed time, warnings |
 | `safety` | Review storage path, run ID, cleanup policy, cache key |
 | `changed_files` | Repo-relative paths changed in `merge_base..head` |
+| `evidence` | Canonical evidence rows with closed kind/source enums and structured citations |
 | `routes` | Added / removed / changed HTTP routes. Removed routes carry downstream impact summaries. |
 | `symbols` | Added / removed / changed exported symbols. Flags `signature_changed` and `visibility_changed`. |
 | `payload_contracts` | Field-level diffs: added, removed, type-changed, optional-required flips |
