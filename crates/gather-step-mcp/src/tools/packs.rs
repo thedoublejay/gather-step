@@ -1229,10 +1229,7 @@ fn assemble_context_pack_for_symbol(
         ));
     }
     let transport_links = raw_transport_links.as_ref().and_then(|links| {
-        let values = links
-            .iter()
-            .filter_map(|link| serde_json::to_value(link).ok())
-            .collect::<Vec<_>>();
+        let values = transport_links_to_json(links);
         (!values.is_empty()).then_some(values)
     });
 
@@ -4174,10 +4171,35 @@ fn merge_cross_repo_callers(callers: &mut Vec<CrossRepoCaller>, additional: Vec<
 }
 
 fn planning_proofs_to_json(proofs: &[PlanningProof]) -> Vec<serde_json::Value> {
-    proofs
-        .iter()
-        .filter_map(|proof| serde_json::to_value(proof).ok())
-        .collect()
+    let mut values = Vec::with_capacity(proofs.len());
+    for proof in proofs {
+        match serde_json::to_value(proof) {
+            Ok(value) => values.push(value),
+            Err(error) => tracing::warn!(
+                target: "gather_step_mcp::packs::planning_proofs_to_json",
+                error = %error,
+                "skipping planning_proof that failed to serialize; \
+                 confirmed_downstream_repos may be shorter than derived proof state",
+            ),
+        }
+    }
+    values
+}
+
+fn transport_links_to_json(links: &[TransportLink]) -> Vec<serde_json::Value> {
+    let mut values = Vec::with_capacity(links.len());
+    for link in links {
+        match serde_json::to_value(link) {
+            Ok(value) => values.push(value),
+            Err(error) => tracing::warn!(
+                target: "gather_step_mcp::packs::transport_links_to_json",
+                error = %error,
+                "skipping transport_link that failed to serialize; \
+                 confirmed downstream transport evidence may be shorter than graph state",
+            ),
+        }
+    }
+    values
 }
 
 fn deserialize_planning_proofs(response: &ContextPackResponse) -> Vec<PlanningProof> {

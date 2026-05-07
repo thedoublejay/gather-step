@@ -80,6 +80,10 @@ pub enum DeploymentParseError {
         #[source]
         source: serde_norway::Error,
     },
+    #[error(
+        "deployment artifact `{path}` contains unrendered template syntax; skipping YAML parse"
+    )]
+    Templated { path: String },
 }
 
 #[must_use]
@@ -159,6 +163,15 @@ pub fn parse_deployment_artifact_with_kind(
     content: &str,
     artifact_kind: DeploymentArtifactKind,
 ) -> Result<DeploymentParseOutput, DeploymentParseError> {
+    if artifact_kind_uses_yaml_parser(artifact_kind)
+        && looks_like_templated_yaml(content)
+        && serde_norway::from_str::<Value>(content).is_err()
+    {
+        return Err(DeploymentParseError::Templated {
+            path: path.to_owned(),
+        });
+    }
+
     let mut builder = OutputBuilder::new(repo, path, artifact_kind);
 
     match artifact_kind {
@@ -850,6 +863,18 @@ pub fn compose_env_file_refs(
     Ok(refs)
 }
 
+#[must_use]
+pub fn is_dotenv_style(name: &str) -> bool {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name);
+    base.eq_ignore_ascii_case(".env")
+        || base
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".env."))
+}
+
 fn collect_compose_env_files(service_value: &Value) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     let Some(env_file) = mapping_get(service_value, "env_file") else {
@@ -1074,6 +1099,29 @@ fn looks_like_helm_template(content: &str) -> bool {
             || content.contains("include "))
 }
 
+fn looks_like_templated_yaml(content: &str) -> bool {
+    has_balanced_template_delim(content, "{{", "}}")
+        || has_balanced_template_delim(content, "{%", "%}")
+}
+
+fn has_balanced_template_delim(content: &str, open: &str, close: &str) -> bool {
+    let Some(open_index) = content.find(open) else {
+        return false;
+    };
+    content[open_index + open.len()..].contains(close)
+}
+
+fn artifact_kind_uses_yaml_parser(kind: DeploymentArtifactKind) -> bool {
+    matches!(
+        kind,
+        DeploymentArtifactKind::Compose
+            | DeploymentArtifactKind::Kubernetes
+            | DeploymentArtifactKind::Kustomize
+            | DeploymentArtifactKind::Helm
+            | DeploymentArtifactKind::GithubActions
+    )
+}
+
 fn workflow_job_is_deployish(job_name: &str, value: &Value) -> bool {
     if deployish_identifier(job_name) || mapping_get(value, "environment").is_some() {
         return true;
@@ -1156,9 +1204,17 @@ fn workflow_needs(value: &Value) -> BTreeSet<String> {
 }
 
 fn parse_yaml(content: &str, path: &str) -> Result<Value, DeploymentParseError> {
-    serde_norway::from_str(content).map_err(|source| DeploymentParseError::Yaml {
-        path: path.to_owned(),
-        source,
+    serde_norway::from_str(content).map_err(|source| {
+        if looks_like_templated_yaml(content) {
+            DeploymentParseError::Templated {
+                path: path.to_owned(),
+            }
+        } else {
+            DeploymentParseError::Yaml {
+                path: path.to_owned(),
+                source,
+            }
+        }
     })
 }
 
@@ -1342,8 +1398,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        DeploymentArtifactKind, compose_env_file_refs, detect_artifact_kind,
-        parse_deployment_artifact,
+        DeploymentArtifactKind, DeploymentParseError, compose_env_file_refs, detect_artifact_kind,
+        is_dotenv_style, parse_deployment_artifact, parse_deployment_artifact_with_kind,
     };
 
     #[test]
@@ -1607,8 +1663,8 @@ spec:
     }
 
     #[test]
-    fn helm_template_fallback_does_not_treat_every_yaml_name_as_env() {
-        let output = parse_deployment_artifact(
+    fn helm_template_control_flow_returns_templated_error() {
+        let error = parse_deployment_artifact(
             "backend",
             "charts/api/templates/service.yaml",
             r"
@@ -1617,15 +1673,13 @@ name: nginx
 {{ end }}
 ",
         )
-        .expect("helm template fallback should not fail parsing");
+        .expect_err("helm template control flow should be skipped before parsing");
 
-        assert_eq!(output.artifact_kind, DeploymentArtifactKind::Helm);
-        assert!(
-            !output
-                .nodes
-                .iter()
-                .any(|node| node.qualified_name == "__env_var__nginx")
-        );
+        assert!(matches!(
+            error,
+            DeploymentParseError::Templated { ref path }
+                if path == "charts/api/templates/service.yaml"
+        ));
     }
 
     #[test]
@@ -1727,7 +1781,7 @@ jobs:
 
     #[test]
     fn env_file_parser_records_names_only() {
-        let output = super::parse_deployment_artifact_with_kind(
+        let output = parse_deployment_artifact_with_kind(
             "backend",
             ".env.production",
             "DATABASE_URL=postgres://secret\n# ignored\nexport BAD=ignored\nAPI_TOKEN=value\n",
@@ -1747,6 +1801,94 @@ jobs:
         );
         let serialized = serde_json::to_string(&output).expect("serialize output");
         assert!(!serialized.contains("postgres://secret"));
+    }
+
+    #[test]
+    fn templated_argo_cd_yaml_returns_templated_error() {
+        let error = parse_deployment_artifact(
+            "platform",
+            "argocd/application.yaml",
+            r"
+{{ range .applications }}
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ .name }}
+spec:
+  destination:
+    namespace: default
+{{ end }}
+",
+        )
+        .expect_err("unrendered Argo CD template should be skipped");
+
+        assert!(matches!(
+            error,
+            DeploymentParseError::Templated { ref path } if path == "argocd/application.yaml"
+        ));
+    }
+
+    #[test]
+    fn templated_helm_yaml_returns_templated_error() {
+        let error = parse_deployment_artifact(
+            "platform",
+            "charts/api/templates/deployment.yaml",
+            r"
+{{ range .Values.deployments }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+{{ end }}
+",
+        )
+        .expect_err("unrendered Helm template should be skipped");
+
+        assert!(matches!(
+            error,
+            DeploymentParseError::Templated { ref path }
+                if path == "charts/api/templates/deployment.yaml"
+        ));
+    }
+
+    #[test]
+    fn plain_malformed_yaml_still_returns_yaml_error() {
+        let error = parse_deployment_artifact(
+            "platform",
+            "deployment.yaml",
+            "apiVersion: [\nkind: Deployment\n",
+        )
+        .expect_err("plain malformed YAML should stay actionable");
+
+        assert!(matches!(error, DeploymentParseError::Yaml { .. }));
+    }
+
+    #[test]
+    fn quoted_template_delimiters_do_not_force_template_skip() {
+        let output = parse_deployment_artifact(
+            "platform",
+            "configmap.yaml",
+            r#"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sample-config
+data:
+  literal: "{{ value }}"
+"#,
+        )
+        .expect("quoted template-looking scalars are valid YAML");
+
+        assert_eq!(output.artifact_kind, DeploymentArtifactKind::Kubernetes);
+    }
+
+    #[test]
+    fn dotenv_style_detection_matches_common_env_names() {
+        assert!(is_dotenv_style(".env"));
+        assert!(is_dotenv_style("./.env.local"));
+        assert!(is_dotenv_style("config/.ENV.production"));
+        assert!(!is_dotenv_style("prod.env"));
+        assert!(!is_dotenv_style("env.production"));
     }
 
     #[test]

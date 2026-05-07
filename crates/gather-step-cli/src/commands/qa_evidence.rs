@@ -596,12 +596,19 @@ fn collect_pack_rows(
 ) {
     rows.extend(response.data.evidence.iter().cloned());
     if response.data.evidence.is_empty() {
+        let source = match source_for_pack_mode(mode) {
+            Ok(source) => source,
+            Err(error) => {
+                push_gap(gaps, mode, "unsupported_pack_mode", error.to_string(), true);
+                return;
+            }
+        };
         rows.extend(
             response
                 .data
                 .items
                 .iter()
-                .map(|item| pack_item_evidence(mode, item)),
+                .map(|item| pack_item_evidence(source, mode, item)),
         );
         rows.extend(
             response
@@ -609,7 +616,7 @@ fn collect_pack_rows(
                 .change_impact
                 .cross_repo_callers
                 .iter()
-                .map(|caller| cross_repo_caller_evidence(mode, caller)),
+                .map(|caller| cross_repo_caller_evidence(source, caller)),
         );
     }
 
@@ -641,10 +648,14 @@ fn collect_pack_rows(
     }
 }
 
-fn pack_item_evidence(mode: &str, item: &gather_step_mcp::tools::packs::PackItem) -> Evidence {
+fn pack_item_evidence(
+    source: EvidenceSource,
+    mode: &str,
+    item: &gather_step_mcp::tools::packs::PackItem,
+) -> Evidence {
     Evidence::new(
         evidence_kind_for_pack_item(mode, &item.category, &item.file_path),
-        evidence_source_for_pack_mode(mode).expect("qa-evidence uses a known pack mode"),
+        source,
         EvidenceCitation::symbol(
             item.repo.clone(),
             item.file_path.clone(),
@@ -672,12 +683,12 @@ fn pack_item_evidence(mode: &str, item: &gather_step_mcp::tools::packs::PackItem
 }
 
 fn cross_repo_caller_evidence(
-    mode: &str,
+    source: EvidenceSource,
     caller: &gather_step_mcp::tools::packs::CrossRepoCaller,
 ) -> Evidence {
     Evidence::new(
         EvidenceKind::CrossRepoCaller,
-        evidence_source_for_pack_mode(mode).expect("qa-evidence uses a known pack mode"),
+        source,
         EvidenceCitation::symbol(
             caller.repo.clone(),
             caller.file_path.clone(),
@@ -701,6 +712,11 @@ fn cross_repo_caller_evidence(
         EvidenceSupportMethod::GraphTraversal,
         Some(1000),
     ))
+}
+
+fn source_for_pack_mode(mode: &str) -> Result<EvidenceSource> {
+    evidence_source_for_pack_mode(mode)
+        .with_context(|| format!("unsupported qa-evidence pack mode `{mode}`"))
 }
 
 fn filesystem_evidence(

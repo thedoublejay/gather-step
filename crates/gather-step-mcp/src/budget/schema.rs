@@ -11,6 +11,17 @@ pub const fn response_schema_version() -> u8 {
     RESPONSE_SCHEMA_VERSION
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{RESPONSE_SCHEMA_VERSION, response_schema_version};
+
+    #[test]
+    fn response_schema_version_is_pinned() {
+        assert_eq!(RESPONSE_SCHEMA_VERSION, 1);
+        assert_eq!(response_schema_version(), 1);
+    }
+}
+
 /// Reason an AI-facing response dropped lower-ranked evidence.
 ///
 /// These four categorical values are locked so agents can branch uniformly on
