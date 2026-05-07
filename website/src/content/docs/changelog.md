@@ -5,6 +5,23 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.3 (2026-05-07)
+
+Release status: **released**.
+
+Patch on top of v4.0.2. Replaces blanket deployment-artifact warning demotion with structured skip classification, so expected template and dotenv cases stay quiet while real malformed YAML remains visible.
+
+### Fixed
+
+- Templated YAML deployment artifacts using `{{ ... }}` or `{% ... %}` are classified as expected skips when strict YAML parsing fails. These files now emit debug detail plus an aggregate skip counter instead of per-file warning noise.
+- Missing Compose `env_file` references are split by convention: `.env` / `.env.*` paths are treated as expected gitignored dotenv skips, while custom names like `prod.env` still warn.
+- Deployment indexing now reports a compact aggregate skip summary with counters for templated YAML, missing dotenv files, oversized env files, malformed artifacts, and non-YAML `.github/workflows` siblings.
+- Real malformed YAML remains a warning. The parser no longer hides actionable deployment config problems behind a blanket debug demotion.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.3`.
+
 ## v4.0.2 (2026-05-07)
 
 Release status: **released**.

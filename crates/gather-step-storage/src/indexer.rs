@@ -17,9 +17,9 @@ use gather_step_core::{
     node_id, normalize_path_separators, ref_node_id,
 };
 use gather_step_deploy::{
-    DeploymentArtifactKind, DeploymentEdge, DeploymentNode, DeploymentParseOutput,
-    compose_env_file_refs, deployment_service_qn, detect_artifact_kind, parse_deployment_artifact,
-    parse_deployment_artifact_with_kind,
+    DeploymentArtifactKind, DeploymentEdge, DeploymentNode, DeploymentParseError,
+    DeploymentParseOutput, compose_env_file_refs, deployment_service_qn, detect_artifact_kind,
+    is_dotenv_style, parse_deployment_artifact, parse_deployment_artifact_with_kind,
 };
 use gather_step_parser::{
     CallSite, FileEntry as SourceFileEntry, FileStat, ManifestError, ParseError, ParsedFile,
@@ -103,6 +103,83 @@ pub struct IndexingStats {
     pub nodes_created: usize,
     pub edges_created: usize,
     pub duration_ms: u128,
+    pub deployment_skips: DeploymentSkipCounters,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeploymentSkipCounters {
+    pub templated_yaml: usize,
+    pub missing_dotenv: usize,
+    pub oversized_envfile: usize,
+    pub malformed_artifact: usize,
+    pub wrong_kind_in_workflows: usize,
+}
+
+impl DeploymentSkipCounters {
+    fn total(self) -> usize {
+        self.templated_yaml
+            .saturating_add(self.missing_dotenv)
+            .saturating_add(self.oversized_envfile)
+            .saturating_add(self.malformed_artifact)
+            .saturating_add(self.wrong_kind_in_workflows)
+    }
+
+    fn merge(&mut self, extra: Self) {
+        self.templated_yaml = self.templated_yaml.saturating_add(extra.templated_yaml);
+        self.missing_dotenv = self.missing_dotenv.saturating_add(extra.missing_dotenv);
+        self.oversized_envfile = self
+            .oversized_envfile
+            .saturating_add(extra.oversized_envfile);
+        self.malformed_artifact = self
+            .malformed_artifact
+            .saturating_add(extra.malformed_artifact);
+        self.wrong_kind_in_workflows = self
+            .wrong_kind_in_workflows
+            .saturating_add(extra.wrong_kind_in_workflows);
+    }
+
+    fn summary_parts(self) -> Vec<String> {
+        let mut parts = Vec::new();
+        push_skip_summary_part(
+            &mut parts,
+            self.templated_yaml,
+            "templated YAML",
+            "templated YAML",
+        );
+        push_skip_summary_part(
+            &mut parts,
+            self.missing_dotenv,
+            "missing .env file",
+            "missing .env files",
+        );
+        push_skip_summary_part(
+            &mut parts,
+            self.oversized_envfile,
+            "oversized env_file",
+            "oversized env_files",
+        );
+        push_skip_summary_part(
+            &mut parts,
+            self.malformed_artifact,
+            "malformed artifact",
+            "malformed artifacts",
+        );
+        push_skip_summary_part(
+            &mut parts,
+            self.wrong_kind_in_workflows,
+            "non-YAML .github/workflows file",
+            "non-YAML .github/workflows files",
+        );
+        parts
+    }
+}
+
+fn push_skip_summary_part(parts: &mut Vec<String>, count: usize, singular: &str, plural: &str) {
+    if count == 1 {
+        parts.push(format!("1 {singular}"));
+    } else if count > 1 {
+        parts.push(format!("{count} {plural}"));
+    }
 }
 
 fn millis_u64(duration: std::time::Duration) -> u64 {
@@ -585,8 +662,12 @@ impl RepoIndexer {
             .as_secs()
             .try_into()
             .unwrap_or(i64::MAX);
-        let candidates = collect_deployment_artifact_paths(repo_root, &self.options.deployment)?;
-        let mut stats = IndexingStats::default();
+        let artifact_scan = collect_deployment_artifact_paths(repo_root, &self.options.deployment)?;
+        let candidates = artifact_scan.paths;
+        let mut stats = IndexingStats {
+            deployment_skips: artifact_scan.skips,
+            ..IndexingStats::default()
+        };
         if candidates.is_empty() {
             // No deployment artifacts on disk right now — but the previous run
             // may have indexed some that have since been deleted or renamed.
@@ -597,6 +678,7 @@ impl RepoIndexer {
             // leaves stale deployment topology in the graph.
             self.purge_stale_deployment_artifacts(repo)?;
             stats.duration_ms = started_at.elapsed().as_millis();
+            emit_deployment_skip_summary(repo, stats);
             return Ok(stats);
         }
         if let Some(progress) = progress {
@@ -658,11 +740,11 @@ impl RepoIndexer {
             ) {
                 Ok(output) => output,
                 Err(error) => {
-                    debug!(
+                    record_deployment_parse_skip(
                         repo,
-                        path = %file_path,
-                        error = %error,
-                        "skipping a malformed deployment artifact during indexing",
+                        &file_path,
+                        &error,
+                        &mut stats.deployment_skips,
                     );
                     self.storage
                         .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
@@ -675,7 +757,14 @@ impl RepoIndexer {
                 continue;
             }
             if output.artifact_kind == DeploymentArtifactKind::Compose {
-                append_compose_env_file_edges(repo, repo_root, &file_path, &content, &mut output)?;
+                append_compose_env_file_edges(
+                    repo,
+                    repo_root,
+                    &file_path,
+                    &content,
+                    &mut output,
+                    &mut stats.deployment_skips,
+                )?;
             }
 
             let batch = deployment_output_to_batch(
@@ -699,6 +788,7 @@ impl RepoIndexer {
             });
         }
         stats.duration_ms = started_at.elapsed().as_millis();
+        emit_deployment_skip_summary(repo, stats);
         Ok(stats)
     }
 
@@ -1175,6 +1265,7 @@ impl RepoIndexer {
             edges_created: files.iter().map(|f| f.edges.len()).sum::<usize>()
                 + deferred_cross_file_edges.len(),
             duration_ms: started_at.elapsed().as_millis(),
+            ..IndexingStats::default()
         };
 
         Ok(RepoIndexPayload {
@@ -1796,10 +1887,15 @@ fn file_stat_from_metadata(metadata: &fs::Metadata) -> FileStat {
     }
 }
 
+struct DeploymentArtifactPathScan {
+    paths: Vec<std::path::PathBuf>,
+    skips: DeploymentSkipCounters,
+}
+
 fn collect_deployment_artifact_paths(
     repo_root: &Path,
     deployment: &DeploymentIndexingOptions,
-) -> Result<Vec<std::path::PathBuf>, RepoIndexerError> {
+) -> Result<DeploymentArtifactPathScan, RepoIndexerError> {
     let include_globs = deployment.include_globs()?;
     let walker = ignore::WalkBuilder::new(repo_root)
         .hidden(false)
@@ -1815,6 +1911,7 @@ fn collect_deployment_artifact_paths(
         })
         .build();
     let mut paths = Vec::new();
+    let mut skips = DeploymentSkipCounters::default();
     for entry in walker {
         let entry = match entry {
             Ok(entry) => entry,
@@ -1835,7 +1932,15 @@ fn collect_deployment_artifact_paths(
             .extension()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or_default();
-        let could_be_yaml_deploy = matches!(extension, "yaml" | "yml");
+        let could_be_yaml_deploy =
+            extension.eq_ignore_ascii_case("yaml") || extension.eq_ignore_ascii_case("yml");
+        if is_github_workflows_path(&file_path)
+            && path_kind == DeploymentArtifactKind::Unknown
+            && !could_be_yaml_deploy
+        {
+            skips.wrong_kind_in_workflows = skips.wrong_kind_in_workflows.saturating_add(1);
+            continue;
+        }
         if path_kind != DeploymentArtifactKind::Unknown
             || could_be_yaml_deploy
             || deployment.matches_configured_artifact(&file_path, extension, &include_globs)
@@ -1844,7 +1949,7 @@ fn collect_deployment_artifact_paths(
         }
     }
     paths.sort();
-    Ok(paths)
+    Ok(DeploymentArtifactPathScan { paths, skips })
 }
 
 fn merge_indexing_stats(stats: &mut IndexingStats, extra: IndexingStats) {
@@ -1852,6 +1957,59 @@ fn merge_indexing_stats(stats: &mut IndexingStats, extra: IndexingStats) {
     stats.nodes_created = stats.nodes_created.saturating_add(extra.nodes_created);
     stats.edges_created = stats.edges_created.saturating_add(extra.edges_created);
     stats.duration_ms = stats.duration_ms.saturating_add(extra.duration_ms);
+    stats.deployment_skips.merge(extra.deployment_skips);
+}
+
+fn emit_deployment_skip_summary(repo: &str, stats: IndexingStats) {
+    let skips = stats.deployment_skips;
+    if skips.total() == 0 {
+        return;
+    }
+    let skipped = skips.summary_parts().join(", ");
+    info!(
+        repo,
+        files_indexed = stats.files_parsed,
+        templated_yaml = skips.templated_yaml,
+        missing_dotenv = skips.missing_dotenv,
+        oversized_envfile = skips.oversized_envfile,
+        malformed_artifact = skips.malformed_artifact,
+        wrong_kind_in_workflows = skips.wrong_kind_in_workflows,
+        "deployment artifact skip summary: skipped {skipped}",
+    );
+}
+
+fn is_github_workflows_path(file_path: &str) -> bool {
+    let mut normalized = file_path.replace('\\', "/");
+    normalized.make_ascii_lowercase();
+    normalized.contains("/.github/workflows/") || normalized.starts_with(".github/workflows/")
+}
+
+fn record_deployment_parse_skip(
+    repo: &str,
+    file_path: &str,
+    error: &DeploymentParseError,
+    skips: &mut DeploymentSkipCounters,
+) {
+    match error {
+        DeploymentParseError::Templated { .. } => {
+            skips.templated_yaml = skips.templated_yaml.saturating_add(1);
+            debug!(
+                repo,
+                path = %file_path,
+                error = %error,
+                "skipping templated deployment artifact during indexing",
+            );
+        }
+        DeploymentParseError::Yaml { .. } => {
+            skips.malformed_artifact = skips.malformed_artifact.saturating_add(1);
+            warn!(
+                repo,
+                path = %file_path,
+                error = %error,
+                "skipping malformed deployment artifact during indexing",
+            );
+        }
+    }
 }
 
 fn append_compose_env_file_edges(
@@ -1860,6 +2018,7 @@ fn append_compose_env_file_edges(
     compose_file_path: &str,
     compose_content: &str,
     output: &mut DeploymentParseOutput,
+    skips: &mut DeploymentSkipCounters,
 ) -> Result<(), RepoIndexerError> {
     let env_file_refs = match compose_env_file_refs(compose_content, compose_file_path) {
         Ok(refs) => refs,
@@ -1868,7 +2027,7 @@ fn append_compose_env_file_edges(
                 repo,
                 path = %compose_file_path,
                 error = %error,
-                "Skipping the compose `env_file` expansion because the referenced file could not be read.",
+                "skipping the compose `env_file` expansion because the referenced file could not be read",
             );
             return Ok(());
         }
@@ -1910,18 +2069,29 @@ fn append_compose_env_file_edges(
         };
         let full_path = repo_root.join(&relative_env_path);
         let Ok(metadata) = fs::symlink_metadata(&full_path) else {
-            debug!(
-                repo,
-                path = %compose_file_path,
-                env_file = %env_file_ref.path,
-                "skipping missing compose env_file"
-            );
+            if is_dotenv_style(&env_file_ref.path) {
+                skips.missing_dotenv = skips.missing_dotenv.saturating_add(1);
+                debug!(
+                    repo,
+                    path = %compose_file_path,
+                    env_file = %env_file_ref.path,
+                    "skipping missing dotenv-style compose env_file"
+                );
+            } else {
+                warn!(
+                    repo,
+                    path = %compose_file_path,
+                    env_file = %env_file_ref.path,
+                    "skipping missing compose env_file"
+                );
+            }
             continue;
         };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
         if metadata.len() > MAX_DEPLOYMENT_ARTIFACT_BYTES {
+            skips.oversized_envfile = skips.oversized_envfile.saturating_add(1);
             warn!(
                 repo,
                 path = %compose_file_path,
@@ -1944,11 +2114,12 @@ fn append_compose_env_file_edges(
         ) {
             Ok(output) => output,
             Err(error) => {
+                skips.malformed_artifact = skips.malformed_artifact.saturating_add(1);
                 warn!(
                     repo,
                     path = %env_file_path,
                     error = %error,
-                    "Skipping a malformed compose `env_file` referenced from this compose document.",
+                    "skipping malformed compose `env_file` referenced from this compose document",
                 );
                 continue;
             }
@@ -2893,6 +3064,111 @@ spec:
                 .iter()
                 .any(|node| node.qualified_name.as_deref() == Some("__env_var__api_token"))
         );
+    }
+
+    #[test]
+    fn missing_dotenv_compose_env_file_increments_skip_counter() {
+        let repo_root = TestDir::new("deployment-missing-dotenv-repo");
+        let storage_root = TestDir::new("deployment-missing-dotenv-storage");
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            r"
+services:
+  api:
+    image: api
+    env_file:
+      - .env
+",
+        )
+        .expect("compose fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let stats = indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        assert_eq!(stats.deployment_skips.missing_dotenv, 1);
+        assert_eq!(stats.deployment_skips.malformed_artifact, 0);
+    }
+
+    #[test]
+    fn missing_custom_compose_env_file_is_not_counted_as_dotenv() {
+        let repo_root = TestDir::new("deployment-missing-custom-env-repo");
+        let storage_root = TestDir::new("deployment-missing-custom-env-storage");
+        fs::write(
+            repo_root.path().join("compose.yaml"),
+            r"
+services:
+  api:
+    image: api
+    env_file:
+      - prod.env
+",
+        )
+        .expect("compose fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let stats = indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        assert_eq!(stats.deployment_skips.missing_dotenv, 0);
+        assert_eq!(stats.deployment_skips.malformed_artifact, 0);
+    }
+
+    #[test]
+    fn templated_yaml_counts_as_templated_skip_not_malformed_artifact() {
+        let repo_root = TestDir::new("deployment-templated-yaml-repo");
+        let storage_root = TestDir::new("deployment-templated-yaml-storage");
+        fs::create_dir_all(repo_root.path().join("charts/api/templates"))
+            .expect("template dir should exist");
+        fs::write(
+            repo_root
+                .path()
+                .join("charts/api/templates/deployment.yaml"),
+            r"
+{{ range .Values.deployments }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+{{ end }}
+",
+        )
+        .expect("helm fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let stats = indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        assert_eq!(stats.deployment_skips.templated_yaml, 1);
+        assert_eq!(stats.deployment_skips.malformed_artifact, 0);
+    }
+
+    #[test]
+    fn non_yaml_github_workflow_siblings_count_as_wrong_kind_skip() {
+        let repo_root = TestDir::new("deployment-workflow-wrong-kind-repo");
+        let storage_root = TestDir::new("deployment-workflow-wrong-kind-storage");
+        fs::create_dir_all(repo_root.path().join(".github/workflows"))
+            .expect("workflow dir should exist");
+        fs::write(
+            repo_root.path().join(".github/workflows/CODEOWNERS"),
+            "* @team",
+        )
+        .expect("codeowners fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let stats = indexer
+            .index_repo("sample-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        assert_eq!(stats.deployment_skips.wrong_kind_in_workflows, 1);
+        assert_eq!(stats.deployment_skips.malformed_artifact, 0);
     }
 
     #[test]
