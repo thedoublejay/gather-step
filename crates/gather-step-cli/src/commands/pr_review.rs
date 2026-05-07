@@ -1833,7 +1833,7 @@ struct CleanOutput {
     operation: &'static str,
     dry_run: bool,
     selected_artifacts: Vec<CleanArtifactEntry>,
-    /// Stale-shape roots (unparseable / pre-`last_accessed_at` markers) that
+    /// Stale-shape roots (unparsable / pre-`last_accessed_at` markers) that
     /// were swept by `--all`. Empty when no stale state was found, or when a
     /// non-`--all` selector was used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1853,7 +1853,7 @@ struct CleanArtifactEntry {
 struct CleanStaleArtifactEntry {
     root: String,
     size_bytes: u64,
-    /// Why the marker was unparseable (e.g. "missing field `last_accessed_at`").
+    /// Why the marker was unparsable (e.g. "missing field `last_accessed_at`").
     reason: String,
     deleted: bool,
 }
