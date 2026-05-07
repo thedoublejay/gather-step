@@ -44,17 +44,32 @@ fn init_flag_overrides_run_full_setup_without_prompting() {
     assert!(agents_md.contains("@AGENTS.gather.md"));
     assert!(
         tmp.path()
-            .join(".claude/rules/gather-step-architecture.md")
+            .join(".agent-context/gather-step/architecture.md")
             .exists()
     );
     assert!(
         tmp.path()
-            .join(".claude/rules/gather-step-events.md")
+            .join(".agent-context/gather-step/events.md")
             .exists()
     );
     assert!(
         tmp.path()
-            .join(".claude/rules/gather-step-routes.md")
+            .join(".agent-context/gather-step/routes.md")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join(".claude/rules/gather-step-index.md")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join(".claude/skills/gather-step-context/SKILL.md")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join(".agents/skills/gather-step-context/SKILL.md")
             .exists()
     );
     assert!(tmp.path().join(".claude/settings.json").exists());

@@ -92,8 +92,8 @@ impl CacheKey {
 
 /// Contents of `review-marker.json`.
 ///
-/// Every field is required for v3.1 markers except optional cache/access
-/// metadata fields used by branch-scoped cache reuse.
+/// Every field is required for current markers except optional cache/access
+/// metadata used by branch-scoped cache reuse.
 ///
 /// Fields are `pub(crate)` so the lifecycle invariants enforced by
 /// [`update_marker_status`] (and [`is_valid_status_transition`]) cannot be
@@ -119,12 +119,10 @@ pub struct ReviewMarker {
     /// Cache key for branch-scoped reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) cache_key: Option<CacheKey>,
-    /// RFC 3339 UTC timestamp of the last time this artifact was accessed via a
-    /// cache hit.  Updated each time `pr-review` reuses this artifact so that
-    /// `--older-than` pruning measures last-use time, not creation time.
-    /// `None` for artifacts that have never been accessed via cache reuse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) last_accessed_at: Option<String>,
+    /// RFC 3339 UTC timestamp of the last time this artifact was accessed.
+    /// Initialized to `created_at` and refreshed on every cache hit so
+    /// `--older-than` pruning measures last-use time, not only creation time.
+    pub(crate) last_accessed_at: String,
 }
 
 impl ReviewMarker {
@@ -152,7 +150,7 @@ impl ReviewMarker {
         created_at: String,
         status: ReviewStatus,
         cache_key: Option<CacheKey>,
-        last_accessed_at: Option<String>,
+        last_accessed_at: String,
     ) -> Self {
         Self {
             schema_version,
@@ -418,6 +416,7 @@ pub fn materialize_artifact_root(
     }
 
     // Write the initial marker.
+    let created_at = Utc::now().to_rfc3339();
     let marker = ReviewMarker {
         schema_version: MARKER_SCHEMA_VERSION,
         workspace_hash: artifact.workspace_hash.clone(),
@@ -428,10 +427,10 @@ pub fn materialize_artifact_root(
         storage_path: artifact.storage_root.clone(),
         registry_path: artifact.registry_path.clone(),
         gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-        created_at: Utc::now().to_rfc3339(),
+        created_at: created_at.clone(),
         status: ReviewStatus::InProgress,
         cache_key,
-        last_accessed_at: None,
+        last_accessed_at: created_at,
     };
     write_marker_to_path(&marker, &artifact.marker_path)?;
 
@@ -477,7 +476,7 @@ pub fn write_marker_completed(root: &ReviewArtifactRoot) -> Result<(), ArtifactR
 /// ignored by callers because a stale timestamp never corrupts the artifact.
 pub fn touch_marker_accessed(root: &ReviewArtifactRoot) -> Result<(), ArtifactRootError> {
     let mut marker = read_marker(&root.marker_path)?;
-    marker.last_accessed_at = Some(chrono::Utc::now().to_rfc3339());
+    marker.last_accessed_at = chrono::Utc::now().to_rfc3339();
     write_marker_to_path(&marker, &root.marker_path)
 }
 
@@ -791,21 +790,18 @@ mod tests {
         .unwrap();
 
         let before = read_marker(&artifact.marker_path).unwrap();
-        assert_eq!(before.last_accessed_at, None);
+        let before_accessed_at = before.last_accessed_at.clone();
 
         touch_marker_accessed(&artifact).unwrap();
 
         let after = read_marker(&artifact.marker_path).unwrap();
-        let accessed_at = after
-            .last_accessed_at
-            .as_deref()
-            .expect("The last_accessed_at field should be set.");
-        chrono::DateTime::parse_from_rfc3339(accessed_at)
+        assert_ne!(after.last_accessed_at, before_accessed_at);
+        chrono::DateTime::parse_from_rfc3339(&after.last_accessed_at)
             .expect("The last_accessed_at field should be an RFC 3339 timestamp.");
     }
 
     #[test]
-    fn read_marker_accepts_legacy_marker_without_last_accessed_at() {
+    fn read_marker_rejects_marker_without_last_accessed_at() {
         let cache_tmp = TempDir::new().unwrap();
         let ws_tmp = TempDir::new().unwrap();
 
@@ -814,7 +810,7 @@ mod tests {
             ws_tmp.path(),
             "baseSHA",
             "headSHA",
-            "review-legacy-marker",
+            "review-uncached-marker",
         )
         .unwrap();
 
@@ -830,8 +826,11 @@ mod tests {
         )
         .unwrap();
 
-        let marker = read_marker(&artifact.marker_path).unwrap();
-        assert_eq!(marker.last_accessed_at, None);
+        let err = read_marker(&artifact.marker_path).unwrap_err();
+        assert!(
+            matches!(err, ArtifactRootError::Serialize { .. }),
+            "Markers missing last_accessed_at should fail as stale generated state: {err:?}."
+        );
     }
 
     #[test]

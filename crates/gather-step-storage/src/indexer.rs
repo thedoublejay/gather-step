@@ -934,7 +934,7 @@ impl RepoIndexer {
         }
         let wait_ms = wait_started.elapsed().as_millis();
         if wait_ms > 0 {
-            info!(repo, wait_ms, "acquired repo index lock after waiting");
+            info!(repo, wait_ms, "Acquired repo index lock after waiting.");
         }
         Ok(RepoIndexLockGuard { file })
     }

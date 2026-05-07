@@ -46,6 +46,7 @@ The documentation site is intentionally limited to implemented behavior. The cur
 - shared type usage lookup
 - payload schema inspection and contract drift analysis
 - context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
+- QA planning evidence export via `gather-step qa-evidence`: canonical rows, structured citations, existing-test signals, feature-flag gaps, and scan-limit gaps
 - repo-level overview, ownership, dead-code, and convention analysis
 - derived outputs such as assistant rules and ownership files
 - cross-repo PR review via `gather-step pr-review`: structured surface delta (routes, symbols, payload contracts, events, deployment, removal risks) across any two refs, local-first

@@ -94,7 +94,7 @@ pub fn try_reuse_cache(cache_root: &Path, key: &CacheKey) -> Result<Option<Revie
     // Collect all run sub-dirs with their mtime so we can sort newest-first.
     let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> =
         std::fs::read_dir(&hash_dir)
-            .map_err(|e| anyhow::anyhow!("reading cache hash-dir `{}`: {e}", hash_dir.display()))?
+            .map_err(|e| anyhow::anyhow!("Reading cache hash-dir `{}`: {e}", hash_dir.display()))?
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();
@@ -454,6 +454,7 @@ mod tests {
         // A small file so the artifact has size.
         fs::write(root.join("storage").join("dummy.txt"), b"data").unwrap();
 
+        let accessed_at = chrono::Utc::now().to_rfc3339();
         let marker = ReviewMarker {
             schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash.clone(),
@@ -464,10 +465,10 @@ mod tests {
             storage_path: root.join("storage"),
             registry_path: root.join("registry.json"),
             gather_step_version: key.gather_step_version.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: accessed_at.clone(),
             status,
             cache_key: Some(key.clone()),
-            last_accessed_at: None,
+            last_accessed_at: accessed_at,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -553,6 +554,7 @@ mod tests {
         fs::write(root.join("registry.json"), b"{}").unwrap();
 
         // Uncached marker: no cache_key field.
+        let accessed_at = chrono::Utc::now().to_rfc3339();
         let marker = ReviewMarker {
             schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash.clone(),
@@ -563,10 +565,10 @@ mod tests {
             storage_path: root.join("storage"),
             registry_path: root.join("registry.json"),
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: accessed_at.clone(),
             status: ReviewStatus::Completed,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: accessed_at,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();

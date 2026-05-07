@@ -131,6 +131,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let storage_path = storage_path_override.unwrap_or_else(|| root.join("storage"));
+        let accessed_at = chrono::Utc::now().to_rfc3339();
         let marker = ReviewMarker {
             schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: marker_workspace_hash.to_owned(),
@@ -141,10 +142,10 @@ mod tests {
             storage_path,
             registry_path: root.join("registry.json"),
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: accessed_at.clone(),
             status,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: accessed_at,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -351,6 +352,7 @@ mod tests {
         // Construct an artifact root that IS the baseline storage path —
         // this is the most adversarial case for the overlap guard.
         let root = baseline_storage.clone();
+        let accessed_at = chrono::Utc::now().to_rfc3339();
         let marker = ReviewMarker {
             schema_version: MARKER_SCHEMA_VERSION,
             workspace_hash: hash.clone(),
@@ -361,10 +363,10 @@ mod tests {
             storage_path: root.join("inner-storage"),
             registry_path: root.join("registry.json"),
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: accessed_at.clone(),
             status: ReviewStatus::Completed,
             cache_key: None,
-            last_accessed_at: None,
+            last_accessed_at: accessed_at,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();

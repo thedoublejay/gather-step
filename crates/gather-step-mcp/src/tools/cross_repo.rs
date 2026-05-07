@@ -11,6 +11,10 @@ use crate::{
     budget::{BudgetedTool, ResponseBudget, apply_response_budget, response_schema_version},
     config::{McpContext, validate_input_length},
     error::McpServerError,
+    evidence::{
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
+        EvidenceSupportMethod,
+    },
     ids::{decode_node_id, encode_node_id},
     tools::labels::edge_kind_label,
 };
@@ -59,6 +63,7 @@ pub struct TraceImpactResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct TraceImpactData {
+    pub evidence: Vec<Evidence>,
     pub impacted_repos: Vec<ImpactRepo>,
     pub target: String,
     pub virtual_targets: Vec<String>,
@@ -86,6 +91,7 @@ pub struct CrossRepoDepsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CrossRepoDepsData {
     pub dependencies: Vec<RepoDependency>,
+    pub evidence: Vec<Evidence>,
     pub repo: String,
 }
 
@@ -184,6 +190,7 @@ pub fn trace_impact_tool(
 
     let mut response = TraceImpactResponse {
         data: TraceImpactData {
+            evidence: Vec::new(),
             impacted_repos,
             target: request.target,
             virtual_targets: seen_virtuals.into_iter().collect(),
@@ -204,6 +211,7 @@ pub fn trace_impact_tool(
         meta.budget = budget;
         meta.truncated = meta.budget.truncated;
     }
+    response.data.evidence = trace_impact_evidence(&response.data);
     Ok(response)
 }
 
@@ -219,7 +227,7 @@ pub fn cross_repo_deps_tool(
             request.repo
         )));
     }
-    let dependencies = cross_repo_deps(ctx.graph(), &request.repo)?
+    let dependencies: Vec<RepoDependency> = cross_repo_deps(ctx.graph(), &request.repo)?
         .into_iter()
         .map(|(repo, kinds)| RepoDependency {
             edge_kinds: kinds
@@ -230,12 +238,66 @@ pub fn cross_repo_deps_tool(
         })
         .collect();
 
+    let evidence = dependencies
+        .iter()
+        .map(|dependency| cross_repo_dependency_evidence(&request.repo, dependency))
+        .collect();
     Ok(CrossRepoDepsResponse {
         data: CrossRepoDepsData {
             dependencies,
+            evidence,
             repo: request.repo,
         },
     })
+}
+
+fn trace_impact_evidence(data: &TraceImpactData) -> Vec<Evidence> {
+    data.impacted_repos
+        .iter()
+        .flat_map(|repo| {
+            repo.hops.iter().map(|hop| {
+                Evidence::new(
+                    EvidenceKind::ConfirmedDownstreamRepo,
+                    EvidenceSource::TraceImpact,
+                    EvidenceCitation::symbol_id(hop.symbol_id.clone(), "symbol"),
+                )
+                .with_subject(
+                    EvidenceSubject::new("repo_impact")
+                        .with_category(hop.direction.clone())
+                        .with_name(repo.repo.clone())
+                        .with_reason(format!(
+                            "{} edge via {} at {}.",
+                            hop.edge_kind, hop.repo, hop.file_path
+                        )),
+                )
+                .with_support(EvidenceSupport::new(
+                    EvidenceSupportMethod::GraphTraversal,
+                    hop.confidence,
+                ))
+            })
+        })
+        .collect()
+}
+
+fn cross_repo_dependency_evidence(source_repo: &str, dependency: &RepoDependency) -> Evidence {
+    Evidence::new(
+        EvidenceKind::ConfirmedDownstreamRepo,
+        EvidenceSource::CrossRepoDeps,
+        EvidenceCitation::repo(dependency.repo.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("repo_impact")
+            .with_category("dependency")
+            .with_name(dependency.repo.clone())
+            .with_reason(format!(
+                "{source_repo} has cross-repo edge kinds: {}.",
+                dependency.edge_kinds.join(", ")
+            )),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        None,
+    ))
 }
 
 pub fn get_shared_type_usage_tool(

@@ -370,7 +370,7 @@ pub fn run_planning_oracle_benchmark(
 ) -> anyhow::Result<PlanningOracleReport> {
     let scenarios = load_oracle_scenarios(scenarios_root)?;
     if scenarios.is_empty() {
-        anyhow::bail!("no oracle scenarios found in {}", scenarios_root.display());
+        anyhow::bail!("No oracle scenarios found in {}.", scenarios_root.display());
     }
 
     let config_path = fixture_root.join("gather-step.config.yaml");
@@ -383,7 +383,7 @@ pub fn run_planning_oracle_benchmark(
             .filter(|parent| parent.join("gather-step.config.yaml").exists())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "failed to find gather-step.config.yaml in {} or its parent",
+                    "Failed to find gather-step.config.yaml in {} or its parent.",
                     fixture_root.display()
                 )
             })?
@@ -725,7 +725,7 @@ fn resolve_target(ctx: &McpContext, target: &OracleTarget) -> anyhow::Result<Str
             let (method, path) = target
                 .qn
                 .split_once(' ')
-                .ok_or_else(|| anyhow::anyhow!("route qn must be `METHOD /path`"))?;
+                .ok_or_else(|| anyhow::anyhow!("Route question must be `METHOD /path`."))?;
             let response = trace_route_tool(
                 ctx,
                 TraceRouteRequest {
@@ -738,7 +738,7 @@ fn resolve_target(ctx: &McpContext, target: &OracleTarget) -> anyhow::Result<Str
             response
                 .data
                 .target_id
-                .ok_or_else(|| anyhow::anyhow!("route target did not resolve to a target id"))
+                .ok_or_else(|| anyhow::anyhow!("Route target did not resolve to a target ID."))
         }
         "event" => {
             let response = trace_event_tool(
@@ -758,9 +758,9 @@ fn resolve_target(ctx: &McpContext, target: &OracleTarget) -> anyhow::Result<Str
                 .matches
                 .first()
                 .map(|item| item.target_id.clone())
-                .ok_or_else(|| anyhow::anyhow!("event target should resolve"))
+                .ok_or_else(|| anyhow::anyhow!("Event target should resolve."))
         }
-        other => anyhow::bail!("unsupported oracle target kind `{other}`"),
+        other => anyhow::bail!("Unsupported oracle target kind `{other}`."),
     }
 }
 
@@ -782,7 +782,7 @@ fn run_pack_for_scenario(
         "fix" => Ok(fix_pack_tool(ctx, request)?),
         "review" => Ok(review_pack_tool(ctx, request)?),
         "impact" | "change_impact" => Ok(change_impact_pack_tool(ctx, request)?),
-        other => anyhow::bail!("unsupported oracle mode `{other}`"),
+        other => anyhow::bail!("Unsupported oracle mode `{other}`."),
     }
 }
 
@@ -802,7 +802,7 @@ fn run_impact_for_scenario(
     )?;
     let payload = rendered
         .payload
-        .ok_or_else(|| anyhow::anyhow!("impact command did not return a JSON payload"))?;
+        .ok_or_else(|| anyhow::anyhow!("The impact command did not return a JSON payload."))?;
     let response = impact_payload_as_context_pack_response(&payload, scenario);
     Ok((response, payload))
 }
@@ -825,7 +825,7 @@ fn run_projection_impact_for_scenario(
         },
     )?;
     let payload = rendered.payload.ok_or_else(|| {
-        anyhow::anyhow!("projection-impact command did not return a JSON payload")
+        anyhow::anyhow!("The projection-impact command did not return a JSON payload.")
     })?;
     let response = projection_impact_payload_as_context_pack_response(&payload, scenario);
     Ok((response, payload))
@@ -875,6 +875,7 @@ fn impact_payload_as_context_pack_response(
             planning_rescue: None,
             planning_proofs: Vec::new(),
             migration_siblings: None,
+            evidence: Vec::new(),
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -941,6 +942,7 @@ fn projection_impact_payload_as_context_pack_response(
             planning_rescue: None,
             planning_proofs: Vec::new(),
             migration_siblings: None,
+            evidence: Vec::new(),
         },
         meta: Some(ContextPackMeta {
             response_schema_version: response_schema_version(),
@@ -1011,6 +1013,7 @@ fn impact_match_as_pack_item(index: usize, item: &serde_json::Value) -> PackItem
             .unwrap_or_default()
             .to_owned(),
         evidence_chain: None,
+        evidence: None,
     }
 }
 
@@ -1038,6 +1041,7 @@ fn projection_field_as_pack_item(index: usize, item: &serde_json::Value) -> Pack
             .unwrap_or_default()
             .to_owned(),
         evidence_chain: None,
+        evidence: None,
     }
 }
 
@@ -2055,7 +2059,7 @@ fn collect_repo_files(
         }
         let relative = path
             .strip_prefix(repo_root)
-            .map_err(|error| anyhow::anyhow!("failed to strip repo prefix: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("Failed to strip repo prefix: {error}."))?;
         let relative = normalize_relative_path(relative);
         match seen.get(&relative) {
             None => {
@@ -2671,6 +2675,7 @@ mod tests {
                         symbol_kind: "function".to_owned(),
                         symbol_name: "transform_batch".to_owned(),
                         evidence_chain: None,
+                        evidence: None,
                     },
                     PackItem {
                         category: "structural_neighbor".to_owned(),
@@ -2683,6 +2688,7 @@ mod tests {
                         symbol_kind: "class".to_owned(),
                         symbol_name: "ParsedDocument".to_owned(),
                         evidence_chain: None,
+                        evidence: None,
                     },
                 ],
                 semantic_bridges: vec![PackBridge {
@@ -2702,6 +2708,7 @@ mod tests {
                         symbol_id: "py-api-caller".to_owned(),
                         symbol_kind: "function".to_owned(),
                         symbol_name: "transform_service.pipeline.transform_batch".to_owned(),
+                        evidence: None,
                     }],
                     confirmed_downstream_repos: vec!["py_shared_models".to_owned()],
                     probable_downstream_repos: Vec::new(),
@@ -2719,6 +2726,7 @@ mod tests {
                     "target_file": "src/shared_models/records.py",
                 })],
                 migration_siblings: None,
+                evidence: Vec::new(),
             },
             meta: Some(ContextPackMeta {
                 response_schema_version: response_schema_version(),

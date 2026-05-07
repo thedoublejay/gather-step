@@ -327,8 +327,8 @@ fn integration_pipeline_runs_on_committed_fixture_workspace() {
 
     let generate = run_ok_json(temp.path(), &["generate", "claude-md"]);
     assert_eq!(generate["event"], "generate_claude_md_completed");
-    let events_rule = temp.path().join(".claude/rules/gather-step-events.md");
-    let routes_rule = temp.path().join(".claude/rules/gather-step-routes.md");
+    let events_rule = temp.path().join(".agent-context/gather-step/events.md");
+    let routes_rule = temp.path().join(".agent-context/gather-step/routes.md");
     assert!(events_rule.exists());
     assert!(routes_rule.exists());
 

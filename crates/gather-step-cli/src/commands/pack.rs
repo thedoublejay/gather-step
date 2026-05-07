@@ -204,7 +204,7 @@ fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &PackArgs) -> Result<
             },
         )?;
         let Some(match_) = response.data.matches.first() else {
-            bail!("no event-like target matched `{target}`");
+            bail!("No event-like target matched `{target}`.");
         };
         return Ok(match_.target_id.clone());
     }
@@ -222,7 +222,7 @@ fn resolve_target(ctx: &gather_step_mcp::McpContext, args: &PackArgs) -> Result<
         },
     )?;
     let Some(target_id) = response.data.target_id else {
-        bail!("no route target matched {method} {path}");
+        bail!("No route target matched {method} {path}.");
     };
     Ok(target_id)
 }

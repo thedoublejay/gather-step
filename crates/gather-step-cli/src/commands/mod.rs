@@ -12,6 +12,7 @@ pub mod no_args;
 pub mod pack;
 pub mod pr_review;
 pub mod projection_impact;
+pub mod qa_evidence;
 pub mod reindex;
 pub mod search;
 pub mod serve;
@@ -78,6 +79,10 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     (
         "pack",
         "Render task / planning / debug / review context packs",
+    ),
+    (
+        "qa-evidence",
+        "Emit canonical code-evidence metadata for QA planning",
     ),
     (
         "generate",
@@ -154,6 +159,8 @@ pub enum Command {
     Impact(impact::ImpactArgs),
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
     DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
+    #[command(name = "qa-evidence")]
+    QaEvidence(qa_evidence::QaEvidenceArgs),
     Pack(pack::PackArgs),
     Events(events::EventsArgs),
     Conventions(conventions::ConventionsArgs),
@@ -198,7 +205,7 @@ impl CliOutcome {
         match code {
             0 => Ok(Self::Success),
             2 => Ok(Self::ReviewThresholdExceeded),
-            other => bail!("pr-review returned an unexpected exit code: {other}."),
+            other => bail!("The `pr-review` command returned an unexpected exit code: {other}."),
         }
     }
 }
@@ -228,6 +235,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
         Some(Command::ProjectionImpact(args)) => success(projection_impact::run(&app, args)),
         Some(Command::DeploymentTopology(args)) => success(deployment_topology::run(&app, args)),
+        Some(Command::QaEvidence(args)) => success(qa_evidence::run(&app, &args)),
         Some(Command::Pack(args)) => success(pack::run(&app, &args)),
         Some(Command::Events(args)) => success(events::run(&app, args)),
         Some(Command::Conventions(args)) => success(conventions::run(&app, args)),

@@ -217,12 +217,12 @@ pub fn run_reliability_check(
     runs: usize,
     latency_drift_tolerance: f64,
 ) -> anyhow::Result<ReliabilityReport> {
-    anyhow::ensure!(runs >= 2, "reliability check requires at least 2 runs");
+    anyhow::ensure!(runs >= 2, "The reliability check requires at least 2 runs.");
 
     let scenarios = load_oracle_scenarios(scenarios_root)?;
     anyhow::ensure!(
         !scenarios.is_empty(),
-        "no oracle scenarios found in {}",
+        "No oracle scenarios found in {}.",
         scenarios_root.display()
     );
 

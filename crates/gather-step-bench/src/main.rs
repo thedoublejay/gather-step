@@ -252,7 +252,7 @@ fn main() -> anyhow::Result<()> {
                 print_status(line);
             }
             if !summary.passed {
-                anyhow::bail!("comparison found one or more regressions");
+                anyhow::bail!("Comparison found one or more regressions.");
             }
             Ok(())
         }
@@ -442,7 +442,7 @@ fn analyze_report_command(
     }
 
     if !gate_result.all_passed {
-        anyhow::bail!("release gate failed one or more criteria");
+        anyhow::bail!("Release gate failed one or more criteria.");
     }
     Ok(())
 }
@@ -667,7 +667,7 @@ fn link_quality_command(
     task_files.sort();
 
     if task_files.is_empty() {
-        anyhow::bail!("no *.yaml task files found in {}", tasks_dir.display());
+        anyhow::bail!("No *.yaml task files found in {}.", tasks_dir.display());
     }
 
     let mut reports = Vec::new();
@@ -691,7 +691,7 @@ fn link_quality_command(
 
     let any_failed = reports.iter().any(|r| !r.passed);
     if any_failed {
-        anyhow::bail!("one or more link-quality tasks failed their thresholds");
+        anyhow::bail!("One or more link-quality tasks failed their thresholds.");
     }
     Ok(())
 }
@@ -827,7 +827,7 @@ fn planning_oracle_command(
     write_result(output_dir, "planning_oracle", &date, &result)?;
 
     if !report.passed {
-        anyhow::bail!("planning oracle benchmark failed one or more thresholds");
+        anyhow::bail!("Planning oracle benchmark failed one or more thresholds.");
     }
     Ok(())
 }
@@ -1145,7 +1145,7 @@ fn release_gate_command(
     write_result(output_dir, "release_gate", &date, &result)?;
 
     if !report.all_passed {
-        anyhow::bail!("release gate failed one or more cut criteria");
+        anyhow::bail!("Release gate failed one or more cut criteria.");
     }
     Ok(())
 }
@@ -1593,7 +1593,7 @@ fn impact_check(json: &serde_json::Value) -> anyhow::Result<ProbeWithPrimary> {
         .iter()
         .find(|item| item.get("primary").and_then(serde_json::Value::as_bool) == Some(true))
     else {
-        anyhow::bail!("impact output did not contain a primary match");
+        anyhow::bail!("Impact output did not contain a primary match.");
     };
     let primary_repo = primary
         .get("source_repo")

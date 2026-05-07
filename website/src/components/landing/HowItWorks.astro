@@ -44,17 +44,7 @@ const steps: Step[] = [
     ],
   },
   {
-    num: '04 · ASK',
-    heading: 'Ask what actually matters.',
-    body:
-      'Every prompt arrives with structural ground truth. Blast radius. Event consumers. Ownership. Conventions. No more large exploratory prompts before the actual work starts.',
-    code: [
-      { dim: '# a question your AI can finally answer' },
-      { line: 'claude: what breaks if I change order.created?' },
-    ],
-  },
-  {
-    num: '05 · PACK',
+    num: '04 · PACK',
     heading: 'Hand the graph to your assistant.',
     body:
       'Plan, debug, fix, review, and change-impact packs ship as one structured response. The MCP server makes them callable from Claude Code; the CLI emits the same JSON for any other tool.',
@@ -64,7 +54,7 @@ const steps: Step[] = [
     ],
   },
   {
-    num: '06 · REVIEW',
+    num: '05 · REVIEW',
     heading: 'Review PRs with structural evidence.',
     body:
       'Run `gather-step pr-review` before merge to get a cross-repo surface delta: added and removed routes, exported symbols, payload contracts, event wiring, deployment surfaces, and removal risks — without sending code off-machine.',
@@ -73,13 +63,23 @@ const steps: Step[] = [
       { line: 'gather-step pr-review --base main --head feat/my-change' },
     ],
   },
+  {
+    num: '06 · EVIDENCE',
+    heading: 'Export QA planning evidence.',
+    body:
+      '`qa-evidence` bundles canonical code facts, structured citations, existing-test hints, dynamic flag gaps, and scan-limit gaps for downstream QA planning tools. It stops at evidence, not requirements or test-case prose.',
+    code: [
+      { dim: '# export facts for QA planning' },
+      { line: 'gather-step qa-evidence OrderList --base main --head feat/orders --json' },
+    ],
+  },
 ];
 ---
 
 <section class="bp-sec" id="how">
   <div class="bp-sec__head">
-    <span class="bp-sec__num">DET-08 · From zero to answered questions</span>
-    <h2 class="bp-h2">Init, index, watch, ask, pack, <span class="u">review.</span></h2>
+    <span class="bp-sec__num">DET-08 · From zero to evidence-backed work</span>
+    <h2 class="bp-h2">Init, index, watch, pack, review, <span class="u">export evidence.</span></h2>
     <p class="bp-lede">No API keys. No account. No data leaves your machine.</p>
   </div>
 

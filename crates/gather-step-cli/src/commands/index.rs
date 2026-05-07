@@ -67,7 +67,7 @@ pub struct IndexArgs {
     pub release_gate: bool,
     #[arg(
         long,
-        help = "Delete generated index state before rebuilding, recovering corrupt or old-schema state."
+        help = "Delete generated index state before rebuilding corrupt or incompatible state."
     )]
     pub auto_recover: bool,
     #[arg(long, help = "Enter watch mode after indexing completes")]
@@ -389,7 +389,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     apply_depth_override(&mut config, args.depth);
 
     if config.repos.is_empty() {
-        bail!("no repos remain after applying filters");
+        bail!("No repos remain after applying filters.");
     }
 
     path_safety::reject_symlinked_generated_state(&app.workspace_path, &storage_root)
@@ -698,10 +698,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         drop(tx);
         let writer_result = writer
             .join()
-            .map_err(|_| anyhow::anyhow!("writer thread panicked"))?;
+            .map_err(|_| anyhow::anyhow!("Writer thread panicked."))?;
         let analytics_timings = analytics_worker
             .join()
-            .map_err(|_| anyhow::anyhow!("analytics thread panicked"))?;
+            .map_err(|_| anyhow::anyhow!("Analytics thread panicked."))?;
         // kanal Receiver does not expose `try_iter`; drain explicitly until the
         // analytics worker has dropped its sender, which closes the channel.
         let mut analytics_results = Vec::new();
@@ -928,7 +928,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let durable_sync_start = Instant::now();
     drop(workspace_bulk);
     let durable_sync_ms = elapsed_ms(durable_sync_start);
-    info!(durable_sync_ms, "stage timing: graph durable sync complete",);
+    info!(
+        durable_sync_ms,
+        "Stage timing: graph durable sync complete.",
+    );
     // Per-batch graph commits synchronously invalidate packs that depend on
     // changed targets. Do not clear the whole cache here; unrelated packs can
     // survive the index run and generation checks still reject stale rows.
@@ -936,7 +939,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let context_pack_cache_clear_ms = 0;
     info!(
         context_pack_cache_clear_ms,
-        context_pack_cache_rows_removed, "stage timing: global context-pack cache clear skipped",
+        context_pack_cache_rows_removed, "Stage timing: global context-pack cache clear skipped.",
     );
     drop(indexer);
 
@@ -961,15 +964,25 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             }
             if report.skipped_count > 0 {
                 output.line(format!(
-                    "  skipped {} review artifact(s) during cleanup; inspect the warning logs or run `gather-step pr-review clean --all`",
+                    "  WARNING: skipped {} review artifact(s) during cleanup. They still point at the previous baseline. \
+                     Run `gather-step pr-review clean --all` to remove them.",
                     report.skipped_count,
                 ));
             }
         }
         Err(e) => {
+            // The new baseline is durable on disk; failing the index now would
+            // be worse than continuing. But silently downgrading this to a
+            // default-off `tracing::warn!` lets stale review caches drift
+            // unnoticed against the new baseline. Surface it to the user.
+            output.line(format!(
+                "  WARNING: could not wipe review artifacts after the full reindex: {e}. \
+                 Stale review caches may still point at the previous baseline. \
+                 Run `gather-step pr-review clean --all` to recover."
+            ));
             warn!(
                 error = %e,
-                "Could not wipe review artifacts after a full reindex; continuing."
+                "Could not wipe review artifacts after a full reindex; user notified via output.line."
             );
         }
     }
@@ -1423,7 +1436,7 @@ fn apply_repo_filter(config: &mut GatherStepConfig, repo_filter: Option<&str>) -
     config.allow_listed_repos.retain(|repo| repo == repo_filter);
 
     if config.repos.is_empty() {
-        bail!("repo `{repo_filter}` was not found in the workspace config");
+        bail!("Repo `{repo_filter}` was not found in the workspace config.");
     }
 
     if original_len != config.repos.len() {
@@ -1621,8 +1634,8 @@ mod tests {
                 last_called_at: 42,
             },
             PackCallLogEntry {
-                target: "legacy".to_owned(),
-                mode: "legacy_mode".to_owned(),
+                target: "unknown".to_owned(),
+                mode: "unknown_mode".to_owned(),
                 call_count: 9,
                 last_called_at: 50,
             },

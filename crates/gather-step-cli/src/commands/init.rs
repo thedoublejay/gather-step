@@ -49,7 +49,7 @@ pub struct InitArgs {
     pub no_watch: bool,
     #[arg(
         long,
-        help = "Generate .claude/rules/, CLAUDE.gather.md, AGENTS.gather.md, and managed includes"
+        help = "Generate .agent-context/gather-step/, on-demand skills (.claude/skills/, .agents/skills/), CLAUDE.gather.md, AGENTS.gather.md, and managed includes"
     )]
     pub generate_ai_files: bool,
     #[arg(long = "no-generate-ai-files", conflicts_with = "generate_ai_files")]
@@ -164,7 +164,7 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
     } else {
         prompt_yes_no(
             3,
-            "Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md, managed includes)",
+            "Generate AI context files now? (.agent-context/gather-step/, .claude/skills/, .agents/skills/, CLAUDE.gather.md, AGENTS.gather.md, managed includes)",
             true,
         )?
     };
@@ -632,7 +632,7 @@ fn prompt_repo_selection_interactive(
                 }
             }
             KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
-                bail!("repository selection cancelled");
+                bail!("Repository selection cancelled.");
             }
             _ => {}
         }
@@ -783,7 +783,7 @@ fn parse_selection_index(token: &str, repo_count: usize) -> Result<usize> {
         .parse::<usize>()
         .with_context(|| format!("invalid repository selection `{token}`"))?;
     if !(1..=repo_count).contains(&number) {
-        bail!("repository selection `{number}` is outside 1..={repo_count}");
+        bail!("Repository selection `{number}` is outside 1..={repo_count}.");
     }
     Ok(number - 1)
 }

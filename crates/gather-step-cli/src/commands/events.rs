@@ -378,10 +378,10 @@ fn select_event_target(
         .collect::<Vec<_>>();
 
     rank_event_targets(graph, &mut candidates, subject)
-        .map_err(|error| anyhow::anyhow!("failed to rank event targets: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("Failed to rank event targets: {error}"))?;
 
     match candidates.as_slice() {
-        [] => bail!("no matching event target found for `{subject}`"),
+        [] => bail!("No matching event target found for `{subject}`."),
         [target] => Ok(SelectedEventTarget {
             target: target.clone(),
             alternates: Vec::new(),

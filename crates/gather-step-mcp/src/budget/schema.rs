@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::writer::BudgetedTool;
 
-pub const RESPONSE_SCHEMA_VERSION: u8 = 3;
+pub const RESPONSE_SCHEMA_VERSION: u8 = 1;
 
 #[must_use]
 pub const fn response_schema_version() -> u8 {
@@ -26,6 +26,18 @@ pub enum OmittedReason {
     FanOutCap,
     /// Ambiguity was detected and lower-ranked candidates were collapsed.
     Ambiguity,
+}
+
+impl OmittedReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Budget => "budget",
+            Self::LowConfidence => "low_confidence",
+            Self::FanOutCap => "fan_out_cap",
+            Self::Ambiguity => "ambiguity",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -10,6 +10,10 @@ use crate::{
     budget::{BudgetedTool, ResponseBudget, apply_response_budget, response_schema_version},
     config::{McpContext, validate_input_length},
     error::McpServerError,
+    evidence::{
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
+        EvidenceSupportMethod,
+    },
     ids::{decode_node_id, encode_node_id},
     tools::labels::{edge_kind_label, evidence_kind_label, node_kind_label},
 };
@@ -43,6 +47,7 @@ pub struct CrudTraceData {
     pub continuation: Vec<CrudTraceSymbol>,
     pub database_hints: Vec<CrudTraceSymbol>,
     pub entities: Vec<CrudTraceSymbol>,
+    pub evidence: Vec<Evidence>,
     pub handlers: Vec<CrudTraceSymbol>,
     pub method: String,
     pub path: String,
@@ -143,6 +148,7 @@ pub fn crud_trace_tool(
                 continuation: trace.continuation.into_iter().map(symbol).collect(),
                 database_hints: trace.database_hints.into_iter().map(symbol).collect(),
                 entities: trace.entities.into_iter().map(symbol).collect(),
+                evidence: Vec::new(),
                 handlers: trace.handlers.into_iter().map(symbol).collect(),
                 method,
                 path,
@@ -170,6 +176,7 @@ pub fn crud_trace_tool(
             meta.budget = budget;
             meta.truncated |= meta.budget.truncated;
         }
+        response.data.evidence = crud_trace_evidence(&response.data);
         response
     } else {
         CrudTraceResponse {
@@ -178,6 +185,7 @@ pub fn crud_trace_tool(
                 continuation: Vec::new(),
                 database_hints: Vec::new(),
                 entities: Vec::new(),
+                evidence: Vec::new(),
                 handlers: Vec::new(),
                 method: request.method.unwrap_or_default(),
                 path: request.path.unwrap_or_default(),
@@ -213,6 +221,50 @@ fn response_route_fields(target: &NodeData, entry: &CrudEntry) -> (String, Strin
         CrudEntry::Route { method, path } => (method.clone(), path.clone()),
         CrudEntry::Symbol { .. } => (String::new(), target.name.clone()),
     }
+}
+
+fn crud_trace_evidence(data: &CrudTraceData) -> Vec<Evidence> {
+    data.handlers
+        .iter()
+        .chain(&data.callers)
+        .chain(&data.continuation)
+        .chain(&data.database_hints)
+        .chain(&data.entities)
+        .map(|symbol| crud_symbol_evidence(data, symbol))
+        .collect()
+}
+
+fn crud_symbol_evidence(data: &CrudTraceData, symbol: &CrudTraceSymbol) -> Evidence {
+    let (kind, surface) = match symbol.role.as_str() {
+        "handler" => (EvidenceKind::RouteHandler, "route"),
+        "caller" => (EvidenceKind::RouteCaller, "route"),
+        "entity" | "collection" | "database_hint" => {
+            (EvidenceKind::ProjectionImpact, "persistence")
+        }
+        _ => (EvidenceKind::ChangeImpactCandidate, "crud_trace"),
+    };
+    Evidence::new(
+        kind,
+        EvidenceSource::CrudTrace,
+        EvidenceCitation::symbol(
+            symbol.repo.clone(),
+            symbol.file_path.clone(),
+            symbol.line_start,
+            symbol.symbol_id.clone(),
+            symbol.symbol_kind.clone(),
+            symbol.symbol_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new(surface)
+            .with_category(symbol.role.clone())
+            .with_name(symbol.symbol_name.clone())
+            .with_reason(format!("CRUD trace for {} {}", data.method, data.path)),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        symbol.confidence,
+    ))
 }
 
 fn parse_route_target(target: &NodeData) -> Option<(String, String)> {

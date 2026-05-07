@@ -149,7 +149,7 @@ fn confirm_destructive_clean(
     }
 
     if app.json_output {
-        bail!("`clean` is destructive; pass `--yes` to confirm when using `--json`");
+        bail!("The `clean` command is destructive; pass `--yes` to confirm when using `--json`.");
     }
 
     let mut stdout = io::stdout().lock();
@@ -175,7 +175,7 @@ fn confirm_destructive_clean_io(
     let mut confirmation = String::new();
     stdin.read_line(&mut confirmation)?;
     if confirmation.trim() != "clean" {
-        bail!("clean aborted");
+        bail!("Clean aborted.");
     }
 
     Ok(())

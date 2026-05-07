@@ -35,16 +35,23 @@ const packs = [
       'Confirmed and probable downstream repos, field-impact gaps, optional payload drift hints, and ranked files for API or contract changes.',
     meta: 'Returns ~8K tokens · shaped for rollout planning.',
   },
+  {
+    tag: 'qa-evidence.manifest',
+    heading: 'QA evidence manifest',
+    body:
+      'Canonical evidence rows, structured citations, existing-test signals, feature-flag gaps, and scan-limit gaps for downstream QA planning.',
+    meta: 'Emits qa-evidence.v1 · shaped for test planning.',
+  },
 ];
 ---
 
 <section class="bp-sec" id="packs">
   <div class="bp-sec__head">
     <span class="bp-sec__num">DET-05 · Task-shaped, not dump-the-graph</span>
-    <h2 class="bp-h2">Context packs, shaped to the step <span class="u">you're on.</span></h2>
+    <h2 class="bp-h2">Packs and evidence exports, shaped to the step <span class="u">you're on.</span></h2>
     <p class="bp-lede">
-      Precision over noise. Five canonical packs cover planning, debugging, fixing, review, and change impact.
-      Each returns exactly the subgraph the task requires.
+      Precision over noise. Six task-shaped exports cover planning, debugging, fixing, review, change impact, and QA evidence;
+      the QA evidence manifest exports the facts a downstream planning tool needs.
     </p>
   </div>
   <div class="bp-packs">

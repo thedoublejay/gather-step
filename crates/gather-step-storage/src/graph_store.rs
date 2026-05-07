@@ -599,7 +599,7 @@ pub enum GraphStoreError {
     #[error("edge owner node is not a file: {0:?}")]
     OwnerNotAFile(NodeId),
     #[error(
-        "graph schema version mismatch at `{path}`: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
+        "graph schema version mismatch at `{path}`: stored {stored}, expected {expected}; rebuild required (run `gather-step index --auto-recover`)"
     )]
     SchemaVersionMismatch {
         path: PathBuf,
@@ -3175,7 +3175,7 @@ impl GraphStoreDb {
                 continue;
             }
 
-            // Cross-repo (by either the legacy repo-id check or the string check).
+            // Cross-repo by either the repo-id check or the string check.
             summary.cross_repo_edges = summary.cross_repo_edges.saturating_add(1);
 
             if tgt_repo == VIRTUAL_NODE_REPO {

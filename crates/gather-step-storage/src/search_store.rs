@@ -56,9 +56,9 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 ///
 /// v3.1 is a fresh generated-state release. Search schema stamping starts at
 /// zero and does not carry migration or upgrade branches for older development
-/// indexes. Bumped to 1 when the `qualified_name` field was added so that
-/// indexes built before the field was reintroduced are rejected at open time.
-pub const SEARCH_INDEX_VERSION: u32 = 1;
+/// indexes. When the schema changes before external users exist, rebuild the
+/// generated search index instead of carrying compatibility branches.
+pub const SEARCH_INDEX_VERSION: u32 = 0;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -80,8 +80,7 @@ const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
 const FIELD_LANG: &str = "lang";
 /// Stored copy of the file path for query-aware rerank path-token boosting.
-/// Not indexed for search — retrieval only.  Absent on documents indexed
-/// before this field was added; callers treat an absent value as empty string.
+/// Not indexed for search — retrieval only.
 const FIELD_FILE_PATH_STORED: &str = "file_path_stored";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,7 +265,7 @@ pub enum SearchStoreError {
     #[error("invalid node kind tag `{0}`")]
     InvalidNodeKind(u64),
     #[error(
-        "search index schema version mismatch: stored {stored}, expected {expected}; manual upgrade required (run `gather-step index --auto-recover`)"
+        "search index schema version mismatch: stored {stored}, expected {expected}; rebuild required (run `gather-step index --auto-recover`)"
     )]
     SchemaVersionMismatch { stored: String, expected: u32 },
 }
@@ -767,7 +766,7 @@ impl SearchDocument {
     }
 }
 
-/// Ensure the search directory carries the v3.1 fresh-release schema stamp.
+/// Ensure the search directory carries the current fresh-release schema stamp.
 ///
 /// The version file is a plain decimal `u32` followed by a newline. If a stamp
 /// is present, it must match [`SEARCH_INDEX_VERSION`]; otherwise a
@@ -793,6 +792,34 @@ pub(crate) fn stamp_schema_version_if_missing(
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Auto-stamp only an empty directory. A pre-existing Tantivy
+            // directory without our stamp file is, by definition, on a stale
+            // schema relative to this binary — silently re-stamping it with
+            // the current version would let Tantivy fail later with a raw
+            // field/schema error instead of giving the user the actionable
+            // `gather-step index --auto-recover` hint.
+            let mut has_other_entries = false;
+            match fs::read_dir(dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry.map_err(SearchStoreError::Io)?;
+                        if entry.file_name() != std::ffi::OsStr::new(SEARCH_VERSION_FILE) {
+                            has_other_entries = true;
+                            break;
+                        }
+                    }
+                }
+                Err(read_err) if read_err.kind() == std::io::ErrorKind::NotFound => {
+                    // Directory doesn't exist yet; nothing to scan.
+                }
+                Err(read_err) => return Err(SearchStoreError::Io(read_err)),
+            }
+            if has_other_entries {
+                return Err(SearchStoreError::SchemaVersionMismatch {
+                    stored: "<missing>".to_owned(),
+                    expected: SEARCH_INDEX_VERSION,
+                });
+            }
             fs::write(&version_path, format!("{SEARCH_INDEX_VERSION}\n"))?;
             Ok(())
         }
@@ -2168,15 +2195,45 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_stamp_writes_current_in_non_empty_directory() {
+    fn schema_version_stamp_rejects_non_empty_directory_without_stamp() {
         use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
+        // A pre-existing Tantivy directory without our stamp file is, by
+        // definition, on a stale schema relative to this binary. Silently
+        // re-stamping it would let Tantivy fail later with a raw field/schema
+        // error instead of giving the user the actionable
+        // `gather-step index --auto-recover` hint.
         let dir = temp_search_dir("version-non-empty");
         fs::create_dir_all(&dir).expect("dir should exist");
         fs::write(dir.join("meta.json"), "{}").expect("write index artifact");
 
-        stamp_schema_version_if_missing(&dir).expect("non-empty dir should still be stamped");
+        let err = stamp_schema_version_if_missing(&dir)
+            .expect_err("non-empty dir without stamp must be rejected, not silently restamped");
+        assert!(matches!(
+            err,
+            SearchStoreError::SchemaVersionMismatch {
+                expected: SEARCH_INDEX_VERSION,
+                ..
+            }
+        ));
+        assert!(
+            !dir.join(SEARCH_VERSION_FILE).exists(),
+            "rejecting must not write a fresh stamp into a stale-schema directory"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_stamp_writes_current_for_empty_directory() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
+        use std::fs;
+
+        let dir = temp_search_dir("version-empty-stamp");
+        fs::create_dir_all(&dir).expect("dir should exist");
+
+        stamp_schema_version_if_missing(&dir).expect("empty dir should be stamped");
 
         let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
         assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());
@@ -2185,12 +2242,11 @@ mod tests {
     }
 
     /// Round-trip: index a fresh store at the current schema version and
-    /// confirm that search still returns the expected hit after the field
-    /// removal (i.e., no regression from removing `FIELD_FILE_PATH`).
+    /// confirm that search returns the expected hit.
     #[test]
     fn fresh_index_at_current_schema_version_returns_search_hits() {
-        let store =
-            TantivySearchStore::open(temp_search_dir("schema-v2-roundtrip")).expect("store opens");
+        let store = TantivySearchStore::open(temp_search_dir("schema-current-roundtrip"))
+            .expect("store opens");
 
         let doc = SearchDocument::from_node(
             &node("processOrderEvent", "src/events/order-processor.ts"),

@@ -90,7 +90,7 @@ fn init_generate_ai_files_without_index_writes_summaries_and_skips_rules() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Warning: Skipped generating `.claude/rules/`"));
+    assert!(stdout.contains("Warning: Skipped generating `.agent-context/gather-step/`"));
     assert!(tmp.path().join("CLAUDE.gather.md").exists());
     assert!(tmp.path().join("AGENTS.gather.md").exists());
     let claude_md = fs::read_to_string(tmp.path().join("CLAUDE.md")).expect("CLAUDE.md");
@@ -99,5 +99,10 @@ fn init_generate_ai_files_without_index_writes_summaries_and_skips_rules() {
     let agents_md = fs::read_to_string(tmp.path().join("AGENTS.md")).expect("AGENTS.md");
     assert!(agents_md.contains("<!-- gather-step:start -->"));
     assert!(agents_md.contains("@AGENTS.gather.md"));
+    // Reference data and scaffold are gated on `can_generate_rules`; without
+    // an index neither directory should be created.
+    assert!(!tmp.path().join(".agent-context").exists());
     assert!(!tmp.path().join(".claude/rules").exists());
+    assert!(!tmp.path().join(".claude/skills").exists());
+    assert!(!tmp.path().join(".agents/skills").exists());
 }

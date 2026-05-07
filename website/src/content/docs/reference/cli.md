@@ -46,6 +46,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`projection-impact`](#projection-impact) — Trace static source-to-projection field impact.
 - [`deployment-topology`](#deployment-topology) — Query indexed deployment artifacts, env vars, and shared runtime infrastructure.
 - [`pack`](#pack) — Return a bounded context pack for a target symbol.
+- [`qa-evidence`](#qa-evidence) — Emit canonical code-evidence metadata for downstream QA planning.
 - [`conventions`](#conventions) — Derive repeated structural conventions from the indexed graph.
 - [`generate claude-md`](#generate-claude-md) — Generate assistant-facing CLAUDE.md rule files from the index.
 - [`generate agents-md`](#generate-agents-md) — Generate a workspace summary for Codex-style `AGENTS.md` workflows.
@@ -74,7 +75,7 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 | `--force` | bool flag | false | Regenerate the config from discovered repos instead of using the existing config as the starting point. |
 | `--index` / `--no-index` | bool flag | prompt/default | Index discovered repos after writing the config, or skip indexing. |
 | `--watch` / `--no-watch` | bool flag | prompt/default | Start watch mode after setup, or return immediately. |
-| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.claude/rules/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
+| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.agent-context/gather-step/` (graph reference) plus the on-demand skills under `.claude/skills/` and `.agents/skills/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
 | `--setup-mcp <SCOPE>` | enum | prompt/default | Register the MCP server in `local` or `global` Claude settings. |
 
 **Example**
@@ -87,7 +88,7 @@ gather-step init
 gather-step init --index --generate-ai-files --setup-mcp local --no-watch
 ```
 
-Interactive `init` starts with a numbered repository picker. Repos from an existing config are selected by default, removed repos stay unchecked, and `all` / `none` shortcuts let you quickly select or clear the list. The remaining prompts ask whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
+Interactive `init` starts with a numbered repository picker. Repos from an existing config are selected by default, removed repos stay unchecked, and `all` / `none` shortcuts let you quickly select or clear the list. The remaining prompts ask whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.agent-context/gather-step/` generation requires `gather-step index`.
 
 **Output shape (`--json`)** — emits one line:
 
@@ -569,9 +570,55 @@ gather-step --workspace /path/to/workspace pack OrdersService --mode planning
 gather-step --workspace /path/to/workspace pack OrdersService --mode debug --depth 3 --limit 8
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "context_pack_completed"`, top-level `response_schema_version`, `data`, and `meta`. The `data` payload contains `mode`, `target`, `found`, ranked `items`, `semantic_bridges`, `transport_links`, `next_steps`, `unresolved_gaps`, `planning_rescue`, and `change_impact`. The `change_impact` block includes `confirmed_downstream_repos`, `probable_downstream_repos`, `downstream_repos` (backward-compatible alias), and `truncated_repos`. The `meta` block includes `resolution`, `resolved_symbol_id`, `candidate_count`, `completeness`, `budget`, `ambiguity`, `resolution_confidence`, `confidence_model_version`, `winner_margin`, and any warnings.
+**Output shape (`--json`)** — emits one line with `event: "context_pack_completed"`, top-level `response_schema_version`, `data`, and `meta`. The `data` payload contains `mode`, `target`, `found`, ranked `items`, canonical `evidence`, `semantic_bridges`, `transport_links`, `next_steps`, `unresolved_gaps`, `planning_rescue`, and `change_impact`. The `change_impact` block includes `confirmed_downstream_repos`, `probable_downstream_repos`, `downstream_repos` (backward-compatible alias), `truncated_repos`, and canonical evidence on cross-repo callers. The `meta` block includes `resolution`, `resolved_symbol_id`, `candidate_count`, `completeness`, `budget`, `ambiguity`, `resolution_confidence`, `confidence_model_version`, `winner_margin`, and any warnings.
 
 **When to use** — to hand a bounded, task-shaped context payload to an AI assistant before starting a feature, debugging session, or review.
+
+---
+
+### `qa-evidence`
+
+Emits a normalized, evidence-only manifest for QA planning workflows. The command combines canonical evidence metadata from `planning`, `review`, and `change_impact` packs with local scans for feature-flag and existing-test signals. It does not generate test cases, interpret Jira or Figma, or make product assertions.
+
+```bash
+gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] [<TARGET> | --symbol <ID> | --event-target <TARGET> | --route-method <M> --route-path <P>] [--base <REF>] [--head <REF>] [--limit <N>] [--depth <N>] [--budget-bytes <N>] [--scan-limit <N>]
+```
+
+Exactly one target form must be supplied: a positional `<TARGET>`, `--symbol`, `--event-target`, or both of `--route-method` + `--route-path`.
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `<TARGET>` | string (positional) | — | Symbol name or hex `symbol_id`. Mutually exclusive with the other target forms. |
+| `--symbol <ID>` | string | — | Hex `symbol_id` form of the target (alternative to the positional). |
+| `--event-target <TARGET>` | string | — | Event target identifier (e.g. `kafka:order.created`). |
+| `--route-method <METHOD>` | string | — | HTTP method for a route target. Required together with `--route-path`. |
+| `--route-path <PATH>` | string | — | Canonical route path (e.g. `/orders/:id`). Required together with `--route-method`. |
+| `--base <REF>` | string | — | Optional base ref captured for downstream QA context. |
+| `--head <REF>` | string | — | Optional head ref captured for downstream QA context. |
+| `--limit <N>` | usize | 6 | Maximum ranked items to request from each pack mode. |
+| `--depth <N>` | usize | 2 | Traversal depth for caller and callee pack context. |
+| `--budget-bytes <N>` | usize | — | Optional response byte budget override for each pack. |
+| `--scan-limit <N>` | usize | 50 | Maximum filesystem-derived feature/test evidence rows. |
+| `--registry <PATH>` | path | workspace registry | Read symbol registry JSON from this path. |
+| `--storage <PATH>` | path | workspace storage | Read storage artifacts from this directory. |
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace qa-evidence OrdersService --base main --head feature/orders --json
+gather-step --workspace /path/to/workspace qa-evidence --route-method GET --route-path /orders/:id --json
+gather-step --workspace /path/to/workspace qa-evidence --event-target kafka:order.created --json
+```
+
+**Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are canonical evidence objects with `id`, closed enum `kind`, closed enum `source`, structured `citation`, optional `subject`, and optional `support { method, score }`. IDs are stable for a given source, kind, citation, and subject; support changes do not change the ID. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.
+
+**Questions it supports**
+
+- "What code evidence should a QA planning tool cite for this changed route or symbol?"
+- "Which existing tests, feature flags, downstream repos, event consumers, payload fields, and projection risks are relevant to this target?"
+- "Is coverage incomplete because refs are missing, scans were truncated, or a feature flag key is dynamic?"
+
+**When to use** — before generating a QA reference in a planning tool that needs grounded code evidence without asking Gather Step to write test-plan prose.
 
 ---
 
@@ -600,7 +647,9 @@ gather-step --workspace /path/to/workspace --repo backend_standard conventions -
 
 ### `generate claude-md`
 
-Generates Claude Code rule files for the workspace. With `--target=rules`, the command writes multiple graph-backed rule files under `.claude/rules/`. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
+Generates Claude Code context files for the workspace. With `--target=rules`, the command writes graph-backed reference data under `.agent-context/gather-step/` (architecture, events, routes, optionally per-repo) and installs an on-demand skill (`.claude/skills/gather-step-context/SKILL.md`, `.agents/skills/gather-step-context/SKILL.md`) plus a tiny `.claude/rules/gather-step-index.md` pointer so neither Claude Code nor Codex auto-loads the heavy reference at launch. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
+
+When `--output` is set, only the data files are written (the scaffold is skipped because its paths are workspace-relative by design). Skill and pointer files are installed only on the default-output path and are skip-if-exists, so user edits to skill prose survive re-runs.
 
 ```bash
 gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] \
@@ -792,7 +841,7 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 7`) populates `metadata`, `safety`, `changed_files`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
+The report (`schema_version: 1`) populates `metadata`, `safety`, `changed_files`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
 
 The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
 

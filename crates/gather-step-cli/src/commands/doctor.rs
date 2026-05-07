@@ -85,7 +85,7 @@ pub(crate) fn execute(
     if repos.is_empty()
         && let Some(repo) = repo_filter
     {
-        bail!("repo `{repo}` is not present in the workspace registry");
+        bail!("Repo `{repo}` is not present in the workspace registry.");
     }
 
     let issue_count = repos.iter().map(|repo| repo.issues.len()).sum();

@@ -161,7 +161,7 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
                 Ok(event) => event,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "serve watch subscriber lagged; continuing");
+                    tracing::warn!(skipped, "Serve watch subscriber lagged; continuing.");
                     continue;
                 }
             };
@@ -219,7 +219,7 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
             };
 
             if let Err(error) = emit_result {
-                tracing::warn!(%error, "serve watch output failed; stopping event stream");
+                tracing::warn!(%error, "Serve watch output failed; stopping the event stream.");
                 break;
             }
         }
@@ -264,7 +264,7 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
                 .await
                 .is_err()
             {
-                tracing::warn!("serve watch event task did not exit within 2s");
+                tracing::warn!("Serve watch event task did not exit within 2s.");
             }
             drop(stores);
             drop(daemon_metadata);
@@ -287,7 +287,7 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
         .await
         .is_err()
     {
-        tracing::warn!("serve watch event task did not exit within 2s");
+        tracing::warn!("Serve watch event task did not exit within 2s.");
     }
     drop(stores);
     drop(daemon_metadata);
@@ -311,8 +311,8 @@ async fn shutdown_watch_task(
 ) {
     match tokio::time::timeout(SHUTDOWN_TIMEOUT, watch_task).await {
         Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => tracing::warn!(?error, "serve watch task exited with error"),
-        Ok(Err(error)) => tracing::warn!(?error, "serve watch task crashed"),
+        Ok(Ok(Err(error))) => tracing::warn!(?error, "Serve watch task exited with an error."),
+        Ok(Err(error)) => tracing::warn!(?error, "Serve watch task crashed."),
         Err(_timeout) => {
             tracing::warn!(
                 timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),

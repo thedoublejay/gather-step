@@ -8,7 +8,7 @@ pub use context_md::{
     ARCHITECTURE_BASE_BUDGET, ARCHITECTURE_MAX_BUDGET, ARCHITECTURE_PER_REPO_BUDGET,
     ClaudeMdOptions, ContextMdError, DEFAULT_RULE_BYTE_BUDGET, RuleFile, architecture_budget,
     derive_conventions, generate_rule_files, render_workspace_summary_agents,
-    render_workspace_summary_claude,
+    render_workspace_summary_claude, scaffold_files,
 };
 pub use evidence::render_evidence_chain;
 

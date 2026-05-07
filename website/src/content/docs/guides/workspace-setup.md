@@ -161,8 +161,10 @@ gather-step --workspace /path/to/workspace init \
 Use `--no-index`, `--no-generate-ai-files`, or `--no-watch` to make a scripted
 setup return immediately after writing the config.
 
-`--generate-ai-files` writes `.claude/rules/` only after an index exists because
-the rule files are graph-backed. When you intentionally skip indexing, Gather
+`--generate-ai-files` writes `.agent-context/gather-step/` (and the on-demand
+skills under `.claude/skills/` / `.agents/skills/` plus the
+`.claude/rules/gather-step-index.md` pointer) only after an index exists because
+the reference data is graph-backed. When you intentionally skip indexing, Gather
 Step still writes `CLAUDE.gather.md` and `AGENTS.gather.md`, then prints a
 warning with the follow-up command:
 
@@ -173,30 +175,58 @@ gather-step --workspace /path/to/workspace generate claude-md --target rules
 
 ## Generated State
 
-After `gather-step index` completes, the workspace looks like this:
+After `gather-step index` followed by `gather-step generate claude-md` completes, the workspace looks like this:
 
 ```text
 /path/to/workspace/
   gather-step.config.yaml
   .gather-step/
-    registry.json              — workspace-level repo metadata and index state
+    registry.json                    — workspace-level repo metadata and index state
     storage/
-      graph.redb               — graph nodes and edges (redb store)
-      search/                  — Tantivy full-text and symbol search index
-      metadata.sqlite          — file hashes, dependencies, payload contracts,
-                                 context pack records, watcher state
+      graph.redb                     — graph nodes and edges (redb store)
+      search/                        — Tantivy full-text and symbol search index
+      metadata.sqlite                — file hashes, dependencies, payload contracts,
+                                       context pack records, watcher state
+  .agent-context/
+    gather-step/
+      architecture.md                — repo map, cross-repo deps, shared symbols, hotspots
+      events.md                      — topics/queues/streams, producers, consumers, orphans
+      routes.md                      — HTTP routes, handlers, callers
+      repo-<NAME>.md                 — per-repo focus (only when generated with --repo)
+  .claude/
+    rules/
+      gather-step-index.md           — tiny pointer telling Claude Code to invoke the skill
+    skills/
+      gather-step-context/
+        SKILL.md                     — on-demand skill body (Claude Code reads on trigger)
+  .agents/
+    skills/
+      gather-step-context/
+        SKILL.md                     — on-demand skill body (Codex reads on trigger)
+  CLAUDE.gather.md                   — registry-only summary, imported via the managed
+                                       block in CLAUDE.md
+  AGENTS.gather.md                   — registry-only summary, imported via the managed
+                                       block in AGENTS.md
 ```
 
 Key properties of this layout:
 
 - **Source repositories are never modified.** Indexing writes only to
-  `.gather-step/`.
-- **All graph-backed CLI and MCP commands read from this directory.** If it is
+  `.gather-step/`; AI context generation writes only to `.agent-context/`,
+  `.claude/`, `.agents/`, and the two `*.gather.md` sidecars at the root.
+- **All graph-backed CLI and MCP commands read from `.gather-step/`.** If it is
   empty or absent, commands like `status`, `doctor`, `trace`, and `serve` have
   nothing to work from. Run `index` first.
 - **The graph store, search index, and metadata database are updated together.**
   The storage coordinator maintains consistency across all three; partial writes
   are rolled back on failure.
+- **`.agent-context/gather-step/` is reference data, not standing instructions.**
+  It is loaded on demand by the installed skill — never pulled into every Claude
+  Code or Codex session — so the ~48 KB architecture file never burns context
+  window space until the question actually calls for it.
+- **Skill and pointer files are skip-if-exists.** Re-running
+  `gather-step generate claude-md` always overwrites the data files in
+  `.agent-context/gather-step/` but leaves user edits to skill prose intact.
 
 ## Depth and Scoping
 

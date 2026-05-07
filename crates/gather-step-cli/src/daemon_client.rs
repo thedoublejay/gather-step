@@ -77,7 +77,7 @@ impl DaemonClient {
         #[cfg(not(unix))]
         {
             let _ = request;
-            anyhow::bail!("daemon IPC is unsupported on this platform");
+            anyhow::bail!("Daemon IPC is unsupported on this platform.");
         }
     }
 }

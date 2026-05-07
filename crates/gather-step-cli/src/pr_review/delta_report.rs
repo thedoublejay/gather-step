@@ -1,30 +1,20 @@
 //! Delta report — typed output struct for `gather-step pr-review`.
 //!
-//! Phase 2 Task 1 formalises the schema: placeholder `Vec<serde_json::Value>`
-//! fields are replaced with typed structs.  `schema_version` is bumped to 2.
-//!
-//! Phase 3 Tasks 3+4+5 add contract alignments, decorator deltas, and review
-//! pack synthesis.  `schema_version` is bumped to 3.
-//!
-//! Phase 5 Tasks 1+2 add `unsupported_surfaces` so the renderer can print
-//! "_unavailable on the {engine} engine_" instead of "_no changes_" for
-//! surfaces the active engine cannot populate.  `schema_version` is bumped
-//! to 4.
-//!
-//! Phase 5 Tasks 3+4 add per-surface `unavailable` flags so each delta struct
-//! self-describes whether it was computed or skipped.  `schema_version` is
-//! bumped to 5.
-//!
-//! Phase 7 adds deployment-topology delta extraction.  `schema_version` is
-//! bumped to 6.  Phase 7 follow-up adds impact summaries for changed payload
-//! contracts and richer deployment change reasons; `schema_version` is bumped
-//! to 7.
+//! The v4 QA planning work resets the public `schema_version` baseline to `1`
+//! while there are no known external consumers. Canonical evidence metadata is
+//! injected at query time from the typed delta surfaces; no storage migration
+//! is required. Bump [`DELTA_REPORT_SCHEMA_VERSION`] when the wire shape
+//! changes again.
 
 use std::{
     fmt::Write as _,
     path::{Path, PathBuf},
 };
 
+use gather_step_mcp::evidence::{
+    CitationKind, Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject,
+    EvidenceSupport, EvidenceSupportMethod,
+};
 use serde::{Serialize, Serializer};
 
 /// Serialize a [`PathBuf`] as a forward-slash-normalized UTF-8 string so JSON
@@ -50,7 +40,7 @@ fn serialize_path_forward_slash<S: Serializer>(
 /// [`DeltaReport`] (JSON + Markdown + Braingent frontmatter). Bump this when
 /// the report shape changes; callers must reference it instead of hard-coding
 /// the literal so the JSON, Markdown, frontmatter, and tests stay aligned.
-pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 7;
+pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Top-level output struct for `gather-step pr-review`.
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +52,10 @@ pub struct DeltaReport {
     pub changed_files: Vec<String>,
     /// `true` if the list was truncated at 200 entries.
     pub changed_files_truncated: bool,
+    /// Canonical, query-time evidence metadata for the surfaces in this delta
+    /// report. No storage migration is required; producers compute this from
+    /// the typed report surfaces before serialization.
+    pub evidence: Vec<Evidence>,
 
     // ── Strongly-typed delta surfaces (Phase 2) ──────────────────────────────
     pub routes: RouteDeltas,
@@ -90,6 +84,12 @@ pub struct DeltaReport {
     /// field is skipped in output for the `temp-index` engine).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unsupported_surfaces: Vec<String>,
+}
+
+impl DeltaReport {
+    pub fn refresh_evidence(&mut self) {
+        self.evidence = collect_delta_report_evidence(self);
+    }
 }
 
 // ─── Impact summary (Phase 3 Tasks 1+2) ──────────────────────────────────────
@@ -357,6 +357,16 @@ pub enum RiskSeverity {
     Low,
     Medium,
     High,
+}
+
+impl RiskSeverity {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 // ─── Contract alignments (Phase 3 Task 3) ────────────────────────────────────
@@ -641,6 +651,608 @@ pub struct SuggestedCommand {
     /// `true` if the command requires `--keep-cache` to have been set
     /// (because the artifact root must exist when the command runs).
     pub requires_keep_cache: bool,
+}
+
+fn collect_delta_report_evidence(report: &DeltaReport) -> Vec<Evidence> {
+    let mut rows = Vec::new();
+
+    for route in &report.routes.added {
+        rows.push(route_evidence(route, "added"));
+        rows.push(route_risk_note(route, "added"));
+    }
+    for route in &report.routes.removed {
+        rows.push(route_evidence(route, "removed"));
+        rows.push(route_risk_note(route, "removed"));
+    }
+    for change in &report.routes.changed {
+        if let Some(after) = &change.after {
+            rows.push(route_evidence(after, "changed"));
+            rows.push(route_risk_note(after, "changed"));
+        }
+    }
+
+    for symbol in &report.symbols.added {
+        rows.push(symbol_evidence(symbol, "added"));
+        rows.push(symbol_risk_note(symbol, "added"));
+    }
+    for symbol in &report.symbols.removed {
+        rows.push(symbol_evidence(symbol, "removed"));
+        rows.push(symbol_risk_note(symbol, "removed"));
+    }
+    for change in &report.symbols.changed {
+        rows.push(symbol_evidence(&change.after, "changed"));
+        rows.push(symbol_risk_note(&change.after, "changed"));
+    }
+
+    for contract in &report.payload_contracts.added {
+        rows.push(payload_contract_evidence(contract, "added"));
+    }
+    for contract in &report.payload_contracts.removed {
+        rows.push(payload_contract_evidence(contract, "removed"));
+    }
+    for change in &report.payload_contracts.changed {
+        rows.push(payload_contract_change_evidence(change));
+        rows.push(payload_contract_risk_note(change));
+        rows.extend(payload_field_change_evidence(change));
+    }
+
+    for event in &report.events.added {
+        rows.push(event_evidence(event, "added"));
+        rows.push(event_risk_note(event, "added"));
+    }
+    for event in &report.events.removed {
+        rows.push(event_evidence(event, "removed"));
+        rows.push(event_risk_note(event, "removed"));
+    }
+    for change in &report.events.changed {
+        rows.push(event_change_evidence(change));
+        rows.push(event_change_risk_note(change));
+    }
+
+    for risk in &report.removed_surface_risks {
+        rows.push(removed_surface_evidence(risk));
+    }
+    for finding in &report.contract_alignments.findings {
+        rows.push(contract_alignment_evidence(finding));
+    }
+    for decorator in &report.decorators.added {
+        rows.push(decorator_evidence(decorator, "added"));
+    }
+    for decorator in &report.decorators.removed {
+        rows.push(decorator_evidence(decorator, "removed"));
+    }
+    for change in &report.decorators.changed {
+        rows.push(decorator_change_evidence(change));
+    }
+    for deployment in &report.deployment.deployments.added {
+        rows.push(deployment_evidence(deployment, "added"));
+    }
+    for deployment in &report.deployment.deployments.removed {
+        rows.push(deployment_evidence(deployment, "removed"));
+    }
+    for change in &report.deployment.deployments.changed {
+        rows.push(deployment_evidence(&change.after, "changed"));
+    }
+    for job in &report.deployment.workflow_jobs.added {
+        rows.push(workflow_job_evidence(job, "added"));
+    }
+    for job in &report.deployment.workflow_jobs.removed {
+        rows.push(workflow_job_evidence(job, "removed"));
+    }
+
+    rows
+}
+
+fn route_evidence(route: &RouteDelta, category: &str) -> Evidence {
+    let name = format!("{} {}", route.method, route.path);
+    Evidence::new(
+        EvidenceKind::RouteDefinition,
+        EvidenceSource::PrReview,
+        EvidenceCitation {
+            kind: CitationKind::Route,
+            repo: route.repo.clone(),
+            path: route.file.clone(),
+            line: route.line,
+            symbol_id: None,
+            symbol_kind: None,
+            symbol_name: route.handler_qualified_name.clone(),
+            route_method: Some(route.method.clone()),
+            route_path: Some(route.path.clone()),
+            event_target: None,
+        },
+    )
+    .with_subject(
+        EvidenceSubject::new("route")
+            .with_category(category.to_owned())
+            .with_name(name),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn symbol_evidence(symbol: &SymbolDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::ChangedSymbol,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            symbol.repo.clone(),
+            symbol.file.clone().unwrap_or_default(),
+            symbol.line,
+            symbol.qualified_name.clone(),
+            symbol.kind.clone(),
+            symbol.qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("symbol")
+            .with_category(category.to_owned())
+            .with_name(symbol.qualified_name.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn route_risk_note(route: &RouteDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation {
+            kind: CitationKind::Route,
+            repo: route.repo.clone(),
+            path: route.file.clone(),
+            line: route.line,
+            symbol_id: None,
+            symbol_kind: None,
+            symbol_name: route.handler_qualified_name.clone(),
+            route_method: Some(route.method.clone()),
+            route_path: Some(route.path.clone()),
+            event_target: None,
+        },
+    )
+    .with_subject(
+        EvidenceSubject::new("route")
+            .with_category("risk_note")
+            .with_name(format!("{} {}", route.method, route.path))
+            .with_reason(format!("{category} route entry point needs QA coverage.")),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn symbol_risk_note(symbol: &SymbolDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            symbol.repo.clone(),
+            symbol.file.clone().unwrap_or_default(),
+            symbol.line,
+            symbol.qualified_name.clone(),
+            symbol.kind.clone(),
+            symbol.qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("symbol")
+            .with_category("risk_note")
+            .with_name(symbol.qualified_name.clone())
+            .with_reason(format!("{category} symbol needs targeted QA review.")),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn payload_contract_evidence(contract: &PayloadContractDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::PayloadContract,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            contract.repo.clone(),
+            contract.file.clone(),
+            None,
+            contract.target_qualified_name.clone(),
+            "payload_contract",
+            contract.target_qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category(category.to_owned())
+            .with_name(contract.target_qualified_name.clone())
+            .with_reason(contract.side.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn payload_contract_change_evidence(change: &PayloadContractDeltaChange) -> Evidence {
+    Evidence::new(
+        EvidenceKind::PayloadContract,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            change.repo.clone(),
+            change.file.clone(),
+            None,
+            change.target_qualified_name.clone(),
+            "payload_contract",
+            change.target_qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category("changed")
+            .with_name(change.target_qualified_name.clone())
+            .with_reason(change.side.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn payload_contract_risk_note(change: &PayloadContractDeltaChange) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            change.repo.clone(),
+            change.file.clone(),
+            None,
+            change.target_qualified_name.clone(),
+            "payload_contract",
+            change.target_qualified_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category("risk_note")
+            .with_name(change.target_qualified_name.clone())
+            .with_reason("Changed payload contract needs request, response, and downstream consumer coverage."),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn payload_field_change_evidence(change: &PayloadContractDeltaChange) -> Vec<Evidence> {
+    let mut rows = Vec::new();
+    rows.extend(change.fields_added.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldAdded,
+            "field_added",
+            &field.name,
+            format!(
+                "{}{}",
+                field.type_name.as_deref().unwrap_or("unknown"),
+                if field.optional {
+                    " optional"
+                } else {
+                    " required"
+                }
+            ),
+        )
+    }));
+    rows.extend(change.fields_removed.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldRemoved,
+            "field_removed",
+            &field.name,
+            format!(
+                "{}{}",
+                field.type_name.as_deref().unwrap_or("unknown"),
+                if field.optional {
+                    " optional"
+                } else {
+                    " required"
+                }
+            ),
+        )
+    }));
+    rows.extend(change.fields_optional_to_required.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldChanged,
+            "field_optional_to_required",
+            field,
+            "optional to required".to_owned(),
+        )
+    }));
+    rows.extend(change.fields_required_to_optional.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldChanged,
+            "field_required_to_optional",
+            field,
+            "required to optional".to_owned(),
+        )
+    }));
+    rows.extend(change.fields_type_changed.iter().map(|field| {
+        payload_field_evidence(
+            change,
+            EvidenceKind::PayloadFieldChanged,
+            "field_type_changed",
+            &field.name,
+            format!(
+                "{} to {}",
+                field.before_type.as_deref().unwrap_or("unknown"),
+                field.after_type.as_deref().unwrap_or("unknown")
+            ),
+        )
+    }));
+    rows
+}
+
+fn payload_field_evidence(
+    change: &PayloadContractDeltaChange,
+    kind: EvidenceKind,
+    category: &str,
+    field_name: &str,
+    reason: String,
+) -> Evidence {
+    Evidence::new(
+        kind,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            change.repo.clone(),
+            change.file.clone(),
+            None,
+            change.target_qualified_name.clone(),
+            "payload_contract_field",
+            field_name.to_owned(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category(category.to_owned())
+            .with_name(format!("{}.{field_name}", change.target_qualified_name))
+            .with_reason(reason),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn event_evidence(event: &EventDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::EventDefinition,
+        EvidenceSource::PrReview,
+        EvidenceCitation::event(event.external_id.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category(category.to_owned())
+            .with_name(format!("{}:{}", event.event_kind, event.event_name)),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn event_change_evidence(change: &EventDeltaChange) -> Evidence {
+    let target = format!("{}:{}", change.event_kind, change.event_name);
+    Evidence::new(
+        EvidenceKind::EventDefinition,
+        EvidenceSource::PrReview,
+        EvidenceCitation::event(target.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category("changed")
+            .with_name(target),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn event_risk_note(event: &EventDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::event(event.external_id.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category("risk_note")
+            .with_name(format!("{}:{}", event.event_kind, event.event_name))
+            .with_reason(format!(
+                "{category} event surface needs producer, consumer, and async regression coverage."
+            )),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn event_change_risk_note(change: &EventDeltaChange) -> Evidence {
+    let target = format!("{}:{}", change.event_kind, change.event_name);
+    Evidence::new(
+        EvidenceKind::RiskNote,
+        EvidenceSource::PrReview,
+        EvidenceCitation::event(target.clone()),
+    )
+    .with_subject(
+        EvidenceSubject::new("event")
+            .with_category("risk_note")
+            .with_name(target)
+            .with_reason(
+                "Changed event surface needs producer, consumer, and async regression coverage.",
+            ),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn removed_surface_evidence(risk: &RemovedSurfaceRisk) -> Evidence {
+    Evidence::new(
+        EvidenceKind::RemovedSurface,
+        EvidenceSource::PrReview,
+        EvidenceCitation {
+            kind: CitationKind::Symbol,
+            repo: risk.repo.clone(),
+            path: None,
+            line: None,
+            symbol_id: None,
+            symbol_kind: Some(risk.kind.clone()),
+            symbol_name: Some(risk.identity.clone()),
+            route_method: None,
+            route_path: None,
+            event_target: None,
+        },
+    )
+    .with_subject(
+        EvidenceSubject::new("removed_surface")
+            .with_category(risk.severity.as_str())
+            .with_name(risk.identity.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::GraphTraversal,
+        None,
+    ))
+}
+
+fn contract_alignment_evidence(finding: &ContractAlignmentFinding) -> Evidence {
+    Evidence::new(
+        EvidenceKind::ContractAlignment,
+        EvidenceSource::PrReview,
+        EvidenceCitation {
+            kind: CitationKind::Symbol,
+            repo: finding.members.first().map(|member| member.repo.clone()),
+            path: finding
+                .members
+                .first()
+                .and_then(|member| member.file.clone()),
+            line: None,
+            symbol_id: None,
+            symbol_kind: Some("contract_alignment".to_owned()),
+            symbol_name: Some(finding.identity.clone()),
+            route_method: None,
+            route_path: None,
+            event_target: None,
+        },
+    )
+    .with_subject(
+        EvidenceSubject::new("contract_alignment")
+            .with_category(if finding.touched_by_pr {
+                "touched_by_pr"
+            } else {
+                "related"
+            })
+            .with_name(finding.identity.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::StaticAnalyzer,
+        None,
+    ))
+}
+
+fn decorator_evidence(decorator: &DecoratorDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::Decorator,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            decorator.repo.clone(),
+            decorator.file.clone().unwrap_or_default(),
+            decorator.line,
+            decorator
+                .target_qualified_name
+                .clone()
+                .unwrap_or_else(|| decorator.decorator_name.clone()),
+            "decorator",
+            decorator.decorator_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("decorator")
+            .with_category(category.to_owned())
+            .with_name(decorator.decorator_name.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn decorator_change_evidence(change: &DecoratorDeltaChange) -> Evidence {
+    Evidence::new(
+        EvidenceKind::Decorator,
+        EvidenceSource::PrReview,
+        EvidenceCitation::symbol(
+            change.repo.clone(),
+            change.after.file.clone().unwrap_or_default(),
+            change.after.line,
+            change.target_qualified_name.clone(),
+            "decorator",
+            change.after.decorator_name.clone(),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("decorator")
+            .with_category("changed")
+            .with_name(change.after.decorator_name.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn deployment_evidence(deployment: &DeploymentDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::DeploymentTouchpoint,
+        EvidenceSource::PrReview,
+        EvidenceCitation::file_line(
+            deployment.repo.clone(),
+            deployment.file.clone().unwrap_or_default(),
+            deployment.line,
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("deployment")
+            .with_category(category.to_owned())
+            .with_name(deployment.name.clone())
+            .with_reason(deployment.kind.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
+}
+
+fn workflow_job_evidence(job: &WorkflowJobDelta, category: &str) -> Evidence {
+    Evidence::new(
+        EvidenceKind::DeploymentTouchpoint,
+        EvidenceSource::PrReview,
+        EvidenceCitation::file_line(job.repo.clone(), job.workflow.clone(), None),
+    )
+    .with_subject(
+        EvidenceSubject::new("workflow_job")
+            .with_category(category.to_owned())
+            .with_name(job.job_name.clone()),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::DiffExtraction,
+        None,
+    ))
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -1596,49 +2208,104 @@ fn format_loc(file: Option<&str>, line: Option<u32>) -> String {
 /// Everything else is wrapped in single quotes, with any embedded single quote
 /// escaped via the standard `'\''` idiom.
 fn shell_quote(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy();
+    shell_quote_str(&p.to_string_lossy())
+}
+
+/// Shell-quote an arbitrary string the same way [`shell_quote`] handles paths.
+/// Used for dynamic values (route paths, symbol names, HTTP methods) that get
+/// embedded into suggested follow-up commands — symbols can contain `<`, `>`,
+/// `&`, spaces, etc., and route paths can contain `$`, parentheses, or other
+/// shell-special chars.
+fn shell_quote_str(s: &str) -> String {
     if s.is_empty() {
         return "''".to_owned();
     }
-    // Characters safe without quoting in POSIX shells.
     if s.bytes()
         .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'=' | b':'))
     {
-        return s.into_owned();
+        return s.to_owned();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Build the list of suggested follow-up commands parameterized with the
 /// review artifact root paths.
+///
+/// When the PR's delta contains a real route or symbol, the templates are
+/// grounded in those identities so the suggestion runs as-is. Otherwise the
+/// templates use explicit placeholder values (`SYMBOL_PLACEHOLDER`,
+/// `/ROUTE_PATH_PLACEHOLDER`) so it is obvious the user must substitute
+/// before running — rather than emitting `ExampleSymbol` / `/example` which
+/// look like real identifiers.
 pub fn build_suggested_followups(
     workspace: &std::path::Path,
     review_registry_path: &std::path::Path,
     review_storage_path: &std::path::Path,
+    routes: &RouteDeltas,
+    symbols: &SymbolDeltas,
 ) -> Vec<SuggestedCommand> {
     let ws = shell_quote(workspace);
     let reg = shell_quote(review_registry_path);
     let stor = shell_quote(review_storage_path);
 
+    let example_route_method_path = routes
+        .added
+        .first()
+        .map(|r| (r.method.clone(), r.path.clone()))
+        .or_else(|| {
+            routes
+                .changed
+                .first()
+                .map(|c| (c.method.clone(), c.path.clone()))
+        })
+        .or_else(|| {
+            routes
+                .removed
+                .first()
+                .map(|r| (r.method.clone(), r.path.clone()))
+        });
+    let (route_method_raw, route_path_raw) = example_route_method_path
+        .unwrap_or_else(|| ("GET".to_owned(), "/ROUTE_PATH_PLACEHOLDER".to_owned()));
+    let route_method = shell_quote_str(&route_method_raw);
+    let route_path = shell_quote_str(&route_path_raw);
+    let example_symbol_raw = symbols
+        .added
+        .first()
+        .map(|sym| sym.qualified_name.clone())
+        .or_else(|| {
+            symbols
+                .changed
+                .first()
+                .map(|c| c.after.qualified_name.clone())
+        })
+        .or_else(|| {
+            symbols
+                .removed
+                .first()
+                .map(|sym| sym.qualified_name.clone())
+        })
+        .unwrap_or_else(|| "SYMBOL_PLACEHOLDER".to_owned());
+    let example_symbol = shell_quote_str(&example_symbol_raw);
+
     vec![
         SuggestedCommand {
             label: "Trace a CRUD route in the PR branch".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} trace --registry {reg} --storage {stor} crud --method GET --path /example"
+                "gather-step --workspace {ws} trace --registry {reg} --storage {stor} crud --method {route_method} --path {route_path}"
             ),
             requires_keep_cache: true,
         },
         SuggestedCommand {
             label: "Impact analysis for a symbol in the PR branch".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} impact --registry {reg} --storage {stor} ExampleSymbol"
+                "gather-step --workspace {ws} impact --registry {reg} --storage {stor} {example_symbol}"
             ),
             requires_keep_cache: true,
         },
         SuggestedCommand {
             label: "Pack review changes into an AI context bundle".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} pack --registry {reg} --storage {stor} --mode review ExampleSymbol"
+                "gather-step --workspace {ws} pack --registry {reg} --storage {stor} --mode review {example_symbol}"
             ),
             requires_keep_cache: true,
         },
@@ -1770,6 +2437,7 @@ mod tests {
             },
             changed_files: vec![],
             changed_files_truncated: false,
+            evidence: vec![],
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),
@@ -1806,6 +2474,7 @@ mod tests {
                 "decorators",
                 "deployment",
                 "events",
+                "evidence",
                 "metadata",
                 "payload_contracts",
                 "removed_surface_risks",
@@ -1827,17 +2496,38 @@ mod tests {
         assert_eq!(json["schema_version"], 3);
     }
 
-    /// The canonical schema version is `DELTA_REPORT_SCHEMA_VERSION` (changed
-    /// payload impact and deployment change reasons added at v7).
+    /// The canonical schema version is `DELTA_REPORT_SCHEMA_VERSION`.
     #[test]
     fn schema_version_matches_constant() {
         let report = make_empty_report(super::DELTA_REPORT_SCHEMA_VERSION);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["schema_version"], super::DELTA_REPORT_SCHEMA_VERSION);
-        // Confirm the `deployment` key is present (added in v7).
+        // Confirm the current report shape includes the `deployment` key.
         assert!(
             json.as_object().unwrap().contains_key("deployment"),
             "current-version report must include the `deployment` key"
+        );
+    }
+
+    /// Hard-pin the wire-version literal `1`. This catches an accidental bump
+    /// of `DELTA_REPORT_SCHEMA_VERSION` that the surrounding tests would
+    /// otherwise tautologically pass — Braingent renderers, MCP consumers,
+    /// and the website docs all key off this literal.
+    #[test]
+    fn schema_version_wire_literal_is_one() {
+        assert_eq!(
+            super::DELTA_REPORT_SCHEMA_VERSION,
+            1,
+            "v4 QA planning resets the public DeltaReport schema_version to 1; \
+             a bump must be intentional and accompanied by a CHANGELOG entry, \
+             docs/website update, and Braingent-side coordination."
+        );
+        let report = make_empty_report(1);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["schema_version"],
+            serde_json::Value::Number(1.into()),
+            "DeltaReport JSON must serialize `schema_version` as the literal `1`"
         );
     }
 
@@ -1849,6 +2539,8 @@ mod tests {
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/review/registry.json"),
             std::path::Path::new("/tmp/review/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
         );
 
         assert_eq!(commands.len(), 3);
@@ -1868,6 +2560,164 @@ mod tests {
         }
     }
 
+    fn make_symbol(qualified_name: &str) -> SymbolDelta {
+        SymbolDelta {
+            kind: "function".to_owned(),
+            repo: "backend".to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            file: Some("src/orders.controller.ts".to_owned()),
+            line: Some(42),
+            signature: None,
+            visibility: Some("public".to_owned()),
+            is_virtual: false,
+            impact: None,
+        }
+    }
+
+    fn make_route(method: &str, path: &str) -> RouteDelta {
+        RouteDelta {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            repo: Some("backend".to_owned()),
+            file: Some("src/orders.controller.ts".to_owned()),
+            line: Some(10),
+            handler_qualified_name: Some("OrdersController.create".to_owned()),
+            impact: None,
+        }
+    }
+
+    #[test]
+    fn suggested_followups_use_real_route_and_symbol_when_available() {
+        let routes = RouteDeltas {
+            added: vec![make_route("POST", "/api/orders")],
+            ..RouteDeltas::default()
+        };
+        let symbols = SymbolDeltas {
+            added: vec![make_symbol("OrdersController.create")],
+            ..SymbolDeltas::default()
+        };
+
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+            &routes,
+            &symbols,
+        );
+
+        assert!(
+            commands[0].command.contains("--method POST"),
+            "trace command should use the real route method: {}",
+            commands[0].command
+        );
+        assert!(
+            commands[0].command.contains("--path /api/orders"),
+            "trace command should use the real route path: {}",
+            commands[0].command
+        );
+        assert!(
+            commands[1].command.ends_with(" OrdersController.create"),
+            "impact command should use the real symbol: {}",
+            commands[1].command
+        );
+        assert!(
+            commands[2].command.ends_with(" OrdersController.create"),
+            "pack command should use the real symbol: {}",
+            commands[2].command
+        );
+        for cmd in &commands {
+            assert!(
+                !cmd.command.contains("PLACEHOLDER"),
+                "real-delta path should not emit placeholders: {}",
+                cmd.command
+            );
+        }
+    }
+
+    #[test]
+    fn suggested_followups_shell_quote_dynamic_route_and_symbol_values() {
+        // Symbols can contain shell-special characters (`<`, `>`, `&`,
+        // spaces, `$`) when types/generics are part of the qualified name;
+        // route paths can contain `$`, parens, etc. The dynamic values must
+        // be shell-quoted in the emitted command, not just the workspace /
+        // registry / storage paths.
+        let routes = RouteDeltas {
+            added: vec![make_route("GET", "/orders/$id")],
+            ..RouteDeltas::default()
+        };
+        let symbols = SymbolDeltas {
+            added: vec![make_symbol("OrdersService::list<T & U>")],
+            ..SymbolDeltas::default()
+        };
+
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+            &routes,
+            &symbols,
+        );
+
+        assert!(
+            commands[0].command.contains("--path '/orders/$id'"),
+            "route path with `$` must be single-quoted: {}",
+            commands[0].command
+        );
+        assert!(
+            commands[1]
+                .command
+                .ends_with(" 'OrdersService::list<T & U>'"),
+            "symbol with `<>&` and spaces must be single-quoted: {}",
+            commands[1].command
+        );
+        assert!(
+            commands[2]
+                .command
+                .ends_with(" 'OrdersService::list<T & U>'"),
+            "pack symbol with `<>&` and spaces must be single-quoted: {}",
+            commands[2].command
+        );
+    }
+
+    #[test]
+    fn suggested_followups_emit_placeholders_when_delta_empty() {
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+        );
+        let route_cmd = &commands[0].command;
+        let symbol_cmd = &commands[1].command;
+        let pack_cmd = &commands[2].command;
+        assert!(
+            route_cmd.contains("/ROUTE_PATH_PLACEHOLDER"),
+            "empty delta route follow-up must use the explicit ROUTE_PATH placeholder: {route_cmd}"
+        );
+        assert!(
+            symbol_cmd.contains("SYMBOL_PLACEHOLDER"),
+            "empty delta symbol follow-up must use the explicit SYMBOL placeholder: {symbol_cmd}"
+        );
+        assert!(
+            pack_cmd.contains("SYMBOL_PLACEHOLDER"),
+            "empty delta pack follow-up must use the explicit SYMBOL placeholder: {pack_cmd}"
+        );
+        // The legacy stub identifiers must not regress.
+        for cmd in &commands {
+            assert!(
+                !cmd.command.contains("ExampleSymbol"),
+                "legacy ExampleSymbol stub must not be emitted: {}",
+                cmd.command
+            );
+            assert!(
+                !cmd.command.contains("/example"),
+                "legacy /example stub must not be emitted: {}",
+                cmd.command
+            );
+        }
+    }
+
     // Finding 4: followup_command_shell_quotes_paths_with_spaces
     #[test]
     fn followup_command_shell_quotes_paths_with_spaces() {
@@ -1875,7 +2725,13 @@ mod tests {
         let registry = std::path::Path::new("/workspace/Foo Projects/.cache/registry.json");
         let storage = std::path::Path::new("/workspace/Foo Projects/.cache/storage");
 
-        let commands = build_suggested_followups(workspace, registry, storage);
+        let commands = build_suggested_followups(
+            workspace,
+            registry,
+            storage,
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+        );
 
         for cmd in &commands {
             // Each path component with spaces must be single-quoted in the command.
@@ -1912,6 +2768,8 @@ mod tests {
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/registry.json"),
             std::path::Path::new("/tmp/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
         );
         for cmd in &commands_plain {
             assert!(
@@ -2025,7 +2883,7 @@ mod tests {
     /// A "fully populated" report with at least one of each delta kind.
     /// Used to pin the schema and section order against accidental regression.
     fn fully_populated_report() -> DeltaReport {
-        DeltaReport {
+        let mut report = DeltaReport {
             schema_version: super::DELTA_REPORT_SCHEMA_VERSION,
             metadata: ReviewMetadata {
                 workspace: std::path::PathBuf::from("/tmp/ws"),
@@ -2051,6 +2909,7 @@ mod tests {
             },
             changed_files: vec!["backend/src/routes.ts".to_owned()],
             changed_files_truncated: false,
+            evidence: vec![],
             routes: RouteDeltas {
                 added: vec![RouteDelta {
                     method: "GET".to_owned(),
@@ -2202,7 +3061,9 @@ mod tests {
             },
             suggested_followups: vec![],
             unsupported_surfaces: vec![],
-        }
+        };
+        report.refresh_evidence();
+        report
     }
 
     /// Top-level JSON keys are stable.
@@ -2230,6 +3091,7 @@ mod tests {
                 "decorators",
                 "deployment",
                 "events",
+                "evidence",
                 "metadata",
                 "payload_contracts",
                 "removed_surface_risks",
@@ -2240,6 +3102,24 @@ mod tests {
                 "symbols",
             ]
         );
+    }
+
+    #[test]
+    fn evidence_metadata_is_populated_from_delta_surfaces() {
+        let report = fully_populated_report();
+        assert!(!report.evidence.is_empty());
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|row| row.kind == EvidenceKind::RouteDefinition
+                    && row.source == EvidenceSource::PrReview)
+        );
+        assert!(report.evidence.iter().all(|row| {
+            row.id().starts_with("GS-EVID-")
+                && row.subject.is_some()
+                && matches!(row.source, EvidenceSource::PrReview)
+        }));
     }
 
     /// Nested route delta JSON keys are stable.

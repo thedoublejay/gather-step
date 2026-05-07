@@ -209,6 +209,21 @@ connectors), next-step suggestions generated from graph structure, and a list
 of unresolved gaps. For a deeper explanation of how packs are assembled, see
 [Concepts: context packs](/concepts/context-packs/).
 
+## Export QA Planning Evidence
+
+```bash
+gather-step qa-evidence createOrder --base main --head feature/create-order --json
+```
+
+Use `qa-evidence` when a downstream planning workflow needs grounded code
+evidence for a QA reference. The command emits normalized rows from
+`planning`, `review`, and `change_impact` packs, plus local feature-flag and
+existing-test signals, using the same canonical evidence metadata shape as the
+underlying producers. It also surfaces dynamic feature-flag and scan-limit gaps
+instead of hiding incomplete coverage. It intentionally stops at evidence:
+requirement interpretation, test-case prose, and reviewer prompts belong in the
+planning tool that consumes the manifest.
+
 ## Generate Derived Artifacts
 
 ```bash
@@ -218,11 +233,15 @@ gather-step generate codeowners
 
 ### `generate claude-md`
 
-Generates `.claude/rules/*.md` files from the live graph state. The output
-files summarize system architecture, routes, and events in a format that can
-be committed to the repository and loaded by Claude Code as assistant context.
-Because the files are derived from the indexed graph rather than maintained by
-hand, they stay in sync with the codebase as the graph is refreshed.
+Generates `.agent-context/gather-step/*.md` files from the live graph state.
+The output files summarize system architecture, routes, and events in a format
+that can be committed to the repository. They are loaded **on demand** through
+an installed skill (`.claude/skills/gather-step-context/SKILL.md` for Claude
+Code, `.agents/skills/gather-step-context/SKILL.md` for Codex) instead of
+being pulled into every session, plus a small `.claude/rules/gather-step-index.md`
+pointer that tells the agent when to invoke the skill. Because the data files
+are derived from the indexed graph rather than maintained by hand, they stay in
+sync with the codebase as the graph is refreshed.
 
 The generator applies a byte budget so the output stays within practical
 context-window limits.
@@ -385,8 +404,9 @@ The report sections are:
 | `decorators` | Permission, audit, and authorization decorator changes |
 | `contract_alignments` | Cross-repo clusters of related payload contracts with confidence scores |
 | `removed_surface_risks` | Removed routes / symbols / events with surviving consumers, classified `high` / `medium` / `low` |
+| `evidence` | Canonical, query-time evidence rows derived from the typed delta surfaces (closed `kind`/`source` enums, structured citations, deterministic IDs) |
 | `deployment` | Deployment-topology changes: Dockerfiles, Compose services, K8s manifests, env vars, secrets, config maps, GitHub Actions deploy jobs |
-| `suggested_followups` | Ready-to-run `gather-step pack` and `trace crud` commands for the highest-impact deltas |
+| `suggested_followups` | Ready-to-run `gather-step pack` and `trace crud` commands grounded in the actual delta when available; otherwise emit explicit placeholders (`SYMBOL_PLACEHOLDER`, `/ROUTE_PATH_PLACEHOLDER`) so it's clear they need substitution |
 
 ### Follow-up queries against the kept index
 

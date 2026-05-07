@@ -12,6 +12,10 @@ use crate::{
     budget::{BudgetedTool, ResponseBudget, apply_response_budget, response_schema_version},
     config::{McpContext, validate_input_length},
     error::McpServerError,
+    evidence::{
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
+        EvidenceSupportMethod,
+    },
     ids::{decode_node_id, encode_node_id},
 };
 
@@ -63,6 +67,7 @@ pub struct PayloadSchemaResponse {
 pub struct PayloadSchemaData {
     pub consumer_contracts: Vec<ContractSummary>,
     pub consumer_schema: Vec<SchemaFieldItem>,
+    pub evidence: Vec<Evidence>,
     pub producer_contracts: Vec<ContractSummary>,
     pub producer_schema: Vec<SchemaFieldItem>,
     pub target_id: String,
@@ -161,6 +166,7 @@ pub fn payload_schema_tool(
         data: map_schema(target.id, schema),
         meta: None,
     };
+    response.data.evidence.clear();
     let budget = apply_response_budget(
         BudgetedTool::Contract,
         request.budget_bytes,
@@ -176,6 +182,7 @@ pub fn payload_schema_tool(
         generation,
         response_schema_version: response_schema_version(),
     });
+    response.data.evidence = payload_schema_evidence(&response.data);
     Ok(response)
 }
 
@@ -446,7 +453,8 @@ fn min_confidence(include_weak: Option<bool>) -> u16 {
 }
 
 fn map_schema(target_id: NodeId, schema: PayloadSchema) -> PayloadSchemaData {
-    PayloadSchemaData {
+    let target_id = encode_node_id(target_id);
+    let mut data = PayloadSchemaData {
         consumer_contracts: schema
             .consumer_contracts
             .iter()
@@ -457,6 +465,7 @@ fn map_schema(target_id: NodeId, schema: PayloadSchema) -> PayloadSchemaData {
             .into_iter()
             .map(map_schema_field)
             .collect(),
+        evidence: Vec::new(),
         producer_contracts: schema
             .producer_contracts
             .iter()
@@ -467,8 +476,93 @@ fn map_schema(target_id: NodeId, schema: PayloadSchema) -> PayloadSchemaData {
             .into_iter()
             .map(map_schema_field)
             .collect(),
-        target_id: encode_node_id(target_id),
-    }
+        target_id,
+    };
+    data.evidence = payload_schema_evidence(&data);
+    data
+}
+
+fn payload_schema_evidence(data: &PayloadSchemaData) -> Vec<Evidence> {
+    let mut rows = Vec::new();
+    rows.extend(
+        data.producer_contracts
+            .iter()
+            .map(|contract| contract_summary_evidence("producer", contract)),
+    );
+    rows.extend(
+        data.consumer_contracts
+            .iter()
+            .map(|contract| contract_summary_evidence("consumer", contract)),
+    );
+    rows.extend(
+        data.producer_schema
+            .iter()
+            .map(|field| schema_field_evidence(&data.target_id, "producer_field", field)),
+    );
+    rows.extend(
+        data.consumer_schema
+            .iter()
+            .map(|field| schema_field_evidence(&data.target_id, "consumer_field", field)),
+    );
+    rows
+}
+
+fn contract_summary_evidence(side: &str, contract: &ContractSummary) -> Evidence {
+    Evidence::new(
+        EvidenceKind::PayloadContract,
+        EvidenceSource::PayloadSchema,
+        EvidenceCitation::symbol(
+            contract.repo.clone(),
+            contract.file_path.clone(),
+            contract.line_start,
+            contract.symbol_id.clone(),
+            "payload_contract",
+            contract
+                .source_type_name
+                .clone()
+                .unwrap_or_else(|| contract.symbol_id.clone()),
+        ),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category(side.to_owned())
+            .with_name(
+                contract
+                    .source_type_name
+                    .clone()
+                    .unwrap_or_else(|| contract.symbol_id.clone()),
+            ),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::StaticAnalyzer,
+        Some(contract.confidence),
+    ))
+}
+
+fn schema_field_evidence(target_id: &str, category: &str, field: &SchemaFieldItem) -> Evidence {
+    Evidence::new(
+        EvidenceKind::PayloadField,
+        EvidenceSource::PayloadSchema,
+        EvidenceCitation::symbol_id(target_id.to_owned(), "payload_contract_field"),
+    )
+    .with_subject(
+        EvidenceSubject::new("payload_contract")
+            .with_category(category.to_owned())
+            .with_name(field.name.clone())
+            .with_reason(format!(
+                "{}{}",
+                field.type_name,
+                if field.optional {
+                    " optional"
+                } else {
+                    " required"
+                }
+            )),
+    )
+    .with_support(EvidenceSupport::new(
+        EvidenceSupportMethod::StaticAnalyzer,
+        Some(field.confidence),
+    ))
 }
 
 fn map_drift(drift: ContractDrift) -> ContractDriftData {
