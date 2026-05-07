@@ -5,6 +5,21 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.1 (2026-05-07)
+
+Release status: **released**.
+
+Patch on top of v4.0.0. Fixes deployment topology evidence for the workspace streaming index path, so GitOps kustomize/compose/workflow artifacts are written when repos are indexed through the CLI workspace pipeline.
+
+### Fixed
+
+- Streaming payload commits now run the same deployment-artifact indexing pass as direct repo indexing. This restores `Service -> Deployment` evidence for `deployment-topology where-deployed` after a normal workspace index.
+- Added a regression test that prepares and commits a streaming payload containing a RegASK-like kustomize service and asserts the expected service and deployment nodes are present.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.1`.
+
 ## v4.0.0 (2026-05-06)
 
 Release status: **released**.
