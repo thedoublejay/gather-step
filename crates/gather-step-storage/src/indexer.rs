@@ -35,7 +35,7 @@ use kanal::bounded;
 use rayon::prelude::*;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     ChangedSet, FileBatch, GraphStore, GraphStoreDb, GraphStoreError, IncrementalError, RepoBatch,
@@ -658,11 +658,11 @@ impl RepoIndexer {
             ) {
                 Ok(output) => output,
                 Err(error) => {
-                    warn!(
+                    debug!(
                         repo,
                         path = %file_path,
                         error = %error,
-                        "Skipping a malformed deployment artifact during indexing.",
+                        "skipping a malformed deployment artifact during indexing",
                     );
                     self.storage
                         .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;
@@ -1910,7 +1910,7 @@ fn append_compose_env_file_edges(
         };
         let full_path = repo_root.join(&relative_env_path);
         let Ok(metadata) = fs::symlink_metadata(&full_path) else {
-            warn!(
+            debug!(
                 repo,
                 path = %compose_file_path,
                 env_file = %env_file_ref.path,

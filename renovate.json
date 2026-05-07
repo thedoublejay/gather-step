@@ -1,0 +1,78 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "timezone": "Europe/Copenhagen",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 10,
+  "rangeStrategy": "auto",
+  "rebaseWhen": "behind-base-branch",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on monday"
+    ]
+  },
+  "vulnerabilityAlerts": {
+    "labels": [
+      "security"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Internal gather-step-* path-deps inherit version.workspace; do not let Renovate touch them.",
+      "matchPackageNames": [
+        "/^gather-step/"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Group the tree-sitter ecosystem; grammars must move in lockstep with the parser.",
+      "matchPackageNames": [
+        "/^tree-sitter/"
+      ],
+      "groupName": "tree-sitter"
+    },
+    {
+      "description": "Storage stack is pinned exact (= prefix). Group so reviews stay coherent.",
+      "matchPackageNames": [
+        "redb",
+        "tantivy",
+        "rusqlite"
+      ],
+      "groupName": "storage stack"
+    },
+    {
+      "description": "Batch Astro / Starlight majors so the site can be regression-tested as a unit.",
+      "matchFileNames": [
+        "website/**"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "groupName": "website majors"
+    },
+    {
+      "description": "Auto-merge low-risk dev-time updates (lockfile, devDeps minor/patch).",
+      "matchManagers": [
+        "cargo",
+        "npm",
+        "bun"
+      ],
+      "matchUpdateTypes": [
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    }
+  ]
+}
