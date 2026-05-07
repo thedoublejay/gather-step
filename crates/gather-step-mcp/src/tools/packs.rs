@@ -32,7 +32,7 @@ use crate::{
     config::{McpContext, validate_input_length},
     error::McpServerError,
     evidence::{
-        Evidence, EvidenceCitation, EvidenceKind, EvidenceSubject, EvidenceSupport,
+        Evidence, EvidenceCitation, EvidenceKind, EvidenceSource, EvidenceSubject, EvidenceSupport,
         EvidenceSupportMethod, evidence_kind_for_pack_item, evidence_source_for_pack_mode,
         infer_surface as infer_evidence_surface,
     },
@@ -2642,23 +2642,37 @@ fn refresh_cached_context_pack_response(
 
 fn attach_context_pack_evidence(response: &mut ContextPackResponse) {
     let mode = response.data.mode.as_str();
+    // Resolve the EvidenceSource once. Unknown modes fall back to PlanningPack
+    // and emit a `tracing::warn!` so a future PackMode addition surfaces in
+    // logs instead of panicking inside an MCP request handler.
+    let source = if let Some(src) = evidence_source_for_pack_mode(mode) {
+        src
+    } else {
+        tracing::warn!(
+            target = "gather_step_mcp::tools::packs",
+            pack_mode = mode,
+            "unknown pack mode while building canonical evidence; defaulting to planning_pack — \
+             update `evidence_source_for_pack_mode` to cover this mode",
+        );
+        EvidenceSource::PlanningPack
+    };
     let mut evidence = Vec::new();
 
     for item in &mut response.data.items {
-        let row = pack_item_evidence(mode, item);
+        let row = pack_item_evidence(source, mode, item);
         item.evidence = Some(row.clone());
         evidence.push(row);
     }
 
     for caller in &mut response.data.change_impact.cross_repo_callers {
-        let row = cross_repo_caller_evidence(mode, caller);
+        let row = cross_repo_caller_evidence(source, caller);
         caller.evidence = Some(row.clone());
         evidence.push(row);
     }
 
     for repo in &response.data.change_impact.confirmed_downstream_repos {
         evidence.push(repo_impact_evidence(
-            mode,
+            source,
             EvidenceKind::ConfirmedDownstreamRepo,
             repo,
             EvidenceSupportMethod::GraphTraversal,
@@ -2667,7 +2681,7 @@ fn attach_context_pack_evidence(response: &mut ContextPackResponse) {
     }
     for repo in &response.data.change_impact.probable_downstream_repos {
         evidence.push(repo_impact_evidence(
-            mode,
+            source,
             EvidenceKind::ProbableDownstreamRepo,
             repo,
             EvidenceSupportMethod::StaticAnalyzer,
@@ -2676,7 +2690,7 @@ fn attach_context_pack_evidence(response: &mut ContextPackResponse) {
     }
     for repo in &response.data.change_impact.unresolved_possible {
         evidence.push(repo_impact_evidence(
-            mode,
+            source,
             EvidenceKind::UnresolvedPossibleRepo,
             repo,
             EvidenceSupportMethod::StaticAnalyzer,
@@ -2687,7 +2701,7 @@ fn attach_context_pack_evidence(response: &mut ContextPackResponse) {
         for repo in &truncated.names {
             evidence.push(
                 repo_impact_evidence(
-                    mode,
+                    source,
                     EvidenceKind::TruncatedRepos,
                     repo,
                     EvidenceSupportMethod::StaticAnalyzer,
@@ -2708,7 +2722,7 @@ fn attach_context_pack_evidence(response: &mut ContextPackResponse) {
     response.data.evidence = evidence;
 }
 
-fn pack_item_evidence(mode: &str, item: &PackItem) -> Evidence {
+fn pack_item_evidence(source: EvidenceSource, mode: &str, item: &PackItem) -> Evidence {
     let surface = infer_evidence_surface(
         &item.symbol_kind,
         &item.category,
@@ -2717,7 +2731,7 @@ fn pack_item_evidence(mode: &str, item: &PackItem) -> Evidence {
     );
     Evidence::new(
         evidence_kind_for_pack_item(mode, &item.category, &item.file_path),
-        evidence_source_for_pack_mode(mode).expect("context pack mode must be canonical"),
+        source,
         EvidenceCitation::symbol(
             item.repo.clone(),
             item.file_path.clone(),
@@ -2739,10 +2753,10 @@ fn pack_item_evidence(mode: &str, item: &PackItem) -> Evidence {
     ))
 }
 
-fn cross_repo_caller_evidence(mode: &str, caller: &CrossRepoCaller) -> Evidence {
+fn cross_repo_caller_evidence(source: EvidenceSource, caller: &CrossRepoCaller) -> Evidence {
     Evidence::new(
         EvidenceKind::CrossRepoCaller,
-        evidence_source_for_pack_mode(mode).expect("context pack mode must be canonical"),
+        source,
         EvidenceCitation::symbol(
             caller.repo.clone(),
             caller.file_path.clone(),
@@ -2769,24 +2783,20 @@ fn cross_repo_caller_evidence(mode: &str, caller: &CrossRepoCaller) -> Evidence 
 }
 
 fn repo_impact_evidence(
-    mode: &str,
+    source: EvidenceSource,
     kind: EvidenceKind,
     repo: &str,
     method: EvidenceSupportMethod,
     reason: &str,
 ) -> Evidence {
-    Evidence::new(
-        kind,
-        evidence_source_for_pack_mode(mode).expect("context pack mode must be canonical"),
-        EvidenceCitation::repo(repo.to_owned()),
-    )
-    .with_subject(
-        EvidenceSubject::new("repo_impact")
-            .with_category("downstream_repo")
-            .with_name(repo.to_owned())
-            .with_reason(reason.to_owned()),
-    )
-    .with_support(EvidenceSupport::new(method, None))
+    Evidence::new(kind, source, EvidenceCitation::repo(repo.to_owned()))
+        .with_subject(
+            EvidenceSubject::new("repo_impact")
+                .with_category("downstream_repo")
+                .with_name(repo.to_owned())
+                .with_reason(reason.to_owned()),
+        )
+        .with_support(EvidenceSupport::new(method, None))
 }
 
 fn cached_context_pack_anchor_repo(

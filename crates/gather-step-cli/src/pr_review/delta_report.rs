@@ -1,25 +1,10 @@
 //! Delta report — typed output struct for `gather-step pr-review`.
 //!
-//! Phase 2 Task 1 formalises the schema: placeholder `Vec<serde_json::Value>`
-//! fields are replaced with typed structs.  `schema_version` is bumped to 2.
-//!
-//! Phase 3 Tasks 3+4+5 add contract alignments, decorator deltas, and review
-//! pack synthesis.  `schema_version` is bumped to 3.
-//!
-//! Phase 5 Tasks 1+2 add `unsupported_surfaces` so the renderer can print
-//! "_unavailable on the {engine} engine_" instead of "_no changes_" for
-//! surfaces the active engine cannot populate.  `schema_version` is bumped
-//! to 4.
-//!
-//! Phase 5 Tasks 3+4 add per-surface `unavailable` flags so each delta struct
-//! self-describes whether it was computed or skipped.  `schema_version` is
-//! bumped to 5.
-//!
-//! Phase 7 adds deployment-topology delta extraction.  `schema_version` is
-//! bumped to 6. Phase 7 follow-up adds impact summaries for changed payload
-//! contracts and richer deployment change reasons; `schema_version` is bumped
-//! to 7. The v4 QA planning work adds canonical evidence metadata and bumps
-//! `schema_version` to 8.
+//! The v4 QA planning work resets the public `schema_version` baseline to `1`
+//! while there are no known external consumers. Canonical evidence metadata is
+//! injected at query time from the typed delta surfaces; no storage migration
+//! is required. Bump [`DELTA_REPORT_SCHEMA_VERSION`] when the wire shape
+//! changes again.
 
 use std::{
     fmt::Write as _,
@@ -2238,34 +2223,79 @@ fn shell_quote(p: &std::path::Path) -> String {
 
 /// Build the list of suggested follow-up commands parameterized with the
 /// review artifact root paths.
+///
+/// When the PR's delta contains a real route or symbol, the templates are
+/// grounded in those identities so the suggestion runs as-is. Otherwise the
+/// templates use explicit placeholder values (`SYMBOL_PLACEHOLDER`,
+/// `/ROUTE_PATH_PLACEHOLDER`) so it is obvious the user must substitute
+/// before running — rather than emitting `ExampleSymbol` / `/example` which
+/// look like real identifiers.
 pub fn build_suggested_followups(
     workspace: &std::path::Path,
     review_registry_path: &std::path::Path,
     review_storage_path: &std::path::Path,
+    routes: &RouteDeltas,
+    symbols: &SymbolDeltas,
 ) -> Vec<SuggestedCommand> {
     let ws = shell_quote(workspace);
     let reg = shell_quote(review_registry_path);
     let stor = shell_quote(review_storage_path);
 
+    let example_route_method_path = routes
+        .added
+        .first()
+        .map(|r| (r.method.clone(), r.path.clone()))
+        .or_else(|| {
+            routes
+                .changed
+                .first()
+                .map(|c| (c.method.clone(), c.path.clone()))
+        })
+        .or_else(|| {
+            routes
+                .removed
+                .first()
+                .map(|r| (r.method.clone(), r.path.clone()))
+        });
+    let (route_method, route_path) = example_route_method_path
+        .unwrap_or_else(|| ("GET".to_owned(), "/ROUTE_PATH_PLACEHOLDER".to_owned()));
+    let example_symbol = symbols
+        .added
+        .first()
+        .map(|sym| sym.qualified_name.clone())
+        .or_else(|| {
+            symbols
+                .changed
+                .first()
+                .map(|c| c.after.qualified_name.clone())
+        })
+        .or_else(|| {
+            symbols
+                .removed
+                .first()
+                .map(|sym| sym.qualified_name.clone())
+        })
+        .unwrap_or_else(|| "SYMBOL_PLACEHOLDER".to_owned());
+
     vec![
         SuggestedCommand {
             label: "Trace a CRUD route in the PR branch".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} trace --registry {reg} --storage {stor} crud --method GET --path /example"
+                "gather-step --workspace {ws} trace --registry {reg} --storage {stor} crud --method {route_method} --path {route_path}"
             ),
             requires_keep_cache: true,
         },
         SuggestedCommand {
             label: "Impact analysis for a symbol in the PR branch".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} impact --registry {reg} --storage {stor} ExampleSymbol"
+                "gather-step --workspace {ws} impact --registry {reg} --storage {stor} {example_symbol}"
             ),
             requires_keep_cache: true,
         },
         SuggestedCommand {
             label: "Pack review changes into an AI context bundle".to_owned(),
             command: format!(
-                "gather-step --workspace {ws} pack --registry {reg} --storage {stor} --mode review ExampleSymbol"
+                "gather-step --workspace {ws} pack --registry {reg} --storage {stor} --mode review {example_symbol}"
             ),
             requires_keep_cache: true,
         },
@@ -2469,6 +2499,28 @@ mod tests {
         );
     }
 
+    /// Hard-pin the wire-version literal `1`. This catches an accidental bump
+    /// of `DELTA_REPORT_SCHEMA_VERSION` that the surrounding tests would
+    /// otherwise tautologically pass — Braingent renderers, MCP consumers,
+    /// and the website docs all key off this literal.
+    #[test]
+    fn schema_version_wire_literal_is_one() {
+        assert_eq!(
+            super::DELTA_REPORT_SCHEMA_VERSION,
+            1,
+            "v4 QA planning resets the public DeltaReport schema_version to 1; \
+             a bump must be intentional and accompanied by a CHANGELOG entry, \
+             docs/website update, and Braingent-side coordination."
+        );
+        let report = make_empty_report(1);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["schema_version"],
+            serde_json::Value::Number(1.into()),
+            "DeltaReport JSON must serialize `schema_version` as the literal `1`"
+        );
+    }
+
     // ── follow-up command helpers ─────────────────────────────────────────────
 
     #[test]
@@ -2477,6 +2529,8 @@ mod tests {
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/review/registry.json"),
             std::path::Path::new("/tmp/review/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
         );
 
         assert_eq!(commands.len(), 3);
@@ -2496,6 +2550,119 @@ mod tests {
         }
     }
 
+    fn make_symbol(qualified_name: &str) -> SymbolDelta {
+        SymbolDelta {
+            kind: "function".to_owned(),
+            repo: "backend".to_owned(),
+            qualified_name: qualified_name.to_owned(),
+            file: Some("src/orders.controller.ts".to_owned()),
+            line: Some(42),
+            signature: None,
+            visibility: Some("public".to_owned()),
+            is_virtual: false,
+            impact: None,
+        }
+    }
+
+    fn make_route(method: &str, path: &str) -> RouteDelta {
+        RouteDelta {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            repo: Some("backend".to_owned()),
+            file: Some("src/orders.controller.ts".to_owned()),
+            line: Some(10),
+            handler_qualified_name: Some("OrdersController.create".to_owned()),
+            impact: None,
+        }
+    }
+
+    #[test]
+    fn suggested_followups_use_real_route_and_symbol_when_available() {
+        let routes = RouteDeltas {
+            added: vec![make_route("POST", "/api/orders")],
+            ..RouteDeltas::default()
+        };
+        let symbols = SymbolDeltas {
+            added: vec![make_symbol("OrdersController.create")],
+            ..SymbolDeltas::default()
+        };
+
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+            &routes,
+            &symbols,
+        );
+
+        assert!(
+            commands[0].command.contains("--method POST"),
+            "trace command should use the real route method: {}",
+            commands[0].command
+        );
+        assert!(
+            commands[0].command.contains("--path /api/orders"),
+            "trace command should use the real route path: {}",
+            commands[0].command
+        );
+        assert!(
+            commands[1].command.ends_with(" OrdersController.create"),
+            "impact command should use the real symbol: {}",
+            commands[1].command
+        );
+        assert!(
+            commands[2].command.ends_with(" OrdersController.create"),
+            "pack command should use the real symbol: {}",
+            commands[2].command
+        );
+        for cmd in &commands {
+            assert!(
+                !cmd.command.contains("PLACEHOLDER"),
+                "real-delta path should not emit placeholders: {}",
+                cmd.command
+            );
+        }
+    }
+
+    #[test]
+    fn suggested_followups_emit_placeholders_when_delta_empty() {
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+        );
+        let route_cmd = &commands[0].command;
+        let symbol_cmd = &commands[1].command;
+        let pack_cmd = &commands[2].command;
+        assert!(
+            route_cmd.contains("/ROUTE_PATH_PLACEHOLDER"),
+            "empty delta route follow-up must use the explicit ROUTE_PATH placeholder: {route_cmd}"
+        );
+        assert!(
+            symbol_cmd.contains("SYMBOL_PLACEHOLDER"),
+            "empty delta symbol follow-up must use the explicit SYMBOL placeholder: {symbol_cmd}"
+        );
+        assert!(
+            pack_cmd.contains("SYMBOL_PLACEHOLDER"),
+            "empty delta pack follow-up must use the explicit SYMBOL placeholder: {pack_cmd}"
+        );
+        // The legacy stub identifiers must not regress.
+        for cmd in &commands {
+            assert!(
+                !cmd.command.contains("ExampleSymbol"),
+                "legacy ExampleSymbol stub must not be emitted: {}",
+                cmd.command
+            );
+            assert!(
+                !cmd.command.contains("/example"),
+                "legacy /example stub must not be emitted: {}",
+                cmd.command
+            );
+        }
+    }
+
     // Finding 4: followup_command_shell_quotes_paths_with_spaces
     #[test]
     fn followup_command_shell_quotes_paths_with_spaces() {
@@ -2503,7 +2670,13 @@ mod tests {
         let registry = std::path::Path::new("/workspace/Foo Projects/.cache/registry.json");
         let storage = std::path::Path::new("/workspace/Foo Projects/.cache/storage");
 
-        let commands = build_suggested_followups(workspace, registry, storage);
+        let commands = build_suggested_followups(
+            workspace,
+            registry,
+            storage,
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
+        );
 
         for cmd in &commands {
             // Each path component with spaces must be single-quoted in the command.
@@ -2540,6 +2713,8 @@ mod tests {
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/registry.json"),
             std::path::Path::new("/tmp/storage"),
+            &RouteDeltas::default(),
+            &SymbolDeltas::default(),
         );
         for cmd in &commands_plain {
             assert!(

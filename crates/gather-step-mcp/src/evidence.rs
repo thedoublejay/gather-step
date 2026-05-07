@@ -50,7 +50,7 @@ impl Evidence {
     fn refresh_id(&mut self) {
         self.id = evidence_id(
             &self.kind,
-            &self.source,
+            self.source,
             &self.citation,
             self.subject.as_ref(),
         );
@@ -76,7 +76,7 @@ impl<'de> Deserialize<'de> for Evidence {
         }
 
         let raw = RawEvidence::deserialize(deserializer)?;
-        let expected_id = evidence_id(&raw.kind, &raw.source, &raw.citation, raw.subject.as_ref());
+        let expected_id = evidence_id(&raw.kind, raw.source, &raw.citation, raw.subject.as_ref());
         if !raw.id.is_empty() && raw.id != expected_id {
             return Err(de::Error::custom(format!(
                 "evidence id `{}` does not match canonical id `{expected_id}`",
@@ -129,7 +129,7 @@ pub enum EvidenceKind {
     DeploymentTouchpoint,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceSource {
     PlanningPack,
@@ -329,17 +329,31 @@ impl EvidenceSubject {
     }
 }
 
+/// Confidence value scaled to permille (0..=1000) — `1000` means "fully
+/// confident". The integer encoding keeps the schema language-agnostic and
+/// avoids float drift in JSON; consumers that want a 0..=1 ratio divide by
+/// 1000.
+pub const EVIDENCE_SCORE_MAX: u16 = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct EvidenceSupport {
     pub method: EvidenceSupportMethod,
+    /// Optional confidence score in permille (0..=`EVIDENCE_SCORE_MAX`).
+    /// Missing means the support method does not produce a quantitative score.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<u16>,
 }
 
 impl EvidenceSupport {
+    /// Construct a support record. Scores above [`EVIDENCE_SCORE_MAX`] are
+    /// clamped so the on-wire contract (0..=1000 permille) stays honest even
+    /// if a producer feeds in a bare integer like `confidence as u16`.
     #[must_use]
-    pub const fn new(method: EvidenceSupportMethod, score: Option<u16>) -> Self {
-        Self { method, score }
+    pub fn new(method: EvidenceSupportMethod, score: Option<u16>) -> Self {
+        Self {
+            method,
+            score: score.map(|s| s.min(EVIDENCE_SCORE_MAX)),
+        }
     }
 }
 
@@ -445,7 +459,7 @@ fn ends_with_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 
 fn evidence_id(
     kind: &EvidenceKind,
-    source: &EvidenceSource,
+    source: EvidenceSource,
     citation: &EvidenceCitation,
     subject: Option<&EvidenceSubject>,
 ) -> String {
@@ -459,7 +473,7 @@ fn evidence_id(
 
     let identity = Identity {
         kind,
-        source,
+        source: &source,
         citation,
         subject,
     };
@@ -518,6 +532,90 @@ mod tests {
         ));
 
         assert_eq!(base.id, supported.id);
+    }
+
+    #[test]
+    fn evidence_id_is_stable_under_builder_order_permutations() {
+        // Identity is `(kind, source, citation, subject)` — `with_support` must
+        // never enter the hash and the order of `with_subject`/`with_support`
+        // must not matter. A regression that folds support into the ID hash
+        // would silently break every consumer that pins IDs.
+        let citation = EvidenceCitation::symbol(
+            "backend",
+            "src/orders.ts",
+            Some(10),
+            "symbol-1",
+            "function",
+            "listOrders",
+        );
+        let subject = EvidenceSubject::new("symbol")
+            .with_category("function")
+            .with_name("listOrders");
+        let support = EvidenceSupport::new(EvidenceSupportMethod::GraphTraversal, Some(750));
+
+        let subject_then_support = Evidence::new(
+            EvidenceKind::ChangedSymbol,
+            EvidenceSource::PrReview,
+            citation.clone(),
+        )
+        .with_subject(subject.clone())
+        .with_support(support.clone());
+        let support_then_subject = Evidence::new(
+            EvidenceKind::ChangedSymbol,
+            EvidenceSource::PrReview,
+            citation.clone(),
+        )
+        .with_support(support.clone())
+        .with_subject(subject.clone());
+        let no_support = Evidence::new(
+            EvidenceKind::ChangedSymbol,
+            EvidenceSource::PrReview,
+            citation,
+        )
+        .with_subject(subject);
+
+        assert_eq!(subject_then_support.id, support_then_subject.id);
+        assert_eq!(no_support.id, subject_then_support.id);
+    }
+
+    #[test]
+    fn evidence_id_round_trips_through_serde_json() {
+        // The ID hash inputs are `serde_json::to_vec` over a struct with named
+        // fields whose order is load-bearing. Round-trip via `to_value` /
+        // `from_value` must yield byte-equal IDs so caches and dedupes that
+        // marshal Evidence through JSON stay valid.
+        let original = Evidence::new(
+            EvidenceKind::EventConsumer,
+            EvidenceSource::TraceEvent,
+            EvidenceCitation::event("kafka:order.created"),
+        )
+        .with_subject(
+            EvidenceSubject::new("event_consumer")
+                .with_category("consumer")
+                .with_name("OrdersConsumer.handleOrderCreated"),
+        )
+        .with_support(EvidenceSupport::new(
+            EvidenceSupportMethod::GraphTraversal,
+            Some(600),
+        ));
+
+        let value = serde_json::to_value(&original).expect("serializes");
+        let back: Evidence = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(original.id, back.id);
+    }
+
+    #[test]
+    fn evidence_score_is_clamped_to_permille_max() {
+        // The wire contract says scores are 0..=1000 permille. A producer
+        // accidentally feeding in a u16 above 1000 must be clamped at the
+        // boundary so consumers that divide by 1000 to get a 0..=1 ratio
+        // never see a > 1.0 value.
+        let support = EvidenceSupport::new(EvidenceSupportMethod::RetrievalRank, Some(50_000));
+        assert_eq!(support.score, Some(EVIDENCE_SCORE_MAX));
+        let pinned = EvidenceSupport::new(EvidenceSupportMethod::RetrievalRank, Some(750));
+        assert_eq!(pinned.score, Some(750));
+        let none = EvidenceSupport::new(EvidenceSupportMethod::StaticAnalyzer, None);
+        assert!(none.score.is_none());
     }
 
     #[test]

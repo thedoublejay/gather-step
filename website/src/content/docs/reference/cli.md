@@ -581,12 +581,18 @@ gather-step --workspace /path/to/workspace pack OrdersService --mode debug --dep
 Emits a normalized, evidence-only manifest for QA planning workflows. The command combines canonical evidence metadata from `planning`, `review`, and `change_impact` packs with local scans for feature-flag and existing-test signals. It does not generate test cases, interpret Jira or Figma, or make product assertions.
 
 ```bash
-gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] <TARGET> [--base <REF>] [--head <REF>] [--limit <N>] [--depth <N>] [--budget-bytes <N>] [--scan-limit <N>]
+gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] [<TARGET> | --symbol <ID> | --event-target <TARGET> | --route-method <M> --route-path <P>] [--base <REF>] [--head <REF>] [--limit <N>] [--depth <N>] [--budget-bytes <N>] [--scan-limit <N>]
 ```
+
+Exactly one target form must be supplied: a positional `<TARGET>`, `--symbol`, `--event-target`, or both of `--route-method` + `--route-path`.
 
 | Argument/Flag | Type | Default | Description |
 |---|---|---|---|
-| `<TARGET>` | string (positional) | required | Target symbol name or hex `symbol_id`. |
+| `<TARGET>` | string (positional) | — | Symbol name or hex `symbol_id`. Mutually exclusive with the other target forms. |
+| `--symbol <ID>` | string | — | Hex `symbol_id` form of the target (alternative to the positional). |
+| `--event-target <TARGET>` | string | — | Event target identifier (e.g. `kafka:order.created`). |
+| `--route-method <METHOD>` | string | — | HTTP method for a route target. Required together with `--route-path`. |
+| `--route-path <PATH>` | string | — | Canonical route path (e.g. `/orders/:id`). Required together with `--route-method`. |
 | `--base <REF>` | string | — | Optional base ref captured for downstream QA context. |
 | `--head <REF>` | string | — | Optional head ref captured for downstream QA context. |
 | `--limit <N>` | usize | 6 | Maximum ranked items to request from each pack mode. |
@@ -600,6 +606,8 @@ gather-step [GLOBAL FLAGS] qa-evidence [--registry <PATH>] [--storage <PATH>] <T
 
 ```bash
 gather-step --workspace /path/to/workspace qa-evidence OrdersService --base main --head feature/orders --json
+gather-step --workspace /path/to/workspace qa-evidence --route-method GET --route-path /orders/:id --json
+gather-step --workspace /path/to/workspace qa-evidence --event-target kafka:order.created --json
 ```
 
 **Output shape (`--json`)** — emits one line with `event: "qa_evidence_completed"`, `schema_version: "qa-evidence.v1"`, `target`, optional `base_ref` and `head_ref`, `manifest_summary`, `rows`, and `gaps`. Rows are canonical evidence objects with `id`, closed enum `kind`, closed enum `source`, structured `citation`, optional `subject`, and optional `support { method, score }`. IDs are stable for a given source, kind, citation, and subject; support changes do not change the ID. Gaps always include `id`, `source_resolver`, `kind`, `message`, and `blocks_complete_coverage`.

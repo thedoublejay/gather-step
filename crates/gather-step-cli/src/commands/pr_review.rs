@@ -1397,6 +1397,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         &app.workspace_path,
         &artifact_root.registry_path,
         &artifact_root.storage_root,
+        &route_deltas,
+        &symbol_deltas,
     );
     let pack_cmds = synthesize_review_pack_commands(
         &app.workspace_path,
@@ -1657,21 +1659,59 @@ pub struct DiscoveredArtifact {
     pub size_bytes: u64,
 }
 
+/// A subdirectory under the workspace cache root that *looks* like an artifact
+/// root (matches the layout) but whose marker is missing, malformed, or in a
+/// stale shape (e.g. pre-`last_accessed_at`). The recovery model is "reindex
+/// or clean," so the cleanup paths must still be able to remove it — keeping
+/// it discoverable here means `clean --all` and `clean --include-review` can
+/// reach it instead of accumulating forever.
+#[derive(Debug, Clone)]
+pub struct StaleArtifactRoot {
+    pub root: PathBuf,
+    pub size_bytes: u64,
+    pub reason: String,
+}
+
+/// Result of scanning the workspace cache root for review artifacts.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveredReviewArtifacts {
+    pub valid: Vec<DiscoveredArtifact>,
+    pub stale: Vec<StaleArtifactRoot>,
+}
+
 /// Scan `default_cache_root(workspace_root)` for subdirectories that contain a
 /// valid `review-marker.json` whose `workspace_hash` matches the current
-/// workspace.  Returns one entry per discovered artifact root.
+/// workspace. Returns one entry per discovered artifact root.
+///
+/// Stale-shape markers (unreadable, malformed, or missing required fields
+/// such as `last_accessed_at`) are silently skipped here for back-compat with
+/// existing call sites; use [`list_review_artifacts_with_stale`] when you
+/// need to surface or clean them up.
 pub fn list_review_artifacts(
     workspace_root: &Path,
     cache_root: &Path,
 ) -> Result<Vec<DiscoveredArtifact>> {
+    Ok(list_review_artifacts_with_stale(workspace_root, cache_root)?.valid)
+}
+
+/// Like [`list_review_artifacts`] but also returns directories that look like
+/// review-artifact roots but couldn't be parsed (pre-`last_accessed_at`
+/// markers, corrupt JSON, missing marker file, etc.). Cleanup paths must use
+/// this so old-shape state can still be removed via `clean --all` or
+/// `clean --include-review` — otherwise the very state the schema-reset
+/// principles call "stale, must be reindexed" silently accumulates forever.
+pub fn list_review_artifacts_with_stale(
+    workspace_root: &Path,
+    cache_root: &Path,
+) -> Result<DiscoveredReviewArtifacts> {
     let current_hash = workspace_hash(workspace_root);
     let hash_dir = cache_root.join(&current_hash);
 
     if !hash_dir.is_dir() {
-        return Ok(vec![]);
+        return Ok(DiscoveredReviewArtifacts::default());
     }
 
-    let mut artifacts = Vec::new();
+    let mut result = DiscoveredReviewArtifacts::default();
 
     let entries = std::fs::read_dir(&hash_dir).with_context(|| {
         format!(
@@ -1702,22 +1742,29 @@ pub fn list_review_artifacts(
                     continue;
                 }
                 let size_bytes = dir_size_bytes(&root);
-                artifacts.push(DiscoveredArtifact {
+                result.valid.push(DiscoveredArtifact {
                     root,
                     marker,
                     size_bytes,
                 });
             }
             Err(e) => {
+                let reason = format!("{e}");
                 tracing::warn!(
-                    "Skipping `{}` because the marker could not be read: {e}.",
+                    "Marker could not be read at `{}`: {reason}. Will be reachable to `clean --all` / `clean --include-review`.",
                     root.display()
                 );
+                let size_bytes = dir_size_bytes(&root);
+                result.stale.push(StaleArtifactRoot {
+                    root,
+                    size_bytes,
+                    reason,
+                });
             }
         }
     }
 
-    Ok(artifacts)
+    Ok(result)
 }
 
 /// Recursively sum the sizes of all files under `dir`.  Ignores I/O errors
@@ -1786,6 +1833,11 @@ struct CleanOutput {
     operation: &'static str,
     dry_run: bool,
     selected_artifacts: Vec<CleanArtifactEntry>,
+    /// Stale-shape roots (unparseable / pre-`last_accessed_at` markers) that
+    /// were swept by `--all`. Empty when no stale state was found, or when a
+    /// non-`--all` selector was used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stale_artifacts: Vec<CleanStaleArtifactEntry>,
     skipped_baseline_paths: Vec<String>,
 }
 
@@ -1794,6 +1846,15 @@ struct CleanArtifactEntry {
     run_id: String,
     root: String,
     size_bytes: u64,
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanStaleArtifactEntry {
+    root: String,
+    size_bytes: u64,
+    /// Why the marker was unparseable (e.g. "missing field `last_accessed_at`").
+    reason: String,
     deleted: bool,
 }
 
@@ -2065,8 +2126,13 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
 
     let emit_json = app.json_output;
 
-    // Discover all review artifacts for this workspace.
-    let all_artifacts = list_review_artifacts(&app.workspace_path, &cache_root)
+    // Discover all review artifacts for this workspace, including stale-shape
+    // dirs (e.g. pre-`last_accessed_at` markers) so `clean --all` can sweep
+    // them up instead of letting them accumulate.
+    let DiscoveredReviewArtifacts {
+        valid: all_artifacts,
+        stale: stale_roots,
+    } = list_review_artifacts_with_stale(&app.workspace_path, &cache_root)
         .context("Discovering review artifacts.")?;
 
     // Baseline paths we will never touch.
@@ -2150,14 +2216,28 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                 // still being reused don't age out from under an active
                 // workflow. Fresh markers initialize it to `created_at`.
                 let age_anchor = &a.marker.last_accessed_at;
-                chrono::DateTime::parse_from_rfc3339(age_anchor)
-                    .ok()
-                    .is_some_and(|dt| {
+                match chrono::DateTime::parse_from_rfc3339(age_anchor) {
+                    Ok(dt) => {
                         let artifact_time = std::time::SystemTime::UNIX_EPOCH
                             + std::time::Duration::from_secs(dt.timestamp().max(0).cast_unsigned());
                         now.duration_since(artifact_time)
                             .is_ok_and(|age| age >= max_age)
-                    })
+                    }
+                    Err(parse_err) => {
+                        // A corrupt `last_accessed_at` means we cannot tell
+                        // how old this artifact is. Surface it as a candidate
+                        // for cleanup rather than silently keeping it forever:
+                        // by definition, "I don't know how old it is" is the
+                        // strongest possible age signal.
+                        tracing::warn!(
+                            run_id = %a.marker.run_id,
+                            last_accessed_at = %age_anchor,
+                            error = %parse_err,
+                            "Marker `last_accessed_at` could not be parsed as RFC3339; treating artifact as eligible for `--older-than` cleanup."
+                        );
+                        true
+                    }
+                }
             })
             .collect()
     } else {
@@ -2202,11 +2282,64 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
         }
     }
 
+    // Sweep stale-shape roots only on `--all`. The `--older-than`, `--run-id`,
+    // and `--base/--head` selectors all key on parsed marker fields, which
+    // stale roots don't have, so a typo'd `clean --older-than 7d` cannot
+    // accidentally nuke them. `--all` is the explicit nuke option.
+    let mut stale_entries: Vec<CleanStaleArtifactEntry> = Vec::new();
+    if args.all {
+        for stale in &stale_roots {
+            if !emit_json {
+                #[expect(
+                    clippy::print_stdout,
+                    reason = "surface stale roots to the user — they were silently accumulating before"
+                )]
+                {
+                    println!(
+                        "Removing stale review artifact `{}` ({}).",
+                        stale.root.display(),
+                        stale.reason,
+                    );
+                }
+            }
+            if !args.dry_run
+                && let Err(e) = std::fs::remove_dir_all(&stale.root)
+            {
+                tracing::error!(
+                    "Failed to remove stale review artifact `{}`: {e:#}.",
+                    stale.root.display()
+                );
+                had_error = true;
+                continue;
+            }
+            stale_entries.push(CleanStaleArtifactEntry {
+                root: stale.root.display().to_string(),
+                size_bytes: stale.size_bytes,
+                reason: stale.reason.clone(),
+                deleted: !args.dry_run,
+            });
+        }
+    } else if !stale_roots.is_empty() && !emit_json {
+        // Surface them so the user knows they exist and how to reach them.
+        #[expect(
+            clippy::print_stdout,
+            reason = "surface stale roots to the user — they were silently accumulating before"
+        )]
+        {
+            println!(
+                "Note: {} stale review artifact root(s) were found but not removed by this selector. \
+                 Run `gather-step pr-review clean --all` to sweep them.",
+                stale_roots.len()
+            );
+        }
+    }
+
     if emit_json {
         let output = CleanOutput {
             operation: "clean",
             dry_run: args.dry_run,
             selected_artifacts: entries,
+            stale_artifacts: stale_entries,
             skipped_baseline_paths: baseline_paths,
         };
         let json =

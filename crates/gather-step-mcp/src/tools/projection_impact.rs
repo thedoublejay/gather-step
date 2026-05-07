@@ -185,11 +185,16 @@ fn projection_impact_evidence(data: &ProjectionImpactData) -> Vec<Evidence> {
                 .map(|item| projection_evidence_item(data, category, item)),
         );
     }
-    rows.extend(data.risk_hints.iter().enumerate().map(|(index, hint)| {
+    // Risk notes are textual hints about the projection target, not surface-
+    // coordinates. Citation uses the target's symbol id so consumers can
+    // resolve back to it; the hint content itself lives in `subject.reason`,
+    // which is part of the Evidence ID hash, so two distinct hints on the
+    // same target still get distinct IDs without depending on their position.
+    rows.extend(data.risk_hints.iter().map(|hint| {
         Evidence::new(
             EvidenceKind::RiskNote,
             EvidenceSource::ProjectionImpact,
-            EvidenceCitation::repo(format!("projection_impact:{}", index + 1)),
+            EvidenceCitation::symbol_id(data.target.clone(), "projection_target"),
         )
         .with_subject(
             EvidenceSubject::new("projection_impact")

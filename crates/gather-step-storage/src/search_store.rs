@@ -792,6 +792,34 @@ pub(crate) fn stamp_schema_version_if_missing(
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Auto-stamp only an empty directory. A pre-existing Tantivy
+            // directory without our stamp file is, by definition, on a stale
+            // schema relative to this binary — silently re-stamping it with
+            // the current version would let Tantivy fail later with a raw
+            // field/schema error instead of giving the user the actionable
+            // `gather-step index --auto-recover` hint.
+            let mut has_other_entries = false;
+            match fs::read_dir(dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry.map_err(SearchStoreError::Io)?;
+                        if entry.file_name() != std::ffi::OsStr::new(SEARCH_VERSION_FILE) {
+                            has_other_entries = true;
+                            break;
+                        }
+                    }
+                }
+                Err(read_err) if read_err.kind() == std::io::ErrorKind::NotFound => {
+                    // Directory doesn't exist yet; nothing to scan.
+                }
+                Err(read_err) => return Err(SearchStoreError::Io(read_err)),
+            }
+            if has_other_entries {
+                return Err(SearchStoreError::SchemaVersionMismatch {
+                    stored: "<missing>".to_owned(),
+                    expected: SEARCH_INDEX_VERSION,
+                });
+            }
             fs::write(&version_path, format!("{SEARCH_INDEX_VERSION}\n"))?;
             Ok(())
         }
@@ -2167,15 +2195,45 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_stamp_writes_current_in_non_empty_directory() {
+    fn schema_version_stamp_rejects_non_empty_directory_without_stamp() {
         use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
         use std::fs;
 
+        // A pre-existing Tantivy directory without our stamp file is, by
+        // definition, on a stale schema relative to this binary. Silently
+        // re-stamping it would let Tantivy fail later with a raw field/schema
+        // error instead of giving the user the actionable
+        // `gather-step index --auto-recover` hint.
         let dir = temp_search_dir("version-non-empty");
         fs::create_dir_all(&dir).expect("dir should exist");
         fs::write(dir.join("meta.json"), "{}").expect("write index artifact");
 
-        stamp_schema_version_if_missing(&dir).expect("non-empty dir should still be stamped");
+        let err = stamp_schema_version_if_missing(&dir)
+            .expect_err("non-empty dir without stamp must be rejected, not silently restamped");
+        assert!(matches!(
+            err,
+            SearchStoreError::SchemaVersionMismatch {
+                expected: SEARCH_INDEX_VERSION,
+                ..
+            }
+        ));
+        assert!(
+            !dir.join(SEARCH_VERSION_FILE).exists(),
+            "rejecting must not write a fresh stamp into a stale-schema directory"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_version_stamp_writes_current_for_empty_directory() {
+        use super::{SEARCH_INDEX_VERSION, SEARCH_VERSION_FILE, stamp_schema_version_if_missing};
+        use std::fs;
+
+        let dir = temp_search_dir("version-empty-stamp");
+        fs::create_dir_all(&dir).expect("dir should exist");
+
+        stamp_schema_version_if_missing(&dir).expect("empty dir should be stamped");
 
         let stamp = fs::read_to_string(dir.join(SEARCH_VERSION_FILE)).expect("sentinel readable");
         assert_eq!(stamp.trim(), SEARCH_INDEX_VERSION.to_string());

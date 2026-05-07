@@ -26,7 +26,7 @@ use gather_step_mcp::tools::{
         ProjectionEvidenceVerbosity, ProjectionImpactRequest, projection_impact_tool,
     },
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::app::AppContext;
 use crate::command_render::RenderedCommand;
@@ -81,10 +81,11 @@ pub struct QaEvidenceArgs {
     pub scan_limit: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QaEvidenceOutput {
-    event: &'static str,
-    schema_version: &'static str,
+    event: String,
+    schema_version: String,
     target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     base_ref: Option<String>,
@@ -95,17 +96,19 @@ struct QaEvidenceOutput {
     gaps: Vec<QaEvidenceGap>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QaEvidenceSummary {
     row_count: usize,
     gap_count: usize,
-    pack_modes: Vec<&'static str>,
+    pack_modes: Vec<String>,
     truncated: bool,
     omitted_rows: usize,
     dropped_kinds: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Gap IDs are stable only within a single `qa-evidence` run. Consumers should
 /// key durable decisions from `kind`, `source_resolver`, and message text.
 struct QaEvidenceGap {
@@ -208,8 +211,13 @@ pub(crate) fn run_rendered(
         .iter()
         .any(|gap| gap.kind == "scan_limit_truncated")
     {
+        // Filesystem scan truncation hits a hard `--scan-limit` ceiling; the
+        // tool stops before counting how many rows it would have produced
+        // unbounded, so we cannot report a meaningful row count. The
+        // `truncated` flag and the blocking `scan_limit_truncated` gap already
+        // signal "incomplete coverage"; do not poison `omitted_rows` (which
+        // is the pack-budget omission count) with a fake `+1`.
         truncated = true;
-        omitted_rows += 1;
     }
     rows.extend(scan_rows);
     stabilize_rows(&mut rows);
@@ -217,15 +225,15 @@ pub(crate) fn run_rendered(
     let row_count = rows.len();
     let gap_count = gaps.len();
     let output = QaEvidenceOutput {
-        event: "qa_evidence_completed",
-        schema_version: QA_EVIDENCE_SCHEMA_VERSION,
+        event: "qa_evidence_completed".to_owned(),
+        schema_version: QA_EVIDENCE_SCHEMA_VERSION.to_owned(),
         target: target.clone(),
         base_ref: args.base.clone(),
         head_ref: args.head.clone(),
         manifest_summary: QaEvidenceSummary {
             row_count,
             gap_count,
-            pack_modes: pack_modes.to_vec(),
+            pack_modes: pack_modes.iter().map(|s| (*s).to_owned()).collect(),
             truncated,
             omitted_rows,
             dropped_kinds,
@@ -485,7 +493,9 @@ fn evidence_repos(app: &AppContext, ctx: &gather_step_mcp::McpContext) -> Vec<St
     let Ok(registry) = ctx.registry_snapshot() else {
         return Vec::new();
     };
-    registry.repos.keys().cloned().collect()
+    let mut repos: Vec<String> = registry.repos.keys().cloned().collect();
+    repos.sort();
+    repos
 }
 
 fn collect_topology_meta_gap(

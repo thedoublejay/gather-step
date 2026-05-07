@@ -613,11 +613,9 @@ export function useDynamicFlag(flagName: string) {
         qa_evidence_scan_limited_json["manifest_summary"]["truncated"],
         true
     );
-    assert!(
-        qa_evidence_scan_limited_json["manifest_summary"]["omitted_rows"]
-            .as_u64()
-            .is_some_and(|count| count > 0)
-    );
+    // Scan truncation must surface as a blocking `scan_limit_truncated` gap
+    // (not as a fake `+1` in `omitted_rows`, which only counts pack-budget
+    // omissions where the actual row count is known).
     assert!(
         qa_evidence_scan_limited_json["gaps"]
             .as_array()

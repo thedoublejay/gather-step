@@ -400,8 +400,9 @@ The report sections are:
 | `decorators` | Permission, audit, and authorization decorator changes |
 | `contract_alignments` | Cross-repo clusters of related payload contracts with confidence scores |
 | `removed_surface_risks` | Removed routes / symbols / events with surviving consumers, classified `high` / `medium` / `low` |
+| `evidence` | Canonical, query-time evidence rows derived from the typed delta surfaces (closed `kind`/`source` enums, structured citations, deterministic IDs) |
 | `deployment` | Deployment-topology changes: Dockerfiles, Compose services, K8s manifests, env vars, secrets, config maps, GitHub Actions deploy jobs |
-| `suggested_followups` | Ready-to-run `gather-step pack` and `trace crud` commands for the highest-impact deltas |
+| `suggested_followups` | Ready-to-run `gather-step pack` and `trace crud` commands grounded in the actual delta when available; otherwise emit explicit placeholders (`SYMBOL_PLACEHOLDER`, `/ROUTE_PATH_PLACEHOLDER`) so it's clear they need substitution |
 
 ### Follow-up queries against the kept index
 

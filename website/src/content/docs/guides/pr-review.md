@@ -38,8 +38,10 @@ and prints the delta report.
 ### With JSON output
 
 ```bash
-gather-step pr-review --base main --head feat/my-change --json
+gather-step pr-review --base main --head feat/my-change --format json
 ```
+
+(`--json` is accepted as a deprecated alias for `--format json`.)
 
 The JSON form emits a `DeltaReport` (`schema_version: 1`) suitable for
 piping into other tools or reading programmatically. It includes canonical

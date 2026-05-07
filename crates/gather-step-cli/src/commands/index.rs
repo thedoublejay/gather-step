@@ -964,15 +964,25 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             }
             if report.skipped_count > 0 {
                 output.line(format!(
-                    "  skipped {} review artifact(s) during cleanup; inspect the warning logs or run `gather-step pr-review clean --all`",
+                    "  WARNING: skipped {} review artifact(s) during cleanup. They still point at the previous baseline. \
+                     Run `gather-step pr-review clean --all` to remove them.",
                     report.skipped_count,
                 ));
             }
         }
         Err(e) => {
+            // The new baseline is durable on disk; failing the index now would
+            // be worse than continuing. But silently downgrading this to a
+            // default-off `tracing::warn!` lets stale review caches drift
+            // unnoticed against the new baseline. Surface it to the user.
+            output.line(format!(
+                "  WARNING: could not wipe review artifacts after the full reindex: {e}. \
+                 Stale review caches may still point at the previous baseline. \
+                 Run `gather-step pr-review clean --all` to recover."
+            ));
             warn!(
                 error = %e,
-                "Could not wipe review artifacts after a full reindex; continuing."
+                "Could not wipe review artifacts after a full reindex; user notified via output.line."
             );
         }
     }
