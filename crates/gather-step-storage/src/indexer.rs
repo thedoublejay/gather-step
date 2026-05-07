@@ -662,7 +662,7 @@ impl RepoIndexer {
                         repo,
                         path = %file_path,
                         error = %error,
-                        "Skipping a malformed deployment artifact during indexing.",
+                        "skipping a malformed deployment artifact during indexing",
                     );
                     self.storage
                         .purge_deleted_files(repo, std::slice::from_ref(&file_path))?;

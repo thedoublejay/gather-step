@@ -5,6 +5,23 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.2 (2026-05-07)
+
+Release status: **released**.
+
+Patch on top of v4.0.1. Quiets noisy deployment-artifact parse warnings that fired on every workspace index against external repos.
+
+### Fixed
+
+- `.github/workflows/` is only classified as a GitHub Actions artifact when the file extension is `yaml` or `yml`. `CODEOWNERS`, release `README.md`, and other Markdown docs that happen to live next to workflow files are now skipped instead of being force-fed to a YAML parser.
+- `Skipping a malformed deployment artifact during indexing.` is now logged at `debug` rather than `warn`. Helm and Argo CD `{{ ... }}` templates legitimately fail strict YAML parsing, so this is a routine best-effort skip rather than something the user can act on.
+- `skipping missing compose env_file` is now logged at `debug` rather than `warn`. `.env` files are routinely gitignored, so the warning fired on every clean checkout for a non-issue.
+
+### Release-wide
+
+- Added a `renovate.json` so dependency updates are proposed on a weekly schedule. Internal `gather-step-*` path deps are excluded; the `tree-sitter` ecosystem and the storage stack (`redb`, `tantivy`, `rusqlite`) are grouped for coherent review.
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.2`.
+
 ## v4.0.1 (2026-05-07)
 
 Release status: **released**.
