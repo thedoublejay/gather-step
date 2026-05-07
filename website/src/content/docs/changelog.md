@@ -158,7 +158,7 @@ Polish pass on top of v3.5.0. No new functionality, no schema changes, no breaki
 - Getting Started gained a "How most people use Gather Step" quote block making the AI-assistant-driven workflow first-class. Next Steps promote the CLI reference.
 - CLI reference gained the same quote block at the top so users who land directly know they don't need to memorise commands.
 - Workspace setup gained an `init --force` subsection plus a richer interactive picker walkthrough showing the keybindings, sample output, and one-to-one mapping between checkbox state and `repos[]` entries.
-- Memory-Backed Planning's Braingent reference refreshed to mention `braingent_find` / `braingent_get` / `braingent_guide`, capture policy, workflow recipes, and validation scripts.
+- Memory-Backed Planning's [Braingent](https://braingent.dev) reference refreshed to mention `braingent_find` / `braingent_get` / `braingent_guide`, capture policy, workflow recipes, and validation scripts.
 - Data-Shape Verification: stale "v2.3 adds" wording removed.
 - Language-support tables converted to bullet lists so wide cells stop overflowing on narrow screens.
 - Changelog: v2.x releases moved into a collapsed `<details>` block under "Earlier releases", with heading levels demoted so the right-side TOC stays focused on the current release.
@@ -182,7 +182,7 @@ Combined v3 release covering deployment-topology indexing, `gather-step pr-revie
 - Added `gather-step pr-review --base <REF> --head <REF>` to build a disposable review index in the OS cache directory and emit a structured `DeltaReport` for human or machine consumption.
 - Added `gather-step pr-review clean` with five selectors (`--dry-run`, `--run-id`, `--base/--head`, `--older-than`, `--all`) and an `--include-active` opt-in for pruning the still-resolvable cache. `clean --older-than` skips `InProgress` artifacts so it cannot race a long indexing run.
 - Added `--severity {warn, strict, pedantic}` threshold modes. `warn` is the default; `strict` exits with code 2 on any High-severity removed-surface risk or payload type change; `pedantic` extends that to Medium risks and any payload change.
-- Added `--format {markdown, json, github-comment, braingent}` plus `--github-comment-file <PATH>` for CI integrations. The GitHub-comment renderer auto-truncates to fit the platform's 65,536-character comment limit. The Braingent renderer emits a YAML-frontmatter Markdown record suitable for archiving in a memory store.
+- Added `--format {markdown, json, github-comment, braingent}` plus `--github-comment-file <PATH>` for CI integrations. The GitHub-comment renderer auto-truncates to fit the platform's 65,536-character comment limit. The [Braingent](https://braingent.dev) renderer emits a YAML-frontmatter Markdown record suitable for archiving in a memory store.
 - Added `--engine temp-index` as the default public review engine; builds a full isolated index for the PR head.
 - Added `--keep-cache` to preserve the review artifact root for follow-up `trace`, `impact`, `pack`, and `projection-impact` commands. Suggested follow-up commands in the report are pre-filled with `--registry` / `--storage` overrides pointing at the kept index.
 - Added `--no-baseline-check` to suppress the workspace-HEAD-vs-`--base` SHA mismatch warning.

@@ -37,9 +37,10 @@ fn serialize_path_forward_slash<S: Serializer>(
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 /// Single source of truth for the `schema_version` emitted in every
-/// [`DeltaReport`] (JSON + Markdown + Braingent frontmatter). Bump this when
-/// the report shape changes; callers must reference it instead of hard-coding
-/// the literal so the JSON, Markdown, frontmatter, and tests stay aligned.
+/// [`DeltaReport`] (JSON + Markdown + Braingent frontmatter,
+/// <https://braingent.dev>). Bump this when the report shape changes; callers
+/// must reference it instead of hard-coding the literal so the JSON, Markdown,
+/// frontmatter, and tests stay aligned.
 pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Top-level output struct for `gather-step pr-review`.
@@ -1392,7 +1393,8 @@ impl DeltaReport {
     }
 
     /// Render a Markdown document with YAML frontmatter, the full report body, and
-    /// an evidence-links section — suitable for archiving in Braingent.
+    /// an evidence-links section — suitable for archiving in Braingent
+    /// (<https://braingent.dev>).
     pub fn render_braingent(&self) -> String {
         let m = &self.metadata;
         let high_count = self
