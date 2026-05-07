@@ -178,7 +178,12 @@ mod tests {
             },
         )
         .expect_err("empty service should fail");
-        assert!(error.to_string().contains("--service must not be empty"));
+        assert!(
+            error
+                .to_string()
+                .contains("`deployment-topology --service` flag must not be empty"),
+            "unexpected error text: {error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

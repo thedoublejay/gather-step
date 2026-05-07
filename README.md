@@ -46,7 +46,7 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 - Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
 - Route, event, shared-symbol, payload-contract, projection-impact, and deployment-topology graph surfaces
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
-- Evidence-only QA planning manifests for downstream Braingent test-plan workflows
+- Evidence-only QA planning manifests for downstream test-plan workflows
 - Workspace health commands such as `status`, `doctor`, and `watch`
 - Derived outputs for assistant summaries, rules, and ownership files
 - Local release validation with high-contract probes and PR-oracle scoring

@@ -55,12 +55,12 @@ pub struct QaEvidenceArgs {
     pub event_target: Option<String>,
     #[arg(
         long,
-        help = "Base ref for the implementation diff that Braingent owns"
+        help = "Base ref for the implementation diff captured for downstream QA planning"
     )]
     pub base: Option<String>,
     #[arg(
         long,
-        help = "Head ref for the implementation diff that Braingent owns"
+        help = "Head ref for the implementation diff captured for downstream QA planning"
     )]
     pub head: Option<String>,
     #[arg(long, default_value_t = 6, help = "Maximum ranked pack items per mode")]
@@ -186,7 +186,7 @@ pub(crate) fn run_rendered(
                     &mut gaps,
                     mode,
                     "truncated",
-                    "The response budget truncated evidence; Braingent must not claim complete coverage.",
+                    "The response budget truncated evidence; downstream QA planning must not claim complete coverage.",
                     true,
                 );
             }
@@ -198,7 +198,7 @@ pub(crate) fn run_rendered(
             &mut gaps,
             "git_diff",
             "missing_diff_refs",
-            "Base and head refs were not supplied; changed-file coverage must come from supplied Braingent context.",
+            "Base and head refs were not supplied; changed-file coverage must come from the planning tool's supplied context.",
             false,
         );
     }
@@ -1010,7 +1010,7 @@ fn push_scan_limit_gap(gaps: &mut Vec<QaEvidenceGap>) {
         gaps,
         "workspace_scan",
         "scan_limit_truncated",
-        "The workspace scan reached --scan-limit before traversal completed; Braingent must not claim complete coverage.",
+        "The workspace scan reached --scan-limit before traversal completed; downstream QA planning must not claim complete coverage.",
         true,
     );
 }

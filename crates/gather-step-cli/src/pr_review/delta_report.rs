@@ -2208,15 +2208,22 @@ fn format_loc(file: Option<&str>, line: Option<u32>) -> String {
 /// Everything else is wrapped in single quotes, with any embedded single quote
 /// escaped via the standard `'\''` idiom.
 fn shell_quote(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy();
+    shell_quote_str(&p.to_string_lossy())
+}
+
+/// Shell-quote an arbitrary string the same way [`shell_quote`] handles paths.
+/// Used for dynamic values (route paths, symbol names, HTTP methods) that get
+/// embedded into suggested follow-up commands — symbols can contain `<`, `>`,
+/// `&`, spaces, etc., and route paths can contain `$`, parentheses, or other
+/// shell-special chars.
+fn shell_quote_str(s: &str) -> String {
     if s.is_empty() {
         return "''".to_owned();
     }
-    // Characters safe without quoting in POSIX shells.
     if s.bytes()
         .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' | b'=' | b':'))
     {
-        return s.into_owned();
+        return s.to_owned();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -2257,9 +2264,11 @@ pub fn build_suggested_followups(
                 .first()
                 .map(|r| (r.method.clone(), r.path.clone()))
         });
-    let (route_method, route_path) = example_route_method_path
+    let (route_method_raw, route_path_raw) = example_route_method_path
         .unwrap_or_else(|| ("GET".to_owned(), "/ROUTE_PATH_PLACEHOLDER".to_owned()));
-    let example_symbol = symbols
+    let route_method = shell_quote_str(&route_method_raw);
+    let route_path = shell_quote_str(&route_path_raw);
+    let example_symbol_raw = symbols
         .added
         .first()
         .map(|sym| sym.qualified_name.clone())
@@ -2276,6 +2285,7 @@ pub fn build_suggested_followups(
                 .map(|sym| sym.qualified_name.clone())
         })
         .unwrap_or_else(|| "SYMBOL_PLACEHOLDER".to_owned());
+    let example_symbol = shell_quote_str(&example_symbol_raw);
 
     vec![
         SuggestedCommand {
@@ -2622,6 +2632,51 @@ mod tests {
                 cmd.command
             );
         }
+    }
+
+    #[test]
+    fn suggested_followups_shell_quote_dynamic_route_and_symbol_values() {
+        // Symbols can contain shell-special characters (`<`, `>`, `&`,
+        // spaces, `$`) when types/generics are part of the qualified name;
+        // route paths can contain `$`, parens, etc. The dynamic values must
+        // be shell-quoted in the emitted command, not just the workspace /
+        // registry / storage paths.
+        let routes = RouteDeltas {
+            added: vec![make_route("GET", "/orders/$id")],
+            ..RouteDeltas::default()
+        };
+        let symbols = SymbolDeltas {
+            added: vec![make_symbol("OrdersService::list<T & U>")],
+            ..SymbolDeltas::default()
+        };
+
+        let commands = build_suggested_followups(
+            std::path::Path::new("/tmp/ws"),
+            std::path::Path::new("/tmp/review/registry.json"),
+            std::path::Path::new("/tmp/review/storage"),
+            &routes,
+            &symbols,
+        );
+
+        assert!(
+            commands[0].command.contains("--path '/orders/$id'"),
+            "route path with `$` must be single-quoted: {}",
+            commands[0].command
+        );
+        assert!(
+            commands[1]
+                .command
+                .ends_with(" 'OrdersService::list<T & U>'"),
+            "symbol with `<>&` and spaces must be single-quoted: {}",
+            commands[1].command
+        );
+        assert!(
+            commands[2]
+                .command
+                .ends_with(" 'OrdersService::list<T & U>'"),
+            "pack symbol with `<>&` and spaces must be single-quoted: {}",
+            commands[2].command
+        );
     }
 
     #[test]
