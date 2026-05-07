@@ -90,8 +90,14 @@ pub fn detect_artifact_kind(path: &str, content: &str) -> DeploymentArtifactKind
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
+    let extension = Path::new(&normalized)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
 
-    if normalized.contains("/.github/workflows/") || normalized.starts_with(".github/workflows/") {
+    let in_github_workflows =
+        normalized.contains("/.github/workflows/") || normalized.starts_with(".github/workflows/");
+    if in_github_workflows && matches!(extension, "yaml" | "yml") {
         return DeploymentArtifactKind::GithubActions;
     }
     if file_name == "dockerfile" || file_name.starts_with("dockerfile.") {
@@ -1748,6 +1754,14 @@ jobs:
         assert_eq!(
             detect_artifact_kind(".github/workflows/ci.yml", ""),
             DeploymentArtifactKind::GithubActions
+        );
+        assert_eq!(
+            detect_artifact_kind(".github/workflows/CODEOWNERS", "* @team"),
+            DeploymentArtifactKind::Unknown
+        );
+        assert_eq!(
+            detect_artifact_kind(".github/workflows/release/README.md", "# Notes"),
+            DeploymentArtifactKind::Unknown
         );
         assert_eq!(
             detect_artifact_kind(".env.production", ""),
