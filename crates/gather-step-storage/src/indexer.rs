@@ -281,6 +281,7 @@ impl Drop for BulkModeGuard<'_> {
 /// no borrows — safe to send through channels or collect across rayon workers.
 pub struct RepoIndexPayload {
     pub repo: String,
+    pub repo_root: PathBuf,
     pub files: Vec<FileBatch>,
     pub deferred_cross_file_edges: Vec<EdgeData>,
     pub unresolved_inputs: Vec<gather_step_parser::resolve::ResolutionInput>,
@@ -401,6 +402,7 @@ impl RepoIndexer {
         let started_at = Instant::now();
         let repo = payload.repo.clone();
         let repo = repo.as_str();
+        let repo_root = payload.repo_root.clone();
 
         self.storage
             .metadata()
@@ -499,6 +501,8 @@ impl RepoIndexer {
             .files_parsed
             .saturating_sub(payload.synthetic_file_count);
         stats.duration_ms = started_at.elapsed().as_millis();
+        let deployment_stats = self.index_deployment_artifacts(repo, &repo_root, None)?;
+        merge_indexing_stats(&mut stats, deployment_stats);
         Ok(stats)
     }
 
@@ -1175,6 +1179,7 @@ impl RepoIndexer {
 
         Ok(RepoIndexPayload {
             repo: repo.to_owned(),
+            repo_root: repo_root.to_path_buf(),
             files,
             deferred_cross_file_edges,
             unresolved_inputs: resolution.unresolved,
@@ -2536,6 +2541,65 @@ jobs:
                 .iter()
                 .any(|edge| edge.kind == EdgeKind::UsesDatabase)
         );
+    }
+
+    #[test]
+    fn streaming_payload_commit_indexes_deployment_topology_artifacts() {
+        let repo_root = TestDir::new("streaming-deployment-topology-repo");
+        let storage_root = TestDir::new("streaming-deployment-topology-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::create_dir_all(
+            repo_root
+                .path()
+                .join("kustomize/apps/services/comment/base"),
+        )
+        .expect("kustomize dir should exist");
+        fs::write(
+            repo_root.path().join("src/app.ts"),
+            "export function run() { return true; }\n",
+        )
+        .expect("source fixture should write");
+        fs::write(
+            repo_root
+                .path()
+                .join("kustomize/apps/services/comment/base/kustomization.yaml"),
+            r#"
+namePrefix: comment-
+images:
+  - name: APP_IMAGE
+    newName: regask.azurecr.io/comment
+"#,
+        )
+        .expect("kustomize fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let payload = indexer
+            .prepare_repo_payload("platform-gitops", repo_root.path())
+            .expect("payload preparation should succeed");
+        let stats = indexer
+            .commit_repo_payload(payload)
+            .expect("payload commit should succeed");
+
+        assert!(
+            stats.files_parsed >= 2,
+            "source and deployment artifacts should both be indexed"
+        );
+
+        let graph = indexer.storage().graph();
+        let deployments = graph
+            .nodes_by_type(NodeKind::Deployment)
+            .expect("deployment nodes should load");
+        let services = graph
+            .nodes_by_type(NodeKind::Service)
+            .expect("service nodes should load");
+
+        assert!(deployments.iter().any(|node| {
+            node.qualified_name.as_deref() == Some("__deployment__platform-gitops__comment")
+        }));
+        assert!(services.iter().any(|node| {
+            node.qualified_name.as_deref() == Some("__service__platform-gitops__comment")
+        }));
     }
 
     #[test]

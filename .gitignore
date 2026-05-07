@@ -25,6 +25,9 @@ dist/
 # Generated indexer state — test artifacts, CLI runs, etc.
 .gather-step/
 
+# Local DeepSec tool state
+.deepsec/
+
 # Local-only planning docs (superpowers plans, drafts, scratch)
 docs/superpowers/
 
