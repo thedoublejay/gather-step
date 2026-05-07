@@ -118,7 +118,8 @@ pub struct PrReviewArgs {
     /// `markdown` (default) emits a human-readable Markdown report.
     /// `json` emits compact machine-readable JSON (equivalent to `--json`).
     /// `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit.
-    /// `braingent` emits Markdown with YAML frontmatter for Braingent archival.
+    /// `braingent` emits Markdown with YAML frontmatter for Braingent archival
+    /// (<https://braingent.dev>).
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     pub format: OutputFormat,
 
@@ -219,6 +220,7 @@ pub enum OutputFormat {
     /// Markdown truncated to GitHub's 65 536-char comment limit.
     GithubComment,
     /// Markdown with YAML frontmatter for Braingent archival.
+    /// See <https://braingent.dev>.
     Braingent,
 }
 

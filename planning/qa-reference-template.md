@@ -1,6 +1,6 @@
 # QA Reference Template
 
-This template is for Braingent-owned QA reference output generated from ticket text, Braingent memory, git diff evidence, and Gather Step graph evidence. It is manual guidance, not proof and not executable test code.
+This template is for [Braingent]-owned QA reference output generated from ticket text, [Braingent] memory, git diff evidence, and Gather Step graph evidence. It is manual guidance, not proof and not executable test code.
 
 ## Frontmatter
 
@@ -101,8 +101,10 @@ manual_reference_only: true
 ## Source Links
 
 - Ticket:
-- Braingent records:
+- [Braingent] records:
 - Gather Step pack targets:
 - Git commits:
 - Changed files:
 - External references:
+
+[Braingent]: https://braingent.dev

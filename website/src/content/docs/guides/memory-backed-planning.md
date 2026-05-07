@@ -1,6 +1,6 @@
 ---
 title: Memory-Backed Planning
-description: Pair Gather Step with a Markdown-first engineering memory system so an AI assistant plans from prior decisions and the current code graph instead of either alone.
+description: Pair Gather Step with Braingent, a Git-backed Markdown-first memory repo for AI-assisted engineering, so assistants plan from prior decisions and the current code graph.
 ---
 
 Gather Step gives an AI assistant the **current code graph**: routes, events,
@@ -21,11 +21,11 @@ When the two are paired, planning quality improves measurably:
 - The agent writes a plan that cites both, separating *fact* from *inference*.
 
 This guide describes the pattern. It does not require any specific memory
-tool, but it uses [Braingent Manifesto](https://github.com/thedoublejay/braingent-manifesto)
-as the concrete example because it is open source, Markdown-first, and
-designed exactly for this loop.
+tool, but it uses [Braingent] as the concrete example because it is a
+Git-backed, Markdown-first memory repo for shared AI-assisted engineering
+context.
 
-Recent Braingent releases ship features that compose directly with this
+Recent [Braingent] releases ship features that compose directly with this
 loop:
 
 - **MCP-first retrieval.** `braingent_find`, `braingent_get`, and
@@ -95,7 +95,7 @@ The agent searches the memory store for context relevant to the task:
 The output is a focused context pack of memory citations, not a wholesale
 dump. Each cited fact links back to the file that holds it.
 
-> **Braingent example.** Braingent stores records as Markdown with
+> **[Braingent] example.** [Braingent] stores records as Markdown with
 > frontmatter. An agent searches first by structured fields
 > (`ticket`, `repo`, `topic`, `status`) using the project's `find.sh`
 > helper, then falls back to free-text `rg` over record bodies. It cites the
@@ -138,7 +138,7 @@ was decided, what changed, what was learned, and what to avoid next time.
 This is the only step that grows the memory; without it, the loop
 unidirectionally drains context the next agent could have reused.
 
-> **Braingent example.** Braingent's capture policy specifies when a record
+> **[Braingent] example.** [Braingent]'s capture policy specifies when a record
 > is worth writing (PR opened, decision made, learning surfaced) and provides
 > a minimal task-record template. A capture is a small Markdown file with
 > frontmatter that the next session can find by structured query.
@@ -167,9 +167,9 @@ contract is small:
 - the memory tool exposes a way for an agent to query and cite specific
   records without loading everything.
 
-[Braingent Manifesto](https://github.com/thedoublejay/braingent-manifesto)
-is one open-source reference for what such a system looks like end-to-end,
-including capture policy, retrieval helpers, and validation scripts.
+[Braingent] is one open-source reference for what such a system looks like
+end-to-end, including capture policy, retrieval helpers, and validation
+scripts.
 
 ## Non-Goals
 
@@ -188,3 +188,5 @@ including capture policy, retrieval helpers, and validation scripts.
   assembled from the graph.
 - [MCP clients](/guides/mcp-clients/) — expose the same graph to an AI
   assistant so the loop runs without manual CLI invocation.
+
+[Braingent]: https://braingent.dev
