@@ -1,5 +1,5 @@
 //! Regression test: a 32-repo workspace must keep every repo visible in
-//! `gather-step-architecture.md` and avoid hitting the truncation marker.
+//! `architecture.md` and avoid hitting the truncation marker.
 //!
 //! Reproduces the symptom seen on a 32-repo monorepo where the
 //! architecture rule renders the repo map fully and then runs out of byte

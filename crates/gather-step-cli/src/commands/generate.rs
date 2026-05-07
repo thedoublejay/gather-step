@@ -10,7 +10,7 @@ use gather_step_core::{RegistryStore, WorkspaceRegistry};
 use gather_step_mcp::MCP_TOOLS;
 use gather_step_output::{
     ClaudeMdOptions, generate_rule_files, render_workspace_summary_agents,
-    render_workspace_summary_claude,
+    render_workspace_summary_claude, scaffold_files,
 };
 use gather_step_storage::{GraphStoreDb, MetadataStore, MetadataStoreDb};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -139,16 +139,48 @@ fn generate_claude_md_rules(
         },
     )?;
 
-    let written = if let Some(output_path) = args.output {
+    let mut written = if let Some(output_path) = args.output {
         write_explicit_output(&output_path, &files)?
     } else {
-        write_default_outputs(&app.workspace_path, &files)?
+        let mut written = write_default_outputs(&app.workspace_path, &files)?;
+        // Scaffold (.claude/rules pointer + .claude/skills + .agents/skills SKILL.md) is
+        // installed only on the default-output path. With `--output` the caller has
+        // taken explicit control of placement and the scaffold paths would not match.
+        // Skip-if-exists keeps user edits to skill prose intact across re-runs.
+        written.extend(write_scaffold_if_missing(
+            &app.workspace_path,
+            &scaffold_files(),
+        )?);
+        written
     };
+    written.sort_by(|left, right| left.path.cmp(&right.path));
 
     Ok(GenerateOutput {
         event: "generate_claude_md_completed",
         files: written,
     })
+}
+
+fn write_scaffold_if_missing(
+    workspace_root: &std::path::Path,
+    files: &[gather_step_output::RuleFile],
+) -> Result<Vec<GeneratedFileOutput>> {
+    let mut written = Vec::new();
+    for file in files {
+        let path = workspace_root.join(&file.relative_path);
+        if path.exists() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::write(&path, &file.content).with_context(|| format!("writing {}", path.display()))?;
+        written.push(GeneratedFileOutput {
+            path: path.display().to_string(),
+            bytes: file.content.len(),
+        });
+    }
+    Ok(written)
 }
 
 fn generate_claude_md_summary(
@@ -257,7 +289,7 @@ pub fn run_summary_pair(app: &AppContext) -> Result<()> {
 
     if !can_generate_rules {
         output.line(
-            "Warning: Skipped generating `.claude/rules/` because no workspace index exists.",
+            "Warning: Skipped generating `.agent-context/gather-step/` because no workspace index exists.",
         );
         output.line(
             "Hint: Run `gather-step index`, then `gather-step generate claude-md --target rules`.",

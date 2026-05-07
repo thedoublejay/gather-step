@@ -16,6 +16,12 @@ Given `--workspace /path/to/workspace`, the tool resolves these paths automatica
 | Storage root | `/path/to/workspace/.gather-step/storage` |
 | Graph store | `/path/to/workspace/.gather-step/storage/graph.redb` |
 | Metadata store | `/path/to/workspace/.gather-step/storage/metadata.sqlite` |
+| Agent reference data (graph-backed) | `/path/to/workspace/.agent-context/gather-step/{architecture,events,routes,repo-NAME}.md` |
+| Claude Code on-demand skill | `/path/to/workspace/.claude/skills/gather-step-context/SKILL.md` |
+| Claude Code rule pointer | `/path/to/workspace/.claude/rules/gather-step-index.md` |
+| Codex on-demand skill | `/path/to/workspace/.agents/skills/gather-step-context/SKILL.md` |
+| Claude Code summary sidecar | `/path/to/workspace/CLAUDE.gather.md` |
+| Codex summary sidecar | `/path/to/workspace/AGENTS.gather.md` |
 
 ## Canonical example
 

@@ -669,17 +669,35 @@ export function useDynamicFlag(flagName: string) {
     assert_eq!(generate_json["event"], "generate_claude_md_completed");
     assert!(
         temp.path()
-            .join(".claude/rules/gather-step-architecture.md")
+            .join(".agent-context/gather-step/architecture.md")
             .exists()
     );
     assert!(
         temp.path()
-            .join(".claude/rules/gather-step-events.md")
+            .join(".agent-context/gather-step/events.md")
             .exists()
     );
     assert!(
         temp.path()
-            .join(".claude/rules/gather-step-routes.md")
+            .join(".agent-context/gather-step/routes.md")
+            .exists()
+    );
+    // Scaffold (pointer rule + on-demand skills) must be installed alongside
+    // the data files so Claude Code/Codex never load the 48 KB reference at
+    // launch.
+    assert!(
+        temp.path()
+            .join(".claude/rules/gather-step-index.md")
+            .exists()
+    );
+    assert!(
+        temp.path()
+            .join(".claude/skills/gather-step-context/SKILL.md")
+            .exists()
+    );
+    assert!(
+        temp.path()
+            .join(".agents/skills/gather-step-context/SKILL.md")
             .exists()
     );
 
@@ -697,12 +715,12 @@ export function useDynamicFlag(flagName: string) {
     assert_eq!(repo_generate_json["event"], "generate_claude_md_completed");
     assert!(
         temp.path()
-            .join(".claude/rules/gather-step-repo-backend_standard.md")
+            .join(".agent-context/gather-step/repo-backend_standard.md")
             .exists()
     );
     let repo_rule_path = temp
         .path()
-        .join(".claude/rules/gather-step-repo-backend_standard.md");
+        .join(".agent-context/gather-step/repo-backend_standard.md");
     let repo_rule = fs::read_to_string(&repo_rule_path).expect("repo rule should be readable");
     assert!(
         repo_rule.contains("Path: `apps/backend_standard`"),

@@ -22,6 +22,7 @@ Builds on v3.5.4 with the v4 QA planning evidence contract. Gather Step now emit
 
 - Public JSON contract baselines are reset to version `1` while there are no known external consumers: MCP `response_schema_version: 1`, PR-review `DeltaReport.schema_version: 1`, and `qa-evidence.v1`.
 - Generated search/review cache compatibility is flattened: stale generated state should be rebuilt or cleaned instead of migrated.
+- `gather-step generate claude-md --target=rules` now writes graph-backed reference data to `.agent-context/gather-step/{architecture,events,routes,repo-NAME}.md` instead of `.claude/rules/`. Claude Code and Codex pick the data up on demand through an installed skill (`.claude/skills/gather-step-context/SKILL.md`, `.agents/skills/gather-step-context/SKILL.md`) plus a tiny `.claude/rules/gather-step-index.md` pointer, so the ~48 KB architecture file is no longer eagerly loaded into every session. Skill files are skip-if-exists so user edits to skill prose are preserved across re-runs; the data files are always overwritten. Workspaces upgrading from v3 should delete the old `.claude/rules/gather-step-architecture.md`, `gather-step-events.md`, `gather-step-routes.md`, and `gather-step-repo-*.md` files after re-running `gather-step generate claude-md`.
 
 ### Release-wide
 

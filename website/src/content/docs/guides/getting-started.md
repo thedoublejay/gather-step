@@ -76,7 +76,7 @@ register local MCP settings, and skip foreground watch mode.
      [x]  2. frontend  (frontend)
      [x]  3. shared  (shared)
 2) Index the selected repositories now? [Y/n]
-3) Generate AI context files now? (.claude/rules/, CLAUDE.gather.md, AGENTS.gather.md) [Y/n]
+3) Generate AI context files now? (.agent-context/gather-step/, .claude/skills/, .agents/skills/, CLAUDE.gather.md, AGENTS.gather.md) [Y/n]
 4) Register Gather Step as an MCP server? [local/global/skip] (default: local)
 5) Watch for repository changes and re-index automatically? [y/N]
 ```
@@ -103,7 +103,7 @@ cd /path/to/workspace
 gather-step init --index --generate-ai-files --setup-mcp local
 ```
 
-When an index exists, `--generate-ai-files` writes Claude Code project rules under `.claude/rules/` and keeps `CLAUDE.gather.md` / `AGENTS.gather.md` as root-level summaries. If no index exists yet, it writes the summaries and prints a warning explaining that rules generation requires `gather-step index`.
+When an index exists, `--generate-ai-files` writes graph-backed reference data under `.agent-context/gather-step/` and installs an on-demand skill (`.claude/skills/gather-step-context/SKILL.md`, `.agents/skills/gather-step-context/SKILL.md`) plus a tiny `.claude/rules/gather-step-index.md` pointer so neither Claude Code nor Codex auto-loads the heavy reference at launch. `CLAUDE.gather.md` / `AGENTS.gather.md` remain as root-level summaries. If no index exists yet, it writes the summaries and prints a warning explaining that reference-data generation requires `gather-step index`.
 
 Example:
 

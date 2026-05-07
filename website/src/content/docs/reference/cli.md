@@ -75,7 +75,7 @@ gather-step [GLOBAL FLAGS] init [--config <PATH>] [--force] \
 | `--force` | bool flag | false | Regenerate the config from discovered repos instead of using the existing config as the starting point. |
 | `--index` / `--no-index` | bool flag | prompt/default | Index discovered repos after writing the config, or skip indexing. |
 | `--watch` / `--no-watch` | bool flag | prompt/default | Start watch mode after setup, or return immediately. |
-| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.claude/rules/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
+| `--generate-ai-files` / `--no-generate-ai-files` | bool flag | prompt/default | Generate `.agent-context/gather-step/` (graph reference) plus the on-demand skills under `.claude/skills/` and `.agents/skills/` when an index exists, plus `CLAUDE.gather.md` and `AGENTS.gather.md`. |
 | `--setup-mcp <SCOPE>` | enum | prompt/default | Register the MCP server in `local` or `global` Claude settings. |
 
 **Example**
@@ -88,7 +88,7 @@ gather-step init
 gather-step init --index --generate-ai-files --setup-mcp local --no-watch
 ```
 
-Interactive `init` starts with a numbered repository picker. Repos from an existing config are selected by default, removed repos stay unchecked, and `all` / `none` shortcuts let you quickly select or clear the list. The remaining prompts ask whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.claude/rules/` generation requires `gather-step index`.
+Interactive `init` starts with a numbered repository picker. Repos from an existing config are selected by default, removed repos stay unchecked, and `all` / `none` shortcuts let you quickly select or clear the list. The remaining prompts ask whether to index, generate AI context, register MCP, and start watch mode. Pressing Enter uses the defaults: index = yes, generate AI context = yes, MCP setup = local, watch = no. Non-interactive scripts should pass those flags explicitly. If `--generate-ai-files` runs before an index exists, Gather Step writes the root summaries and prints a warning that `.agent-context/gather-step/` generation requires `gather-step index`.
 
 **Output shape (`--json`)** — emits one line:
 
@@ -647,7 +647,9 @@ gather-step --workspace /path/to/workspace --repo backend_standard conventions -
 
 ### `generate claude-md`
 
-Generates Claude Code rule files for the workspace. With `--target=rules`, the command writes multiple graph-backed rule files under `.claude/rules/`. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
+Generates Claude Code context files for the workspace. With `--target=rules`, the command writes graph-backed reference data under `.agent-context/gather-step/` (architecture, events, routes, optionally per-repo) and installs an on-demand skill (`.claude/skills/gather-step-context/SKILL.md`, `.agents/skills/gather-step-context/SKILL.md`) plus a tiny `.claude/rules/gather-step-index.md` pointer so neither Claude Code nor Codex auto-loads the heavy reference at launch. With `--target=summary`, the command writes a registry-only workspace summary to `CLAUDE.gather.md`.
+
+When `--output` is set, only the data files are written (the scaffold is skipped because its paths are workspace-relative by design). Skill and pointer files are installed only on the default-output path and are skip-if-exists, so user edits to skill prose survive re-runs.
 
 ```bash
 gather-step [GLOBAL FLAGS] generate claude-md [--output <PATH>] [--repo <NAME>] \

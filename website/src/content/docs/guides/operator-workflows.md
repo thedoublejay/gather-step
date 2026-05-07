@@ -233,11 +233,15 @@ gather-step generate codeowners
 
 ### `generate claude-md`
 
-Generates `.claude/rules/*.md` files from the live graph state. The output
-files summarize system architecture, routes, and events in a format that can
-be committed to the repository and loaded by Claude Code as assistant context.
-Because the files are derived from the indexed graph rather than maintained by
-hand, they stay in sync with the codebase as the graph is refreshed.
+Generates `.agent-context/gather-step/*.md` files from the live graph state.
+The output files summarize system architecture, routes, and events in a format
+that can be committed to the repository. They are loaded **on demand** through
+an installed skill (`.claude/skills/gather-step-context/SKILL.md` for Claude
+Code, `.agents/skills/gather-step-context/SKILL.md` for Codex) instead of
+being pulled into every session, plus a small `.claude/rules/gather-step-index.md`
+pointer that tells the agent when to invoke the skill. Because the data files
+are derived from the indexed graph rather than maintained by hand, they stay in
+sync with the codebase as the graph is refreshed.
 
 The generator applies a byte budget so the output stays within practical
 context-window limits.
