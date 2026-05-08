@@ -6,37 +6,44 @@ export interface Props {
   description?: string;
 }
 
+const DEFAULT_DESCRIPTION =
+  'Local-first code graph for AI coding assistants. Trace routes, events, contracts, and change impact across every repo before you edit.';
+
 const {
   title,
-  description = 'Local-first code graph for AI coding assistants. Trace routes, events, contracts, and change impact across every repo before you edit.',
+  description,
 } = Astro.props;
 
 const siteUrl = Astro.site ?? 'https://gatherstep.dev';
+const homeUrl = new URL('/', siteUrl).toString();
 const canonical = new URL(Astro.url.pathname, siteUrl).toString();
 const ogImage = new URL('/og_card.webp', siteUrl).toString();
+const metaDescription = description ?? DEFAULT_DESCRIPTION;
+const fontStylesheet =
+  'https://fonts.googleapis.com/css2?family=Archivo:wght@400;800&family=Space+Mono:wght@400;700&display=swap';
 
 const jsonLd = {
   '@context': 'https://schema.org',
   '@graph': [
     {
       '@type': 'WebSite',
-      '@id': 'https://gatherstep.dev/#website',
-      url: 'https://gatherstep.dev/',
+      '@id': new URL('/#website', siteUrl).toString(),
+      url: homeUrl,
       name: 'Gather Step',
-      description,
+      description: metaDescription,
       inLanguage: 'en',
     },
     {
       '@type': 'SoftwareApplication',
-      '@id': 'https://gatherstep.dev/#software',
+      '@id': new URL('/#software', siteUrl).toString(),
       name: 'Gather Step',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'macOS, Linux',
       offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-      url: 'https://gatherstep.dev/',
+      url: homeUrl,
       codeRepository: 'https://github.com/thedoublejay/gather-step',
       license: 'https://github.com/thedoublejay/gather-step/blob/main/LICENSE',
-      description,
+      description: metaDescription,
     },
     {
       '@type': 'Person',
@@ -55,16 +62,16 @@ const jsonLd = {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
-    <meta name="description" content={description} />
+    <meta name="description" content={metaDescription} />
     <link rel="canonical" href={canonical} />
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1" />
     <meta name="author" content="JJ Adonis" />
     <meta name="generator" content={Astro.generator} />
     <meta name="referrer" content="strict-origin-when-cross-origin" />
-    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta name="theme-color" content="#101418" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
-    <meta property="og:description" content={description} />
+    <meta property="og:description" content={metaDescription} />
     <meta property="og:image" content={ogImage} />
     <meta property="og:image:alt" content="Gather Step - Local-first code graph for AI coding assistants" />
     <meta property="og:image:width" content="1200" />
@@ -74,19 +81,18 @@ const jsonLd = {
     <meta property="og:locale" content="en_US" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={title} />
-    <meta name="twitter:description" content={description} />
+    <meta name="twitter:description" content={metaDescription} />
     <meta name="twitter:image" content={ogImage} />
     <meta name="twitter:image:alt" content="Gather Step - Local-first code graph for AI coding assistants" />
     <link rel="me" href="https://github.com/thedoublejay" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;800&family=Space+Mono:wght@400;700&display=swap"
-      rel="stylesheet"
-    />
+    <link rel="preload" href={fontStylesheet} as="style" />
+    <link href={fontStylesheet} rel="stylesheet" />
     <link rel="icon" href="/favicon/favicon.ico" sizes="any" />
     <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg" />
     <link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png" />
+    <link rel="manifest" href="/favicon/site.webmanifest" />
     <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
   </head>
   <body class="blueprint">
