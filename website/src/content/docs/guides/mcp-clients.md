@@ -17,8 +17,8 @@ Before connecting a client:
 1. **An indexed workspace:** run `gather-step --workspace /path/to/workspace index`
    if you have not already. The MCP server reads from the indexed state; it
    does not build the index for you.
-2. **The built binary** on your `PATH` or at a known absolute path. See
-   [Installation](/guides/installation/) for build instructions.
+2. **The built binary** on your `PATH`. See [Installation](/guides/installation/)
+   for build instructions.
 
 ## Fast Path for Claude
 
@@ -66,7 +66,7 @@ fits your workflow:
 {
   "mcpServers": {
     "gather-step": {
-      "command": "/absolute/path/to/gather-step",
+      "command": "gather-step",
       "args": [
         "--workspace",
         "/path/to/workspace",
@@ -84,7 +84,7 @@ projects for this user):
 {
   "mcpServers": {
     "gather-step": {
-      "command": "/absolute/path/to/gather-step",
+      "command": "gather-step",
       "args": [
         "--workspace",
         "/path/to/workspace",
@@ -95,13 +95,28 @@ projects for this user):
 }
 ```
 
-Replace `/absolute/path/to/gather-step` with the real path to the compiled
-binary (for example, the output of `which gather-step` once it is on your
-`PATH`). Replace `/path/to/workspace` with the directory that contains your
-`gather-step.config.yaml`.
+Replace `/path/to/workspace` with the directory that contains your
+`gather-step.config.yaml`. The examples assume `gather-step` is already on
+your `PATH`.
 
 After saving the config, restart Claude Code. The `gather-step` server entry
 should appear in the MCP server list and show a connected state.
+
+## Configure Codex CLI
+
+Codex reads MCP servers from `~/.codex/config.toml`. Add a `gather-step`
+server block that uses the same `PATH` command and workspace-pinned `serve`
+args:
+
+```toml
+[mcp_servers.gather-step]
+command = "gather-step"
+args = ["--workspace", "/path/to/workspace", "serve"]
+```
+
+Restart Codex after editing the config. MCP servers are loaded when the session
+starts, so a running Codex session will not gain `mcp__gather_step` tools until
+the next session.
 
 ## Configure Cursor
 
@@ -112,7 +127,7 @@ under **MCP Servers**. The JSON format is the same:
 {
   "mcpServers": {
     "gather-step": {
-      "command": "/absolute/path/to/gather-step",
+      "command": "gather-step",
       "args": [
         "--workspace",
         "/path/to/workspace",
@@ -124,8 +139,8 @@ under **MCP Servers**. The JSON format is the same:
 ```
 
 If you prefer the Settings UI, add a new server entry with the transport set
-to `stdio`, the command set to the absolute binary path, and the arguments list
-containing `--workspace`, your workspace path, and `serve`.
+to `stdio`, the command set to `gather-step`, and the arguments list containing
+`--workspace`, your workspace path, and `serve`.
 
 ## Configure Any MCP-Aware Client
 
@@ -136,7 +151,7 @@ that supports the stdio transport accepts this shape:
 {
   "mcpServers": {
     "gather-step": {
-      "command": "/absolute/path/to/gather-step",
+      "command": "gather-step",
       "args": [
         "--workspace",
         "/path/to/workspace",
