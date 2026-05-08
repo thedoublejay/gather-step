@@ -204,10 +204,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo check --all-features --locked
 
+  install-smoke:
+    name: Install Smoke (Linux)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      # Pinned to a specific SHA (was dtolnay/rust-toolchain@master, 2026-04-15).
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.94.1
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Install CLI from workspace
+        run: cargo install --path crates/gather-step-cli --locked --root "$RUNNER_TEMP/gather-step-homebrew-smoke" --force
+      - name: Smoke test installed binary
+        run: |
+          "$RUNNER_TEMP/gather-step-homebrew-smoke/bin/gather-step" --version
+          "$RUNNER_TEMP/gather-step-homebrew-smoke/bin/gather-step" --help
+
   ci-summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [changes, lint, deny, unused-deps, test, test-linux, mvcc-stress, msrv]
+    needs: [changes, lint, deny, unused-deps, test, test-linux, mvcc-stress, msrv, install-smoke]
     if: always()
     steps:
       - name: Report CI routing
@@ -223,6 +242,7 @@ jobs:
           TEST_LINUX_RESULT: ${{ needs['test-linux'].result }}
           MVCC_STRESS_RESULT: ${{ needs['mvcc-stress'].result }}
           MSRV_RESULT: ${{ needs.msrv.result }}
+          INSTALL_SMOKE_RESULT: ${{ needs['install-smoke'].result }}
         run: |
           set -euo pipefail
 
@@ -237,6 +257,7 @@ jobs:
           echo "test_linux=$TEST_LINUX_RESULT"
           echo "mvcc_stress=$MVCC_STRESS_RESULT"
           echo "msrv=$MSRV_RESULT"
+          echo "install_smoke=$INSTALL_SMOKE_RESULT"
 
           failed=false
 
@@ -269,6 +290,7 @@ jobs:
               require_success "test-linux" "$TEST_LINUX_RESULT"
               require_success "mvcc-stress" "$MVCC_STRESS_RESULT"
               require_success "msrv" "$MSRV_RESULT"
+              require_success "install-smoke" "$INSTALL_SMOKE_RESULT"
               ;;
             false)
               allow_success_or_skipped "lint" "$LINT_RESULT"
@@ -278,6 +300,7 @@ jobs:
               allow_success_or_skipped "test-linux" "$TEST_LINUX_RESULT"
               allow_success_or_skipped "mvcc-stress" "$MVCC_STRESS_RESULT"
               allow_success_or_skipped "msrv" "$MSRV_RESULT"
+              allow_success_or_skipped "install-smoke" "$INSTALL_SMOKE_RESULT"
               ;;
             *)
               echo "::error::changes did not produce a valid rust output: '$RUST_CHANGED'"

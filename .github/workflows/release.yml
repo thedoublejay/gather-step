@@ -192,25 +192,36 @@ jobs:
           x86_archive="gather-step-${REF_NAME}-x86_64-apple-darwin.tar.gz"
           export aarch64_sha
           export x86_sha
+          export source_sha
           export aarch64_url
           export x86_url
+          export source_url
           aarch64_sha="$(shasum -a 256 "dist/${aarch64_archive}" | awk '{print $1}')"
           x86_sha="$(shasum -a 256 "dist/${x86_archive}" | awk '{print $1}')"
           aarch64_url="https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/${aarch64_archive}"
           x86_url="https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/${x86_archive}"
+          source_url="https://github.com/${REPOSITORY}/archive/refs/tags/${REF_NAME}.tar.gz"
+          source_sha="$(curl -fsSL "${source_url}" | shasum -a 256 | awk '{print $1}')"
           ruby <<'RUBY'
           path = "homebrew-tap/Formula/gather-step.rb"
           formula = File.read(path)
-          replacements = {
+          required_replacements = {
             /url "https:\/\/github\.com\/[^"]+\/releases\/download\/v[^"]+\/gather-step-v[^"]+-aarch64-apple-darwin\.tar\.gz"\n(\s*)sha256 "[0-9a-f]+"/ =>
               "url \"#{ENV.fetch("aarch64_url")}\"\n\\1sha256 \"#{ENV.fetch("aarch64_sha")}\"",
             /url "https:\/\/github\.com\/[^"]+\/releases\/download\/v[^"]+\/gather-step-v[^"]+-x86_64-apple-darwin\.tar\.gz"\n(\s*)sha256 "[0-9a-f]+"/ =>
               "url \"#{ENV.fetch("x86_url")}\"\n\\1sha256 \"#{ENV.fetch("x86_sha")}\"",
           }
-          replacements.each do |pattern, replacement|
+          optional_replacements = {
+            /url "https:\/\/github\.com\/[^"]+\/archive\/refs\/tags\/v[^"]+\.tar\.gz"\n(\s*)sha256 "[0-9a-f]+"/ =>
+              "url \"#{ENV.fetch("source_url")}\"\n\\1sha256 \"#{ENV.fetch("source_sha")}\"",
+          }
+          required_replacements.each do |pattern, replacement|
             before = formula
             formula = formula.sub(pattern, replacement)
             abort("formula pattern not found: #{pattern.inspect}") if formula == before
+          end
+          optional_replacements.each do |pattern, replacement|
+            formula = formula.sub(pattern, replacement)
           end
           File.write(path, formula)
           RUBY
@@ -241,5 +252,5 @@ jobs:
               --base main \
               --head "$branch" \
               --title "gather-step ${REF_NAME}" \
-              --body "Updates gather-step macOS release URLs and SHA256 checksums for ${REF_NAME}. Do not merge until the GitHub release is no longer draft."
+              --body "Updates gather-step release URLs and SHA256 checksums for ${REF_NAME}, including the Linux source-build URL when present. Do not merge until the GitHub release is no longer draft."
           fi
