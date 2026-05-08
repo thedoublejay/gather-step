@@ -65,12 +65,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS-only by design for the initial public release scope.
+        # Homebrew/core builds from source, but published archives should also
+        # cover the Linux host used by Homebrew's x86_64 Linux CI.
         include:
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
     env:
       REF_NAME: ${{ github.ref_name }}
       TARGET: ${{ matrix.target }}
