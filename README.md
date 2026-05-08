@@ -124,7 +124,7 @@ Install with Homebrew on macOS:
 brew install thedoublejay/tap/gather-step
 ```
 
-Or build from source:
+Or build from source on macOS or Linux:
 
 ```bash
 cargo build -p gather-step --release

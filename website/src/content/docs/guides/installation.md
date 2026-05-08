@@ -1,13 +1,14 @@
 ---
 title: Install Gather Step (Rust CLI)
-description: Install Gather Step on macOS with Homebrew, or build it from a repo checkout. Prerequisites, verification, and clean state.
+description: Install Gather Step on macOS with Homebrew, or build it from a repo checkout on macOS or Linux. Prerequisites, verification, and clean state.
 ---
 
 Gather Step ships as a Rust CLI binary. Pick the install path that matches how
 you want to work:
 
 - **macOS (recommended):** install via Homebrew.
-- **Source build:** compile directly from a repo checkout with `cargo`.
+- **Source build:** compile directly from a repo checkout with `cargo` on
+  macOS or Linux.
 
 Both paths produce the same `gather-step` binary. Once it is on your `PATH`,
 every example in the rest of the documentation works identically.
@@ -61,12 +62,14 @@ PR queue, then use the source build below until the tag is published.
 
 ### Platform scope
 
-The planned tap targets macOS only.
+The tap serves prebuilt macOS artifacts. Linux is supported through source
+builds and the release pipeline publishes a Linux x86_64 archive for direct
+download.
 
 ## Build from Source
 
-Source builds are the right path when you want to run unreleased code from the
-`main` branch or work directly from a local checkout.
+Source builds are the right path when you want to run Linux, unreleased code
+from the `main` branch, or work directly from a local checkout.
 
 ### Prerequisites
 
@@ -151,13 +154,15 @@ above.
 
 ## Release Artifacts
 
-The release pipeline publishes pre-built binaries for two Apple Darwin targets:
+The release pipeline publishes pre-built binaries for the supported direct
+download targets:
 
 - `aarch64-apple-darwin` (Apple Silicon)
 - `x86_64-apple-darwin` (Intel Mac)
+- `x86_64-unknown-linux-gnu` (Linux x86_64)
 
-These are the binaries the Homebrew tap serves. If you are working outside that
-path, use the source build flow above.
+The Homebrew tap serves the macOS binaries. Homebrew/core formulae build from
+source first and get bottles from Homebrew CI after acceptance.
 
 ## Uninstall / Clean State
 
