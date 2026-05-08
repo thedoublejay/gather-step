@@ -77,7 +77,7 @@ fits your workflow:
 }
 ```
 
-**User-scoped:** `~/.claude/claude_desktop_config.json` (applies to all
+**User-scoped:** `~/.claude/settings.json` (applies to all
 projects for this user):
 
 ```json
@@ -117,6 +117,11 @@ args = ["--workspace", "/path/to/workspace", "serve"]
 Restart Codex after editing the config. MCP servers are loaded when the session
 starts, so a running Codex session will not gain `mcp__gather_step` tools until
 the next session.
+
+On macOS, GUI-launched apps may inherit a different `PATH` from your shell. If
+an MCP client reports that it cannot spawn `gather-step`, compare the client's
+environment with `launchctl getenv PATH` and make sure the install directory
+for `gather-step` is included.
 
 ## Configure Cursor
 

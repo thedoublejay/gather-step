@@ -125,6 +125,16 @@ fn setup_mcp_local_writes_workspace_settings() {
 
     assert!(stdout.contains("Updated"));
     assert_eq!(
+        value["mcpServers"]["gather-step"]["command"],
+        serde_json::json!("gather-step")
+    );
+    assert!(
+        !value["mcpServers"]["gather-step"]["command"]
+            .as_str()
+            .expect("command string")
+            .contains('/')
+    );
+    assert_eq!(
         value["mcpServers"]["gather-step"]["args"],
         serde_json::json!([
             "--workspace",
@@ -134,6 +144,81 @@ fn setup_mcp_local_writes_workspace_settings() {
                 .expect("utf-8 temp path"),
             "serve"
         ])
+    );
+}
+
+#[test]
+fn setup_mcp_json_reports_missing_path_resolution() {
+    let temp = TempDir::new("setup-mcp-path-missing");
+
+    let output = gather_step()
+        .arg("--workspace")
+        .arg(temp.path())
+        .arg("--json")
+        .arg("setup-mcp")
+        .arg("--scope")
+        .arg("local")
+        .env("PATH", "")
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = stdout_json(&output);
+    assert_eq!(value["event"], "setup_mcp_completed");
+    assert_eq!(value["path_resolution"], "not_found");
+}
+
+#[test]
+fn setup_mcp_global_writes_home_claude_settings() {
+    let workspace = TempDir::new("setup-mcp-global-workspace");
+    let home = TempDir::new("setup-mcp-global-home");
+
+    let output = gather_step()
+        .arg("--workspace")
+        .arg(workspace.path())
+        .arg("setup-mcp")
+        .arg("--scope")
+        .arg("global")
+        .env("HOME", home.path())
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settings_path = home.path().join(".claude/settings.json");
+    let settings = fs::read_to_string(&settings_path).expect("settings file should be written");
+    let value: Value = serde_json::from_str(&settings).expect("settings json");
+    assert_eq!(value["mcpServers"]["gather-step"]["command"], "gather-step");
+}
+
+#[test]
+fn setup_mcp_global_without_home_errors() {
+    let temp = TempDir::new("setup-mcp-global-no-home");
+
+    let output = gather_step()
+        .arg("--workspace")
+        .arg(temp.path())
+        .arg("setup-mcp")
+        .arg("--scope")
+        .arg("global")
+        .env_remove("HOME")
+        .output()
+        .expect("command should run");
+
+    assert!(!output.status.success(), "command unexpectedly succeeded");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot resolve HOME"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

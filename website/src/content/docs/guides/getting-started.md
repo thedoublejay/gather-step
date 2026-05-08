@@ -171,7 +171,7 @@ For other MCP clients, configure the client to launch the local stdio server:
 {
   "mcpServers": {
     "gather-step": {
-      "command": "/absolute/path/to/gather-step",
+      "command": "gather-step",
       "args": [
         "--workspace",
         "/path/to/workspace",
@@ -183,6 +183,8 @@ For other MCP clients, configure the client to launch the local stdio server:
 ```
 
 Gather Step does not need to run as a separate network service. The client starts it as needed.
+The example assumes the installed `gather-step` binary is available on the MCP
+client's `PATH`.
 
 For client-specific setup, use [MCP clients](/guides/mcp-clients/).
 
