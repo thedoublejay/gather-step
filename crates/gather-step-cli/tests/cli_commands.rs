@@ -132,7 +132,6 @@ fn setup_mcp_local_writes_workspace_settings() {
                 .expect("canonical workspace")
                 .to_str()
                 .expect("utf-8 temp path"),
-            "mcp",
             "serve"
         ])
     );

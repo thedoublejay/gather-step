@@ -5,6 +5,28 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.4 (2026-05-08)
+
+Release status: **released**.
+
+Patch on top of v4.0.3. Fixes generated and documented MCP setup so clients use the installed `gather-step` command from `PATH` with the public top-level `serve` command.
+
+### Fixed
+
+- `gather-step setup-mcp --scope local` now writes Claude settings with `command: "gather-step"` instead of pinning MCP startup to the absolute path of the current executable.
+- Generated MCP args now use `["--workspace", "...", "serve"]`, matching the public CLI surface instead of the hidden `mcp serve` compatibility alias.
+- MCP client documentation for Claude Code, Codex CLI, Cursor, and generic stdio MCP clients now shows the same `PATH`-based command shape. The Codex section also calls out that the session must be restarted before `mcp__gather_step` tools appear.
+- Added regression coverage for both direct setup command output and the lower-level settings writer so stale `mcp serve` expectations fail in CI.
+
+### Changed
+
+- Refreshed resolvable Cargo lockfile dependencies in the `wasm-bindgen` stack.
+- Bumped the website stack to `astro` `^6.3.1` and `@astrojs/starlight` `^0.39.1`.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.4`.
+
 ## v4.0.3 (2026-05-07)
 
 Release status: **released**.
