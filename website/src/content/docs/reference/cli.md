@@ -777,7 +777,7 @@ The TUI requires stdin, stdout, and stderr to be TTYs. In scripts or CI, use `st
 
 ### `setup-mcp`
 
-Writes an idempotent `mcpServers.gather-step` block pinned to the current workspace. The generated entry uses the current `gather-step` binary path and launches the stdio MCP server for that workspace.
+Writes an idempotent `mcpServers.gather-step` block pinned to the current workspace. The generated entry uses `gather-step` from the user's `PATH` and launches the stdio MCP server for that workspace.
 
 ```bash
 gather-step [GLOBAL FLAGS] setup-mcp [--scope <local|global>]

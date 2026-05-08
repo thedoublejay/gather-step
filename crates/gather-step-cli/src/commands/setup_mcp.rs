@@ -34,9 +34,7 @@ pub fn run(app: &AppContext, args: SetupMcpArgs) -> Result<()> {
             .context("cannot resolve HOME")?
             .join(".claude/settings.json"),
     };
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("gather-step"));
-
-    write_settings(&settings_path, &app.workspace_path, &exe)?;
+    write_settings(&settings_path, &app.workspace_path)?;
 
     let payload = SetupMcpOutput {
         event: "setup_mcp_completed",
@@ -49,7 +47,7 @@ pub fn run(app: &AppContext, args: SetupMcpArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn write_settings(path: &Path, workspace: &Path, exe: &Path) -> Result<()> {
+pub fn write_settings(path: &Path, workspace: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
@@ -66,11 +64,9 @@ pub fn write_settings(path: &Path, workspace: &Path, exe: &Path) -> Result<()> {
     let workspace_str = workspace
         .to_str()
         .context("workspace path is not valid UTF-8")?;
-    let exe_str = exe.to_str().context("executable path is not valid UTF-8")?;
-
     let entry = json!({
-        "command": exe_str,
-        "args": ["--workspace", workspace_str, "mcp", "serve"],
+        "command": "gather-step",
+        "args": ["--workspace", workspace_str, "serve"],
     });
 
     let servers = root
