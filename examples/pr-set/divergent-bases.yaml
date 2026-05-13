@@ -1,0 +1,17 @@
+version: 0
+id: divergent-bases
+title: Divergent base branches
+prs:
+  - id: backend-contract
+    repo: label-review
+    base: main
+    head: feature/backend-contract
+    pr: 1201
+    depends_on: []
+  - id: frontend-release
+    repo: web-frontend
+    base: release/2026.05
+    head: feature/frontend-release-hookup
+    pr: 1202
+    depends_on:
+      - backend-contract
