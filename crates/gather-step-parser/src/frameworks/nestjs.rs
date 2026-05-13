@@ -619,7 +619,7 @@ fn extract_event_type_values_from_producer_call(
     values
 }
 
-fn resolve_event_type_expression_values(
+pub(crate) fn resolve_event_type_expression_values(
     parsed: &ParsedFile,
     source_content: &str,
     call_span: Option<&gather_step_core::SourceSpan>,
@@ -938,7 +938,7 @@ fn find_matching_close_local(input: &str, open_pos: usize) -> Option<usize> {
     None
 }
 
-fn extract_object_key_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn extract_object_key_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return None;

@@ -29,7 +29,13 @@ use gather_step_core::{
     shared_symbol_qn_unversioned,
 };
 
-use crate::{resolve::ImportBinding, tree_sitter::ParsedFile};
+use crate::{
+    frameworks::nestjs::{
+        extract_call_argument, extract_object_key_value, resolve_event_type_expression_values,
+    },
+    resolve::ImportBinding,
+    tree_sitter::{EnrichedCallSite, ParsedFile},
+};
 
 /// Output of the Azure / `LaunchDarkly` extractor pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -173,27 +179,62 @@ fn add_web_pubsub_edges(parsed: &ParsedFile, aug: &mut AzureAugmentation) {
             continue;
         };
 
-        let Some(raw_name) = call_site.literal_argument.as_deref() else {
-            continue;
-        };
-        let name = sanitize_name(raw_name);
-        if name.is_empty() {
-            continue;
-        }
+        for name in web_pubsub_event_names(parsed, call_site) {
+            if name.is_empty() {
+                continue;
+            }
 
-        let qualified_name = format!("__event__pubsub__{name}");
-        let event_node =
-            virtual_node_from_call_site(NodeKind::Event, &qualified_name, &name, parsed, call_site);
-        aug.nodes.push(event_node.clone());
-        aug.edges.push(EdgeData {
-            source: call_site.owner_id,
-            target: event_node.id,
-            kind: edge_kind,
-            metadata: EdgeMetadata::default(),
-            owner_file: parsed.file_node.id,
-            is_cross_file: false,
-        });
+            let qualified_name = format!("__event__pubsub__{name}");
+            let event_node = virtual_node_from_call_site(
+                NodeKind::Event,
+                &qualified_name,
+                &name,
+                parsed,
+                call_site,
+            );
+            aug.nodes.push(event_node.clone());
+            aug.edges.push(EdgeData {
+                source: call_site.owner_id,
+                target: event_node.id,
+                kind: edge_kind,
+                metadata: EdgeMetadata::default(),
+                owner_file: parsed.file_node.id,
+                is_cross_file: false,
+            });
+        }
     }
+}
+
+fn web_pubsub_event_names(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<String> {
+    let mut names = Vec::new();
+    let first_argument = call_site
+        .raw_arguments
+        .as_deref()
+        .and_then(|raw_arguments| extract_call_argument(raw_arguments, 0));
+    let first_argument_is_object = first_argument.is_some_and(|argument| {
+        let trimmed = argument.trim();
+        trimmed.starts_with('{') && trimmed.ends_with('}')
+    });
+
+    if !first_argument_is_object && let Some(raw_name) = call_site.literal_argument.as_deref() {
+        names.push(sanitize_name(raw_name));
+    }
+
+    if let Some(argument) = first_argument
+        && let Some(payload) = extract_object_key_value(argument, "payload")
+        && let Some(event_type) = extract_object_key_value(payload, "eventType")
+    {
+        names.extend(resolve_event_type_expression_values(
+            parsed,
+            parsed.source.as_ref(),
+            call_site.span.as_ref(),
+            event_type,
+        ));
+    }
+
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Returns `true` when the hint receiver contains a Web `PubSub` SDK reference.
@@ -911,6 +952,122 @@ export class NotificationPublisher {
         assert!(
             publishes_edges.iter().any(|e| e.target == notif_node.id),
             "Publishes edge must target the notification event node"
+        );
+    }
+
+    #[test]
+    fn web_pubsub_send_to_group_payload_event_type_produces_event_node() {
+        let temp_dir = TestDir::new("pubsub-send-to-group-payload-event-type");
+        fs::write(
+            temp_dir.path().join("event-types.ts"),
+            r#"
+export enum PubSubEventType {
+  NotificationCreated = 'notification.created',
+}
+"#,
+        )
+        .expect("event-types fixture should write");
+        fs::write(
+            temp_dir.path().join("publisher.ts"),
+            r#"
+import { PubSubEventType } from './event-types';
+
+export class NotificationPublisher {
+  async publish(groupId: string, data: unknown) {
+    this.pubSubService.sendToGroup({
+      group: groupId,
+      payload: {
+        eventType: PubSubEventType.NotificationCreated,
+        data,
+      },
+    });
+  }
+}
+"#,
+        )
+        .expect("publisher fixture should write");
+
+        let parsed = parse_file(
+            "service-b",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "publisher.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("publisher fixture should parse");
+
+        let event_nodes: Vec<_> = parsed
+            .nodes
+            .iter()
+            .filter(|n| n.kind == gather_step_core::NodeKind::Event)
+            .collect();
+        let publishes_edges: Vec<_> = parsed
+            .edges
+            .iter()
+            .filter(|e| e.kind == gather_step_core::EdgeKind::Publishes)
+            .collect();
+
+        let event_node = event_nodes
+            .iter()
+            .find(|n| n.external_id.as_deref() == Some("__event__pubsub__notification.created"))
+            .expect("payload eventType should produce notification.created Event node");
+        assert!(
+            publishes_edges.iter().any(|e| e.target == event_node.id),
+            "Publishes edge must target the notification.created event node"
+        );
+    }
+
+    #[test]
+    fn web_pubsub_send_to_group_dynamic_payload_event_type_does_not_fabricate_event_node() {
+        let temp_dir = TestDir::new("pubsub-send-to-group-dynamic-payload-event-type");
+        fs::write(
+            temp_dir.path().join("publisher.ts"),
+            r#"
+export class NotificationPublisher {
+  async publish(eventType: string, data: unknown) {
+    this.pubSubService.sendToGroup({
+      group: 'admins',
+      payload: {
+        eventType,
+        data,
+      },
+    });
+  }
+}
+"#,
+        )
+        .expect("publisher fixture should write");
+
+        let parsed = parse_file(
+            "service-b",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "publisher.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("publisher fixture should parse");
+
+        assert!(
+            parsed.nodes.iter().all(|n| {
+                n.kind != gather_step_core::NodeKind::Event
+                    || n.external_id.as_deref() != Some("__event__pubsub__admins")
+            }),
+            "object-form sendToGroup must not treat the group name as the event name"
+        );
+        assert!(
+            parsed
+                .edges
+                .iter()
+                .all(|e| e.kind != gather_step_core::EdgeKind::Publishes),
+            "dynamic payload eventType should be skipped instead of fabricating a producer edge"
         );
     }
 
