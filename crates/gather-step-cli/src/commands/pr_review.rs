@@ -103,7 +103,7 @@ pub struct PrReviewArgs {
     pub set_id: Option<String>,
 
     /// Number of independent PR-set entries to review in parallel.
-    #[arg(long, value_name = "N", default_value_t = 1)]
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = parse_positive_usize)]
     pub parallelism: usize,
 
     /// Include PRs whose GitHub repo is not listed in the workspace config
@@ -329,6 +329,17 @@ pub enum ReviewEngine {
     TempIndex,
 }
 
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| "--parallelism must be an integer greater than or equal to 1.".to_owned())?;
+    if parsed == 0 {
+        Err("--parallelism must be an integer greater than or equal to 1.".to_owned())
+    } else {
+        Ok(parsed)
+    }
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
@@ -340,9 +351,6 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
             run_init_set(app, &args, init_args).map(|()| 0)
         }
         None => {
-            if args.parallelism == 0 {
-                anyhow::bail!("--parallelism must be at least 1.");
-            }
             if let Some(pr_set) = args.pr_set.as_ref() {
                 let set_args = PrSetRunArgs {
                     manifest_path: pr_set.clone(),
@@ -1690,6 +1698,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             run_id: artifact_root.run_id.clone(),
             cleanup_policy,
             cache_key,
+            config_hash: cache_key_struct.config_hash.clone(),
         },
         changed_files: changed_files_display,
         changed_files_truncated,
@@ -4939,6 +4948,7 @@ indexing:
                 run_id: "test-run".to_owned(),
                 cleanup_policy: CleanupPolicy::RemoveOnExit,
                 cache_key: "hash:aaa:bbb".to_owned(),
+                config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
             changed_files_truncated: false,

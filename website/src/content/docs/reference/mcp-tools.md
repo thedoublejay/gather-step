@@ -173,7 +173,7 @@ Used automatically when the user asks to review a pull request, do a structural 
 **Returns.** A JSON `DeltaReport` (`schema_version: 1`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
-- `safety` — review storage path, run id, cleanup policy, cache key.
+- `safety` — review storage path, run id, cleanup policy, cache key, config hash.
 - `changed_files` — list of repo-relative paths changed in `merge_base..head`.
 - `evidence` — canonical evidence rows computed from the typed delta surfaces at query time.
 - `routes` — added / removed / changed HTTP routes by `(method, canonical_path)`. Carry handler info via `Serves` edges and downstream impact summaries.

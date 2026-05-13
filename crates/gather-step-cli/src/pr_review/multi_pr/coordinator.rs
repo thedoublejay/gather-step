@@ -79,10 +79,7 @@ pub fn run_pr_set(app: &AppContext, args: &PrSetRunArgs) -> Result<(String, bool
                 blocked_ids.insert(entry.id.clone());
                 errors.push(skipped_entry(
                     &entry,
-                    format!(
-                        "Skipped because dependency review did not complete successfully: {}.",
-                        blocked_by.join(", ")
-                    ),
+                    skipped_dependency_message(&entry, &blocked_by),
                 ));
             }
         }
@@ -294,6 +291,18 @@ fn skipped_entry(entry: &PrEntry, message: String) -> ErroredPrReview {
     }
 }
 
+fn skipped_dependency_message(entry: &PrEntry, blocked_by: &[String]) -> String {
+    let dependency_ids = if blocked_by.is_empty() {
+        &entry.depends_on
+    } else {
+        blocked_by
+    };
+    format!(
+        "Skipped because dependency review did not complete successfully: {}.",
+        dependency_ids.join(", ")
+    )
+}
+
 fn dependency_levels(manifest: &PrSetManifest) -> Vec<Vec<PrEntry>> {
     let mut entries: BTreeMap<String, PrEntry> = manifest
         .prs
@@ -335,7 +344,7 @@ fn dependency_levels(manifest: &PrSetManifest) -> Vec<Vec<PrEntry>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dependency_levels, resolve_entry_workspace};
+    use super::{dependency_levels, resolve_entry_workspace, skipped_dependency_message};
     use crate::pr_review::multi_pr::manifest::{PrEntry, PrSetManifest};
 
     fn entry(id: &str, depends_on: Vec<&str>) -> PrEntry {
@@ -379,5 +388,17 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
 
         assert!(resolve_entry_workspace(temp.path(), "api").is_none());
+    }
+
+    #[test]
+    fn skipped_dependency_message_falls_back_to_all_dependencies() {
+        let entry = entry("web", vec!["api", "contracts"]);
+
+        let message = skipped_dependency_message(&entry, &[]);
+
+        assert_eq!(
+            message,
+            "Skipped because dependency review did not complete successfully: api, contracts."
+        );
     }
 }

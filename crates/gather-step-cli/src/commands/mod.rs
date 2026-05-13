@@ -397,6 +397,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_pr_review_parallelism_during_parse() {
+        let error = Cli::try_parse_from([
+            "gather-step",
+            "pr-review",
+            "--pr-set",
+            "examples/pr-set/cross-repo-feature.yaml",
+            "--parallelism",
+            "0",
+        ])
+        .expect_err("zero parallelism should be rejected by clap");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--parallelism must be an integer greater than or equal to 1"),
+            "unexpected error for zero parallelism: {error}"
+        );
+    }
+
+    #[test]
     fn parses_top_level_serve_args() {
         let cli = Cli::parse_from([
             "gather-step",

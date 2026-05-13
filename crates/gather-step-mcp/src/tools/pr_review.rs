@@ -34,7 +34,6 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -428,19 +427,12 @@ fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus, String> {
-    let (tx, rx) = mpsc::channel::<Result<std::process::ExitStatus, std::io::Error>>();
-    // We cannot move `child` into the waiter thread (we still need its
-    // pipes and `kill` handle on this thread), so the waiter polls
-    // `try_wait` from its own thread. A short cadence keeps the timeout
-    // honest without busy-spinning.
+    // A short polling cadence keeps the timeout honest without busy-spinning.
     let pid = child.id();
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let _ = (tx, rx, pid);
-                return Ok(status);
-            }
+            Ok(Some(status)) => return Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();

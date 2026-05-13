@@ -162,7 +162,7 @@ in that surface category.
 | Section | What it shows |
 |---|---|
 | `metadata` | Base/head SHAs, checkout mode, indexed repos, elapsed time, warnings |
-| `safety` | Review storage path, run ID, cleanup policy, cache key |
+| `safety` | Review storage path, run ID, cleanup policy, cache key, config hash |
 | `changed_files` | Repo-relative paths changed in `merge_base..head` |
 | `evidence` | Canonical evidence rows with closed kind/source enums and structured citations |
 | `routes` | Added / removed / changed HTTP routes. Removed routes carry downstream impact summaries. |

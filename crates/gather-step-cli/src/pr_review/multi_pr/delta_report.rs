@@ -72,6 +72,15 @@ pub enum PrReviewSetEntryStatus {
     Skipped,
 }
 
+impl PrReviewSetEntryStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CrossPrFindings {
     pub contract_drifts: Vec<CrossPrContractDrift>,
@@ -242,8 +251,13 @@ impl MultiPrDeltaReport {
                 .map_or_else(|| error.id.clone(), |pr| format!("#{pr}"));
             let _ = writeln!(
                 buf,
-                "| {:?} | {} | `{}` | `{}`..`{}` | {} |",
-                error.status, pr, error.repo, error.base, error.head, error.message
+                "| {} | {} | `{}` | `{}`..`{}` | {} |",
+                error.status.as_str(),
+                pr,
+                error.repo,
+                error.base,
+                error.head,
+                error.message
             );
         }
     }
@@ -506,7 +520,13 @@ fn set_fingerprint_for_report(manifest: &PrSetManifest, prs: &[PerPrDeltaReport]
                 .and_then(Value::as_str)
                 .unwrap_or(pr.head.as_str())
                 .to_owned(),
-            config_hash: String::new(),
+            config_hash: pr
+                .delta_report
+                .get("safety")
+                .and_then(|safety| safety.get("config_hash"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             gather_step_version: env!("CARGO_PKG_VERSION").to_owned(),
         })
         .collect();
@@ -546,6 +566,10 @@ mod tests {
     use crate::pr_review::multi_pr::manifest::{PrEntry, PrSetManifest};
 
     fn pr(id: &str, side: &str) -> PerPrDeltaReport {
+        pr_with_config_hash(id, side, "cfg")
+    }
+
+    fn pr_with_config_hash(id: &str, side: &str, config_hash: &str) -> PerPrDeltaReport {
         PerPrDeltaReport {
             id: id.to_owned(),
             repo: id.to_owned(),
@@ -559,7 +583,8 @@ mod tests {
                     "head_sha": "2222222222222222222222222222222222222222"
                 },
                 "safety": {
-                    "cache_key": "workspace:base:head"
+                    "cache_key": "workspace:base:head",
+                    "config_hash": config_hash
                 },
                 "changed_files": ["src/app.ts"],
                 "routes": { "added": [], "removed": [], "changed": [] },
@@ -644,6 +669,42 @@ mod tests {
         assert_eq!(report.metadata.completed_prs, 1);
         assert_eq!(report.metadata.failed_prs, 0);
         assert_eq!(report.metadata.skipped_prs, 1);
-        assert!(report.render_markdown().contains("Cross-PR findings"));
+        let markdown = report.render_markdown();
+        assert!(markdown.contains("Cross-PR findings"));
+        assert!(
+            markdown.contains("| skipped | #2 |"),
+            "markdown should use the stable serialized status label: {markdown}"
+        );
+    }
+
+    #[test]
+    fn set_fingerprint_includes_child_config_hash() {
+        let manifest = PrSetManifest {
+            version: 0,
+            id: "checkout-refresh".to_owned(),
+            title: None,
+            prs: vec![PrEntry {
+                id: "api".to_owned(),
+                repo: "api".to_owned(),
+                base: "main".to_owned(),
+                head: "feature/api".to_owned(),
+                pr: Some(1),
+                depends_on: vec![],
+            }],
+        };
+
+        let first = super::set_fingerprint_for_report(
+            &manifest,
+            &[pr_with_config_hash("api", "producer", "cfg-a")],
+        );
+        let second = super::set_fingerprint_for_report(
+            &manifest,
+            &[pr_with_config_hash("api", "producer", "cfg-b")],
+        );
+
+        assert_ne!(
+            first, second,
+            "set fingerprint must change when a child review config hash changes"
+        );
     }
 }
