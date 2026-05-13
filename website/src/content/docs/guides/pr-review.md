@@ -35,6 +35,80 @@ The command resolves both refs to SHAs, expands the set of affected repos from
 the changed files, indexes the head branch into a disposable storage location,
 and prints the delta report.
 
+### Review a child repo with a parent workspace config
+
+When the Git branch belongs to a child repo but the `gather-step.config.yaml`
+lives at the parent workspace, run from the parent and point `--workspace` at
+the child repo while passing the parent config:
+
+```bash
+gather-step --workspace /path/to/workspace/web-client pr-review \
+  --base main \
+  --head feature/checkout-ui \
+  --config /path/to/workspace/gather-step.config.yaml
+```
+
+The review rewrites the matching repo entry inside the temporary worktree so
+the child repo indexes as `.`. The parent workspace's `.gather-step` baseline
+remains the comparison source; no duplicate config is required inside the child
+repo.
+
+### Review a related PR set
+
+Create a manifest that names each PR and its dependency order:
+
+```yaml
+version: 0
+id: checkout-refresh
+title: Checkout refresh cross-repo set
+prs:
+  - id: api-contract-42
+    repo: api-service
+    base: main
+    head: feature/checkout-contract
+    pr: 42
+    depends_on: []
+  - id: ui-hookup-108
+    repo: web-client
+    base: main
+    head: feature/checkout-ui
+    pr: 108
+    depends_on:
+      - api-contract-42
+```
+
+Then run:
+
+```bash
+gather-step --workspace /path/to/workspace pr-review \
+  --pr-set examples/pr-set/cross-repo-feature.yaml \
+  --parallelism 2
+```
+
+Entries with satisfied dependencies can run in parallel. If one entry fails,
+dependent entries are skipped and the final `MultiPrDeltaReport` still includes
+the completed PRs, failed/skipped entries, and cross-PR payload-contract drift.
+
+You can also generate a draft manifest from GitHub search results:
+
+```bash
+gather-step --workspace /path/to/workspace pr-review init-set \
+  --query "checkout refresh is:open" \
+  --output checkout-refresh-pr-set.yaml
+```
+
+Or resolve and run immediately:
+
+```bash
+gather-step --workspace /path/to/workspace pr-review \
+  --from-gh "checkout refresh is:open" \
+  --set-id checkout-refresh \
+  --parallelism 2
+```
+
+`--from-gh` writes the resolved manifest under the review cache before running,
+so the exact PR set remains inspectable after the command completes.
+
 ### With JSON output
 
 ```bash
@@ -88,7 +162,7 @@ in that surface category.
 | Section | What it shows |
 |---|---|
 | `metadata` | Base/head SHAs, checkout mode, indexed repos, elapsed time, warnings |
-| `safety` | Review storage path, run ID, cleanup policy, cache key |
+| `safety` | Review storage path, run ID, cleanup policy, cache key, config hash |
 | `changed_files` | Repo-relative paths changed in `merge_base..head` |
 | `evidence` | Canonical evidence rows with closed kind/source enums and structured citations |
 | `routes` | Added / removed / changed HTTP routes. Removed routes carry downstream impact summaries. |
@@ -162,10 +236,17 @@ Claude Code triggers it automatically when you ask:
 
 > "Check the cross-repo impact of feat/my-change."
 
-The tool accepts the same parameters as the CLI (`base`, `head`, `keep_cache`,
-`severity`) and returns the same `DeltaReport` JSON. It works with any client
-that supports the stdio transport. See [Connect an MCP Client](/guides/mcp-clients/)
-for setup.
+The tool accepts the same parameters as the CLI (`base`, `head`, `config`,
+`cache_root`, `keep_cache`, `severity`, `no_baseline_check`, `timeout_secs`)
+and returns the same `DeltaReport` JSON. It works with any client that supports
+the stdio transport. See [Connect an MCP Client](/guides/mcp-clients/) for
+setup.
+
+For coordinated sets, MCP clients can call `pr_review_set` with either a
+`pr_set` manifest path or a `from_gh` search query. It also exposes `set_id`,
+`parallelism`, `allow_unknown_repos`, `config`, `cache_root`, `keep_cache`,
+`severity`, `no_baseline_check`, and `timeout_secs`, and returns the same
+`MultiPrDeltaReport` JSON as the CLI PR-set modes.
 
 **Clients known to work with `pr_review`:**
 

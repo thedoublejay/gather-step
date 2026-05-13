@@ -631,6 +631,9 @@ pub struct SafetyMetadata {
     /// Composite key that uniquely identifies this review state.
     /// Format: `"<workspace_hash>:<base_sha>:<head_sha>"`.
     pub cache_key: String,
+    /// First 16 hex chars of blake3(`gather-step.config.yaml` bytes) used by
+    /// the review cache identity.
+    pub config_hash: String,
 }
 
 /// Whether the review artifact root is kept or removed after the run.
@@ -2436,6 +2439,7 @@ mod tests {
                 run_id: "test-run".to_owned(),
                 cleanup_policy: CleanupPolicy::RemoveOnExit,
                 cache_key: "hash:aaa:bbb".to_owned(),
+                config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
             changed_files_truncated: false,
@@ -2908,6 +2912,7 @@ mod tests {
                 run_id: "test-run-full".to_owned(),
                 cleanup_policy: CleanupPolicy::KeepCache,
                 cache_key: "hash:aaa:bbb".to_owned(),
+                config_hash: "cfg".to_owned(),
             },
             changed_files: vec!["backend/src/routes.ts".to_owned()],
             changed_files_truncated: false,

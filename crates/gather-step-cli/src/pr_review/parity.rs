@@ -409,6 +409,7 @@ mod tests {
                 run_id: "test-run".to_owned(),
                 cleanup_policy: CleanupPolicy::RemoveOnExit,
                 cache_key: "hash:aaa:bbb".to_owned(),
+                config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
             changed_files_truncated: false,

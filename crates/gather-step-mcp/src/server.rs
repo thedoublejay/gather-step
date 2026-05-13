@@ -56,7 +56,10 @@ use crate::{
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
             review_pack_tool as run_review_pack,
         },
-        pr_review::{PrReviewInput, PrReviewResponse, run_pr_review},
+        pr_review::{
+            PrReviewInput, PrReviewResponse, PrReviewSetInput, PrReviewSetResponse, run_pr_review,
+            run_pr_review_set,
+        },
         projection_impact::{
             ProjectionImpactRequest, ProjectionImpactResponse,
             projection_impact_tool as run_projection_impact,
@@ -1016,6 +1019,8 @@ impl GatherStepMcpServer {
             Builds a disposable review index for the PR head, diffs it against the workspace baseline, \
             and returns a structured DeltaReport (routes, symbols, payload contracts, events, decorators, \
             contract alignments, removed-surface risks, deployment topology, and impact summaries). \
+            Accepts the same review controls as the CLI for parent workspace config files, review cache roots, \
+            cache retention, severity mode, and baseline mismatch suppression. \
             The workspace storage is never mutated — the review runs in a separate disposable artifact root. \
             Requires the `gather-step` binary to be on PATH or in the same directory as the MCP server. \
             First runs take ~30-90 seconds because a fresh review index is built; cache-hit runs against \
@@ -1030,6 +1035,29 @@ impl GatherStepMcpServer {
         let workspace = self.ctx.config.workspace_root();
         self.traced_call("pr_review", &args, move || {
             run_pr_review(&workspace, &request).map(Json)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "pr_review_set",
+        description = "Use this tool when the user asks to review multiple related pull requests, \
+            a PR stack, or a cross-repo PR set with gather-step. Accepts either a PR-set manifest path \
+            or a GitHub search query to resolve with `gh pr list`, builds one disposable review per entry, \
+            preserves dependency ordering, and returns a MultiPrDeltaReport with per-PR results and \
+            cross-PR payload-contract drift. Accepts the same review controls as the CLI for parent \
+            workspace config files, review cache roots, cache retention, severity mode, baseline mismatch \
+            suppression, set id override, parallelism, and unknown-repo handling for GitHub-resolved sets.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn pr_review_set_tool(
+        &self,
+        Parameters(request): Parameters<PrReviewSetInput>,
+    ) -> Result<Json<PrReviewSetResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let workspace = self.ctx.config.workspace_root();
+        self.traced_call("pr_review_set", &args, move || {
+            run_pr_review_set(&workspace, &request).map(Json)
         })
         .await
     }

@@ -163,13 +163,17 @@ Used automatically when the user asks to review a pull request, do a structural 
 | --- | --- | --- | --- |
 | `base` | string | yes | Base ref (branch name, tag, or full SHA). The PR's target branch — typically `main`. |
 | `head` | string | yes | Head ref (branch name, tag, or full SHA). The PR's source branch. |
+| `config` | string | no | Path to a `gather-step.config.yaml`, absolute or relative to the workspace root. Use this when the reviewed repo does not commit its own config, or when reviewing a child repo with a parent workspace config. |
+| `cache_root` | string | no | Override the OS cache root used for review artifacts, absolute or relative to the workspace root. |
 | `keep_cache` | bool | no | Preserve the review artifact for follow-up `impact`/`trace`/`pack` queries. Default: `false` — the artifact is deleted after the report is returned. |
 | `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. `strict` and `pedantic` cause non-zero exit on threshold violations; `warn` always returns the report regardless. |
+| `no_baseline_check` | bool | no | Suppress the warning emitted when the workspace HEAD does not match `base`. |
+| `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
 
 **Returns.** A JSON `DeltaReport` (`schema_version: 1`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
-- `safety` — review storage path, run id, cleanup policy, cache key.
+- `safety` — review storage path, run id, cleanup policy, cache key, config hash.
 - `changed_files` — list of repo-relative paths changed in `merge_base..head`.
 - `evidence` — canonical evidence rows computed from the typed delta surfaces at query time.
 - `routes` — added / removed / changed HTTP routes by `(method, canonical_path)`. Carry handler info via `Serves` edges and downstream impact summaries.
@@ -193,6 +197,39 @@ Used automatically when the user asks to review a pull request, do a structural 
 **Cleanup.** Without `keep_cache`, the artifact is removed when the report is returned. With `keep_cache`, the artifact survives until `pr-review clean` is run (or the OS cache root is cleared). The `suggested_followups` field includes commands pre-filled with `--registry` / `--storage` overrides pointing at the kept review index.
 
 **Implementation note.** The MCP tool shells out to the `gather-step` binary's `pr-review` subcommand. The binary must be on PATH or in the same directory as the MCP server.
+
+### `pr_review_set`
+
+> "Review this related PR set using gather-step."
+
+Used automatically when the user asks to review multiple related pull requests,
+a PR stack, or a cross-repo PR set. It shells out to `gather-step pr-review`
+with either `--pr-set <manifest>` or `--from-gh <query>`, and always requests
+JSON output.
+
+**Inputs.**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `pr_set` | string | required unless `from_gh` is set | Path to a PR-set manifest, absolute or relative to the workspace root. Mutually exclusive with `from_gh`. |
+| `from_gh` | string | required unless `pr_set` is set | GitHub search query to resolve into a temporary PR-set manifest using `gh pr list`. Mutually exclusive with `pr_set`. |
+| `set_id` | string | no | Override the manifest id in the emitted report. |
+| `parallelism` | integer | no | Number of independent entries to review in parallel. Dependency levels still run in order. |
+| `allow_unknown_repos` | bool | no | With `from_gh`, include PRs whose GitHub repo is not listed in the workspace config. Default: `false`. |
+| `config` | string | no | Path to a `gather-step.config.yaml`, absolute or relative to the workspace root. Use this for child repos that rely on a parent workspace config. |
+| `cache_root` | string | no | Override the OS cache root used for review artifacts, absolute or relative to the workspace root. |
+| `keep_cache` | bool | no | Preserve each child review artifact for follow-up queries. |
+| `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. |
+| `no_baseline_check` | bool | no | Suppress baseline-vs-workspace HEAD mismatch warnings for each child review. |
+| `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
+
+**Returns.** A JSON `MultiPrDeltaReport` (`schema_version: 0`) with:
+
+- `metadata` — set id, manifest version/path, completed/failed/skipped counts, and set fingerprint.
+- `prs` — each completed child `DeltaReport` with entry id, repo, PR number, and base/head.
+- `errors` — failed and dependency-skipped entries.
+- `cross_pr.contract_drifts` — producer payload-contract changes in the set that lack a matching consumer PR.
+- `threshold_exceeded` — true when any completed child review crossed the requested severity mode.
 
 ## Contracts
 
