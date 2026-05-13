@@ -1291,7 +1291,7 @@ fn pack_oracle_suite_runs_under_two_minutes() {
     let temp = stage_fixture_workspace("timing");
     let started = Instant::now();
     run_pack_oracle_suite(temp.path());
-    assert!(started.elapsed() < Duration::from_secs(120));
+    assert!(started.elapsed() < Duration::from_mins(2));
 }
 
 #[test]
@@ -1764,7 +1764,7 @@ fn oracle_high_bar_scenarios_are_stable_across_fresh_index_runs() {
     );
 
     assert!(
-        started.elapsed() < Duration::from_secs(180),
+        started.elapsed() < Duration::from_mins(3),
         "stability gate must finish within 3 minutes; elapsed={:?}",
         started.elapsed()
     );

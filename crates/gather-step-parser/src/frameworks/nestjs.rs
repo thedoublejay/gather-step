@@ -619,7 +619,7 @@ fn extract_event_type_values_from_producer_call(
     values
 }
 
-fn resolve_event_type_expression_values(
+pub(crate) fn resolve_event_type_expression_values(
     parsed: &ParsedFile,
     source_content: &str,
     call_span: Option<&gather_step_core::SourceSpan>,
@@ -938,7 +938,7 @@ fn find_matching_close_local(input: &str, open_pos: usize) -> Option<usize> {
     None
 }
 
-fn extract_object_key_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn extract_object_key_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return None;
@@ -1862,19 +1862,21 @@ fn split_logical_or_values(raw: &str) -> Vec<String> {
             '}' => brace_depth = brace_depth.saturating_sub(1),
             '(' => paren_depth = paren_depth.saturating_add(1),
             ')' => paren_depth = paren_depth.saturating_sub(1),
-            '|' if bracket_depth == 0 && brace_depth == 0 && paren_depth == 0 => {
-                if chars.get(index + 1).is_some_and(|(_, next)| *next == '|') {
-                    let part = raw[start..offset].trim();
-                    if !part.is_empty() {
-                        parts.push(part.to_owned());
-                    }
-                    let next_offset = chars
-                        .get(index + 1)
-                        .map_or(offset + 1, |(next_offset, _)| *next_offset + 1);
-                    start = next_offset;
-                    index += 2;
-                    continue;
+            '|' if bracket_depth == 0
+                && brace_depth == 0
+                && paren_depth == 0
+                && chars.get(index + 1).is_some_and(|(_, next)| *next == '|') =>
+            {
+                let part = raw[start..offset].trim();
+                if !part.is_empty() {
+                    parts.push(part.to_owned());
                 }
+                let next_offset = chars
+                    .get(index + 1)
+                    .map_or(offset + 1, |(next_offset, _)| *next_offset + 1);
+                start = next_offset;
+                index += 2;
+                continue;
             }
             _ => {}
         }

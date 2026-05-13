@@ -777,7 +777,7 @@ impl GraphStoreDb {
 
     /// Return database file size in bytes for diagnostic logging.
     pub fn file_size_bytes(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(&self.path).map_or(0, |m| m.len())
     }
 
     pub fn table_footprints(&self) -> Result<Vec<GraphTableFootprint>, GraphStoreError> {
