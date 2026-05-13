@@ -7,17 +7,19 @@ This changelog lists significant user-visible changes. The latest release is sho
 
 ## v4.0.5 (2026-05-13)
 
-Release status: **prepared**.
+Release status: **released**.
 
 Patch on top of v4.0.4. Fixes Web PubSub producer extraction so object-form group sends that identify the event under `payload.eventType` connect to event consumers in topology and trace output.
 
 ### Fixed
 
 - `pubSubService.sendToGroup({ payload: { eventType: PubSubEventType.X } })` now emits a Web PubSub producer edge for the resolved event `X`.
-- Object-form `sendToGroup` calls no longer treat unrelated literal metadata, such as `group: 'admins'`, as the event name when `payload.eventType` is dynamic or unresolved.
+- Mixed-form `sendToGroup('admins', { eventType: 'notification.created' })` calls now resolve the payload event type instead of treating the group name as the event.
+- Object-form `sendToGroup` calls no longer treat unrelated literal metadata, such as `group: 'admins'`, as the event name when no resolvable `payload.eventType` is available.
 
 ### Changed
 
+- Bumped the exact-pinned Oxc parser stack from `0.129.0` to `0.130.0`.
 - Cargo dependency status was refreshed for the release; `cargo outdated -wR` reports the workspace dependencies are current.
 
 ### Release-wide

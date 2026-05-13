@@ -179,7 +179,7 @@ fn add_web_pubsub_edges(parsed: &ParsedFile, aug: &mut AzureAugmentation) {
             continue;
         };
 
-        for name in web_pubsub_event_names(parsed, call_site) {
+        for name in web_pubsub_event_names(parsed, call_site, operation) {
             if name.is_empty() {
                 continue;
             }
@@ -205,36 +205,196 @@ fn add_web_pubsub_edges(parsed: &ParsedFile, aug: &mut AzureAugmentation) {
     }
 }
 
-fn web_pubsub_event_names(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<String> {
+/// Extract Web `PubSub` event identities without confusing routing metadata for events.
+///
+/// Object-form sends can include literals such as `group: 'admins'`; those are not
+/// event names. For object payloads, only a resolvable `eventType` or
+/// `payload.eventType` is emitted. Literal fallback is kept for operations whose first
+/// literal represents the event.
+fn web_pubsub_event_names(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    operation: &str,
+) -> Vec<String> {
     let mut names = Vec::new();
     let first_argument = call_site
         .raw_arguments
         .as_deref()
         .and_then(|raw_arguments| extract_call_argument(raw_arguments, 0));
-    let first_argument_is_object = first_argument.is_some_and(|argument| {
-        let trimmed = argument.trim();
-        trimmed.starts_with('{') && trimmed.ends_with('}')
-    });
+    let first_argument_is_object = first_argument
+        .and_then(web_pubsub_object_argument)
+        .is_some();
+    let mut payload_event_type_seen = false;
 
-    if !first_argument_is_object && let Some(raw_name) = call_site.literal_argument.as_deref() {
-        names.push(sanitize_name(raw_name));
+    if let Some(raw_arguments) = call_site.raw_arguments.as_deref() {
+        let mut index = 0;
+        while let Some(argument) = extract_call_argument(raw_arguments, index) {
+            if let Some(object) = web_pubsub_object_argument(argument)
+                && let Some(event_type) = web_pubsub_payload_event_type_expression(object)
+            {
+                payload_event_type_seen = true;
+                let resolved = resolve_event_type_expression_values(
+                    parsed,
+                    parsed.source.as_ref(),
+                    call_site.span.as_ref(),
+                    event_type,
+                );
+                if resolved.is_empty() {
+                    let (line, column) = call_site
+                        .span
+                        .as_ref()
+                        .map_or((0, 0), |span| (span.line_start, span.column_start));
+                    tracing::debug!(
+                        operation = %operation,
+                        file = %parsed.file_node.file_path,
+                        line,
+                        column,
+                        raw_event_type = %event_type.trim(),
+                        "Skipping Web PubSub payload event type because it could not be resolved to a literal event name.",
+                    );
+                }
+                names.extend(resolved);
+            }
+            index += 1;
+        }
     }
 
-    if let Some(argument) = first_argument
-        && let Some(payload) = extract_object_key_value(argument, "payload")
-        && let Some(event_type) = extract_object_key_value(payload, "eventType")
+    if !payload_event_type_seen
+        && !first_argument_is_object
+        && web_pubsub_literal_argument_is_event_name(operation)
+        && let Some(raw_name) = call_site.literal_argument.as_deref()
     {
-        names.extend(resolve_event_type_expression_values(
-            parsed,
-            parsed.source.as_ref(),
-            call_site.span.as_ref(),
-            event_type,
-        ));
+        let (line, column) = call_site
+            .span
+            .as_ref()
+            .map_or((0, 0), |span| (span.line_start, span.column_start));
+        tracing::debug!(
+            operation = %operation,
+            file = %parsed.file_node.file_path,
+            line,
+            column,
+            raw_name = %raw_name,
+            "Using Web PubSub literal argument as event name.",
+        );
+        names.push(sanitize_name(raw_name));
     }
 
     names.sort();
     names.dedup();
     names
+}
+
+fn web_pubsub_literal_argument_is_event_name(operation: &str) -> bool {
+    matches!(operation, "sendToAll" | "sendEvent" | "on" | "subscribe")
+}
+
+fn web_pubsub_payload_event_type_expression(object: &str) -> Option<&str> {
+    if let Some(payload) = extract_object_key_value(object, "payload")
+        && let Some(payload_object) = web_pubsub_object_argument(payload)
+        && let Some(event_type) = extract_object_key_value(payload_object, "eventType")
+    {
+        return Some(event_type);
+    }
+
+    extract_object_key_value(object, "eventType")
+}
+
+fn web_pubsub_object_argument(mut raw: &str) -> Option<&str> {
+    loop {
+        raw = raw.trim();
+        if let Some(inner) = web_pubsub_wrapped_expression(raw, '(', ')') {
+            raw = inner;
+            continue;
+        }
+        break;
+    }
+
+    raw = raw.trim();
+    if !raw.starts_with('{') {
+        return None;
+    }
+
+    let close = web_pubsub_matching_delimiter(raw, '{', '}')?;
+    if !web_pubsub_expression_suffix_is_trivia(&raw[close + 1..]) {
+        return None;
+    }
+    Some(&raw[..=close])
+}
+
+fn web_pubsub_wrapped_expression(raw: &str, open: char, close: char) -> Option<&str> {
+    if !raw.starts_with(open) {
+        return None;
+    }
+
+    let close_index = web_pubsub_matching_delimiter(raw, open, close)?;
+    if !web_pubsub_expression_suffix_is_trivia(&raw[close_index + close.len_utf8()..]) {
+        return None;
+    }
+    Some(&raw[open.len_utf8()..close_index])
+}
+
+fn web_pubsub_expression_suffix_is_trivia(mut suffix: &str) -> bool {
+    loop {
+        let trimmed = suffix.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        if let Some(rest) = trimmed.strip_prefix(';') {
+            suffix = rest;
+            continue;
+        }
+        if let Some(comment) = trimmed.strip_prefix("//") {
+            let rest = comment.split_once('\n').map_or("", |(_, rest)| rest);
+            return rest.trim().is_empty();
+        }
+        if let Some(comment) = trimmed.strip_prefix("/*") {
+            let Some((_, rest)) = comment.split_once("*/") else {
+                return false;
+            };
+            suffix = rest;
+            continue;
+        }
+        return false;
+    }
+}
+
+fn web_pubsub_matching_delimiter(raw: &str, open: char, close: char) -> Option<usize> {
+    if !raw.starts_with(open) {
+        return None;
+    }
+
+    let mut depth = 0_u32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut escape = false;
+
+    for (index, ch) in raw.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_single || in_double || in_backtick => {
+                escape = true;
+            }
+            '\'' if !in_double && !in_backtick => in_single = !in_single,
+            '"' if !in_single && !in_backtick => in_double = !in_double,
+            '`' if !in_single && !in_double => in_backtick = !in_backtick,
+            _ if in_single || in_double || in_backtick => {}
+            _ if ch == open => depth = depth.saturating_add(1),
+            _ if ch == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Returns `true` when the hint receiver contains a Web `PubSub` SDK reference.
@@ -1018,6 +1178,182 @@ export class NotificationPublisher {
         assert!(
             publishes_edges.iter().any(|e| e.target == event_node.id),
             "Publishes edge must target the notification.created event node"
+        );
+    }
+
+    #[test]
+    fn web_pubsub_send_to_group_inline_payload_event_type_produces_event_node() {
+        let temp_dir = TestDir::new("pubsub-send-to-group-inline-payload-event-type");
+        fs::write(
+            temp_dir.path().join("publisher.ts"),
+            r#"
+export class NotificationPublisher {
+  async publish(groupId: string, data: unknown) {
+    this.pubSubService.sendToGroup({
+      group: groupId,
+      payload: {
+        eventType: 'notification.created',
+        data,
+      },
+    });
+  }
+}
+"#,
+        )
+        .expect("publisher fixture should write");
+
+        let parsed = parse_file(
+            "service-b",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "publisher.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("publisher fixture should parse");
+
+        let event_nodes: Vec<_> = parsed
+            .nodes
+            .iter()
+            .filter(|n| n.kind == gather_step_core::NodeKind::Event)
+            .collect();
+        let publishes_edges: Vec<_> = parsed
+            .edges
+            .iter()
+            .filter(|e| e.kind == gather_step_core::EdgeKind::Publishes)
+            .collect();
+
+        let event_node = event_nodes
+            .iter()
+            .find(|n| n.external_id.as_deref() == Some("__event__pubsub__notification.created"))
+            .expect(
+                "inline string payload eventType should produce notification.created Event node",
+            );
+        assert!(
+            publishes_edges.iter().any(|e| e.target == event_node.id),
+            "Publishes edge must target the notification.created event node"
+        );
+    }
+
+    #[test]
+    fn web_pubsub_send_to_group_mixed_direct_payload_event_type_produces_event_node() {
+        let temp_dir = TestDir::new("pubsub-send-to-group-mixed-payload-event-type");
+        fs::write(
+            temp_dir.path().join("publisher.ts"),
+            r#"
+export class NotificationPublisher {
+  async publish(data: unknown) {
+    this.pubSubService.sendToGroup('admins', {
+      eventType: 'notification.created',
+      data,
+    });
+  }
+}
+"#,
+        )
+        .expect("publisher fixture should write");
+
+        let parsed = parse_file(
+            "service-b",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "publisher.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("publisher fixture should parse");
+
+        let event_nodes: Vec<_> = parsed
+            .nodes
+            .iter()
+            .filter(|n| n.kind == gather_step_core::NodeKind::Event)
+            .collect();
+        let publishes_edges: Vec<_> = parsed
+            .edges
+            .iter()
+            .filter(|e| e.kind == gather_step_core::EdgeKind::Publishes)
+            .collect();
+
+        let event_node = event_nodes
+            .iter()
+            .find(|n| n.external_id.as_deref() == Some("__event__pubsub__notification.created"))
+            .expect(
+                "mixed-form direct payload eventType should produce notification.created Event node",
+            );
+        assert!(
+            publishes_edges.iter().any(|e| e.target == event_node.id),
+            "Publishes edge must target the notification.created event node"
+        );
+        assert!(
+            event_nodes
+                .iter()
+                .all(|n| n.external_id.as_deref() != Some("__event__pubsub__admins")),
+            "mixed-form sendToGroup must not treat the group name as the event name"
+        );
+    }
+
+    #[test]
+    fn web_pubsub_send_to_group_partial_payload_shapes_do_not_produce_event_node() {
+        let temp_dir = TestDir::new("pubsub-send-to-group-partial-payload-shapes");
+        fs::write(
+            temp_dir.path().join("publisher.ts"),
+            r#"
+export class NotificationPublisher {
+  async publish(data: unknown) {
+    this.pubSubService.sendToGroup({
+      group: 'admins',
+      payload: {
+        data,
+      },
+    });
+
+    this.pubSubService.sendToGroup({
+      group: 'admins',
+      meta: {
+        eventType: 'notification.created',
+      },
+      payload: {
+        data,
+      },
+    });
+  }
+}
+"#,
+        )
+        .expect("publisher fixture should write");
+
+        let parsed = parse_file(
+            "service-b",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "publisher.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("publisher fixture should parse");
+
+        assert!(
+            parsed
+                .nodes
+                .iter()
+                .all(|n| n.kind != gather_step_core::NodeKind::Event),
+            "partial object payloads should not produce Event nodes"
+        );
+        assert!(
+            parsed
+                .edges
+                .iter()
+                .all(|e| e.kind != gather_step_core::EdgeKind::Publishes),
+            "partial object payloads should not produce Publishes edges"
         );
     }
 
