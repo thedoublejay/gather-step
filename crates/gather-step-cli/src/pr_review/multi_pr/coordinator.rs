@@ -174,8 +174,8 @@ fn run_level(
         let chunk_results = thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
-                .cloned()
                 .map(|entry| {
+                    let entry = entry.clone();
                     let app = app.clone();
                     let settings = settings.clone();
                     scope.spawn(move || run_one(&app, &settings, entry))
