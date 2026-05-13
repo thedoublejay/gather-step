@@ -849,14 +849,16 @@ The `deployment` surface captures changes to deployment topology: added, removed
 
 ```bash
 gather-step [GLOBAL FLAGS] pr-review --base <REF> --head <REF> [--engine temp-index] \
-  [--config <PATH>] [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
+  [--config <PATH>] [--cache-root <PATH>] [--severity <MODE>] [--format <FORMAT>] \
+  [--keep-cache] [--no-baseline-check]
 
 gather-step [GLOBAL FLAGS] pr-review --pr-set <PATH> [--parallelism <N>] [--set-id <ID>] \
-  [--engine temp-index] [--config <PATH>] [--severity <MODE>] [--format <FORMAT>] [--keep-cache]
+  [--engine temp-index] [--config <PATH>] [--cache-root <PATH>] [--severity <MODE>] \
+  [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
 
 gather-step [GLOBAL FLAGS] pr-review --from-gh <QUERY> [--parallelism <N>] [--set-id <ID>] \
-  [--allow-unknown-repos] [--engine temp-index] [--config <PATH>] [--severity <MODE>] \
-  [--format <FORMAT>] [--keep-cache]
+  [--allow-unknown-repos] [--engine temp-index] [--config <PATH>] [--cache-root <PATH>] \
+  [--severity <MODE>] [--format <FORMAT>] [--keep-cache] [--no-baseline-check]
 
 gather-step [GLOBAL FLAGS] pr-review init-set --query <QUERY> [--output <PATH>] \
   [--set-id <ID>] [--allow-unknown-repos]
@@ -873,6 +875,7 @@ gather-step [GLOBAL FLAGS] pr-review init-set --query <QUERY> [--output <PATH>] 
 | `--allow-unknown-repos` | bool flag | false | With `--from-gh`, include PRs whose GitHub repo is not listed in the workspace config. By default the resolver filters to configured repos. |
 | `--engine <ENGINE>` | enum | `temp-index` | Engine to use for the review index. `temp-index` builds a full isolated index. This flag is retained for forward-compatible engine selection; no alternate public engine is currently exposed. |
 | `--config <PATH>` | path | — | Path to a `gather-step.config.yaml` to use for this review run. The temp-index requires a config at the worktree root; by default the worktree is checked out at `--head`, so a config that is committed in that ref is picked up automatically. Pass `--config` when the reviewed git repo does not commit its own config, or to override the committed one for a run. When `--workspace` points at a child repo and `--config` points at a parent workspace config, the matching repo entry is rewritten to `path: "."` inside the temporary worktree. The original config bytes feed into the cache-key fingerprint, so different `--config` values produce distinct cache entries. |
+| `--cache-root <PATH>` | path | OS cache directory | Override the cache root used for review artifacts and generated `--from-gh` manifests. Use this in CI or automation that needs review artifacts under a known directory. |
 | `--severity <MODE>` | enum | `warn` | `warn` always exits 0. `strict` exits 2 on High risks or incompatible payload type changes. `pedantic` exits 2 on any Medium+ risk, any payload change, or removed permission decorators. |
 | `--format <FORMAT>` | enum | `markdown` | `markdown` emits a human-readable Markdown report. `json` emits compact machine-readable JSON. `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit. `braingent` emits Markdown with YAML frontmatter for [Braingent](https://braingent.dev) archival. |
 | `--keep-cache` | bool flag | false | Keep the review artifact directory after the run, including failed runs (failed artifacts are marked `Quarantined` so `pr-review clean` can find them). Cache hits are available when a retained matching artifact already exists. |

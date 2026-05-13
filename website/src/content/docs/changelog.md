@@ -5,6 +5,31 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.1.0 (2026-05-13)
+
+Release status: **unreleased**.
+
+Minor release on top of v4.0.5. Adds coordinated multi-PR review support so related PRs, stacks, and cross-repo feature sets can be reviewed together instead of one branch at a time.
+
+### Added
+
+- `gather-step pr-review --pr-set <PATH>` runs a coordinated review from a manifest that lists each PR's repo, base, head, PR number, and dependencies.
+- `gather-step pr-review init-set --query <QUERY>` generates a draft PR-set manifest from GitHub search results, and `gather-step pr-review --from-gh <QUERY>` resolves and runs that set in one command.
+- PR-set reviews return a `MultiPrDeltaReport` with per-PR `DeltaReport` results, failed/skipped entries, dependency-aware execution status, and cross-PR payload-contract drift.
+- `pr_review_set` is now available through MCP for assistant-driven review of related PR sets.
+
+### Changed
+
+- `pr-review` can use a parent workspace `gather-step.config.yaml` while reviewing a child repo. The matching repo entry is rewritten to `path: "."` inside the temporary worktree, so the child repo no longer needs a duplicate committed config.
+- Review-set execution supports `--parallelism`, `--set-id`, `--allow-unknown-repos`, `--config`, `--cache-root`, `--keep-cache`, `--severity`, and `--no-baseline-check` at the CLI surface.
+- MCP `pr_review` and `pr_review_set` now expose the same config, cache-root, cache-retention, severity, baseline-check, timeout, set-id, parallelism, and GitHub-query controls that automation users need to discover from the tool schema.
+- `--cache-root` is now a visible CLI option for `pr-review`, instead of a hidden automation-only flag.
+
+### Docs
+
+- Added PR-set examples for cross-repo sets, stacked PRs in one repo, and divergent-base sets.
+- Expanded the PR Review guide, CLI reference, and MCP tools reference with PR-set manifests, GitHub query resolution, child-repo parent-config usage, and MCP input fields.
+
 ## v4.0.5 (2026-05-13)
 
 Release status: **released**.

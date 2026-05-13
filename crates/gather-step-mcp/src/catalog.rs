@@ -110,6 +110,6 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "pr_review_set",
-        "Build coordinated disposable review indexes for a PR-set manifest",
+        "Build coordinated disposable review indexes from a PR-set manifest or GitHub query",
     ),
 ];

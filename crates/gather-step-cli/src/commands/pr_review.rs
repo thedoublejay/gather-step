@@ -122,7 +122,7 @@ pub struct PrReviewArgs {
 
     /// Override the OS cache root used for review artifacts.
     /// Useful for CI and tests.
-    #[arg(long, value_name = "PATH", hide = true)]
+    #[arg(long, value_name = "PATH")]
     pub cache_root: Option<PathBuf>,
 
     /// Path to a `gather-step.config.yaml` to use for the review run.

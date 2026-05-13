@@ -163,8 +163,12 @@ Used automatically when the user asks to review a pull request, do a structural 
 | --- | --- | --- | --- |
 | `base` | string | yes | Base ref (branch name, tag, or full SHA). The PR's target branch — typically `main`. |
 | `head` | string | yes | Head ref (branch name, tag, or full SHA). The PR's source branch. |
+| `config` | string | no | Path to a `gather-step.config.yaml`, absolute or relative to the workspace root. Use this when the reviewed repo does not commit its own config, or when reviewing a child repo with a parent workspace config. |
+| `cache_root` | string | no | Override the OS cache root used for review artifacts, absolute or relative to the workspace root. |
 | `keep_cache` | bool | no | Preserve the review artifact for follow-up `impact`/`trace`/`pack` queries. Default: `false` — the artifact is deleted after the report is returned. |
 | `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. `strict` and `pedantic` cause non-zero exit on threshold violations; `warn` always returns the report regardless. |
+| `no_baseline_check` | bool | no | Suppress the warning emitted when the workspace HEAD does not match `base`. |
+| `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
 
 **Returns.** A JSON `DeltaReport` (`schema_version: 1`) with these top-level sections:
 
@@ -199,18 +203,24 @@ Used automatically when the user asks to review a pull request, do a structural 
 > "Review this related PR set using gather-step."
 
 Used automatically when the user asks to review multiple related pull requests,
-a PR stack, or a cross-repo PR set. It shells out to
-`gather-step pr-review --pr-set <manifest> --format json`.
+a PR stack, or a cross-repo PR set. It shells out to `gather-step pr-review`
+with either `--pr-set <manifest>` or `--from-gh <query>`, and always requests
+JSON output.
 
 **Inputs.**
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `pr_set` | string | yes | Path to a PR-set manifest, absolute or relative to the workspace root. |
+| `pr_set` | string | required unless `from_gh` is set | Path to a PR-set manifest, absolute or relative to the workspace root. Mutually exclusive with `from_gh`. |
+| `from_gh` | string | required unless `pr_set` is set | GitHub search query to resolve into a temporary PR-set manifest using `gh pr list`. Mutually exclusive with `pr_set`. |
 | `set_id` | string | no | Override the manifest id in the emitted report. |
 | `parallelism` | integer | no | Number of independent entries to review in parallel. Dependency levels still run in order. |
+| `allow_unknown_repos` | bool | no | With `from_gh`, include PRs whose GitHub repo is not listed in the workspace config. Default: `false`. |
+| `config` | string | no | Path to a `gather-step.config.yaml`, absolute or relative to the workspace root. Use this for child repos that rely on a parent workspace config. |
+| `cache_root` | string | no | Override the OS cache root used for review artifacts, absolute or relative to the workspace root. |
 | `keep_cache` | bool | no | Preserve each child review artifact for follow-up queries. |
 | `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. |
+| `no_baseline_check` | bool | no | Suppress baseline-vs-workspace HEAD mismatch warnings for each child review. |
 | `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
 
 **Returns.** A JSON `MultiPrDeltaReport` (`schema_version: 0`) with:

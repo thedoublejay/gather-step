@@ -236,14 +236,17 @@ Claude Code triggers it automatically when you ask:
 
 > "Check the cross-repo impact of feat/my-change."
 
-The tool accepts the same parameters as the CLI (`base`, `head`, `keep_cache`,
-`severity`) and returns the same `DeltaReport` JSON. It works with any client
-that supports the stdio transport. See [Connect an MCP Client](/guides/mcp-clients/)
-for setup.
+The tool accepts the same parameters as the CLI (`base`, `head`, `config`,
+`cache_root`, `keep_cache`, `severity`, `no_baseline_check`, `timeout_secs`)
+and returns the same `DeltaReport` JSON. It works with any client that supports
+the stdio transport. See [Connect an MCP Client](/guides/mcp-clients/) for
+setup.
 
-For coordinated sets, MCP clients can call `pr_review_set` with a `pr_set`
-manifest path. It returns the same `MultiPrDeltaReport` JSON as the CLI
-`--pr-set` mode.
+For coordinated sets, MCP clients can call `pr_review_set` with either a
+`pr_set` manifest path or a `from_gh` search query. It also exposes `set_id`,
+`parallelism`, `allow_unknown_repos`, `config`, `cache_root`, `keep_cache`,
+`severity`, `no_baseline_check`, and `timeout_secs`, and returns the same
+`MultiPrDeltaReport` JSON as the CLI PR-set modes.
 
 **Clients known to work with `pr_review`:**
 
