@@ -3,13 +3,13 @@ id: stacked-in-one-repo
 title: Stacked API cleanup
 prs:
   - id: api-foundation
-    repo: web-api-gateway
+    repo: api-service
     base: main
     head: feature/api-foundation
     pr: 1101
     depends_on: []
   - id: api-ui-hookup
-    repo: web-api-gateway
+    repo: api-service
     base: feature/api-foundation
     head: feature/api-ui-hookup
     pr: 1102

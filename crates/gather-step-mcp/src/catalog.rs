@@ -108,4 +108,8 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
         "pr_review",
         "Build a disposable review index for a PR branch and return the delta report",
     ),
+    (
+        "pr_review_set",
+        "Build coordinated disposable review indexes for a PR-set manifest",
+    ),
 ];

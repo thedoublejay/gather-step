@@ -56,7 +56,10 @@ use crate::{
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
             review_pack_tool as run_review_pack,
         },
-        pr_review::{PrReviewInput, PrReviewResponse, run_pr_review},
+        pr_review::{
+            PrReviewInput, PrReviewResponse, PrReviewSetInput, PrReviewSetResponse, run_pr_review,
+            run_pr_review_set,
+        },
         projection_impact::{
             ProjectionImpactRequest, ProjectionImpactResponse,
             projection_impact_tool as run_projection_impact,
@@ -1030,6 +1033,26 @@ impl GatherStepMcpServer {
         let workspace = self.ctx.config.workspace_root();
         self.traced_call("pr_review", &args, move || {
             run_pr_review(&workspace, &request).map(Json)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "pr_review_set",
+        description = "Use this tool when the user asks to review multiple related pull requests, \
+            a PR stack, or a cross-repo PR set with gather-step. Accepts a PR-set manifest path, \
+            builds one disposable review per manifest entry, preserves dependency ordering, and \
+            returns a MultiPrDeltaReport with per-PR results and cross-PR payload-contract drift.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn pr_review_set_tool(
+        &self,
+        Parameters(request): Parameters<PrReviewSetInput>,
+    ) -> Result<Json<PrReviewSetResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let workspace = self.ctx.config.workspace_root();
+        self.traced_call("pr_review_set", &args, move || {
+            run_pr_review_set(&workspace, &request).map(Json)
         })
         .await
     }

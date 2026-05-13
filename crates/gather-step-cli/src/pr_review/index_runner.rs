@@ -8,8 +8,8 @@
 //!
 //! A copy of `gather-step.config.yaml` must exist at
 //! `artifact_root.worktree_root.join("gather-step.config.yaml")`.  The review
-//! worktree was created from a SHA in the user's repo, so the config file is
-//! naturally present if the user has it checked in.
+//! worktree may provide that file from the checked-out ref, or the caller may
+//! copy a workspace-level config into the temporary worktree before indexing.
 //!
 //! Phase 1 Task 4 of the PR review mode plan.
 
@@ -45,8 +45,8 @@ const CONFIG_FILENAME: &str = "gather-step.config.yaml";
 ///
 /// A copy of `gather-step.config.yaml` must exist at
 /// `artifact_root.worktree_root.join("gather-step.config.yaml")`. The
-/// review worktree was created from a SHA in the user's repo, so the
-/// config file is naturally present if the user has it checked in.
+/// review worktree may provide that file from the checked-out ref, or the
+/// caller may copy a workspace-level config into the temporary worktree.
 ///
 /// # Errors
 ///
@@ -64,8 +64,8 @@ pub fn run_review_index(
     if !config_path.exists() {
         bail!(
             "review index pre-condition violated: `{}` not found in worktree at `{}`.\n\
-             The config file must be committed to the repository so it is present \
-             in the detached worktree.",
+             Pass --config with an existing workspace config when the reviewed \
+             git repository does not commit its own config file.",
             CONFIG_FILENAME,
             artifact_root.worktree_root.display(),
         );

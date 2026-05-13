@@ -224,27 +224,28 @@ fn detect_dependency_cycle<'a>(
 mod tests {
     use super::{ManifestError, PR_SET_MANIFEST_VERSION, PrSetManifest};
 
-    const REG_13863_EXAMPLE: &str = include_str!("../../../../../examples/pr-set/reg-13863.yaml");
+    const CROSS_REPO_FEATURE_EXAMPLE: &str =
+        include_str!("../../../../../examples/pr-set/cross-repo-feature.yaml");
     const STACKED_EXAMPLE: &str =
         include_str!("../../../../../examples/pr-set/stacked-in-one-repo.yaml");
     const DIVERGENT_BASES_EXAMPLE: &str =
         include_str!("../../../../../examples/pr-set/divergent-bases.yaml");
 
     #[test]
-    fn pr_set_manifest_parses_reg_13863_example() {
-        let manifest = PrSetManifest::from_yaml_str(REG_13863_EXAMPLE)
-            .expect("REG-13863 example should parse");
+    fn pr_set_manifest_parses_cross_repo_feature_example() {
+        let manifest = PrSetManifest::from_yaml_str(CROSS_REPO_FEATURE_EXAMPLE)
+            .expect("cross-repo feature example should parse");
 
         assert_eq!(manifest.version, PR_SET_MANIFEST_VERSION);
-        assert_eq!(manifest.id, "REG-13863");
+        assert_eq!(manifest.id, "checkout-refresh");
         assert_eq!(manifest.prs.len(), 3);
         assert!(
             manifest
                 .prs
                 .iter()
-                .any(|entry| entry.id == "label-review-502"
-                    && entry.repo == "label-review"
-                    && entry.pr == Some(502))
+                .any(|entry| entry.id == "api-contract-42"
+                    && entry.repo == "api-service"
+                    && entry.pr == Some(42))
         );
 
         let round_tripped = manifest
@@ -257,7 +258,11 @@ mod tests {
 
     #[test]
     fn pr_set_manifest_examples_validate_cleanly() {
-        for raw in [REG_13863_EXAMPLE, STACKED_EXAMPLE, DIVERGENT_BASES_EXAMPLE] {
+        for raw in [
+            CROSS_REPO_FEATURE_EXAMPLE,
+            STACKED_EXAMPLE,
+            DIVERGENT_BASES_EXAMPLE,
+        ] {
             PrSetManifest::from_yaml_str(raw).expect("example manifest should validate cleanly");
         }
     }

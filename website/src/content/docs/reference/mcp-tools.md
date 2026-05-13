@@ -194,6 +194,33 @@ Used automatically when the user asks to review a pull request, do a structural 
 
 **Implementation note.** The MCP tool shells out to the `gather-step` binary's `pr-review` subcommand. The binary must be on PATH or in the same directory as the MCP server.
 
+### `pr_review_set`
+
+> "Review this related PR set using gather-step."
+
+Used automatically when the user asks to review multiple related pull requests,
+a PR stack, or a cross-repo PR set. It shells out to
+`gather-step pr-review --pr-set <manifest> --format json`.
+
+**Inputs.**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `pr_set` | string | yes | Path to a PR-set manifest, absolute or relative to the workspace root. |
+| `set_id` | string | no | Override the manifest id in the emitted report. |
+| `parallelism` | integer | no | Number of independent entries to review in parallel. Dependency levels still run in order. |
+| `keep_cache` | bool | no | Preserve each child review artifact for follow-up queries. |
+| `severity` | string | no | One of `warn` (default), `strict`, `pedantic`. |
+| `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
+
+**Returns.** A JSON `MultiPrDeltaReport` (`schema_version: 0`) with:
+
+- `metadata` — set id, manifest version/path, completed/failed/skipped counts, and set fingerprint.
+- `prs` — each completed child `DeltaReport` with entry id, repo, PR number, and base/head.
+- `errors` — failed and dependency-skipped entries.
+- `cross_pr.contract_drifts` — producer payload-contract changes in the set that lack a matching consumer PR.
+- `threshold_exceeded` — true when any completed child review crossed the requested severity mode.
+
 ## Contracts
 
 ### `payload_schema`

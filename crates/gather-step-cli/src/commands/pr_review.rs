@@ -7,6 +7,8 @@
 //! # Sub-commands
 //!
 //! - `pr-review` (no subcommand): run a review.  Requires `--base` and `--head`.
+//! - `pr-review --pr-set <path>`: run a coordinated review set.
+//! - `pr-review init-set`: generate a PR-set manifest from GitHub search.
 //! - `pr-review clean ...`: clean up stale review artifacts (Phase 1 Task 6).
 
 use std::{
@@ -25,7 +27,7 @@ use gather_step_storage::IndexingOptions;
 use serde::Serialize;
 
 use crate::{
-    app::AppContext,
+    app::{AppContext, WorkspacePaths},
     pr_review::{
         affected::{AffectedRepos, compute_affected_repos},
         artifact_root::{
@@ -56,6 +58,11 @@ use crate::{
             routes::{extract_route_deltas, find_route_node_id},
             symbols::{extract_symbol_deltas, find_symbol_node_id},
         },
+        multi_pr::{
+            coordinator::{PrSetRunArgs, run_pr_set},
+            gh::{GhResolveOptions, resolve_pr_set_from_gh, slugify_set_id},
+            manifest::PrSetManifest,
+        },
     },
     storage_context::StorageContext,
 };
@@ -75,13 +82,34 @@ pub struct PrReviewArgs {
 
     /// Base ref (branch, tag, SHA, or any git rev).
     /// Required when no subcommand is given (i.e., when running a review).
-    #[arg(long, value_name = "REF")]
+    #[arg(long, value_name = "REF", conflicts_with = "pr_set")]
     pub base: Option<String>,
 
     /// Head ref (branch, tag, SHA, "HEAD", …).
     /// Required when no subcommand is given (i.e., when running a review).
-    #[arg(long, value_name = "REF")]
+    #[arg(long, value_name = "REF", conflicts_with = "pr_set")]
     pub head: Option<String>,
+
+    /// Path to a PR-set manifest for coordinated multi-PR review.
+    #[arg(long = "pr-set", value_name = "PATH", conflicts_with_all = ["base", "head", "from_gh"])]
+    pub pr_set: Option<PathBuf>,
+
+    /// Resolve a PR-set manifest from GitHub search results and run it.
+    #[arg(long = "from-gh", value_name = "QUERY", conflicts_with_all = ["base", "head", "pr_set"])]
+    pub from_gh: Option<String>,
+
+    /// Override the manifest set id in the emitted PR-set report.
+    #[arg(long, value_name = "ID")]
+    pub set_id: Option<String>,
+
+    /// Number of independent PR-set entries to review in parallel.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    pub parallelism: usize,
+
+    /// Include PRs whose GitHub repo is not listed in the workspace config
+    /// when resolving `--from-gh`.
+    #[arg(long, requires = "from_gh")]
+    pub allow_unknown_repos: bool,
 
     /// Engine to use for the review.  Only `temp-index` is supported in this MVP.
     #[arg(long, value_enum, default_value_t = ReviewEngine::TempIndex)]
@@ -102,8 +130,10 @@ pub struct PrReviewArgs {
     /// The review temp-index requires a config at the worktree root. By
     /// default the worktree is checked out at `--head`, so a config that
     /// is committed in that ref is naturally present. Pass this flag when
-    /// the workspace does not have a checked-in config (e.g. during
-    /// bootstrap), or to override the committed one for a single run.
+    /// the reviewed git repo does not commit its own config, or to override
+    /// the committed one for a run. When `--workspace` points at a child repo
+    /// and `--config` points at the parent workspace config, the matching repo
+    /// entry is rewritten to `path: "."` inside the temporary worktree.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -145,6 +175,27 @@ pub struct PrReviewArgs {
 pub enum PrReviewSubcommand {
     /// Clean up stale review artifact roots for this workspace.
     Clean(CleanArgs),
+    /// Generate a PR-set manifest from GitHub search results.
+    InitSet(InitSetArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct InitSetArgs {
+    /// GitHub PR search query used with `gh pr list --search`.
+    #[arg(long, value_name = "QUERY")]
+    pub query: String,
+
+    /// Output manifest path. Defaults to `<set-id>-pr-set.yaml`.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Override the generated manifest id.
+    #[arg(long, value_name = "ID")]
+    pub set_id: Option<String>,
+
+    /// Include PRs whose GitHub repo is not listed in the workspace config.
+    #[arg(long)]
+    pub allow_unknown_repos: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -285,7 +336,100 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
         Some(PrReviewSubcommand::Clean(ref clean_args)) => {
             run_clean(app, &args, clean_args).map(|()| 0)
         }
+        Some(PrReviewSubcommand::InitSet(ref init_args)) => {
+            run_init_set(app, &args, init_args).map(|()| 0)
+        }
         None => {
+            if args.parallelism == 0 {
+                anyhow::bail!("--parallelism must be at least 1.");
+            }
+            if let Some(pr_set) = args.pr_set.as_ref() {
+                let set_args = PrSetRunArgs {
+                    manifest_path: pr_set.clone(),
+                    set_id: args.set_id.clone(),
+                    parallelism: args.parallelism,
+                    engine: args.engine,
+                    keep_cache: args.keep_cache,
+                    cache_root: args.cache_root.clone(),
+                    config: args.config.clone(),
+                    severity: args.severity,
+                    format: if app.json_output {
+                        OutputFormat::Json
+                    } else {
+                        args.format
+                    },
+                    github_comment_file: args.github_comment_file.clone(),
+                    no_baseline_check: args.no_baseline_check,
+                };
+                let (report, exceeded) = run_pr_set(app, &set_args)?;
+                #[expect(
+                    clippy::print_stdout,
+                    reason = "pr-review is the sole caller of this path; structured output goes here"
+                )]
+                {
+                    println!("{report}");
+                }
+                let _ = <std::io::Stdout as std::io::Write>::flush(&mut std::io::stdout());
+                return Ok(if exceeded { 2 } else { 0 });
+            }
+
+            if let Some(query) = args.from_gh.as_ref() {
+                let config_path = args
+                    .config
+                    .clone()
+                    .unwrap_or_else(|| app.workspace_paths().config_path);
+                let manifest = resolve_pr_set_from_gh(
+                    &app.workspace_path,
+                    &config_path,
+                    &GhResolveOptions {
+                        query: query.clone(),
+                        set_id: args.set_id.clone(),
+                        allow_unknown_repos: args.allow_unknown_repos,
+                    },
+                )
+                .with_context(|| "Resolving PR-set manifest from GitHub.")?;
+                let manifest_path =
+                    write_generated_pr_set_manifest(app, &args, &manifest, "from-gh")?;
+                tracing::info!(
+                    path = %manifest_path.display(),
+                    "Wrote GitHub-resolved PR-set manifest."
+                );
+                let set_args = PrSetRunArgs {
+                    manifest_path,
+                    set_id: args.set_id.clone(),
+                    parallelism: args.parallelism,
+                    engine: args.engine,
+                    keep_cache: args.keep_cache,
+                    cache_root: args.cache_root.clone(),
+                    config: args.config.clone(),
+                    severity: args.severity,
+                    format: if app.json_output {
+                        OutputFormat::Json
+                    } else {
+                        args.format
+                    },
+                    github_comment_file: args.github_comment_file.clone(),
+                    no_baseline_check: args.no_baseline_check,
+                };
+                let (report, exceeded) = run_pr_set(app, &set_args)?;
+                #[expect(
+                    clippy::print_stdout,
+                    reason = "pr-review is the sole caller of this path; structured output goes here"
+                )]
+                {
+                    println!("{report}");
+                }
+                let _ = <std::io::Stdout as std::io::Write>::flush(&mut std::io::stdout());
+                return Ok(if exceeded { 2 } else { 0 });
+            }
+
+            if args.set_id.is_some() {
+                anyhow::bail!("--set-id requires --pr-set or --from-gh.");
+            }
+            if args.parallelism != 1 {
+                anyhow::bail!("--parallelism requires --pr-set or --from-gh.");
+            }
+
             // Default path: run a review. --base and --head are required here.
             let base = args
                 .base
@@ -341,6 +485,80 @@ pub fn run(app: &AppContext, args: PrReviewArgs) -> Result<u8> {
             Ok(if exceeded { 2 } else { 0 })
         }
     }
+}
+
+fn run_init_set(app: &AppContext, top: &PrReviewArgs, args: &InitSetArgs) -> Result<()> {
+    let config_path = top
+        .config
+        .clone()
+        .unwrap_or_else(|| app.workspace_paths().config_path);
+    let manifest = resolve_pr_set_from_gh(
+        &app.workspace_path,
+        &config_path,
+        &GhResolveOptions {
+            query: args.query.clone(),
+            set_id: args.set_id.clone(),
+            allow_unknown_repos: args.allow_unknown_repos,
+        },
+    )
+    .with_context(|| "Resolving PR-set manifest from GitHub.")?;
+
+    let output = args.output.clone().unwrap_or_else(|| {
+        app.workspace_path
+            .join(format!("{}-pr-set.yaml", slugify_set_id(&manifest.id)))
+    });
+    if output.exists() {
+        anyhow::bail!(
+            "Refusing to overwrite existing PR-set manifest `{}`.",
+            output.display()
+        );
+    }
+    write_manifest_yaml(&output, &manifest)?;
+
+    #[expect(
+        clippy::print_stdout,
+        reason = "init-set reports the generated manifest path for shell use"
+    )]
+    {
+        println!("{}", output.display());
+    }
+    Ok(())
+}
+
+fn write_generated_pr_set_manifest(
+    app: &AppContext,
+    args: &PrReviewArgs,
+    manifest: &PrSetManifest,
+    source: &str,
+) -> Result<PathBuf> {
+    let cache_root = args
+        .cache_root
+        .clone()
+        .unwrap_or_else(|| default_cache_root(&app.workspace_path));
+    let set_dir = cache_root
+        .join(workspace_hash(&app.workspace_path))
+        .join(format!("set-{}-{}", source, slugify_set_id(&manifest.id)));
+    std::fs::create_dir_all(&set_dir).with_context(|| {
+        format!(
+            "Creating PR-set manifest cache dir `{}`.",
+            set_dir.display()
+        )
+    })?;
+    let path = set_dir.join("manifest.yaml");
+    write_manifest_yaml(&path, manifest)?;
+    Ok(path)
+}
+
+fn write_manifest_yaml(path: &Path, manifest: &PrSetManifest) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Creating manifest output dir `{}`.", parent.display()))?;
+    }
+    let yaml = manifest
+        .to_yaml_string()
+        .with_context(|| "Serializing PR-set manifest YAML.")?;
+    std::fs::write(path, yaml)
+        .with_context(|| format!("Writing PR-set manifest `{}`.", path.display()))
 }
 
 // ─── Validated run-review args ─────────────────────────────────────────────
@@ -617,6 +835,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             );
         }
     }
+    let baseline_workspace_path = config_override_path
+        .as_ref()
+        .and_then(|path| path.parent().map(PathBuf::from))
+        .map_or_else(
+            || app.workspace_path.clone(),
+            |path| std::fs::canonicalize(&path).unwrap_or(path),
+        );
+    let baseline_workspace_paths = workspace_paths_for_root(&baseline_workspace_path);
+
     let config_override_bytes: Option<Vec<u8>> = if let Some(path) = config_override_path.as_ref() {
         Some(
             std::fs::read(path)
@@ -624,6 +851,17 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         )
     } else {
         None
+    };
+    let config_worktree_bytes: Option<Vec<u8>> = match (
+        config_override_path.as_ref(),
+        config_override_bytes.as_ref(),
+    ) {
+        (Some(path), Some(bytes)) => Some(prepare_review_config_override(
+            &app.workspace_path,
+            path,
+            bytes,
+        )?),
+        _ => None,
     };
     let config_bytes: Vec<u8> = if let Some(bytes) = config_override_bytes.as_ref() {
         bytes.clone()
@@ -741,7 +979,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // rather than racing with `git worktree add`.
         if let (Some(src), Some(bytes)) = (
             config_override_path.as_ref(),
-            config_override_bytes.as_ref(),
+            config_worktree_bytes.as_ref(),
         ) {
             let dst = artifact_root.worktree_root.join("gather-step.config.yaml");
             if let Err(e) = std::fs::write(&dst, bytes) {
@@ -760,7 +998,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // If the workspace has a normal index with a matching config hash,
         // copy it into the review artifact root so the indexer only needs to
         // update changed repos rather than rebuild from scratch.
-        match pick_seed_source(&app.workspace_path, &cache_key_struct.config_hash) {
+        match pick_seed_source(&baseline_workspace_path, &cache_key_struct.config_hash) {
             Ok(Some(seed)) => {
                 tracing::info!("Seeding the review artifact from the baseline workspace index.");
                 if let Err(e) = seed_artifact_root(&seed, &artifact_root) {
@@ -795,7 +1033,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // if the baseline doesn't exist yet (user hasn't indexed), pass None and
         // fall back to direct-change-only affected set.
         let affected_baseline_coord = {
-            let baseline_storage = app.workspace_paths().storage_root;
+            let baseline_storage = baseline_workspace_paths.storage_root.clone();
             if baseline_storage.join("graph.redb").exists() {
                 match gather_step_storage::StorageCoordinator::open_read_only(&baseline_storage) {
                     Ok(coord) => Some(coord),
@@ -899,7 +1137,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let changed_repos = map_changed_repos_from_config(head_config.as_ref(), &all_changed_paths);
 
     // ── 8. Build report ────────────────────────────────────────────────────
-    let ws_paths = app.workspace_paths();
+    let ws_paths = baseline_workspace_paths.clone();
     let ws_hash = workspace_hash(&app.workspace_path);
     let cache_key = format!("{ws_hash}:{base_sha}:{head_sha}");
 
@@ -1396,14 +1634,14 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
     // ── Phase 3 Task 5: synthesize targeted pack commands ──────────────────
     let mut suggested_followups = build_suggested_followups(
-        &app.workspace_path,
+        &baseline_workspace_path,
         &artifact_root.registry_path,
         &artifact_root.storage_root,
         &route_deltas,
         &symbol_deltas,
     );
     let pack_cmds = synthesize_review_pack_commands(
-        &app.workspace_path,
+        &baseline_workspace_path,
         &artifact_root.registry_path,
         &artifact_root.storage_root,
         &route_deltas,
@@ -1556,6 +1794,63 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn workspace_paths_for_root(workspace_path: &Path) -> WorkspacePaths {
+    let config_path = workspace_path.join("gather-step.config.yaml");
+    let registry_path = workspace_path.join(".gather-step").join("registry.json");
+    let storage_root = workspace_path.join(".gather-step").join("storage");
+    let graph_path = storage_root.join("graph.redb");
+
+    WorkspacePaths {
+        config_path,
+        registry_path,
+        storage_root,
+        graph_path,
+    }
+}
+
+fn prepare_review_config_override(
+    git_workspace: &Path,
+    config_path: &Path,
+    bytes: &[u8],
+) -> Result<Vec<u8>> {
+    let Some(config_root) = config_path.parent() else {
+        return Ok(bytes.to_vec());
+    };
+    let config_root =
+        std::fs::canonicalize(config_root).unwrap_or_else(|_| config_root.to_path_buf());
+    let git_workspace =
+        std::fs::canonicalize(git_workspace).unwrap_or_else(|_| git_workspace.to_path_buf());
+    if config_root == git_workspace {
+        return Ok(bytes.to_vec());
+    }
+
+    let raw = std::str::from_utf8(bytes)
+        .with_context(|| format!("Reading --config `{}` as UTF-8.", config_path.display()))?;
+    let mut config = GatherStepConfig::from_yaml_str(raw)
+        .with_context(|| format!("Parsing --config `{}`.", config_path.display()))?;
+
+    let Some(index) = config.repos.iter().position(|repo| {
+        let repo_root = config_root.join(&repo.path);
+        std::fs::canonicalize(repo_root).is_ok_and(|path| path == git_workspace)
+    }) else {
+        return Ok(bytes.to_vec());
+    };
+
+    let mut selected_repo = config.repos[index].clone();
+    ".".clone_into(&mut selected_repo.path);
+    let selected_name = selected_repo.name.clone();
+    config.repos = vec![selected_repo];
+    config
+        .allow_listed_repos
+        .retain(|repo| repo == &selected_name);
+
+    serde_norway::to_string(&config)
+        .map(std::string::String::into_bytes)
+        .with_context(|| {
+            format!("Serializing a worktree-local PR-review config for repo `{selected_name}`.")
+        })
+}
 
 /// Map changed file paths to configured repo names using longest-prefix
 /// matching against the supplied head-worktree config. Files that do not match
@@ -2820,6 +3115,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -2881,6 +3181,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -2946,6 +3251,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -3010,6 +3320,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -3074,6 +3389,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -3140,6 +3460,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -3733,6 +4058,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_override_rewrites_parent_config_for_child_repo_worktree() {
+        let root = TempDir::new("pr-review-parent-config");
+        let parent = root.path();
+        let api = parent.join("api-service");
+        let web = parent.join("web-client");
+        fs::create_dir_all(&api).expect("api repo dir");
+        fs::create_dir_all(&web).expect("web repo dir");
+        let config_path = parent.join("gather-step.config.yaml");
+        let raw = b"
+allow_listed_repos:
+  - api-service
+  - web-client
+repos:
+  - name: api-service
+    path: api-service
+  - name: web-client
+    path: web-client
+indexing:
+  workspace_concurrency: 1
+";
+
+        let rewritten =
+            prepare_review_config_override(&web, &config_path, raw).expect("rewrite config");
+        let config = GatherStepConfig::from_yaml_str(std::str::from_utf8(&rewritten).unwrap())
+            .expect("rewritten config should parse");
+
+        assert_eq!(config.repos.len(), 1);
+        assert_eq!(config.repos[0].name, "web-client");
+        assert_eq!(config.repos[0].path, ".");
+        assert_eq!(config.allow_listed_repos, vec!["web-client"]);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Finding 1: clean_older_than_skips_in_progress
     // ─────────────────────────────────────────────────────────────────────────
@@ -3774,6 +4132,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -3838,6 +4201,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -3895,6 +4263,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -4327,6 +4700,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -4421,6 +4799,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),
@@ -4493,6 +4876,11 @@ mod tests {
             command: None,
             base: None,
             head: None,
+            pr_set: None,
+            from_gh: None,
+            set_id: None,
+            parallelism: 1,
+            allow_unknown_repos: false,
             engine: ReviewEngine::TempIndex,
             keep_cache: false,
             cache_root: Some(cache.to_path_buf()),

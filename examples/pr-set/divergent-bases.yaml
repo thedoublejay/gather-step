@@ -3,13 +3,13 @@ id: divergent-bases
 title: Divergent base branches
 prs:
   - id: backend-contract
-    repo: label-review
+    repo: api-service
     base: main
     head: feature/backend-contract
     pr: 1201
     depends_on: []
   - id: frontend-release
-    repo: web-frontend
+    repo: web-client
     base: release/2026.05
     head: feature/frontend-release-hookup
     pr: 1202

@@ -81,12 +81,44 @@ pub struct PrReviewInput {
     pub timeout_secs: Option<u64>,
 }
 
+/// Input parameters for the `pr_review_set` MCP tool.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct PrReviewSetInput {
+    /// Path to a PR-set manifest, absolute or relative to the workspace root.
+    pub pr_set: String,
+    /// Override the manifest set id in the emitted report.
+    #[serde(default)]
+    pub set_id: Option<String>,
+    /// Number of independent entries to review in parallel.
+    #[serde(default)]
+    pub parallelism: Option<usize>,
+    /// Keep review artifacts after the run.
+    #[serde(default)]
+    pub keep_cache: Option<bool>,
+    /// Severity mode: `"warn"` (default) | `"strict"` | `"pedantic"`.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// Override the wall-clock timeout in seconds. Capped at
+    /// [`PR_REVIEW_TIMEOUT_MAX_SECS`].
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 /// Structured response returned by the `pr_review` MCP tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PrReviewResponse {
     /// The full `DeltaReport` as a JSON value.
     pub delta_report: serde_json::Value,
     /// `true` when the effective severity threshold was exceeded.
+    pub threshold_exceeded: bool,
+}
+
+/// Structured response returned by the `pr_review_set` MCP tool.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PrReviewSetResponse {
+    /// The full `MultiPrDeltaReport` as a JSON value.
+    pub multi_pr_delta_report: serde_json::Value,
+    /// `true` when any completed child review exceeded the severity threshold.
     pub threshold_exceeded: bool,
 }
 
@@ -117,12 +149,59 @@ pub fn run_pr_review(
     if let Some(sev) = &input.severity {
         cmd.arg("--severity").arg(sev);
     }
+
+    let (delta_report, threshold_exceeded) =
+        run_pr_review_json_child(cmd, &binary, effective_timeout(input.timeout_secs))?;
+
+    Ok(PrReviewResponse {
+        delta_report,
+        threshold_exceeded,
+    })
+}
+
+/// Run the coordinated PR-set review pipeline via the `gather-step` CLI.
+pub fn run_pr_review_set(
+    workspace: &std::path::Path,
+    input: &PrReviewSetInput,
+) -> Result<PrReviewSetResponse, String> {
+    let binary = resolve_binary();
+    let manifest_path = manifest_path_for_workspace(workspace, &input.pr_set);
+
+    let mut cmd = Command::new(&binary);
+    cmd.arg("--workspace").arg(workspace);
+    cmd.arg("pr-review");
+    cmd.arg("--pr-set").arg(manifest_path);
+    cmd.arg("--format").arg("json");
+    if let Some(set_id) = &input.set_id {
+        cmd.arg("--set-id").arg(set_id);
+    }
+    if let Some(parallelism) = input.parallelism {
+        cmd.arg("--parallelism").arg(parallelism.to_string());
+    }
+    if input.keep_cache.unwrap_or(false) {
+        cmd.arg("--keep-cache");
+    }
+    if let Some(sev) = &input.severity {
+        cmd.arg("--severity").arg(sev);
+    }
+
+    let (multi_pr_delta_report, threshold_exceeded) =
+        run_pr_review_json_child(cmd, &binary, effective_timeout(input.timeout_secs))?;
+
+    Ok(PrReviewSetResponse {
+        multi_pr_delta_report,
+        threshold_exceeded,
+    })
+}
+
+fn run_pr_review_json_child(
+    mut cmd: Command,
+    binary: &std::path::Path,
+    timeout: Duration,
+) -> Result<(serde_json::Value, bool), String> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-
-    let timeout = effective_timeout(input.timeout_secs);
-
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "Failed to launch the `gather-step` binary at `{}`: {e}. \
@@ -188,10 +267,7 @@ pub fn run_pr_review(
         "Failed to parse the pr-review JSON output; check the operator log for details.".to_owned()
     })?;
 
-    Ok(PrReviewResponse {
-        delta_report,
-        threshold_exceeded,
-    })
+    Ok((delta_report, threshold_exceeded))
 }
 
 /// Resolve the path to the `gather-step` binary.
@@ -207,6 +283,15 @@ fn resolve_binary() -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from("gather-step")
+}
+
+fn manifest_path_for_workspace(workspace: &std::path::Path, value: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        workspace.join(path)
+    }
 }
 
 fn effective_timeout(requested: Option<u64>) -> Duration {
@@ -356,6 +441,36 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json.get("delta_report").is_some());
         assert!(json.get("threshold_exceeded").is_some());
+    }
+
+    #[test]
+    fn pr_review_set_input_deserialises_minimal() {
+        let json = r#"{"pr_set": "examples/pr-set/cross-repo-feature.yaml"}"#;
+        let input: PrReviewSetInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.pr_set, "examples/pr-set/cross-repo-feature.yaml");
+        assert!(input.parallelism.is_none());
+        assert!(input.timeout_secs.is_none());
+    }
+
+    #[test]
+    fn pr_review_set_response_serialises() {
+        let resp = PrReviewSetResponse {
+            multi_pr_delta_report: serde_json::json!({"schema_version": 0}),
+            threshold_exceeded: true,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json.get("multi_pr_delta_report").is_some());
+        assert_eq!(json.get("threshold_exceeded").unwrap(), true);
+    }
+
+    #[test]
+    fn manifest_path_for_workspace_resolves_relative_paths() {
+        let workspace = std::path::Path::new("/tmp/workspace");
+
+        assert_eq!(
+            manifest_path_for_workspace(workspace, "sets/review.yaml"),
+            std::path::PathBuf::from("/tmp/workspace/sets/review.yaml")
+        );
     }
 
     #[test]
