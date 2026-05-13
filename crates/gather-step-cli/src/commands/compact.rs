@@ -79,7 +79,5 @@ pub fn run(app: &AppContext, args: CompactArgs) -> Result<()> {
 }
 
 fn graph_file_size(path: &std::path::Path) -> u64 {
-    fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
 }

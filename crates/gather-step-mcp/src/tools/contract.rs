@@ -208,7 +208,7 @@ pub fn contract_drift_tool(
     response
         .data
         .drifts
-        .sort_by(|left, right| right.confidence.cmp(&left.confidence));
+        .sort_by_key(|drift| std::cmp::Reverse(drift.confidence));
     let budget = apply_response_budget(
         BudgetedTool::Contract,
         request.budget_bytes,

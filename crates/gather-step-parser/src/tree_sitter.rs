@@ -221,9 +221,7 @@ fn parse_file_core(
     // Diagnostic bypass: when `GATHER_STEP_DIAG_TS=treesitter` is set, force
     // TS/JS files through the tree-sitter path instead of the dedicated Oxc
     // visitor. Used for empirical comparison against the Oxc output.
-    let force_tree_sitter = std::env::var("GATHER_STEP_DIAG_TS")
-        .map(|v| v == "treesitter")
-        .unwrap_or(false);
+    let force_tree_sitter = std::env::var("GATHER_STEP_DIAG_TS").is_ok_and(|v| v == "treesitter");
 
     // ── TS/JS: use the Oxc visitor (unless the diagnostic bypass is active) ─
     if should_use_ts_js_visitor(file) && !force_tree_sitter {

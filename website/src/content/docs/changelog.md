@@ -5,6 +5,25 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.5 (2026-05-13)
+
+Release status: **prepared**.
+
+Patch on top of v4.0.4. Fixes Web PubSub producer extraction so object-form group sends that identify the event under `payload.eventType` connect to event consumers in topology and trace output.
+
+### Fixed
+
+- `pubSubService.sendToGroup({ payload: { eventType: PubSubEventType.X } })` now emits a Web PubSub producer edge for the resolved event `X`.
+- Object-form `sendToGroup` calls no longer treat unrelated literal metadata, such as `group: 'admins'`, as the event name when `payload.eventType` is dynamic or unresolved.
+
+### Changed
+
+- Cargo dependency status was refreshed for the release; `cargo outdated -wR` reports the workspace dependencies are current.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.5`.
+
 ## v4.0.4 (2026-05-08)
 
 Release status: **released**.

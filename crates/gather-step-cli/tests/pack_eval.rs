@@ -744,7 +744,7 @@ fn pack_eval_suite_runs_under_two_minutes() {
     let started = Instant::now();
     run_pack_eval_suite(temp.path());
     assert!(
-        started.elapsed() < Duration::from_secs(120),
+        started.elapsed() < Duration::from_mins(2),
         "pack eval suite took {:?}, target < 2 minutes",
         started.elapsed()
     );

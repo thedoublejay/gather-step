@@ -216,10 +216,7 @@ fn build_chain<S: GraphStore>(
     // Reconstruct forward path (anchor → meet).
     let mut forward_steps: Vec<EvidenceStep> = Vec::new();
     let mut current = meet;
-    loop {
-        let Some(&(parent, edge_kind, _spec)) = forward_parent.get(&current) else {
-            break;
-        };
+    while let Some(&(parent, edge_kind, _spec)) = forward_parent.get(&current) {
         if parent == current {
             // Sentinel — we've reached the anchor.
             break;
@@ -241,10 +238,7 @@ fn build_chain<S: GraphStore>(
     // Reconstruct backward path (meet → target).
     let mut backward_steps: Vec<EvidenceStep> = Vec::new();
     let mut current = meet;
-    loop {
-        let Some(&(child, edge_kind, _spec)) = backward_parent.get(&current) else {
-            break;
-        };
+    while let Some(&(child, edge_kind, _spec)) = backward_parent.get(&current) {
         if child == current {
             // Sentinel — we've reached the target.
             break;

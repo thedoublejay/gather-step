@@ -1234,10 +1234,8 @@ fn kustomize_images(value: &Value) -> BTreeSet<String> {
     };
     for item in sequence {
         match item {
-            Value::String(image) => {
-                if !image.trim().is_empty() {
-                    images.insert(image.trim().to_owned());
-                }
+            Value::String(image) if !image.trim().is_empty() => {
+                images.insert(image.trim().to_owned());
             }
             Value::Mapping(_) => {
                 let Some(name) = mapping_get(item, "newName")

@@ -1090,12 +1090,13 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
     for scored in hits.iter_mut() {
         let export_boost = if scored.hit.is_exported { 1.10 } else { 1.0 };
         let exact_boost = if scored.hit.exact_match { 1.0 } else { 0.98 };
-        let recency_bonus = if newest_timestamp > 0 {
-            let scaled = scored.last_modified.saturating_mul(15) / newest_timestamp;
-            f32::from(u16::try_from(scaled).unwrap_or(15)) / 100.0
-        } else {
-            0.0
-        };
+        let recency_bonus = scored
+            .last_modified
+            .saturating_mul(15)
+            .checked_div(newest_timestamp)
+            .map_or(0.0, |scaled| {
+                f32::from(u16::try_from(scaled).unwrap_or(15)) / 100.0
+            });
         let score_ratio = if highest_score > 0.0 {
             scored.base_score / highest_score
         } else {

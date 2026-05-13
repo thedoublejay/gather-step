@@ -1745,8 +1745,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|dur| dur.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |dur| dur.as_nanos())
         ));
         std::fs::create_dir_all(&tmp).expect("tmp dir");
         let result = super::worktree_is_dirty(&tmp);
@@ -1764,8 +1763,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|dur| dur.as_nanos())
-                .unwrap_or(0)
+                .map_or(0, |dur| dur.as_nanos())
         ));
         std::fs::create_dir_all(&tmp).expect("tmp dir");
         let result = super::release_gate_dirty_reason_with_build_root(&tmp, Some(&tmp));
