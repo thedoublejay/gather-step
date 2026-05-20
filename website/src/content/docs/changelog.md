@@ -5,6 +5,21 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.0.6 (2026-05-20)
+
+Release status: **prepared**.
+
+Patch on top of v4.0.5. Maintenance release that refreshes Cargo and website dependencies to the latest SemVer-compatible versions. No user-visible behavior changes.
+
+### Changed
+
+- Refreshed `Cargo.lock` to the latest SemVer-compatible versions for 12 transitive and direct dependencies, including `dashmap 6.1.0 → 6.2.1`, `rmcp 1.6.0 → 1.7.0`, `winnow 1.0.2 → 1.0.3`, `typetag 0.2.21 → 0.2.22`, and `sqlite-wasm-rs 0.5.3 → 0.5.4`.
+- Refreshed the website lockfile and pinned floors: `astro 6.3.1 → 6.3.5` and `@astrojs/starlight 0.39.1 → 0.39.2`.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.6`.
+
 ## v4.1.0 (2026-05-13)
 
 Release status: **unreleased**.
