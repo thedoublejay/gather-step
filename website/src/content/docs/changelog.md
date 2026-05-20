@@ -21,11 +21,13 @@ Patch on top of v4.0.5. Maintenance release that refreshes Cargo and website dep
 
 - Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.0.6`.
 
-## v4.1.0 (2026-05-13)
+## v4.1.1 (2026-05-20)
 
-Release status: **unreleased**.
+Release status: **prepared**.
 
-Minor release on top of v4.0.5. Adds coordinated multi-PR review support so related PRs, stacks, and cross-repo feature sets can be reviewed together instead of one branch at a time.
+Minor release on top of v4.0.6. Adds coordinated multi-PR review support so related PRs, stacks, and cross-repo feature sets can be reviewed together instead of one branch at a time.
+
+Version numbering note: previously drafted as v4.1.0; renumbered to v4.1.1 because the v4.0.6 dependency-refresh patch shipped first.
 
 ### Added
 
@@ -45,6 +47,10 @@ Minor release on top of v4.0.5. Adds coordinated multi-PR review support so rela
 
 - Added PR-set examples for cross-repo sets, stacked PRs in one repo, and divergent-base sets.
 - Expanded the PR Review guide, CLI reference, and MCP tools reference with PR-set manifests, GitHub query resolution, child-repo parent-config usage, and MCP input fields.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.1.1`.
 
 ## v4.0.5 (2026-05-13)
 
