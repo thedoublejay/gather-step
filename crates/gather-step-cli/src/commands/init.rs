@@ -107,7 +107,13 @@ async fn run_non_interactive(app: &AppContext, args: InitArgs) -> Result<()> {
         generate::run_summary_pair(app)?;
     }
     if let Some(scope) = args.setup_mcp {
-        setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
+        setup_mcp::run(
+            app,
+            setup_mcp::SetupMcpArgs {
+                client: setup_mcp::McpClient::Claude,
+                scope,
+            },
+        )?;
     }
     if args.watch && !args.no_watch {
         emit_setup_complete(&output);
@@ -193,7 +199,13 @@ async fn run_wizard(app: &AppContext, args: InitArgs) -> Result<()> {
         generate::run_summary_pair(app)?;
     }
     if let Some(scope) = scope {
-        setup_mcp::run(app, setup_mcp::SetupMcpArgs { scope })?;
+        setup_mcp::run(
+            app,
+            setup_mcp::SetupMcpArgs {
+                client: setup_mcp::McpClient::Claude,
+                scope,
+            },
+        )?;
     }
     emit_setup_complete(&output);
     if do_watch {

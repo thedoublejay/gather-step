@@ -72,7 +72,7 @@ fn init_flag_overrides_run_full_setup_without_prompting() {
             .join(".agents/skills/gather-step-context/SKILL.md")
             .exists()
     );
-    assert!(tmp.path().join(".claude/settings.json").exists());
+    assert!(tmp.path().join(".mcp.json").exists());
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn init_flag_overrides_keep_setup_mcp_idempotent() {
         );
     }
 
-    let settings = fs::read_to_string(tmp.path().join(".claude/settings.json")).expect("settings");
+    let settings = fs::read_to_string(tmp.path().join(".mcp.json")).expect("settings");
     let value: serde_json::Value = serde_json::from_str(&settings).expect("settings json");
     assert_eq!(
         value["mcpServers"]

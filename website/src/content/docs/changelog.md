@@ -5,6 +5,33 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.2.0 (2026-05-29)
+
+Release status: **released**.
+
+Minor release on top of v4.1.1. Fixes `setup-mcp` so it writes to the files MCP clients actually read, adds Codex support, and refreshes dependencies. Rolls up the unreleased v4.0.6 and v4.1.1 changes.
+
+### Fixed
+
+- `setup-mcp --scope local` now writes the project-scoped `.mcp.json`, and `--scope global` writes the user-scoped `~/.claude.json`. Previously it wrote to `.claude/settings.json`, which Claude Code does not read for server definitions, so the registered server never appeared in the client.
+
+### Added
+
+- `setup-mcp --client codex` merges a `[mcp_servers.gather-step]` block into `~/.codex/config.toml`, preserving existing servers, other keys, and comments. The default client remains `claude`.
+
+### Docs
+
+- Corrected the MCP clients guide: the Claude user-scoped config path is `~/.claude.json` (not `~/.claude/settings.json`), and the Fast Path section now reflects the `.mcp.json` / `~/.claude.json` / Codex targets.
+
+### Changed
+
+- Refreshed Cargo dependencies to the latest SemVer-compatible versions, including `serde_json 1.0.149 → 1.0.150`, `tokio 1.52.2 → 1.52.3`, `rmcp 1.5.0 → 1.7.0`, `similar 3.1.0 → 3.1.1`, `quick_cache 0.6.21 → 0.6.22`, and `memchr 2.8.0 → 2.8.1`, plus transitive lockfile updates. Intentionally exact-pinned dependencies were left untouched.
+- Bumped the website `astro 6.3.5 → 6.4.2` floor and refreshed the website lockfile.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, and website package metadata to `4.2.0`.
+
 ## v4.0.6 (2026-05-20)
 
 Release status: **prepared**.
