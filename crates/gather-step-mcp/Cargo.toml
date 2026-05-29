@@ -22,7 +22,7 @@ gather-step-git.workspace = true
 gather-step-output.workspace = true
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
-rmcp = { version = "1.5.0", features = ["client", "server", "macros", "transport-io"] }
+rmcp = { version = "1.7.0", features = ["client", "server", "macros", "transport-io"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

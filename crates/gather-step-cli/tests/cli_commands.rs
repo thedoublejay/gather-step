@@ -119,7 +119,7 @@ fn setup_mcp_local_writes_workspace_settings() {
 
     let output = run_ok(temp.path(), &["setup-mcp", "--scope", "local"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let settings_path = temp.path().join(".claude/settings.json");
+    let settings_path = temp.path().join(".mcp.json");
     let settings = fs::read_to_string(&settings_path).expect("settings file should be written");
     let value: Value = serde_json::from_str(&settings).expect("settings json");
 
@@ -174,7 +174,7 @@ fn setup_mcp_json_reports_missing_path_resolution() {
 }
 
 #[test]
-fn setup_mcp_global_writes_home_claude_settings() {
+fn setup_mcp_global_writes_home_claude_json() {
     let workspace = TempDir::new("setup-mcp-global-workspace");
     let home = TempDir::new("setup-mcp-global-home");
 
@@ -194,7 +194,7 @@ fn setup_mcp_global_writes_home_claude_settings() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let settings_path = home.path().join(".claude/settings.json");
+    let settings_path = home.path().join(".claude.json");
     let settings = fs::read_to_string(&settings_path).expect("settings file should be written");
     let value: Value = serde_json::from_str(&settings).expect("settings json");
     assert_eq!(value["mcpServers"]["gather-step"]["command"], "gather-step");

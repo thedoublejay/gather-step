@@ -110,13 +110,13 @@ fn mcp_state(app: &AppContext) -> &'static str {
 }
 
 fn mcp_state_with_home(app: &AppContext, home: Option<&std::ffi::OsStr>) -> &'static str {
-    let local = app.workspace_path.join(".claude/settings.json");
+    let local = app.workspace_path.join(".mcp.json");
     if json_has_gather_step(&local) {
         return "configured: local";
     }
 
     if let Some(home) = home {
-        let global = std::path::PathBuf::from(home).join(".claude/settings.json");
+        let global = std::path::PathBuf::from(home).join(".claude.json");
         if json_has_gather_step(&global) {
             return "configured: global";
         }
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn mcp_state_reports_local_configuration_first() {
         let temp = tempfile::tempdir().expect("temp dir");
-        write_settings(&temp.path().join(".claude/settings.json"));
+        write_settings(&temp.path().join(".mcp.json"));
 
         assert_eq!(
             mcp_state_with_home(&app_for(temp.path()), None),
@@ -430,7 +430,7 @@ mod tests {
     fn mcp_state_reports_global_configuration() {
         let workspace = tempfile::tempdir().expect("workspace");
         let home = tempfile::tempdir().expect("home");
-        write_settings(&home.path().join(".claude/settings.json"));
+        write_settings(&home.path().join(".claude.json"));
 
         assert_eq!(
             mcp_state_with_home(&app_for(workspace.path()), Some(home.path().as_os_str())),

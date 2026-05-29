@@ -20,17 +20,24 @@ Before connecting a client:
 2. **The built binary** on your `PATH`. See [Installation](/guides/installation/)
    for build instructions.
 
-## Fast Path for Claude
+## Fast Path
 
-For Claude Code, Gather Step can write the workspace-local MCP settings entry:
+For Claude Code, Gather Step writes the project-scoped `.mcp.json` entry:
 
 ```bash
 gather-step --workspace /path/to/workspace setup-mcp --scope local
 ```
 
-Use `--scope global` only when you want the same workspace-pinned server entry
-in `~/.claude/settings.json`. The command is idempotent and updates the
-`mcpServers.gather-step` block without touching other server entries.
+Use `--scope global` to write the user-scoped entry to `~/.claude.json`
+instead. For Codex, pass `--client codex` to merge the server block into
+`~/.codex/config.toml` (scope is ignored — Codex has a single global config):
+
+```bash
+gather-step --workspace /path/to/workspace setup-mcp --client codex
+```
+
+The command is idempotent and updates only the `gather-step` entry without
+touching other servers, keys, or comments. Restart the client afterward.
 
 ## Start the Server (Smoke Test)
 
@@ -77,7 +84,7 @@ fits your workflow:
 }
 ```
 
-**User-scoped:** `~/.claude/settings.json` (applies to all
+**User-scoped:** `~/.claude.json` (applies to all
 projects for this user):
 
 ```json
