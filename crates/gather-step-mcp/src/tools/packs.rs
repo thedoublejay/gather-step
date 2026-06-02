@@ -208,13 +208,15 @@ pub struct ContextPackResponse {
 }
 
 /// Schema version of the [`PlanChangeResponse`] contract. Bump on any change to
-/// the section set or contract shape. v2 adds `display_ownership_checks` (DSO1).
-const PLAN_CHANGE_SCHEMA_VERSION: u8 = 2;
+/// the section set or contract shape. v2 adds `display_ownership_checks` (DSO1);
+/// v3 adds `pass_two_gap_dimensions` (B1) and `v1_completeness_checklist`
+/// (B3 + WS-16).
+const PLAN_CHANGE_SCHEMA_VERSION: u8 = 3;
 
 /// The fixed `plan_change` section names, in canonical order. The contract
 /// manifest must equal this exactly so consumers (and the G7 gate) can assert
 /// completeness deterministically.
-const PLAN_CHANGE_SECTIONS: [&str; 10] = [
+const PLAN_CHANGE_SECTIONS: [&str; 12] = [
     "reuse_candidates",
     "sibling_clone_targets",
     "standards_to_preserve",
@@ -224,7 +226,46 @@ const PLAN_CHANGE_SECTIONS: [&str; 10] = [
     "write_path_or_state_machine_risks",
     "required_braingent_records",
     "open_unknowns",
+    "pass_two_gap_dimensions",
+    "v1_completeness_checklist",
     "verification_plan",
+];
+
+/// B1: the eight fixed pass-2 gap-enumeration dimensions, surfaced as a required
+/// checklist on every plan so a planner cannot skip them.
+const PASS_TWO_GAP_DIMENSIONS: [&str; 8] = [
+    "State machine: does this add/alter a status or lifecycle state? Enumerate transitions and conflict handling.",
+    "Token/URL security: are tokens, signed URLs, or IDs exposed or accepted? Validate scope, expiry, and tampering.",
+    "Dependent ticket: is there upstream/downstream work this depends on or unblocks? Link it.",
+    "Atomicity: do multi-document or multi-step writes need a transaction or idempotency guard?",
+    "Index-per-field: does any new query/filter field need an index? Confirm coverage.",
+    "Event contract: grep producers and consumers of any touched event/topic for set-difference drift.",
+    "Audit category: does this mutating path need an audit-log entry with the correct category?",
+    "Notification: should this change emit or suppress a user/system notification?",
+];
+
+/// B3 (v1-completeness) + WS-16 (v1 deviation taxonomy V1–V9), folded into one
+/// checklist. Every item carries a `→ verify:` so progress is observable.
+const V1_COMPLETENESS_CHECKLIST: [&str; 19] = [
+    "Scale test: does it hold at production data volume? → verify: run against a realistic-size fixture.",
+    "Failure-path lifecycle: are partial-failure and retry paths handled? → verify: exercise the failure branch.",
+    "Consumer reachability: does the output actually reach every consumer? → verify: trace producer→consumer.",
+    "Downstream coupling: which downstream systems depend on this shape? → verify: enumerate consumers.",
+    "Delete/invalidate: are deletes and cache/index invalidations handled? → verify: delete-path test.",
+    "Single source of truth: is the value derived once, not duplicated? → verify: grep for parallel computations.",
+    "Non-functional: latency/memory/throughput within budget? → verify: measure against baseline.",
+    "Exclusion scope: what is explicitly out of scope? → verify: state exclusions in the PR.",
+    "Cross-commit regression: could a later commit re-break this? → verify: add a regression test.",
+    "Deferred as follow-ups: are deferrals recorded as tickets? → verify: link follow-up issues.",
+    "Prior-release correctness/security gate: did a prior release defer hardening here? → verify: re-check the deferred item.",
+    "Partial-migration tail: zero residual call-sites workspace-wide? → verify: grep shows no residual callers.",
+    "Release-profile divergence: verify flags on the installed profile. → verify: check [profile.dist].",
+    "Teardown under-spec: disposable artifacts specify creation/reuse-key/safe-delete/in-flight-writer guard. → verify: all four present.",
+    "Schema-version forward-compat: a version-mismatch refusal/rebuild path exists. → verify: mismatch is refused, not mis-read.",
+    "Derived-field blast radius: enumerate source, projection writer, all readers, filters, search/index, backfill. → verify: all six listed.",
+    "Cross-service ownership: should the owner publish a snapshot/resolver before adopting a join? → verify: question answered.",
+    "Lossy rollback: enumerate unrecoverable rows/fields. → verify: rollback notes list them.",
+    "Implied-surface sweep: events/audit/notification/rate-limit/idempotency even when the spec is silent. → verify: sweep performed.",
 ];
 
 /// Evidentiary contract for the typed `plan_change` product (WS-3 / G7):
@@ -242,7 +283,7 @@ pub struct PlanChangeContract {
 /// Typed `plan_change` product (WS-3 / E1).
 ///
 /// A distinct response shape — not an alias for the planning pack — with the
-/// ten fixed planning sections. v1 projects the existing planning-pack data
+/// twelve fixed planning sections. v1 projects the existing planning-pack data
 /// into these sections; later slices (B7 proactive queries, G7 evidentiary
 /// fields) enrich them. Every section is always present (possibly empty) so the
 /// contract is stable for consumers and the G7 gate.
@@ -267,6 +308,11 @@ pub struct PlanChangeResponse {
     pub write_path_or_state_machine_risks: Vec<String>,
     pub required_braingent_records: Vec<String>,
     pub open_unknowns: Vec<String>,
+    /// B1: the eight fixed pass-2 gap-enumeration dimensions (required checklist).
+    pub pass_two_gap_dimensions: Vec<String>,
+    /// B3 + WS-16: the v1-completeness checklist with the v1 deviation taxonomy
+    /// folded in; every item carries a `→ verify:`.
+    pub v1_completeness_checklist: Vec<String>,
     pub verification_plan: Vec<String>,
     /// Evidentiary contract: schema version, section manifest, exclusion ledger.
     pub contract: PlanChangeContract,
@@ -396,6 +442,14 @@ fn build_plan_change(
         write_path_or_state_machine_risks,
         required_braingent_records: Vec::new(),
         open_unknowns: unresolved_gaps.to_vec(),
+        pass_two_gap_dimensions: PASS_TWO_GAP_DIMENSIONS
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
+        v1_completeness_checklist: V1_COMPLETENESS_CHECKLIST
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
         verification_plan,
         contract,
         meta,
@@ -429,7 +483,7 @@ pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
 }
 
 /// Build the typed `plan_change` product (WS-3 / E1): run the planning pack,
-/// then project its data into the ten fixed sections.
+/// then project its data into the twelve fixed sections.
 pub fn run_plan_change(
     ctx: &McpContext,
     request: ModePackRequest,
@@ -5620,6 +5674,55 @@ mod tests {
         // Contract: sections awaiting later work still exist (empty).
         assert!(plan.standards_to_preserve.is_empty());
         assert!(plan.required_braingent_records.is_empty());
+    }
+
+    #[test]
+    fn plan_change_includes_pass_two_and_v1_checklists() {
+        use super::{ChangeImpactSummary, build_plan_change};
+
+        let plan = build_plan_change(
+            "anyTarget",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+
+        // B1: all eight pass-2 gap dimensions are present as a required checklist.
+        assert_eq!(
+            plan.pass_two_gap_dimensions.len(),
+            8,
+            "all 8 pass-2 dimensions must be present: {:?}",
+            plan.pass_two_gap_dimensions
+        );
+
+        // B3 + WS-16: the v1-completeness checklist is non-empty and every item
+        // carries a `→ verify:` so progress is observable.
+        assert!(!plan.v1_completeness_checklist.is_empty());
+        assert!(
+            plan.v1_completeness_checklist
+                .iter()
+                .all(|item| item.contains("→ verify:")),
+            "every v1-completeness item must carry a verify step"
+        );
+        // WS-16: the deviation taxonomy (V1–V9) is folded into the checklist.
+        assert!(
+            plan.v1_completeness_checklist
+                .iter()
+                .any(|item| item.contains("Derived-field blast radius")),
+            "V6 deviation item missing from checklist"
+        );
+
+        // Both new sections are part of the deterministic contract manifest.
+        for section in ["pass_two_gap_dimensions", "v1_completeness_checklist"] {
+            assert!(
+                plan.contract.sections.iter().any(|s| s == section),
+                "missing section in manifest: {section}"
+            );
+        }
     }
 
     #[test]

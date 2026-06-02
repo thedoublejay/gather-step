@@ -94,7 +94,7 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "plan_change",
-        "Typed plan-change product (ten planning sections)",
+        "Typed plan-change product (twelve planning sections)",
     ),
     ("debug_pack", "Context pack for debugging production issues"),
     ("fix_pack", "Context pack scoped for a bug fix"),
