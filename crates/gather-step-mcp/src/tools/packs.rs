@@ -247,6 +247,7 @@ fn build_plan_change(
     unresolved_gaps: &[String],
     planning_proofs: &[serde_json::Value],
     next_steps: &[String],
+    change_impact: &ChangeImpactSummary,
     meta: Option<ContextPackMeta>,
 ) -> PlanChangeResponse {
     let mut reuse_candidates = Vec::new();
@@ -267,16 +268,49 @@ fn build_plan_change(
         .map(|step| format!("Run `{step}` and confirm the result before changing code."))
         .collect();
 
+    // B7: surface the change-impact evidence the planning pack already gathered
+    // into the typed sections, rather than leaving them empty.
+    let mut integration_checks = Vec::new();
+    for repo in &change_impact.confirmed_downstream_repos {
+        integration_checks.push(format!(
+            "Integration: verify confirmed downstream consumer `{repo}` still works after this change."
+        ));
+    }
+    for repo in &change_impact.probable_downstream_repos {
+        integration_checks.push(format!(
+            "Integration: check probable downstream `{repo}` (partial evidence) for impact."
+        ));
+    }
+
+    let mut write_path_or_state_machine_risks = Vec::new();
+    for caller in &change_impact.cross_repo_callers {
+        write_path_or_state_machine_risks.push(format!(
+            "Cross-repo caller `{}::{}` depends on this behavior — preserve its contract.",
+            caller.repo, caller.symbol_name
+        ));
+    }
+    for unresolved in &change_impact.unresolved_possible {
+        write_path_or_state_machine_risks.push(format!(
+            "Unresolved possible impact: `{unresolved}` — confirm before changing."
+        ));
+    }
+    if change_impact.truncated_repos.is_some() {
+        write_path_or_state_machine_risks.push(
+            "Downstream fan-out was capped — affected repos exist beyond the listed set."
+                .to_owned(),
+        );
+    }
+
     PlanChangeResponse {
         target: target.to_owned(),
         found,
         reuse_candidates,
         sibling_clone_targets,
-        // Populated by later WS-3 slices (B7 proactive queries / G7 evidence).
+        // standards_to_preserve / required_braingent_records arrive with G7.
         standards_to_preserve: Vec::new(),
-        integration_checks: Vec::new(),
+        integration_checks,
         cross_repo_reachability: planning_proofs.to_vec(),
-        write_path_or_state_machine_risks: Vec::new(),
+        write_path_or_state_machine_risks,
         required_braingent_records: Vec::new(),
         open_unknowns: unresolved_gaps.to_vec(),
         verification_plan,
@@ -299,6 +333,7 @@ pub fn run_plan_change(
         &data.unresolved_gaps,
         &data.planning_proofs,
         &data.next_steps,
+        &data.change_impact,
         pack.meta.clone(),
     ))
 }
@@ -5401,6 +5436,19 @@ mod tests {
         let gaps = vec!["Who emits status FINALIZED?".to_owned()];
         let proofs = vec![serde_json::json!({"repo": "alert", "edge": "ConsumesApiFrom"})];
         let next_steps = vec!["crud_trace".to_owned()];
+        let change_impact = super::ChangeImpactSummary {
+            confirmed_downstream_repos: vec!["alert".to_owned()],
+            cross_repo_callers: vec![super::CrossRepoCaller {
+                file_path: "src/consumer.ts".to_owned(),
+                line_start: None,
+                repo: "report".to_owned(),
+                symbol_id: "id_consumer".to_owned(),
+                symbol_kind: "function".to_owned(),
+                symbol_name: "useOrderTotals".to_owned(),
+                evidence: None,
+            }],
+            ..Default::default()
+        };
 
         let plan = build_plan_change(
             "createOrder",
@@ -5409,6 +5457,7 @@ mod tests {
             &gaps,
             &proofs,
             &next_steps,
+            &change_impact,
             None,
         );
 
@@ -5428,9 +5477,13 @@ mod tests {
         assert_eq!(plan.open_unknowns, gaps);
         assert_eq!(plan.cross_repo_reachability.len(), 1);
         assert_eq!(plan.verification_plan.len(), 1);
-        // Contract: the sections not yet populated still exist (empty).
+        // B7: change-impact evidence now populates these sections.
+        assert_eq!(plan.integration_checks.len(), 1);
+        assert!(plan.integration_checks[0].contains("alert"));
+        assert_eq!(plan.write_path_or_state_machine_risks.len(), 1);
+        assert!(plan.write_path_or_state_machine_risks[0].contains("report::useOrderTotals"));
+        // Contract: sections awaiting G7 still exist (empty).
         assert!(plan.standards_to_preserve.is_empty());
-        assert!(plan.integration_checks.is_empty());
         assert!(plan.required_braingent_records.is_empty());
     }
 
