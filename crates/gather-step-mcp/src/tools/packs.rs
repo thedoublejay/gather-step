@@ -1114,6 +1114,7 @@ fn assemble_context_pack_for_symbol(
         }
     }
     if mode == PackMode::Planning && evidence_populated {
+        apply_reuse_evidence_ranking(&mut items, ctx.graph());
         apply_planning_evidence_ranking(&mut items);
     }
 
@@ -2497,6 +2498,56 @@ fn populate_evidence_chain<S: gather_step_storage::GraphStore>(
 /// Items with a confirmed evidence chain (graph-proven path from anchor) are
 /// boosted by 50 score points so they appear before lexical-only hits at
 /// equivalent depth. The list is re-sorted by the updated scores.
+/// Whether a file path lives in a shared / design-system module — a strong
+/// signal that a symbol there is the canonical reusable thing rather than a
+/// local one-off. Markers are matched as-is (paths are conventionally
+/// lowercase), avoiding an allocation.
+fn is_shared_module_path(file_path: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "shared/",
+        "design-system",
+        "packages/ui",
+        "/ui/components",
+        "@shared",
+    ];
+    MARKERS.iter().any(|marker| file_path.contains(marker))
+}
+
+/// S3 graph-derived reuse boost. A symbol in a shared/design-system path or
+/// consumed by many modules is more likely the canonical reusable surface, so
+/// it should rank above local candidates. Consumer influence is capped so a
+/// single hub node cannot dominate the ranking.
+fn reuse_evidence_boost(file_path: &str, consumer_count: usize) -> u16 {
+    let mut boost = 0_u16;
+    if is_shared_module_path(file_path) {
+        boost = boost.saturating_add(40);
+    }
+    // Each consumer adds weight, capped at 30 so a single hub node cannot
+    // dominate the ranking; 3 points per consumer => up to +90.
+    let consumers = u16::try_from(consumer_count.min(30)).unwrap_or(u16::MAX);
+    boost.saturating_add(consumers.saturating_mul(3))
+}
+
+/// Apply the S3 graph-derived reuse boost to planning-pack items: shared-module
+/// membership (from the path) plus sibling-consumer count (inbound edges in the
+/// graph). Runs before [`apply_planning_evidence_ranking`], which then sorts.
+fn apply_reuse_evidence_ranking<S: gather_step_storage::GraphStore>(
+    items: &mut [PackItem],
+    graph: &S,
+) {
+    for item in items.iter_mut() {
+        if item.category == "target" {
+            continue;
+        }
+        let consumer_count = decode_node_id(&item.symbol_id)
+            .ok()
+            .and_then(|id| graph.get_incoming(id).ok())
+            .map_or(0, |edges| edges.len());
+        let boost = reuse_evidence_boost(&item.file_path, consumer_count);
+        item.score = item.score.saturating_add(boost);
+    }
+}
+
 fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
     for item in items.iter_mut() {
         if item.evidence_chain.is_some() {
@@ -5170,6 +5221,29 @@ mod tests {
         let mut items = vec![make_pack_item(80, "a.rs", true)];
         apply_planning_evidence_ranking(&mut items);
         assert_eq!(items[0].score, 130);
+    }
+
+    #[test]
+    fn reuse_evidence_boost_prefers_shared_and_widely_consumed() {
+        use super::reuse_evidence_boost;
+
+        // Local one-off with no consumers gets no reuse boost.
+        assert_eq!(
+            reuse_evidence_boost("src/features/orders/local-button.tsx", 0),
+            0
+        );
+
+        // A shared / design-system symbol is boosted even with no consumers.
+        assert!(reuse_evidence_boost("packages/ui/components/Button.tsx", 0) > 0);
+
+        // More consumers => larger boost (the canonical reusable thing).
+        assert!(reuse_evidence_boost("src/x.ts", 10) > reuse_evidence_boost("src/x.ts", 1));
+
+        // A shared + widely-consumed symbol outranks a local one-off.
+        assert!(
+            reuse_evidence_boost("packages/ui/Button.tsx", 8)
+                > reuse_evidence_boost("src/features/orders/local-button.tsx", 0)
+        );
     }
 
     #[test]
