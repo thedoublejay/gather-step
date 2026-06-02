@@ -2,8 +2,13 @@ use std::collections::{BTreeMap, VecDeque};
 
 use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::{GraphStore, GraphStoreError};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
+
+/// Maximum out-edges a single node contributes, and the maximum number of
+/// distinct in-paths recorded per node, before a traversal marks itself
+/// `truncated`. Bounds memory/work on very-high-fan-out hub nodes.
+const DEFAULT_FANOUT_CAP: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -14,8 +19,23 @@ pub enum QueryError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraversalStep {
     pub node_id: NodeId,
+    /// The first (BFS-shortest) path of edge kinds discovered into this node.
     pub edge_kinds: Vec<EdgeKind>,
     pub depth: usize,
+    /// Every distinct path of edge kinds that reaches this node (capped at
+    /// `DEFAULT_FANOUT_CAP`). A node reachable N ways reports N caller paths.
+    pub in_paths: Vec<Vec<EdgeKind>>,
+}
+
+/// The result of a bounded graph traversal, carrying the visited steps plus
+/// signals about whether the walk was cut short by a depth or fan-out bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraversalOutcome {
+    pub steps: Vec<TraversalStep>,
+    /// At least one node sat at `max_depth` with deeper edges left unfollowed.
+    pub depth_capped: bool,
+    /// At least one node's fan-out (or recorded in-paths) hit `DEFAULT_FANOUT_CAP`.
+    pub truncated: bool,
 }
 
 pub struct GraphQuery<'a, S> {
@@ -71,36 +91,92 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         max_depth: usize,
         min_confidence: Option<u16>,
     ) -> Result<Vec<TraversalStep>, QueryError> {
+        Ok(self
+            .traverse_with_provenance(start, edge_kinds, max_depth, min_confidence)?
+            .steps)
+    }
+
+    /// Bounded BFS that records multi-path provenance (every distinct path into
+    /// each node) and signals when the walk was cut short by the depth limit
+    /// (`depth_capped`) or the fan-out bound (`truncated`).
+    pub fn traverse_with_provenance(
+        &self,
+        start: NodeId,
+        edge_kinds: &[EdgeKind],
+        max_depth: usize,
+        min_confidence: Option<u16>,
+    ) -> Result<TraversalOutcome, QueryError> {
         let mut queue = VecDeque::from([(start, Vec::<EdgeKind>::new(), 0_usize)]);
-        let mut seen = FxHashSet::from_iter([start.as_bytes()]);
-        let mut steps = Vec::new();
+        let mut enqueued = FxHashSet::from_iter([start.as_bytes()]);
+        // Discovery order of reached nodes, so step order is deterministic.
+        let mut order: Vec<NodeId> = Vec::new();
+        // First-discovered path + depth per node.
+        let mut primary: FxHashMap<[u8; 16], (Vec<EdgeKind>, usize)> = FxHashMap::default();
+        // Every distinct path into each node (bounded).
+        let mut in_paths: FxHashMap<[u8; 16], Vec<Vec<EdgeKind>>> = FxHashMap::default();
+        let mut depth_capped = false;
+        let mut truncated = false;
 
         while let Some((node_id, path, depth)) = queue.pop_front() {
+            let outgoing: Vec<EdgeData> = self
+                .store
+                .get_outgoing(node_id)?
+                .into_iter()
+                .filter(|edge| edge_kinds.is_empty() || edge_kinds.contains(&edge.kind))
+                .filter(|edge| edge.metadata.passes_confidence(min_confidence))
+                .collect();
+
             if depth >= max_depth {
+                if !outgoing.is_empty() {
+                    depth_capped = true;
+                }
                 continue;
             }
 
-            for edge in self.store.get_outgoing(node_id)? {
-                if !edge_kinds.is_empty() && !edge_kinds.contains(&edge.kind) {
-                    continue;
-                }
-                if !edge.metadata.passes_confidence(min_confidence) {
-                    continue;
+            for (index, edge) in outgoing.iter().enumerate() {
+                if index >= DEFAULT_FANOUT_CAP {
+                    truncated = true;
+                    break;
                 }
                 let mut next_path = path.clone();
                 next_path.push(edge.kind);
-                if seen.insert(edge.target.as_bytes()) {
-                    steps.push(TraversalStep {
-                        node_id: edge.target,
-                        edge_kinds: next_path.clone(),
-                        depth: depth + 1,
-                    });
+                let key = edge.target.as_bytes();
+
+                let recorded = in_paths.entry(key).or_default();
+                if recorded.len() < DEFAULT_FANOUT_CAP {
+                    recorded.push(next_path.clone());
+                } else {
+                    truncated = true;
+                }
+
+                if enqueued.insert(key) {
+                    order.push(edge.target);
+                    primary.insert(key, (next_path.clone(), depth + 1));
                     queue.push_back((edge.target, next_path, depth + 1));
                 }
             }
         }
 
-        Ok(steps)
+        let steps = order
+            .into_iter()
+            .map(|node_id| {
+                let key = node_id.as_bytes();
+                let (edges, depth) = primary.get(&key).cloned().unwrap_or_default();
+                let paths = in_paths.get(&key).cloned().unwrap_or_default();
+                TraversalStep {
+                    node_id,
+                    edge_kinds: edges,
+                    depth,
+                    in_paths: paths,
+                }
+            })
+            .collect();
+
+        Ok(TraversalOutcome {
+            steps,
+            depth_capped,
+            truncated,
+        })
     }
 
     pub fn count_by_kind(&self) -> Result<BTreeMap<NodeKind, usize>, QueryError> {
@@ -287,6 +363,97 @@ mod tests {
             .expect("traversal should succeed");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].node_id, trusted.id);
+    }
+
+    #[test]
+    fn traverse_with_provenance_flags_depth_capping() {
+        let temp_db = TempDb::new("query-depth-cap");
+        let store = test_store(temp_db.path());
+        let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
+        let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 0);
+        let b = node("service-a", "src/a.ts", NodeKind::Function, "b", 1);
+        let c = node("service-a", "src/a.ts", NodeKind::Function, "c", 2);
+        let d = node("service-a", "src/a.ts", NodeKind::Function, "d", 3);
+        store
+            .bulk_insert(
+                &[file.clone(), a.clone(), b.clone(), c.clone(), d.clone()],
+                &[
+                    edge(a.id, b.id, file.id),
+                    edge(b.id, c.id, file.id),
+                    edge(c.id, d.id, file.id),
+                ],
+            )
+            .expect("graph should write");
+
+        let query = GraphQuery::new(&store);
+
+        // A chain longer than max_depth: c sits at the depth boundary and still
+        // has an outgoing edge to d, so the traversal must flag depth capping.
+        let capped = query
+            .traverse_with_provenance(a.id, &[EdgeKind::Calls], 2, None)
+            .expect("traversal should succeed");
+        assert_eq!(capped.steps.len(), 2);
+        assert!(
+            capped.depth_capped,
+            "deeper edge beyond max_depth not flagged"
+        );
+        assert!(!capped.truncated);
+
+        // A depth that reaches the whole chain leaves nothing capped.
+        let full = query
+            .traverse_with_provenance(a.id, &[EdgeKind::Calls], 8, None)
+            .expect("traversal should succeed");
+        assert_eq!(full.steps.len(), 3);
+        assert!(!full.depth_capped);
+    }
+
+    #[test]
+    fn traverse_with_provenance_records_every_in_path() {
+        let temp_db = TempDb::new("query-provenance");
+        let store = test_store(temp_db.path());
+        let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
+        let root = node("service-a", "src/a.ts", NodeKind::Function, "root", 0);
+        let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 1);
+        let b = node("service-a", "src/a.ts", NodeKind::Function, "b", 2);
+        let c = node("service-a", "src/a.ts", NodeKind::Function, "c", 3);
+        // sink is reachable three ways: root->a->sink, root->b->sink, root->c->sink.
+        let sink = node("service-a", "src/a.ts", NodeKind::Function, "sink", 4);
+        store
+            .bulk_insert(
+                &[
+                    file.clone(),
+                    root.clone(),
+                    a.clone(),
+                    b.clone(),
+                    c.clone(),
+                    sink.clone(),
+                ],
+                &[
+                    edge(root.id, a.id, file.id),
+                    edge(root.id, b.id, file.id),
+                    edge(root.id, c.id, file.id),
+                    edge(a.id, sink.id, file.id),
+                    edge(b.id, sink.id, file.id),
+                    edge(c.id, sink.id, file.id),
+                ],
+            )
+            .expect("graph should write");
+
+        let query = GraphQuery::new(&store);
+        let outcome = query
+            .traverse_with_provenance(root.id, &[EdgeKind::Calls], 4, None)
+            .expect("traversal should succeed");
+
+        let sink_step = outcome
+            .steps
+            .iter()
+            .find(|step| step.node_id == sink.id)
+            .expect("sink should be reached");
+        assert_eq!(
+            sink_step.in_paths.len(),
+            3,
+            "a node reachable three ways should report three caller paths"
+        );
     }
 
     #[test]
