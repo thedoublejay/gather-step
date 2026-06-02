@@ -40,11 +40,13 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         &self,
         source: NodeId,
         edge_kind: Option<EdgeKind>,
+        min_confidence: Option<u16>,
     ) -> Result<Vec<EdgeData>, QueryError> {
         let mut edges = self.store.get_outgoing(source)?;
         if let Some(edge_kind) = edge_kind {
             edges.retain(|edge| edge.kind == edge_kind);
         }
+        edges.retain(|edge| edge.metadata.passes_confidence(min_confidence));
         Ok(edges)
     }
 
@@ -52,11 +54,13 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         &self,
         target: NodeId,
         edge_kind: Option<EdgeKind>,
+        min_confidence: Option<u16>,
     ) -> Result<Vec<EdgeData>, QueryError> {
         let mut edges = self.store.get_incoming(target)?;
         if let Some(edge_kind) = edge_kind {
             edges.retain(|edge| edge.kind == edge_kind);
         }
+        edges.retain(|edge| edge.metadata.passes_confidence(min_confidence));
         Ok(edges)
     }
 
@@ -65,6 +69,7 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         start: NodeId,
         edge_kinds: &[EdgeKind],
         max_depth: usize,
+        min_confidence: Option<u16>,
     ) -> Result<Vec<TraversalStep>, QueryError> {
         let mut queue = VecDeque::from([(start, Vec::<EdgeKind>::new(), 0_usize)]);
         let mut seen = FxHashSet::from_iter([start.as_bytes()]);
@@ -77,6 +82,9 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
 
             for edge in self.store.get_outgoing(node_id)? {
                 if !edge_kinds.is_empty() && !edge_kinds.contains(&edge.kind) {
+                    continue;
+                }
+                if !edge.metadata.passes_confidence(min_confidence) {
                     continue;
                 }
                 let mut next_path = path.clone();
@@ -221,13 +229,13 @@ mod tests {
         );
         assert_eq!(
             query
-                .get_edges(a.id, Some(EdgeKind::Calls))
+                .get_edges(a.id, Some(EdgeKind::Calls), None)
                 .expect("edges should load")
                 .len(),
             1
         );
         let traversed = query
-            .traverse(a.id, &[EdgeKind::Calls], 2)
+            .traverse(a.id, &[EdgeKind::Calls], 2, None)
             .expect("traversal should succeed");
         assert_eq!(traversed.len(), 2);
         assert!(
@@ -240,6 +248,45 @@ mod tests {
                 .iter()
                 .any(|step| step.node_id == c.id && step.depth == 2)
         );
+    }
+
+    #[test]
+    fn min_confidence_filters_low_confidence_edges_but_keeps_structural() {
+        let temp_db = TempDb::new("query-confidence");
+        let store = test_store(temp_db.path());
+        let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
+        let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 0);
+        let trusted = node("service-a", "src/a.ts", NodeKind::Function, "trusted", 1);
+        let guessed = node("service-a", "src/a.ts", NodeKind::Function, "guessed", 2);
+
+        // a -> trusted has no confidence (a definite structural edge);
+        // a -> guessed is a low-confidence heuristic resolution.
+        let trusted_edge = edge(a.id, trusted.id, file.id);
+        let mut guessed_edge = edge(a.id, guessed.id, file.id);
+        guessed_edge.metadata.confidence = Some(300);
+
+        store
+            .bulk_insert(
+                &[file.clone(), a.clone(), trusted.clone(), guessed.clone()],
+                &[trusted_edge, guessed_edge],
+            )
+            .expect("graph should write");
+
+        let query = GraphQuery::new(&store);
+
+        // No threshold: both edges traversed.
+        let all = query
+            .traverse(a.id, &[EdgeKind::Calls], 1, None)
+            .expect("traversal should succeed");
+        assert_eq!(all.len(), 2);
+
+        // Threshold above the heuristic edge: the low-confidence edge is
+        // dropped, but the structural (None) edge is kept.
+        let filtered = query
+            .traverse(a.id, &[EdgeKind::Calls], 1, Some(500))
+            .expect("traversal should succeed");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].node_id, trusted.id);
     }
 
     #[test]

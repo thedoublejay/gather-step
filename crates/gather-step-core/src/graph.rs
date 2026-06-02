@@ -194,6 +194,17 @@ impl EdgeMetadata {
         self.resolver_strategy()
             .map_or(0, crate::ResolverStrategy::strategy_weight)
     }
+
+    /// Whether this edge passes a `min_confidence` traversal filter.
+    ///
+    /// `None` confidence means the edge is a definite structural fact (e.g. an
+    /// import-resolved call), not a heuristic guess, so it passes any threshold
+    /// rather than being filtered out. An explicit confidence is compared
+    /// against the threshold; a `None` threshold disables filtering entirely.
+    #[must_use]
+    pub fn passes_confidence(&self, min_confidence: Option<u16>) -> bool {
+        min_confidence.is_none_or(|min| self.confidence.is_none_or(|actual| actual >= min))
+    }
 }
 
 #[derive(
@@ -262,6 +273,25 @@ mod tests {
         EdgeData, EdgeMetadata, NodeData, NodeId, SourceSpan, Visibility, node_id, ref_node_id,
     };
     use crate::schema::{EdgeKind, NodeKind};
+
+    #[test]
+    fn passes_confidence_treats_none_as_trusted_and_filters_low() {
+        // No threshold disables filtering: everything passes.
+        let mut meta = EdgeMetadata::default();
+        assert!(meta.passes_confidence(None));
+
+        // None confidence is a definite structural edge (not a heuristic
+        // guess) and must pass any threshold rather than be filtered out.
+        assert!(meta.passes_confidence(Some(500)));
+
+        // An explicit low confidence is filtered out below the threshold.
+        meta.confidence = Some(300);
+        assert!(!meta.passes_confidence(Some(500)));
+
+        // At or above the threshold, it passes.
+        meta.confidence = Some(900);
+        assert!(meta.passes_confidence(Some(500)));
+    }
 
     #[test]
     fn node_id_is_deterministic_for_identical_inputs() {
