@@ -50,11 +50,11 @@ use crate::{
         },
         orientation::{GraphSchemaResponse, ListReposResponse, get_graph_schema, list_repos},
         packs::{
-            ContextPackRequest, ContextPackResponse, ModePackRequest,
+            ContextPackRequest, ContextPackResponse, ModePackRequest, PlanChangeResponse,
             change_impact_pack_tool as run_change_impact_pack,
             context_pack_tool as run_context_pack, debug_pack_tool as run_debug_pack,
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
-            review_pack_tool as run_review_pack,
+            review_pack_tool as run_review_pack, run_plan_change,
         },
         pr_review::{
             PrReviewInput, PrReviewResponse, PrReviewSetInput, PrReviewSetResponse, run_pr_review,
@@ -784,17 +784,17 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "plan_change",
-        description = "Return a bounded planning pack for a target symbol.",
+        description = "Return a typed plan-change product (nine planning sections) for a target symbol.",
         annotations(read_only_hint = true)
     )]
     pub async fn plan_change_tool(
         &self,
         Parameters(request): Parameters<ModePackRequest>,
-    ) -> Result<Json<ContextPackResponse>, String> {
+    ) -> Result<Json<PlanChangeResponse>, String> {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("plan_change", &args, move || {
-            run_planning_pack(&ctx, request)
+            run_plan_change(&ctx, request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })

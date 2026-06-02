@@ -207,6 +207,102 @@ pub struct ContextPackResponse {
     pub meta: Option<ContextPackMeta>,
 }
 
+/// Typed `plan_change` product (WS-3 / E1).
+///
+/// A distinct response shape — not an alias for the planning pack — with the
+/// nine fixed planning sections. v1 projects the existing planning-pack data
+/// into these sections; later slices (B7 proactive queries, G7 evidentiary
+/// fields) enrich them. Every section is always present (possibly empty) so the
+/// contract is stable for consumers and the G7 gate.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanChangeResponse {
+    pub target: String,
+    pub found: bool,
+    /// Existing reusable symbols a change should prefer over a new fork —
+    /// shared/design-system members surfaced by the S3 reuse ranking.
+    pub reuse_candidates: Vec<PackItem>,
+    /// Local siblings worth cloning/aligning with (same neighbourhood, not in a
+    /// shared module).
+    pub sibling_clone_targets: Vec<PackItem>,
+    pub standards_to_preserve: Vec<String>,
+    pub integration_checks: Vec<String>,
+    /// Cross-repo reachability proofs (producer/consumer edges) for the target.
+    pub cross_repo_reachability: Vec<serde_json::Value>,
+    pub write_path_or_state_machine_risks: Vec<String>,
+    pub required_braingent_records: Vec<String>,
+    pub open_unknowns: Vec<String>,
+    pub verification_plan: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ContextPackMeta>,
+}
+
+/// Project planning-pack pieces into the typed `plan_change` sections (WS-3 /
+/// E1). Pure over its inputs so the projection is unit-testable without an MCP
+/// context or graph. Reuse candidates are shared-module members; remaining
+/// related items become sibling clone targets.
+fn build_plan_change(
+    target: &str,
+    found: bool,
+    items: &[PackItem],
+    unresolved_gaps: &[String],
+    planning_proofs: &[serde_json::Value],
+    next_steps: &[String],
+    meta: Option<ContextPackMeta>,
+) -> PlanChangeResponse {
+    let mut reuse_candidates = Vec::new();
+    let mut sibling_clone_targets = Vec::new();
+    for item in items {
+        if item.category == "target" {
+            continue;
+        }
+        if is_shared_module_path(&item.file_path) {
+            reuse_candidates.push(item.clone());
+        } else {
+            sibling_clone_targets.push(item.clone());
+        }
+    }
+
+    let verification_plan = next_steps
+        .iter()
+        .map(|step| format!("Run `{step}` and confirm the result before changing code."))
+        .collect();
+
+    PlanChangeResponse {
+        target: target.to_owned(),
+        found,
+        reuse_candidates,
+        sibling_clone_targets,
+        // Populated by later WS-3 slices (B7 proactive queries / G7 evidence).
+        standards_to_preserve: Vec::new(),
+        integration_checks: Vec::new(),
+        cross_repo_reachability: planning_proofs.to_vec(),
+        write_path_or_state_machine_risks: Vec::new(),
+        required_braingent_records: Vec::new(),
+        open_unknowns: unresolved_gaps.to_vec(),
+        verification_plan,
+        meta,
+    }
+}
+
+/// Build the typed `plan_change` product (WS-3 / E1): run the planning pack,
+/// then project its data into the nine fixed sections.
+pub fn run_plan_change(
+    ctx: &McpContext,
+    request: ModePackRequest,
+) -> Result<PlanChangeResponse, McpServerError> {
+    let pack = planning_pack_tool(ctx, request)?;
+    let data = &pack.data;
+    Ok(build_plan_change(
+        &data.target,
+        data.found,
+        &data.items,
+        &data.unresolved_gaps,
+        &data.planning_proofs,
+        &data.next_steps,
+        pack.meta.clone(),
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ContextPackData {
     pub mode: String,
@@ -5289,6 +5385,53 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].file_path, "packages/ui/components/Button.tsx");
+    }
+
+    #[test]
+    fn build_plan_change_projects_pack_into_typed_sections() {
+        use super::build_plan_change;
+
+        let mut target_item = make_pack_item(200, "src/orders/create-order.ts", false);
+        target_item.category = "target".to_owned();
+        let items = vec![
+            make_pack_item(120, "packages/ui/components/Button.tsx", false),
+            make_pack_item(90, "src/features/orders/local-helper.ts", false),
+            target_item,
+        ];
+        let gaps = vec!["Who emits status FINALIZED?".to_owned()];
+        let proofs = vec![serde_json::json!({"repo": "alert", "edge": "ConsumesApiFrom"})];
+        let next_steps = vec!["crud_trace".to_owned()];
+
+        let plan = build_plan_change(
+            "createOrder",
+            true,
+            &items,
+            &gaps,
+            &proofs,
+            &next_steps,
+            None,
+        );
+
+        assert!(plan.found);
+        // Shared component => reuse candidate; local helper => sibling target;
+        // the target item is excluded from both.
+        assert_eq!(plan.reuse_candidates.len(), 1);
+        assert_eq!(
+            plan.reuse_candidates[0].file_path,
+            "packages/ui/components/Button.tsx"
+        );
+        assert_eq!(plan.sibling_clone_targets.len(), 1);
+        assert_eq!(
+            plan.sibling_clone_targets[0].file_path,
+            "src/features/orders/local-helper.ts"
+        );
+        assert_eq!(plan.open_unknowns, gaps);
+        assert_eq!(plan.cross_repo_reachability.len(), 1);
+        assert_eq!(plan.verification_plan.len(), 1);
+        // Contract: the sections not yet populated still exist (empty).
+        assert!(plan.standards_to_preserve.is_empty());
+        assert!(plan.integration_checks.is_empty());
+        assert!(plan.required_braingent_records.is_empty());
     }
 
     #[test]
