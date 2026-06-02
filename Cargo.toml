@@ -14,27 +14,27 @@ members = [
 ]
 
 [workspace.package]
-version = "4.2.0"
+version = "4.2.1"
 authors = ["JJ Adonis"]
 edition = "2024"
-rust-version = "1.94.1"
+rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/thedoublejay/gather-step"
 homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step = { path = "crates/gather-step-cli", version = "4.2.0" }
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "4.2.0" }
-gather-step-core = { path = "crates/gather-step-core", version = "4.2.0" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "4.2.0" }
-gather-step-git = { path = "crates/gather-step-git", version = "4.2.0" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "4.2.0" }
-gather-step-output = { path = "crates/gather-step-output", version = "4.2.0" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "4.2.0" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "4.2.0" }
+gather-step = { path = "crates/gather-step-cli", version = "4.2.1" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "4.2.1" }
+gather-step-core = { path = "crates/gather-step-core", version = "4.2.1" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "4.2.1" }
+gather-step-git = { path = "crates/gather-step-git", version = "4.2.1" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "4.2.1" }
+gather-step-output = { path = "crates/gather-step-output", version = "4.2.1" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "4.2.1" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "4.2.1" }
 
-tree-sitter = "=0.26.8"
+tree-sitter = "=0.26.9"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "=0.25.0"
@@ -43,7 +43,7 @@ tree-sitter-go = "0.25"
 tree-sitter-java = "0.23.5"
 redb = "=4.1.0"
 tantivy = "=0.26.1"
-rusqlite = { version = "=0.39.0", features = ["bundled"] }
+rusqlite = { version = "=0.40.0", features = ["bundled"] }
 rayon = "1.12"
 kanal = "0.1.1"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -68,12 +68,12 @@ subtle = "2.6.1"
 ignore = "0.4.25"
 globset = "0.4.18"
 rustc-hash = "2.1.2"
-hashbrown = "=0.17.0"
+hashbrown = "=0.17.1"
 parking_lot = "=0.12.5"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = "0.7.18"
 notify = "=9.0.0-rc.4"
-gix = { version = "0.83", default-features = true }
+gix = { version = "0.84", default-features = true }
 regex = "1.12.3"
 simdutf8 = "=0.1.5"
 similar = "3.1.1"

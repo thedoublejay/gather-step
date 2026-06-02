@@ -536,9 +536,7 @@ fn event_target_score<S: GraphStore>(store: &S, target: &NodeData, subject: &str
         _ => 1,
     };
     let family_bonus = event_name_for_node(target)
-        .and_then(|event_name| {
-            normalized_event_family_query(subject).map(|query| (event_name, query))
-        })
+        .zip(normalized_event_family_query(subject))
         .map_or(0, |(event_name, query)| {
             if event_name == query {
                 500
