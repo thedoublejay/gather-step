@@ -686,6 +686,59 @@ impl TantivySearchStore {
             file_path_stored,
         })
     }
+
+    /// Disjunction fallback for multi-**word** capability queries: each
+    /// whitespace-separated word becomes a `Should` clause and a hit must match
+    /// at least a majority of them (`ceil(n/2)`).
+    ///
+    /// Gated on the *original* query containing two or more words. A single
+    /// identifier such as `createOrderUseCase` is one word — even though it
+    /// camelCase-splits into several tokens — and must not fuzzily match
+    /// siblings that merely share tokens (e.g. `updateOrderUseCase`). Only a
+    /// genuine phrase like `email notification delivery` should relax to OR.
+    fn execute_search_disjunctive(
+        &self,
+        query_text: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let words: Vec<&str> = query_text.split_whitespace().collect();
+        if words.len() < 2 {
+            return Ok(Vec::new());
+        }
+
+        let reader = self.reader.lock();
+        let searcher = reader.searcher();
+        // Fuzzy on: this is the last-resort recall pass.
+        let parser = self.build_query_parser(true);
+        let clauses: Vec<(Occur, Box<dyn Query>)> = words
+            .iter()
+            .map(|word| {
+                let (query, _) = parser.parse_query_lenient(word);
+                (Occur::Should, query)
+            })
+            .collect();
+        let floor = words.len().div_ceil(2).max(1);
+        let query: Box<dyn Query> =
+            Box::new(BooleanQuery::with_minimum_required_clauses(clauses, floor));
+        let query = self.apply_filters(query, filters);
+
+        let fetch_limit = limit.max(1).saturating_mul(5).min(MAX_RESULT_WINDOW);
+        let collector = TopDocs::with_limit(fetch_limit).order_by_score();
+        let docs: Vec<(f32, DocAddress)> = searcher.search(&query, &collector)?;
+
+        let mut hits = docs
+            .into_iter()
+            .map(|(score, address)| self.decode_hit(&searcher, address, score, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        rerank_hits(&mut hits, query_text);
+
+        Ok(hits
+            .into_iter()
+            .take(limit.max(1))
+            .map(|scored| scored.hit)
+            .collect())
+    }
 }
 
 impl SearchStore for TantivySearchStore {
@@ -718,7 +771,17 @@ impl SearchStore for TantivySearchStore {
             return Ok(exact_hits);
         }
 
-        self.execute_search(trimmed, limit, false, true, filters)
+        let fuzzy_hits = self.execute_search(trimmed, limit, false, true, filters)?;
+        if !fuzzy_hits.is_empty() {
+            return Ok(fuzzy_hits);
+        }
+
+        // Both conjunctive passes require every query term to match, so a
+        // multi-word capability query ("email notification delivery") returns
+        // nothing when a symbol covers only some terms. Fall back to a
+        // disjunction with a majority floor so reuse-discovery queries still
+        // surface partial matches instead of an empty result.
+        self.execute_search_disjunctive(trimmed, limit, filters)
     }
 
     fn delete_by_files(&self, files: &[(&str, &str)]) -> Result<(), SearchStoreError> {
@@ -1548,6 +1611,58 @@ mod tests {
         assert_eq!(results[0].symbol_name, "backend_standard");
         assert_eq!(results[0].node_kind, NodeKind::Repo);
         assert!(results[0].exact_match);
+    }
+
+    #[test]
+    fn partial_multiword_query_recovers_via_disjunction_fallback() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("or-fallback")).expect("store should open");
+        let mut symbol = node("dispatchEmailNotification", "src/notifications/dispatch.ts");
+        // Keep `content` empty so the match can only come from the symbol-name
+        // tokens (dispatch / email / notification), making the assertion precise.
+        symbol.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&symbol, 1))
+            .expect("document should index");
+
+        // Capability-style query: two of three terms ("email", "notification")
+        // match the symbol's camelCase tokens; "delivery" appears nowhere. The
+        // conjunctive (AND) default returns nothing, so a disjunction fallback
+        // with a majority floor must surface the symbol for reuse discovery.
+        let results = store
+            .search("email notification delivery", 10)
+            .expect("search should succeed");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "partial multi-word query should match via OR fallback"
+        );
+        assert_eq!(results[0].symbol_name, "dispatchEmailNotification");
+    }
+
+    #[test]
+    fn single_identifier_miss_does_not_fall_back_to_token_sharing_sibling() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("or-precision")).expect("store should open");
+        let mut existing = node("updateOrderUseCase", "src/b.ts");
+        existing.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&existing, 1))
+            .expect("document should index");
+
+        // No `createOrderUseCase` exists. Because the query is a single
+        // identifier (one word), the disjunction fallback must NOT fire and
+        // resurrect the token-sharing sibling `updateOrderUseCase` on the
+        // shared Order/Use/Case tokens. Adversarial guard for the OR fallback.
+        let results = store
+            .search("createOrderUseCase", 10)
+            .expect("search should succeed");
+
+        assert!(
+            results.is_empty(),
+            "single-identifier miss must not OR-match a token-sharing sibling"
+        );
     }
 
     #[test]
