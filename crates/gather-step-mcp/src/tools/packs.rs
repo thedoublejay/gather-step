@@ -207,6 +207,37 @@ pub struct ContextPackResponse {
     pub meta: Option<ContextPackMeta>,
 }
 
+/// Schema version of the [`PlanChangeResponse`] contract. Bump on any change to
+/// the section set or contract shape.
+const PLAN_CHANGE_SCHEMA_VERSION: u8 = 1;
+
+/// The nine fixed `plan_change` section names, in canonical order. The contract
+/// manifest must equal this exactly so consumers (and the G7 gate) can assert
+/// completeness deterministically.
+const PLAN_CHANGE_SECTIONS: [&str; 9] = [
+    "reuse_candidates",
+    "sibling_clone_targets",
+    "standards_to_preserve",
+    "integration_checks",
+    "cross_repo_reachability",
+    "write_path_or_state_machine_risks",
+    "required_braingent_records",
+    "open_unknowns",
+    "verification_plan",
+];
+
+/// Evidentiary contract for the typed `plan_change` product (WS-3 / G7):
+/// deterministic metadata (schema version + the fixed section manifest) plus an
+/// exclusion ledger recording what was dropped from the response and why, so a
+/// consumer never mistakes a capped/filtered result for an exhaustive one.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanChangeContract {
+    pub schema_version: u8,
+    pub sections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusion_ledger: Vec<String>,
+}
+
 /// Typed `plan_change` product (WS-3 / E1).
 ///
 /// A distinct response shape — not an alias for the planning pack — with the
@@ -232,6 +263,8 @@ pub struct PlanChangeResponse {
     pub required_braingent_records: Vec<String>,
     pub open_unknowns: Vec<String>,
     pub verification_plan: Vec<String>,
+    /// Evidentiary contract: schema version, section manifest, exclusion ledger.
+    pub contract: PlanChangeContract,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<ContextPackMeta>,
 }
@@ -301,6 +334,30 @@ fn build_plan_change(
         );
     }
 
+    // G7: exclusion ledger — record what was dropped from the response so a
+    // consumer never reads a capped/filtered result as exhaustive.
+    let mut exclusion_ledger = Vec::new();
+    if let Some(truncated) = &change_impact.truncated_repos {
+        exclusion_ledger.push(format!(
+            "Downstream fan-out capped: {} repo(s) omitted ({}).",
+            truncated.count,
+            truncated.reason_codes.join(", ")
+        ));
+    }
+    if let Some(meta) = &meta {
+        for warning in &meta.warnings {
+            exclusion_ledger.push(format!("Planning warning: {warning}"));
+        }
+    }
+    let contract = PlanChangeContract {
+        schema_version: PLAN_CHANGE_SCHEMA_VERSION,
+        sections: PLAN_CHANGE_SECTIONS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        exclusion_ledger,
+    };
+
     PlanChangeResponse {
         target: target.to_owned(),
         found,
@@ -314,8 +371,35 @@ fn build_plan_change(
         required_braingent_records: Vec::new(),
         open_unknowns: unresolved_gaps.to_vec(),
         verification_plan,
+        contract,
         meta,
     }
+}
+
+/// G7 contract gate: assert a [`PlanChangeResponse`] carries deterministic
+/// contract metadata — the current schema version and the exact canonical
+/// section manifest. Returns the list of violations (empty == passes).
+pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
+    let mut violations = Vec::new();
+    if plan.contract.schema_version != PLAN_CHANGE_SCHEMA_VERSION {
+        violations.push(format!(
+            "schema_version {} != expected {PLAN_CHANGE_SCHEMA_VERSION}",
+            plan.contract.schema_version
+        ));
+    }
+    if !plan
+        .contract
+        .sections
+        .iter()
+        .map(String::as_str)
+        .eq(PLAN_CHANGE_SECTIONS)
+    {
+        violations.push(format!(
+            "section manifest {:?} != canonical {PLAN_CHANGE_SECTIONS:?}",
+            plan.contract.sections
+        ));
+    }
+    violations
 }
 
 /// Build the typed `plan_change` product (WS-3 / E1): run the planning pack,
@@ -5482,9 +5566,82 @@ mod tests {
         assert!(plan.integration_checks[0].contains("alert"));
         assert_eq!(plan.write_path_or_state_machine_risks.len(), 1);
         assert!(plan.write_path_or_state_machine_risks[0].contains("report::useOrderTotals"));
-        // Contract: sections awaiting G7 still exist (empty).
+        // Contract: sections awaiting later work still exist (empty).
         assert!(plan.standards_to_preserve.is_empty());
         assert!(plan.required_braingent_records.is_empty());
+    }
+
+    #[test]
+    fn plan_change_contract_gate_validates_deterministic_metadata() {
+        use super::{
+            ChangeImpactSummary, PLAN_CHANGE_SCHEMA_VERSION, PLAN_CHANGE_SECTIONS,
+            build_plan_change, validate_plan_change_contract,
+        };
+
+        let mut plan = build_plan_change(
+            "createOrder",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+
+        // A freshly built product satisfies the contract: current schema
+        // version and the exact canonical section manifest, deterministically.
+        assert_eq!(plan.contract.schema_version, PLAN_CHANGE_SCHEMA_VERSION);
+        assert!(
+            plan.contract
+                .sections
+                .iter()
+                .map(String::as_str)
+                .eq(PLAN_CHANGE_SECTIONS)
+        );
+        assert!(validate_plan_change_contract(&plan).is_empty());
+
+        // The gate fails on a stale schema version.
+        plan.contract.schema_version = 99;
+        assert!(!validate_plan_change_contract(&plan).is_empty());
+        plan.contract.schema_version = PLAN_CHANGE_SCHEMA_VERSION;
+
+        // The gate fails on a mangled section manifest (missing/renamed section).
+        plan.contract.sections.pop();
+        assert!(!validate_plan_change_contract(&plan).is_empty());
+    }
+
+    #[test]
+    fn plan_change_exclusion_ledger_records_capped_fan_out() {
+        use super::{ChangeImpactSummary, TruncatedRepos, build_plan_change};
+
+        let change_impact = ChangeImpactSummary {
+            truncated_repos: Some(TruncatedRepos {
+                count: 4,
+                names: vec!["a".to_owned(), "b".to_owned()],
+                reason_codes: vec!["fan_out_cap".to_owned()],
+            }),
+            ..Default::default()
+        };
+        let plan = build_plan_change(
+            "createOrder",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &change_impact,
+            None,
+        );
+
+        assert!(
+            plan.contract
+                .exclusion_ledger
+                .iter()
+                .any(|entry| entry.contains("capped") && entry.contains('4')),
+            "ledger should record the capped fan-out: {:?}",
+            plan.contract.exclusion_ledger
+        );
     }
 
     #[test]
