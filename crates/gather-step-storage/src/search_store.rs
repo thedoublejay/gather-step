@@ -1311,6 +1311,11 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
             .adjusted_score
             .partial_cmp(&left.hit.adjusted_score)
             .unwrap_or(Ordering::Equal)
+            // Deterministic tie-breaks so equal-score hits have a stable order
+            // regardless of the underlying Tantivy doc-id ordering.
+            .then_with(|| left.hit.symbol_name.cmp(&right.hit.symbol_name))
+            .then_with(|| left.file_path_stored.cmp(&right.file_path_stored))
+            .then_with(|| left.hit.node_id.cmp(&right.hit.node_id))
     });
 }
 
@@ -1775,6 +1780,39 @@ mod tests {
         rerank_hits(&mut hits, "email notification delivery");
 
         assert_eq!(hits[0].hit.symbol_name, "dispatchEmailNotification");
+    }
+
+    #[test]
+    fn rerank_breaks_score_ties_deterministically_by_symbol_name() {
+        use super::{ScoredSearchHit, SearchHit, rerank_hits};
+
+        fn scored(symbol: &str) -> ScoredSearchHit {
+            ScoredSearchHit {
+                hit: SearchHit {
+                    node_id: node_id("service-a", "src/x.ts", NodeKind::Function, symbol),
+                    repo: "service-a".to_owned(),
+                    file_path: String::new(),
+                    symbol_name: symbol.to_owned(),
+                    node_kind: NodeKind::Function,
+                    adjusted_score: 0.0,
+                    exact_match: false,
+                    is_exported: true,
+                    lang: "typescript".to_owned(),
+                },
+                base_score: 1.0,
+                last_modified: 1,
+                file_path_stored: String::new(),
+            }
+        }
+
+        // Single-word query (no coverage boost): both hits resolve to the same
+        // adjusted score, so the symbol-name tie-break must impose a stable
+        // order regardless of input order.
+        let mut hits = vec![scored("zebra"), scored("alpha")];
+        rerank_hits(&mut hits, "unrelated");
+
+        assert_eq!(hits[0].hit.symbol_name, "alpha");
+        assert_eq!(hits[1].hit.symbol_name, "zebra");
     }
 
     #[test]

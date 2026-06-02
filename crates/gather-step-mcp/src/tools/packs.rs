@@ -1084,22 +1084,26 @@ fn assemble_context_pack_for_symbol(
         .map(|item| item.repo.clone())
         .collect::<Vec<_>>();
     items.extend(contract_impact_items);
-    items.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then(left.repo.cmp(&right.repo))
-            .then(left.file_path.cmp(&right.file_path))
-            .then(left.line_start.cmp(&right.line_start))
-            .then(left.symbol_name.cmp(&right.symbol_name))
-            .then(left.symbol_id.cmp(&right.symbol_id))
-    });
+    sort_pack_items(&mut items);
     items.dedup_by(|left, right| {
         left.symbol_id == right.symbol_id && left.category == right.category
     });
     if let Some(repo) = options.repo_filter {
         items.retain(|item| item.repo == repo);
     }
+
+    // S3: apply the graph-derived reuse boost on a bounded candidate window
+    // BEFORE the cut, then re-sort, so a canonical reusable symbol can be
+    // promoted into the pack rather than discarded by the base-score truncate.
+    if mode == PackMode::Planning {
+        let window = options.limit.saturating_mul(5).min(items.len());
+        let graph = ctx.graph();
+        apply_reuse_boost_with(&mut items[..window], |symbol_id| {
+            consumer_count(graph, symbol_id)
+        });
+        sort_pack_items(&mut items);
+    }
+
     items.truncate(options.limit);
 
     let evidence_populated = items.len() <= 20;
@@ -1114,7 +1118,6 @@ fn assemble_context_pack_for_symbol(
         }
     }
     if mode == PackMode::Planning && evidence_populated {
-        apply_reuse_evidence_ranking(&mut items, ctx.graph());
         apply_planning_evidence_ranking(&mut items);
     }
 
@@ -2528,32 +2531,43 @@ fn reuse_evidence_boost(file_path: &str, consumer_count: usize) -> u16 {
     boost.saturating_add(consumers.saturating_mul(3))
 }
 
-/// Apply the S3 graph-derived reuse boost to planning-pack items: shared-module
-/// membership (from the path) plus sibling-consumer count (inbound edges in the
-/// graph). Runs before [`apply_planning_evidence_ranking`], which then sorts.
-fn apply_reuse_evidence_ranking<S: gather_step_storage::GraphStore>(
-    items: &mut [PackItem],
-    graph: &S,
-) {
+/// Distinct reuse consumers of a symbol: the source nodes of inbound edges,
+/// excluding structural `Defines`/`Imports` edges that do not represent a
+/// caller/user. Mirrors the edge-kind filter used by the resolution scorer so
+/// the count reflects real consumers, not raw inbound-edge volume.
+fn consumer_count<S: gather_step_storage::GraphStore>(graph: &S, symbol_id: &str) -> usize {
+    let Ok(node_id) = decode_node_id(symbol_id) else {
+        return 0;
+    };
+    let Ok(incoming) = graph.get_incoming(node_id) else {
+        return 0;
+    };
+    incoming
+        .iter()
+        .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+        .map(|edge| edge.source)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// Apply the S3 graph-derived reuse boost to planning-pack items via a
+/// consumer-count lookup. Generic over the lookup so the boost is unit-testable
+/// without a graph store. Must run BEFORE truncation so a canonical reusable
+/// symbol can be promoted into the pack, not merely reordered within an
+/// already-cut set.
+fn apply_reuse_boost_with(items: &mut [PackItem], consumer_count: impl Fn(&str) -> usize) {
     for item in items.iter_mut() {
         if item.category == "target" {
             continue;
         }
-        let consumer_count = decode_node_id(&item.symbol_id)
-            .ok()
-            .and_then(|id| graph.get_incoming(id).ok())
-            .map_or(0, |edges| edges.len());
-        let boost = reuse_evidence_boost(&item.file_path, consumer_count);
+        let boost = reuse_evidence_boost(&item.file_path, consumer_count(&item.symbol_id));
         item.score = item.score.saturating_add(boost);
     }
 }
 
-fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
-    for item in items.iter_mut() {
-        if item.evidence_chain.is_some() {
-            item.score = item.score.saturating_add(50);
-        }
-    }
+/// Canonical ordering for planning-pack items: descending score, then stable
+/// lexical tie-breaks for deterministic output.
+fn sort_pack_items(items: &mut [PackItem]) {
     items.sort_by(|left, right| {
         right
             .score
@@ -2564,6 +2578,15 @@ fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
             .then(left.symbol_name.cmp(&right.symbol_name))
             .then(left.symbol_id.cmp(&right.symbol_id))
     });
+}
+
+fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
+    for item in items.iter_mut() {
+        if item.evidence_chain.is_some() {
+            item.score = item.score.saturating_add(50);
+        }
+    }
+    sort_pack_items(items);
 }
 
 fn mode_pack_tool(
@@ -5244,6 +5267,28 @@ mod tests {
             reuse_evidence_boost("packages/ui/Button.tsx", 8)
                 > reuse_evidence_boost("src/features/orders/local-button.tsx", 0)
         );
+    }
+
+    #[test]
+    fn reuse_boost_promotes_canonical_symbol_past_truncation() {
+        use super::{apply_reuse_boost_with, sort_pack_items};
+
+        // The local one-off has the higher base score; the shared, widely
+        // consumed component has a lower base score and would be cut by a
+        // base-score truncate to 1 — unless reuse ranking runs before the cut.
+        let mut items = vec![
+            make_pack_item(100, "src/features/orders/local.tsx", false),
+            make_pack_item(80, "packages/ui/components/Button.tsx", false),
+        ];
+
+        apply_reuse_boost_with(&mut items, |symbol_id| {
+            if symbol_id.contains("Button") { 12 } else { 0 }
+        });
+        sort_pack_items(&mut items);
+        items.truncate(1);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].file_path, "packages/ui/components/Button.tsx");
     }
 
     #[test]
