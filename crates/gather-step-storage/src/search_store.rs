@@ -714,8 +714,21 @@ impl TantivySearchStore {
         let clauses: Vec<(Occur, Box<dyn Query>)> = words
             .iter()
             .map(|word| {
-                let (query, _) = parser.parse_query_lenient(word);
-                (Occur::Should, query)
+                // Expand each word into (word OR synonyms) so capability phrases
+                // bridge to the symbol vocabulary (e.g. "login" -> authenticate).
+                let mut sub: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let (word_query, _) = parser.parse_query_lenient(word);
+                sub.push((Occur::Should, word_query));
+                for synonym in synonym_terms(word) {
+                    let (synonym_query, _) = parser.parse_query_lenient(synonym);
+                    sub.push((Occur::Should, synonym_query));
+                }
+                let clause: Box<dyn Query> = if sub.len() == 1 {
+                    sub.pop().expect("clause exists").1
+                } else {
+                    Box::new(BooleanQuery::from(sub))
+                };
+                (Occur::Should, clause)
             })
             .collect();
         let floor = words.len().div_ceil(2).max(1);
@@ -1134,6 +1147,36 @@ fn infra_repo_penalty(symbol_exact_boost: f32, is_exported: bool, repo: &str) ->
     if is_infra { 0.85 } else { 1.0 }
 }
 
+/// Curated concept→vocabulary synonym map (S4).
+///
+/// Returns extra terms to OR into a query word's clause in the disjunction
+/// fallback so capability phrases bridge to the identifiers code actually uses
+/// (e.g. "login" → authenticate). Intentionally small and high-signal; the
+/// original word is always searched too, so an empty list is a safe no-op.
+fn synonym_terms(word: &str) -> &'static [&'static str] {
+    const TABLE: &[(&[&str], &[&str])] = &[
+        (
+            &["login", "signin", "auth"],
+            &["authenticate", "authentication"],
+        ),
+        (&["logout", "signout"], &["deauthenticate"]),
+        (
+            &["paginate", "pagination", "paging"],
+            &["cursor", "offset", "page"],
+        ),
+        (&["delete", "remove"], &["destroy"]),
+        (&["create", "add"], &["insert"]),
+        (&["update", "edit"], &["modify"]),
+        (&["list", "fetch", "get"], &["find"]),
+    ];
+    for (keys, synonyms) in TABLE {
+        if keys.iter().any(|key| word.eq_ignore_ascii_case(key)) {
+            return synonyms;
+        }
+    }
+    &[]
+}
+
 /// Term-coverage boost (S2).
 ///
 /// Rewards hits whose symbol-name tokens cover a larger fraction of the query's
@@ -1149,7 +1192,9 @@ fn query_term_coverage_boost(query_tokens: &[String], symbol_name: &str) -> f32 
         .iter()
         .filter(|qt| symbol_tokens.iter().any(|st| st == *qt))
         .count();
-    let coverage = covered as f32 / query_tokens.len() as f32;
+    // Token counts are tiny; u16 conversion avoids the cast-precision-loss lint.
+    let coverage = f32::from(u16::try_from(covered).unwrap_or(u16::MAX))
+        / f32::from(u16::try_from(query_tokens.len()).unwrap_or(u16::MAX));
     1.0 + coverage * 0.25
 }
 
@@ -1730,6 +1775,28 @@ mod tests {
         rerank_hits(&mut hits, "email notification delivery");
 
         assert_eq!(hits[0].hit.symbol_name, "dispatchEmailNotification");
+    }
+
+    #[test]
+    fn disjunction_fallback_bridges_query_synonyms_to_symbol_vocabulary() {
+        let store = TantivySearchStore::open(temp_search_dir("synonym-fallback"))
+            .expect("store should open");
+        let mut symbol = node("authenticateUser", "src/auth/authenticate-user.ts");
+        symbol.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&symbol, 1))
+            .expect("document should index");
+
+        // "login" is a concept synonym of the symbol's "authenticate" token;
+        // "workflow" matches nothing. Without synonym expansion the disjunction
+        // fallback finds no matching term and returns empty; the login →
+        // authenticate bridge must surface the symbol for capability search.
+        let results = store
+            .search("login workflow", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_name, "authenticateUser");
     }
 
     #[test]
