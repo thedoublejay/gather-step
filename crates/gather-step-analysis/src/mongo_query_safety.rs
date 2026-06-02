@@ -20,6 +20,10 @@ pub const RULE_UNSAFE_COERCION: &str = "GS-MONGO-UNSAFE-COERCION";
 /// MQS3 — a `$set` on a dotted path with no existence/`$type:object` guard on
 /// the parent, which can clobber or fail on a null/scalar parent.
 pub const RULE_NULL_PARENT_PATH: &str = "GS-MONGO-NULL-PARENT-PATH";
+/// AIX1 — a doc field is referenced in a `$search`/filter but absent from a
+/// `dynamic:false` Atlas search-index mapping, so the query silently matches
+/// nothing on that field.
+pub const RULE_ATLAS_INDEX_DRIFT: &str = "GS-MONGO-ATLAS-INDEX-DRIFT";
 
 /// One mongo-query-safety finding. `path` is a dotted location into the analysed
 /// value so a caller can point at the offending stage/field.
@@ -43,6 +47,46 @@ pub fn analyze_mongo_value(value: &Value) -> Vec<MongoQueryFinding> {
             .cmp(right.rule_id)
             .then_with(|| left.path.cmp(&right.path))
     });
+    findings
+}
+
+/// AIX1: flag doc fields referenced in a `$search`/filter that are absent from
+/// a `dynamic:false` Atlas search-index mapping. A `dynamic:true` (or missing —
+/// Atlas defaults to dynamic) mapping covers all fields, so it never drifts.
+/// Pure over the index definition + the referenced field set.
+#[must_use]
+pub fn analyze_atlas_index_drift(
+    index_def: &Value,
+    referenced_fields: &[&str],
+) -> Vec<MongoQueryFinding> {
+    let mappings = index_def.get("mappings");
+    let dynamic = mappings
+        .and_then(|m| m.get("dynamic"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if dynamic {
+        return Vec::new();
+    }
+    let mapped: Vec<&str> = mappings
+        .and_then(|m| m.get("fields"))
+        .and_then(Value::as_object)
+        .map(|fields| fields.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    let mut findings: Vec<MongoQueryFinding> = referenced_fields
+        .iter()
+        .filter(|field| !mapped.contains(*field))
+        .map(|field| MongoQueryFinding {
+            rule_id: RULE_ATLAS_INDEX_DRIFT,
+            confidence: 0.75,
+            message: format!(
+                "Field `{field}` is queried but absent from the `dynamic:false` Atlas index \
+                 mapping; the search silently matches nothing on it. Add it to the mapping."
+            ),
+            path: (*field).to_owned(),
+        })
+        .collect();
+    findings.sort_by(|left, right| left.path.cmp(&right.path));
     findings
 }
 
@@ -212,6 +256,28 @@ mod tests {
         let guarded_sibling =
             json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
         assert!(!rule_ids(&guarded_sibling).contains(&RULE_NULL_PARENT_PATH));
+    }
+
+    #[test]
+    fn flags_unmapped_field_on_dynamic_false_index_but_not_mapped_field() {
+        use super::{RULE_ATLAS_INDEX_DRIFT, analyze_atlas_index_drift};
+
+        // GO4(d): a dynamic:false index missing a referenced field.
+        let index = json!({
+            "mappings": { "dynamic": false, "fields": { "title": {}, "body": {} } }
+        });
+        let findings = analyze_atlas_index_drift(&index, &["title", "entity"]);
+        let ids: Vec<_> = findings.iter().map(|f| f.rule_id).collect();
+        assert!(ids.contains(&RULE_ATLAS_INDEX_DRIFT));
+        assert!(findings.iter().any(|f| f.path == "entity"));
+        assert!(
+            !findings.iter().any(|f| f.path == "title"),
+            "a mapped field must not drift"
+        );
+
+        // A dynamic:true index covers every field — no drift.
+        let dynamic_index = json!({ "mappings": { "dynamic": true } });
+        assert!(analyze_atlas_index_drift(&dynamic_index, &["anything"]).is_empty());
     }
 
     #[test]

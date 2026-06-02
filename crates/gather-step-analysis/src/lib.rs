@@ -56,8 +56,8 @@ pub use impact::{
     BoundaryRole, EvidenceBand, ImpactError, ImpactMap, ImpactedFile, shared_contract_impact,
 };
 pub use mongo_query_safety::{
-    MongoQueryFinding, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH, RULE_UNSAFE_COERCION,
-    analyze_mongo_value,
+    MongoQueryFinding, RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH,
+    RULE_UNSAFE_COERCION, analyze_atlas_index_drift, analyze_mongo_value,
 };
 pub use overview::{ModuleSummary, OverviewError, RepoOverview, build_overview};
 pub use pack_assembly::{
