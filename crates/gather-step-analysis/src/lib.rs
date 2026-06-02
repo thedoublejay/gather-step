@@ -14,6 +14,7 @@ pub mod deployment_topology;
 pub mod event_topology;
 pub mod evidence;
 pub mod impact;
+pub mod mongo_query_safety;
 pub mod overview;
 pub mod pack_assembly;
 pub mod projection_impact;
@@ -54,6 +55,10 @@ pub use event_topology::{
 pub use impact::{
     BoundaryRole, EvidenceBand, ImpactError, ImpactMap, ImpactedFile, shared_contract_impact,
 };
+pub use mongo_query_safety::{
+    MongoQueryFinding, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH, RULE_UNSAFE_COERCION,
+    analyze_mongo_value,
+};
 pub use overview::{ModuleSummary, OverviewError, RepoOverview, build_overview};
 pub use pack_assembly::{
     CandidateKey, Pack, PackAssembler, PackItem, PackMode, QueryShape, SimplePackAssembler,
@@ -68,7 +73,7 @@ pub use proofs::{
     MAX_PROOFS_PER_REPO, ProofCaller, ProofEngineError, ProofEngineOptions, ProofEngineOutput,
     build_pack_proofs, derive_repo_sets, finalize_proofs, proof_strength,
 };
-pub use query::{GraphQuery, QueryError, TraversalStep};
+pub use query::{GraphQuery, QueryError, TraversalOutcome, TraversalStep};
 pub use semantic_health::{
     SemanticHealthError, SemanticHealthReport, SemanticLinkHealth, semantic_health_for_repo,
     semantic_health_for_workspace,
