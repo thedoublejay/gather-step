@@ -731,6 +731,11 @@ impl TantivySearchStore {
                 (Occur::Should, clause)
             })
             .collect();
+        // INTENTIONAL RECALL BEHAVIOR: ceil(n/2) is 1 for a 2-word query, so
+        // the last-resort fallback can match a symbol covering a single token
+        // (possibly via fuzzy/synonym). This trades exact-phrase precision for
+        // recall and only fires after both conjunctive passes returned empty;
+        // callers must not treat a non-empty fallback result as an exact match.
         let floor = words.len().div_ceil(2).max(1);
         let query: Box<dyn Query> =
             Box::new(BooleanQuery::with_minimum_required_clauses(clauses, floor));
@@ -1154,24 +1159,29 @@ fn infra_repo_penalty(symbol_exact_boost: f32, is_exported: bool, repo: &str) ->
 /// (e.g. "login" → authenticate). Intentionally small and high-signal; the
 /// original word is always searched too, so an empty list is a safe no-op.
 fn synonym_terms(word: &str) -> &'static [&'static str] {
-    const TABLE: &[(&[&str], &[&str])] = &[
-        (
-            &["login", "signin", "auth"],
-            &["authenticate", "authentication"],
-        ),
-        (&["logout", "signout"], &["deauthenticate"]),
-        (
-            &["paginate", "pagination", "paging"],
-            &["cursor", "offset", "page"],
-        ),
-        (&["delete", "remove"], &["destroy"]),
-        (&["create", "add"], &["insert"]),
-        (&["update", "edit"], &["modify"]),
-        (&["list", "fetch", "get"], &["find"]),
+    // Symmetric concept groups: any member expands to the whole group, so
+    // recall does not depend on which side of a synonym pair the user typed
+    // (e.g. "login" and "authenticate" reach each other). The word's own clause
+    // is also added by the caller; a duplicate OR clause is harmless.
+    const GROUPS: &[&[&str]] = &[
+        &["login", "signin", "auth", "authenticate", "authentication"],
+        &["logout", "signout", "deauthenticate"],
+        &[
+            "paginate",
+            "pagination",
+            "paging",
+            "cursor",
+            "offset",
+            "page",
+        ],
+        &["delete", "remove", "destroy"],
+        &["create", "add", "insert"],
+        &["update", "edit", "modify"],
+        &["list", "fetch", "get", "find"],
     ];
-    for (keys, synonyms) in TABLE {
-        if keys.iter().any(|key| word.eq_ignore_ascii_case(key)) {
-            return synonyms;
+    for group in GROUPS {
+        if group.iter().any(|member| word.eq_ignore_ascii_case(member)) {
+            return group;
         }
     }
     &[]
@@ -1241,6 +1251,10 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
         // Raised from 1.4× to break ties between multiple same-name hits where
         // secondary factors (BM25, recency) were pulling unrelated-repo symbols
         // above the user's likely target.
+        // NOTE: for a multi-word query (which contains spaces) this exact-match
+        // boost is always neutral — symbol names have no spaces, so neither
+        // comparison can hit. Term-coverage is the ordering signal for
+        // multi-word queries; this boost only differentiates single-token ones.
         let symbol_name_matches = scored.hit.symbol_name.eq_ignore_ascii_case(query);
         let symbol_token_matches = !symbol_name_matches
             && first_code_token(&scored.hit.symbol_name).eq_ignore_ascii_case(query);
@@ -1835,6 +1849,27 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].symbol_name, "authenticateUser");
+    }
+
+    #[test]
+    fn disjunction_fallback_synonyms_are_symmetric() {
+        let store = TantivySearchStore::open(temp_search_dir("synonym-symmetric"))
+            .expect("store should open");
+        let mut symbol = node("loginUser", "src/auth/login-user.ts");
+        symbol.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&symbol, 1))
+            .expect("document should index");
+
+        // Reverse of the previous test: the symbol uses "login" and the query
+        // uses "authenticate". Symmetric synonym groups must bridge either
+        // direction, so recall does not depend on which term the user typed.
+        let results = store
+            .search("authenticate workflow", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_name, "loginUser");
     }
 
     #[test]

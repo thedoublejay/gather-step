@@ -227,6 +227,15 @@ impl EdgeKind {
         self as u8
     }
 
+    /// Whether this edge represents a *consumer*/usage of the target rather
+    /// than a structural `Defines` (file→symbol) or `Imports` edge. Used to
+    /// count real consumers for reuse ranking and resolution scoring, so a
+    /// "consumer count" reflects callers/users, not raw inbound-edge volume.
+    #[must_use]
+    pub const fn is_consumer_edge(self) -> bool {
+        !matches!(self, Self::Defines | Self::Imports)
+    }
+
     /// Whether this edge kind represents a semantic bridge link
     /// connecting a real symbol to a virtual bridge node (`Route`, `Topic`,
     /// `SharedSymbol`, `PayloadContract`, …) — i.e. an edge whose correctness

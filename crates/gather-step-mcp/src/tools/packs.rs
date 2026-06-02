@@ -349,6 +349,12 @@ fn build_plan_change(
             exclusion_ledger.push(format!("Planning warning: {warning}"));
         }
     }
+    // Sections that are intentionally not computed yet are recorded here so an
+    // empty value is read as "not computed", not "nothing applies".
+    exclusion_ledger
+        .push("standards_to_preserve: not yet computed (no standards engine).".to_owned());
+    exclusion_ledger
+        .push("required_braingent_records: not yet computed (no record ingestion).".to_owned());
     let contract = PlanChangeContract {
         schema_version: PLAN_CHANGE_SCHEMA_VERSION,
         sections: PLAN_CHANGE_SECTIONS
@@ -363,7 +369,8 @@ fn build_plan_change(
         found,
         reuse_candidates,
         sibling_clone_targets,
-        // standards_to_preserve / required_braingent_records arrive with G7.
+        // Not yet computed; their absence is recorded in the exclusion ledger
+        // so an empty value is not read as "nothing applies".
         standards_to_preserve: Vec::new(),
         integration_checks,
         cross_repo_reachability: planning_proofs.to_vec(),
@@ -1311,12 +1318,28 @@ fn assemble_context_pack_for_symbol(
     // BEFORE the cut, then re-sort, so a canonical reusable symbol can be
     // promoted into the pack rather than discarded by the base-score truncate.
     if mode == PackMode::Planning {
+        // KNOWN CEILING: the reuse boost re-ranks the top `limit*5` base-ranked
+        // candidates; a canonical symbol ranked below that window for a very
+        // high-fan-out target is not rescued. The window keeps the boost (and
+        // the bounded re-sort below) cheap.
         let window = options.limit.saturating_mul(5).min(items.len());
         let graph = ctx.graph();
+        // Precompute distinct consumer counts in one pre-pass so the boost loop
+        // does map lookups instead of per-item graph I/O, deduped by symbol_id.
+        let mut consumer_counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for item in &items[..window] {
+            consumer_counts
+                .entry(item.symbol_id.clone())
+                .or_insert_with(|| consumer_count(graph, &item.symbol_id));
+        }
         apply_reuse_boost_with(&mut items[..window], |symbol_id| {
-            consumer_count(graph, symbol_id)
+            consumer_counts.get(symbol_id).copied().unwrap_or(0)
         });
-        sort_pack_items(&mut items);
+        // The boost only raised window items' scores, and the window holds the
+        // top base-ranked candidates, so every boosted item still outranks the
+        // untouched tail — re-sorting just the window keeps global order.
+        sort_pack_items(&mut items[..window]);
     }
 
     items.truncate(options.limit);
@@ -2721,12 +2744,21 @@ fn populate_evidence_chain<S: gather_step_storage::GraphStore>(
 /// local one-off. Markers are matched as-is (paths are conventionally
 /// lowercase), avoiding an allocation.
 fn is_shared_module_path(file_path: &str) -> bool {
+    // A path heuristic spanning common JS, Rust, Go, and Python shared-module
+    // layouts. NOTE: this is a heuristic; the pipeline-wide canonical signal
+    // (pack_assembly's `Canonical`) is the longer-term source of truth, pending
+    // threading it onto `PackItem`.
     const MARKERS: &[&str] = &[
         "shared/",
         "design-system",
-        "packages/ui",
+        "packages/",
         "/ui/components",
         "@shared",
+        "common/",
+        "/lib/",
+        "libs/",
+        "internal/",
+        "/pkg/",
     ];
     MARKERS.iter().any(|marker| file_path.contains(marker))
 }
@@ -2759,7 +2791,7 @@ fn consumer_count<S: gather_step_storage::GraphStore>(graph: &S, symbol_id: &str
     };
     incoming
         .iter()
-        .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+        .filter(|edge| edge.kind.is_consumer_edge())
         .map(|edge| edge.source)
         .collect::<std::collections::BTreeSet<_>>()
         .len()
@@ -3814,12 +3846,12 @@ fn pack_resolution_edge_score(ctx: &McpContext, symbol_id: &str) -> Result<i32, 
     let outgoing = ctx.graph().get_outgoing(node_id)?;
     let incoming_score = incoming
         .iter()
-        .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+        .filter(|edge| edge.kind.is_consumer_edge())
         .count()
         .min(6);
     let outgoing_score = outgoing
         .iter()
-        .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+        .filter(|edge| edge.kind.is_consumer_edge())
         .count()
         .min(6);
     let mut boundary_edges = 0usize;
@@ -5640,6 +5672,17 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("capped") && entry.contains('4')),
             "ledger should record the capped fan-out: {:?}",
+            plan.contract.exclusion_ledger
+        );
+
+        // Sections that are not yet computed are recorded, so an empty value is
+        // never silently read as "nothing applies".
+        assert!(
+            plan.contract
+                .exclusion_ledger
+                .iter()
+                .any(|entry| entry.contains("standards_to_preserve")),
+            "ledger should record not-yet-computed sections: {:?}",
             plan.contract.exclusion_ledger
         );
     }
