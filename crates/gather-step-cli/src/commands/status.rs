@@ -6,8 +6,9 @@ use gather_step_analysis::{
     GraphQuery, SemanticHealthReport, semantic_health_for_repo, semantic_health_for_workspace,
 };
 use gather_step_core::{DepthLevel, RegistryStore};
+use gather_step_git::{GitHistoryIndexer, GitRepoSource, IndexFreshness};
 use gather_step_mcp::output::redact::relativize_to_workspace;
-use gather_step_storage::{ContextPackStats, GraphStore, StorageCoordinator};
+use gather_step_storage::{ContextPackStats, GraphStore, MetadataStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -37,6 +38,9 @@ struct RepoStatusOutput {
     path: String,
     path_exists: bool,
     depth_level: String,
+    /// Query-time index freshness vs the working tree's HEAD (A13): one of
+    /// `fresh`, `stale`, `never_indexed`, or `unknown` (git unavailable).
+    freshness: String,
     last_indexed_at: Option<String>,
     registry_file_count: u64,
     registry_symbol_count: u64,
@@ -190,12 +194,18 @@ pub(crate) fn execute(
                 unresolved_inputs,
             )
             .with_context(|| format!("computing semantic health for `{repo}`"))?;
+            let indexed_sha = storage
+                .metadata()
+                .get_last_commit_sha(repo)
+                .with_context(|| format!("loading indexed commit SHA for `{repo}`"))?;
+            let freshness = repo_freshness(repo, &registered.path, indexed_sha.as_deref());
 
             Ok(RepoStatusOutput {
                 repo: repo.clone(),
                 path: relativize_to_workspace(&registered.path, workspace_path),
                 path_exists: registered.path.exists(),
                 depth_level: depth_label(registered.depth_level).to_owned(),
+                freshness,
                 last_indexed_at: registered.last_indexed_at.clone(),
                 registry_file_count: registered.file_count,
                 registry_symbol_count: registered.symbol_count,
@@ -268,6 +278,7 @@ pub(crate) fn execute(
     repo_table.set_header(vec![
         "Repo",
         "Depth",
+        "Freshness",
         "Indexed",
         "Files",
         "Symbols",
@@ -280,6 +291,7 @@ pub(crate) fn execute(
         repo_table.add_row(vec![
             Cell::new(&repo.repo),
             Cell::new(&repo.depth_level),
+            Cell::new(&repo.freshness),
             Cell::new(repo.last_indexed_at.as_deref().unwrap_or("never")),
             Cell::new(format!(
                 "{}/{}",
@@ -328,6 +340,25 @@ fn format_semantic_summary(health: &SemanticHealthReport) -> String {
         health.payload_contract_links.total_targets,
         health.orphan_topics
     )
+}
+
+/// Classify a repo's index freshness vs its current git HEAD (A13). Opening
+/// git is best-effort: a non-git path or git failure yields `unknown` rather
+/// than failing the whole status command.
+fn repo_freshness(repo: &str, path: &std::path::Path, indexed_sha: Option<&str>) -> String {
+    let indexer = GitHistoryIndexer::new(GitRepoSource::from_path(path), repo);
+    match indexer.index_freshness(indexed_sha) {
+        Ok(freshness) => freshness_label(&freshness).to_owned(),
+        Err(_) => "unknown".to_owned(),
+    }
+}
+
+fn freshness_label(freshness: &IndexFreshness) -> &'static str {
+    match freshness {
+        IndexFreshness::Fresh { .. } => "fresh",
+        IndexFreshness::Stale { .. } => "stale",
+        IndexFreshness::NeverIndexed { .. } => "never_indexed",
+    }
 }
 
 fn depth_label(depth: DepthLevel) -> &'static str {
@@ -469,6 +500,41 @@ mod tests {
             payload["event"].as_str(),
             Some("status_completed"),
             "status payload should have event=status_completed"
+        );
+        // A13: every repo row carries a query-time index-freshness verdict.
+        for repo in repos {
+            let freshness = repo["freshness"]
+                .as_str()
+                .expect("each repo should carry a freshness verdict");
+            assert!(
+                matches!(freshness, "fresh" | "stale" | "never_indexed" | "unknown"),
+                "unexpected freshness verdict: {freshness}"
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_label_maps_every_variant() {
+        use gather_step_git::IndexFreshness;
+
+        assert_eq!(
+            super::freshness_label(&IndexFreshness::Fresh {
+                head_sha: "abc".to_owned()
+            }),
+            "fresh"
+        );
+        assert_eq!(
+            super::freshness_label(&IndexFreshness::Stale {
+                indexed_sha: "old".to_owned(),
+                head_sha: "new".to_owned()
+            }),
+            "stale"
+        );
+        assert_eq!(
+            super::freshness_label(&IndexFreshness::NeverIndexed {
+                head_sha: "abc".to_owned()
+            }),
+            "never_indexed"
         );
     }
 }
