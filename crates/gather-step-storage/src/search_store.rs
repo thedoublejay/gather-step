@@ -1134,6 +1134,25 @@ fn infra_repo_penalty(symbol_exact_boost: f32, is_exported: bool, repo: &str) ->
     if is_infra { 0.85 } else { 1.0 }
 }
 
+/// Term-coverage boost (S2).
+///
+/// Rewards hits whose symbol-name tokens cover a larger fraction of the query's
+/// tokens, so a higher-coverage match outranks a lower-coverage one at equal
+/// base score. Scales linearly up to +25% at full coverage. Callers apply this
+/// only for multi-word queries; for a single identifier it is meaningless.
+fn query_term_coverage_boost(query_tokens: &[String], symbol_name: &str) -> f32 {
+    if query_tokens.is_empty() {
+        return 1.0;
+    }
+    let symbol_tokens = tokenize_camel_case(symbol_name);
+    let covered = query_tokens
+        .iter()
+        .filter(|qt| symbol_tokens.iter().any(|st| st == *qt))
+        .count();
+    let coverage = covered as f32 / query_tokens.len() as f32;
+    1.0 + coverage * 0.25
+}
+
 fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
     let newest_timestamp = hits
         .iter()
@@ -1149,6 +1168,10 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
     let query_is_pascal = query.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     // Tokenize the query once for the file-path token match boost.
     let query_tokens = tokenize_camel_case(query);
+    // Coverage boost only applies to genuine multi-word capability queries,
+    // mirroring the disjunction fallback — a single identifier must not be
+    // re-ranked by partial token overlap.
+    let multiword_query = query.split_whitespace().count() >= 2;
 
     for scored in hits.iter_mut() {
         let export_boost = if scored.hit.is_exported { 1.10 } else { 1.0 };
@@ -1217,6 +1240,13 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
         let infra_penalty =
             infra_repo_penalty(symbol_exact_boost, scored.hit.is_exported, &scored.hit.repo);
 
+        // term-coverage boost (S2) — higher query-term coverage ranks higher.
+        let coverage_boost = if multiword_query {
+            query_term_coverage_boost(&query_tokens, &scored.hit.symbol_name)
+        } else {
+            1.0
+        };
+
         scored.hit.adjusted_score = scored.base_score
             * export_boost
             * exact_boost
@@ -1226,7 +1256,8 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
             * pascal_type_boost
             * path_boost
             * hook_boost
-            * infra_penalty;
+            * infra_penalty
+            * coverage_boost;
     }
 
     hits.sort_by(|left, right| {
@@ -1663,6 +1694,42 @@ mod tests {
             results.is_empty(),
             "single-identifier miss must not OR-match a token-sharing sibling"
         );
+    }
+
+    #[test]
+    fn rerank_prefers_higher_query_term_coverage_on_equal_base_score() {
+        use super::{ScoredSearchHit, SearchHit, rerank_hits};
+
+        fn scored(symbol: &str, base: f32) -> ScoredSearchHit {
+            ScoredSearchHit {
+                hit: SearchHit {
+                    node_id: node_id("service-a", "src/x.ts", NodeKind::Function, symbol),
+                    repo: "service-a".to_owned(),
+                    file_path: String::new(),
+                    symbol_name: symbol.to_owned(),
+                    node_kind: NodeKind::Function,
+                    adjusted_score: 0.0,
+                    exact_match: false,
+                    is_exported: true,
+                    lang: "typescript".to_owned(),
+                },
+                base_score: base,
+                last_modified: 1,
+                file_path_stored: String::new(),
+            }
+        }
+
+        // Equal base score and identical flags. Against "email notification
+        // delivery", `dispatchEmailNotification` covers two query terms while
+        // `deliveryService` covers one. The higher-coverage hit must rank first
+        // even though it is listed second in the input.
+        let mut hits = vec![
+            scored("deliveryService", 1.0),
+            scored("dispatchEmailNotification", 1.0),
+        ];
+        rerank_hits(&mut hits, "email notification delivery");
+
+        assert_eq!(hits[0].hit.symbol_name, "dispatchEmailNotification");
     }
 
     #[test]
