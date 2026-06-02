@@ -5,6 +5,28 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.2.1 (2026-06-02)
+
+Release status: **prepared**.
+
+Patch on top of v4.2.0. Raises the Rust toolchain to 1.96.0, refreshes the remaining Cargo and GitHub Actions dependencies (including dependencies that the toolchain bump unblocks), and clears a new compiler lint. No user-visible behavior changes.
+
+### Changed
+
+- Raised the Rust toolchain and MSRV `1.94.1 → 1.96.0` (`rust-toolchain.toml`, `rust-version`, and CI/release workflow toolchains).
+- Bumped `rusqlite 0.39.0 → 0.40.0`, unblocked by the toolchain bump — `libsqlite3-sys 0.38` requires the `cfg_select!` macro stabilized in Rust 1.95.
+- Bumped the exact-pinned Oxc parser stack `0.132.0 → 0.134.0`.
+- Bumped further Cargo dependencies: `tree-sitter 0.26.8 → 0.26.9`, `hashbrown 0.17.0 → 0.17.1`, `gix 0.83 → 0.84`, `mimalloc 0.1.50 → 0.1.52`, plus a transitive lockfile refresh.
+- Bumped GitHub Actions: `crate-ci/typos v1.45.2 → v1.47.0` and `taiki-e/install-action v2.75.25 → v2.81.2`.
+
+### Fixed
+
+- Replaced a manual `Option::zip` in event-topology scoring to satisfy the new `clippy::manual_option_zip` lint in Rust 1.96. No behavior change.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.2.1`.
+
 ## v4.2.0 (2026-05-29)
 
 Release status: **released**.
