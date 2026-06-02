@@ -457,6 +457,48 @@ mod tests {
     }
 
     #[test]
+    fn traverse_with_provenance_flags_fan_out_truncation() {
+        let temp_db = TempDb::new("query-fan-out");
+        let store = test_store(temp_db.path());
+        let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
+        let hub = node("service-a", "src/a.ts", NodeKind::Function, "hub", 0);
+
+        // A hub node with more out-edges than DEFAULT_FANOUT_CAP (256) must trip
+        // the truncation signal rather than silently exploring a bounded subset.
+        let fan_out = 300_u16;
+        let mut nodes = vec![file.clone(), hub.clone()];
+        let mut edges = Vec::new();
+        for ordinal in 1..=fan_out {
+            let leaf = node(
+                "service-a",
+                "src/a.ts",
+                NodeKind::Function,
+                &format!("leaf{ordinal}"),
+                ordinal,
+            );
+            edges.push(edge(hub.id, leaf.id, file.id));
+            nodes.push(leaf);
+        }
+        store
+            .bulk_insert(&nodes, &edges)
+            .expect("graph should write");
+
+        let query = GraphQuery::new(&store);
+        let outcome = query
+            .traverse_with_provenance(hub.id, &[EdgeKind::Calls], 2, None)
+            .expect("traversal should succeed");
+        assert!(
+            outcome.truncated,
+            "fan-out above the cap must flag truncated"
+        );
+        assert!(
+            outcome.steps.len() <= 256,
+            "truncated traversal must not exceed the fan-out cap: {}",
+            outcome.steps.len()
+        );
+    }
+
+    #[test]
     fn counts_nodes_and_edges_by_kind() {
         let temp_db = TempDb::new("counts");
         let store = test_store(temp_db.path());

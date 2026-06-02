@@ -1,5 +1,5 @@
 //! Regression: `batch_query` must route `plan_change` to the typed
-//! nine-section product (`PlanChangeResponse`), not the legacy planning-pack
+//! twelve-section product (`PlanChangeResponse`), not the legacy planning-pack
 //! `ContextPackResponse`. The direct MCP route and the batch route must agree.
 
 use std::sync::Arc;
@@ -44,5 +44,22 @@ async fn batch_query_plan_change_returns_typed_product() {
     assert!(
         body.contains("verification_plan") && body.contains("\"sections\""),
         "batch plan_change must include the contract section manifest: {body}"
+    );
+    // The newer sections must round-trip through the batch route too: DSO1
+    // (display ownership) and B1/B3/WS-16 (the pass-2 + v1-completeness
+    // checklists), plus the current contract schema version.
+    for section in [
+        "display_ownership_checks",
+        "pass_two_gap_dimensions",
+        "v1_completeness_checklist",
+    ] {
+        assert!(
+            body.contains(section),
+            "batch plan_change missing section `{section}`: {body}"
+        );
+    }
+    assert!(
+        body.contains("\"schema_version\":3"),
+        "batch plan_change must carry the current contract schema version: {body}"
     );
 }
