@@ -23,7 +23,7 @@ use crate::{
         orientation::{RepoSummary, list_repos},
         packs::{
             ContextPackRequest, ModePackRequest, change_impact_pack_tool, context_pack_tool,
-            debug_pack_tool, fix_pack_tool, planning_pack_tool, review_pack_tool,
+            debug_pack_tool, fix_pack_tool, planning_pack_tool, review_pack_tool, run_plan_change,
         },
         repo_intelligence::{
             DeadCodeRequest, RepoScopedRequest, WhoOwnsRequest, get_conventions_tool,
@@ -513,11 +513,12 @@ fn execute_batch_op(ctx: &McpContext, op: BatchQueryOperation) -> BatchQueryResu
                 context_pack_tool(ctx, args).and_then(to_value)
             })
         }
-        "planning_pack" | "plan_change" => {
-            parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
-                planning_pack_tool(ctx, args).and_then(to_value)
-            })
-        }
+        "planning_pack" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
+            planning_pack_tool(ctx, args).and_then(to_value)
+        }),
+        "plan_change" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
+            run_plan_change(ctx, args).and_then(to_value)
+        }),
         "debug_pack" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
             debug_pack_tool(ctx, args).and_then(to_value)
         }),
