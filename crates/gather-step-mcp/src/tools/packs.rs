@@ -208,18 +208,19 @@ pub struct ContextPackResponse {
 }
 
 /// Schema version of the [`PlanChangeResponse`] contract. Bump on any change to
-/// the section set or contract shape.
-const PLAN_CHANGE_SCHEMA_VERSION: u8 = 1;
+/// the section set or contract shape. v2 adds `display_ownership_checks` (DSO1).
+const PLAN_CHANGE_SCHEMA_VERSION: u8 = 2;
 
-/// The nine fixed `plan_change` section names, in canonical order. The contract
+/// The fixed `plan_change` section names, in canonical order. The contract
 /// manifest must equal this exactly so consumers (and the G7 gate) can assert
 /// completeness deterministically.
-const PLAN_CHANGE_SECTIONS: [&str; 9] = [
+const PLAN_CHANGE_SECTIONS: [&str; 10] = [
     "reuse_candidates",
     "sibling_clone_targets",
     "standards_to_preserve",
     "integration_checks",
     "cross_repo_reachability",
+    "display_ownership_checks",
     "write_path_or_state_machine_risks",
     "required_braingent_records",
     "open_unknowns",
@@ -241,7 +242,7 @@ pub struct PlanChangeContract {
 /// Typed `plan_change` product (WS-3 / E1).
 ///
 /// A distinct response shape — not an alias for the planning pack — with the
-/// nine fixed planning sections. v1 projects the existing planning-pack data
+/// ten fixed planning sections. v1 projects the existing planning-pack data
 /// into these sections; later slices (B7 proactive queries, G7 evidentiary
 /// fields) enrich them. Every section is always present (possibly empty) so the
 /// contract is stable for consumers and the G7 gate.
@@ -259,6 +260,10 @@ pub struct PlanChangeResponse {
     pub integration_checks: Vec<String>,
     /// Cross-repo reachability proofs (producer/consumer edges) for the target.
     pub cross_repo_reachability: Vec<serde_json::Value>,
+    /// DSO1: for each cross-service reference, the display-ownership question —
+    /// confirm display fields come from the owner service (snapshot/API), not a
+    /// direct cross-service DB lookup, and that access control stays in the owner.
+    pub display_ownership_checks: Vec<String>,
     pub write_path_or_state_machine_risks: Vec<String>,
     pub required_braingent_records: Vec<String>,
     pub open_unknowns: Vec<String>,
@@ -312,6 +317,19 @@ fn build_plan_change(
     for repo in &change_impact.probable_downstream_repos {
         integration_checks.push(format!(
             "Integration: check probable downstream `{repo}` (partial evidence) for impact."
+        ));
+    }
+
+    // DSO1: every cross-service reference raises the display-ownership question
+    // as a named planning dimension (REG-13833 — a cross-service display lookup
+    // was added without planning who owns the field).
+    let mut display_ownership_checks = Vec::new();
+    for caller in &change_impact.cross_repo_callers {
+        display_ownership_checks.push(format!(
+            "Display ownership: cross-service ref `{}::{}` — confirm display fields are sourced \
+             from the owner service (snapshot/API), not a direct cross-service DB lookup, and \
+             that access control stays in the owner.",
+            caller.repo, caller.symbol_name
         ));
     }
 
@@ -374,6 +392,7 @@ fn build_plan_change(
         standards_to_preserve: Vec::new(),
         integration_checks,
         cross_repo_reachability: planning_proofs.to_vec(),
+        display_ownership_checks,
         write_path_or_state_machine_risks,
         required_braingent_records: Vec::new(),
         open_unknowns: unresolved_gaps.to_vec(),
@@ -410,7 +429,7 @@ pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
 }
 
 /// Build the typed `plan_change` product (WS-3 / E1): run the planning pack,
-/// then project its data into the nine fixed sections.
+/// then project its data into the ten fixed sections.
 pub fn run_plan_change(
     ctx: &McpContext,
     request: ModePackRequest,
@@ -5601,6 +5620,71 @@ mod tests {
         // Contract: sections awaiting later work still exist (empty).
         assert!(plan.standards_to_preserve.is_empty());
         assert!(plan.required_braingent_records.is_empty());
+    }
+
+    #[test]
+    fn plan_change_surfaces_display_ownership_for_cross_service_refs() {
+        use super::{ChangeImpactSummary, build_plan_change};
+
+        let change_impact = ChangeImpactSummary {
+            cross_repo_callers: vec![super::CrossRepoCaller {
+                file_path: "src/action_hub.ts".to_owned(),
+                line_start: None,
+                repo: "label-review".to_owned(),
+                symbol_id: "id_hub".to_owned(),
+                symbol_kind: "function".to_owned(),
+                symbol_name: "renderActionHub".to_owned(),
+                evidence: None,
+            }],
+            ..Default::default()
+        };
+        let plan = build_plan_change(
+            "getOrderDisplayName",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &change_impact,
+            None,
+        );
+
+        // DSO1: cross-service references raise the display-ownership question as
+        // a named section, citing the owning service.
+        assert!(
+            plan.display_ownership_checks
+                .iter()
+                .any(|check| check.contains("label-review")),
+            "display ownership not surfaced for cross-service ref: {:?}",
+            plan.display_ownership_checks
+        );
+        // The new section is part of the deterministic contract manifest.
+        assert!(
+            plan.contract
+                .sections
+                .iter()
+                .any(|s| s == "display_ownership_checks")
+        );
+    }
+
+    #[test]
+    fn plan_change_omits_display_ownership_without_cross_service_refs() {
+        use super::{ChangeImpactSummary, build_plan_change};
+
+        let plan = build_plan_change(
+            "localOnly",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+        assert!(
+            plan.display_ownership_checks.is_empty(),
+            "no cross-service refs should mean no display-ownership prompts"
+        );
     }
 
     #[test]

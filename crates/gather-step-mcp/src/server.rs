@@ -784,7 +784,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "plan_change",
-        description = "Return a typed plan-change product (nine planning sections) for a target symbol.",
+        description = "Return a typed plan-change product (ten planning sections) for a target symbol.",
         annotations(read_only_hint = true)
     )]
     pub async fn plan_change_tool(
