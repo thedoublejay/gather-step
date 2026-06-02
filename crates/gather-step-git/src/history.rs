@@ -163,6 +163,44 @@ pub enum HistorySyncOutcome {
     NoChange { repo: String, head_sha: String },
 }
 
+/// Query-time freshness of an indexed repo relative to the working tree's
+/// current HEAD (A13). Distinct from [`HistorySyncOutcome`], which describes an
+/// indexing run; this answers "can I trust what the index says right now?" so
+/// a trace/search against a stale index can be flagged instead of silently
+/// answering about code that no longer matches the tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IndexFreshness {
+    /// The indexed commit matches the current HEAD — the index is current.
+    Fresh { head_sha: String },
+    /// The index reflects an older commit than the working tree's HEAD.
+    Stale {
+        indexed_sha: String,
+        head_sha: String,
+    },
+    /// No commit was recorded for this repo — it has never been indexed.
+    NeverIndexed { head_sha: String },
+}
+
+/// Classify index freshness by comparing the recorded indexed commit against
+/// the repository's current HEAD. Pure so it is unit-testable without git or a
+/// metadata store.
+#[must_use]
+pub fn classify_freshness(indexed_sha: Option<&str>, head_sha: &str) -> IndexFreshness {
+    match indexed_sha {
+        None => IndexFreshness::NeverIndexed {
+            head_sha: head_sha.to_owned(),
+        },
+        Some(sha) if sha == head_sha => IndexFreshness::Fresh {
+            head_sha: head_sha.to_owned(),
+        },
+        Some(sha) => IndexFreshness::Stale {
+            indexed_sha: sha.to_owned(),
+            head_sha: head_sha.to_owned(),
+        },
+    }
+}
+
 impl HistorySyncOutcome {
     #[must_use]
     pub fn repo(&self) -> &str {
@@ -348,6 +386,17 @@ impl GitHistoryIndexer {
     pub fn head_sha(&self) -> Result<String, GitHistoryError> {
         let repo = self.open_repo()?;
         Ok(repo.head_id().map_err(Box::new)?.detach().to_string())
+    }
+
+    /// Classify how fresh an indexed repo is relative to its current HEAD (A13).
+    /// `indexed_sha` is the commit recorded for the repo (e.g. from
+    /// `MetadataStore::get_last_commit_sha`); `None` means never indexed.
+    pub fn index_freshness(
+        &self,
+        indexed_sha: Option<&str>,
+    ) -> Result<IndexFreshness, GitHistoryError> {
+        let head = self.head_sha()?;
+        Ok(classify_freshness(indexed_sha, &head))
     }
 
     /// Walks the repository, persists the new commits + per-file deltas via
@@ -1074,8 +1123,34 @@ mod tests {
 
     use super::{
         CommitFact, CommitFileChangeKind, CommitFileDelta, GitHistoryIndexer, GitRepoSource,
-        HistorySyncOutcome, normalize_author_email_bytes,
+        HistorySyncOutcome, IndexFreshness, classify_freshness, normalize_author_email_bytes,
     };
+
+    #[test]
+    fn classify_freshness_distinguishes_fresh_stale_and_never_indexed() {
+        // Indexed commit matches HEAD => fresh.
+        assert_eq!(
+            classify_freshness(Some("abc123"), "abc123"),
+            IndexFreshness::Fresh {
+                head_sha: "abc123".to_owned()
+            }
+        );
+        // Indexed commit older than HEAD => stale, carrying both SHAs.
+        assert_eq!(
+            classify_freshness(Some("old111"), "new222"),
+            IndexFreshness::Stale {
+                indexed_sha: "old111".to_owned(),
+                head_sha: "new222".to_owned(),
+            }
+        );
+        // No recorded commit => never indexed.
+        assert_eq!(
+            classify_freshness(None, "abc123"),
+            IndexFreshness::NeverIndexed {
+                head_sha: "abc123".to_owned()
+            }
+        );
+    }
 
     /// Minimal hand-rolled `TempDir` that deletes itself on drop. Avoids
     /// adding a `tempfile` dev-dependency.
