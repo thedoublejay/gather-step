@@ -9,7 +9,10 @@ use clap::Parser;
 use dhat::Alloc;
 use gather_step::app::{self, AppContext};
 use gather_step::commands::{self, Cli};
-use gather_step::errors::format_operator_error;
+use gather_step::errors::{
+    GRAPH_LOCKED_EXIT_CODE, format_operator_error, graph_lock_contention,
+    graph_locked_json_disclosure,
+};
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 
@@ -49,14 +52,34 @@ async fn run_main() -> Result<commands::CliOutcome> {
     commands::run(cli, app).await
 }
 
-/// Print the operator-facing error to stderr and return exit code 1.
+/// Print the operator-facing error to stderr and return an exit code.
+///
+/// Graph lock contention (REL1) returns a dedicated exit code and, under
+/// `--json`, a `degraded: graph_locked` disclosure on stdout so a blocked read
+/// can never be mistaken for an empty-but-successful result. All other failures
+/// return exit code 1.
 ///
 /// Returning `ExitCode` rather than calling `std::process::exit(1)` lets
 /// tokio's runtime tear down cleanly and lets stdio buffers flush — important
 /// for `pr-review` (which prints a structured report on stdout) and any
 /// command that emits trailing tracing lines.
 fn print_operator_error_and_code(error: &Error) -> ExitCode {
+    if graph_lock_contention(error) {
+        if wants_json_output() {
+            let mut stdout = std::io::stdout().lock();
+            let _ = writeln!(stdout, "{}", graph_locked_json_disclosure(error));
+        }
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{}", format_operator_error(error));
+        return ExitCode::from(GRAPH_LOCKED_EXIT_CODE);
+    }
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "{}", format_operator_error(error));
     ExitCode::from(1)
+}
+
+/// Best-effort check of the raw argv for the global `--json` flag. Used only on
+/// the error path, where the parsed `Cli` is unavailable.
+fn wants_json_output() -> bool {
+    std::env::args().any(|arg| arg == "--json")
 }
