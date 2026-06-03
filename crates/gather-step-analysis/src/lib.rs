@@ -21,6 +21,7 @@ pub mod projection_impact;
 pub mod proofs;
 pub mod query;
 pub mod semantic_health;
+pub mod shared_component_usage;
 pub mod shared_contract;
 pub mod transport;
 
@@ -77,6 +78,9 @@ pub use query::{GraphQuery, QueryError, TraversalOutcome, TraversalStep};
 pub use semantic_health::{
     SemanticHealthError, SemanticHealthReport, SemanticLinkHealth, semantic_health_for_repo,
     semantic_health_for_workspace,
+};
+pub use shared_component_usage::{
+    ReuseOpportunity, SharedComponentError, analyze_shared_component_reuse, is_design_system_path,
 };
 pub use shared_contract::{
     guard_class_name_for_anchor, looks_like_guard_entrypoint, peer_matches_guard_class_name,
