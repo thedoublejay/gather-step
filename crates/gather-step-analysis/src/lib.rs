@@ -9,17 +9,21 @@ pub mod contract_drift;
 pub mod conventions;
 pub mod cross_repo;
 pub mod crud_trace;
+pub mod cycles;
 pub mod dead_code;
 pub mod deployment_topology;
 pub mod event_topology;
 pub mod evidence;
 pub mod impact;
+pub mod mock_leakage;
+pub mod mongo_query_safety;
 pub mod overview;
 pub mod pack_assembly;
 pub mod projection_impact;
 pub mod proofs;
 pub mod query;
 pub mod semantic_health;
+pub mod shared_component_usage;
 pub mod shared_contract;
 pub mod transport;
 
@@ -36,6 +40,7 @@ pub use cross_repo::{
 pub use crud_trace::{
     CrudTrace, CrudTraceEntry, CrudTraceError, CrudTraceRole, trace_crud_route, trace_crud_symbol,
 };
+pub use cycles::{Cycle, CycleError, find_cycles};
 pub use dead_code::{
     ConfidenceBand, DeadCodeError, DeadCodeFinding, DeadCodeReport, DetectorBasis, find_dead_code,
     find_dead_code_with_manifest,
@@ -54,6 +59,11 @@ pub use event_topology::{
 pub use impact::{
     BoundaryRole, EvidenceBand, ImpactError, ImpactMap, ImpactedFile, shared_contract_impact,
 };
+pub use mock_leakage::{MockLeakage, MockLeakageError, find_mock_leakage, is_mock_path};
+pub use mongo_query_safety::{
+    MongoQueryFinding, RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH,
+    RULE_UNSAFE_COERCION, analyze_atlas_index_drift, analyze_mongo_value,
+};
 pub use overview::{ModuleSummary, OverviewError, RepoOverview, build_overview};
 pub use pack_assembly::{
     CandidateKey, Pack, PackAssembler, PackItem, PackMode, QueryShape, SimplePackAssembler,
@@ -68,10 +78,13 @@ pub use proofs::{
     MAX_PROOFS_PER_REPO, ProofCaller, ProofEngineError, ProofEngineOptions, ProofEngineOutput,
     build_pack_proofs, derive_repo_sets, finalize_proofs, proof_strength,
 };
-pub use query::{GraphQuery, QueryError, TraversalStep};
+pub use query::{GraphQuery, QueryError, TraversalOutcome, TraversalStep};
 pub use semantic_health::{
     SemanticHealthError, SemanticHealthReport, SemanticLinkHealth, semantic_health_for_repo,
     semantic_health_for_workspace,
+};
+pub use shared_component_usage::{
+    ReuseOpportunity, SharedComponentError, analyze_shared_component_reuse, is_design_system_path,
 };
 pub use shared_contract::{
     guard_class_name_for_anchor, looks_like_guard_entrypoint, peer_matches_guard_class_name,

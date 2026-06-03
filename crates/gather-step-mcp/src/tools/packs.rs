@@ -207,6 +207,247 @@ pub struct ContextPackResponse {
     pub meta: Option<ContextPackMeta>,
 }
 
+const PLAN_CHANGE_SCHEMA_VERSION: u8 = 3;
+
+const PLAN_CHANGE_SECTIONS: [&str; 12] = [
+    "reuse_candidates",
+    "sibling_clone_targets",
+    "standards_to_preserve",
+    "integration_checks",
+    "cross_repo_reachability",
+    "display_ownership_checks",
+    "write_path_or_state_machine_risks",
+    "required_braingent_records",
+    "open_unknowns",
+    "pass_two_gap_dimensions",
+    "v1_completeness_checklist",
+    "verification_plan",
+];
+
+const PASS_TWO_GAP_DIMENSIONS: [&str; 8] = [
+    "State machine: does this add/alter a status or lifecycle state? Enumerate transitions and conflict handling.",
+    "Token/URL security: are tokens, signed URLs, or IDs exposed or accepted? Validate scope, expiry, and tampering.",
+    "Dependent ticket: is there upstream/downstream work this depends on or unblocks? Link it.",
+    "Atomicity: do multi-document or multi-step writes need a transaction or idempotency guard?",
+    "Index-per-field: does any new query/filter field need an index? Confirm coverage.",
+    "Event contract: grep producers and consumers of any touched event/topic for set-difference drift.",
+    "Audit category: does this mutating path need an audit-log entry with the correct category?",
+    "Notification: should this change emit or suppress a user/system notification?",
+];
+
+const V1_COMPLETENESS_CHECKLIST: [&str; 19] = [
+    "Scale test: does it hold at production data volume? → verify: run against a realistic-size fixture.",
+    "Failure-path lifecycle: are partial-failure and retry paths handled? → verify: exercise the failure branch.",
+    "Consumer reachability: does the output actually reach every consumer? → verify: trace producer→consumer.",
+    "Downstream coupling: which downstream systems depend on this shape? → verify: enumerate consumers.",
+    "Delete/invalidate: are deletes and cache/index invalidations handled? → verify: delete-path test.",
+    "Single source of truth: is the value derived once, not duplicated? → verify: grep for parallel computations.",
+    "Non-functional: latency/memory/throughput within budget? → verify: measure against baseline.",
+    "Exclusion scope: what is explicitly out of scope? → verify: state exclusions in the PR.",
+    "Cross-commit regression: could a later commit re-break this? → verify: add a regression test.",
+    "Deferred as follow-ups: are deferrals recorded as tickets? → verify: link follow-up issues.",
+    "Prior-release correctness/security gate: did a prior release defer hardening here? → verify: re-check the deferred item.",
+    "Partial-migration tail: zero residual call-sites workspace-wide? → verify: grep shows no residual callers.",
+    "Release-profile divergence: verify flags on the installed profile. → verify: check [profile.dist].",
+    "Teardown under-spec: disposable artifacts specify creation/reuse-key/safe-delete/in-flight-writer guard. → verify: all four present.",
+    "Schema-version forward-compat: a version-mismatch refusal/rebuild path exists. → verify: mismatch is refused, not misread.",
+    "Derived-field blast radius: enumerate source, projection writer, all readers, filters, search/index, backfill. → verify: all six listed.",
+    "Cross-service ownership: should the owner publish a snapshot/resolver before adopting a join? → verify: question answered.",
+    "Lossy rollback: enumerate unrecoverable rows/fields. → verify: rollback notes list them.",
+    "Implied-surface sweep: events/audit/notification/rate-limit/idempotency even when the spec is silent. → verify: sweep performed.",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanChangeContract {
+    pub schema_version: u8,
+    pub sections: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusion_ledger: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PlanChangeResponse {
+    pub target: String,
+    pub found: bool,
+    pub reuse_candidates: Vec<PackItem>,
+    pub sibling_clone_targets: Vec<PackItem>,
+    pub standards_to_preserve: Vec<String>,
+    pub integration_checks: Vec<String>,
+    pub cross_repo_reachability: Vec<serde_json::Value>,
+    pub display_ownership_checks: Vec<String>,
+    pub write_path_or_state_machine_risks: Vec<String>,
+    pub required_braingent_records: Vec<String>,
+    pub open_unknowns: Vec<String>,
+    pub pass_two_gap_dimensions: Vec<String>,
+    pub v1_completeness_checklist: Vec<String>,
+    pub verification_plan: Vec<String>,
+    pub contract: PlanChangeContract,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ContextPackMeta>,
+}
+
+fn build_plan_change(
+    target: &str,
+    found: bool,
+    items: &[PackItem],
+    unresolved_gaps: &[String],
+    planning_proofs: &[serde_json::Value],
+    next_steps: &[String],
+    change_impact: &ChangeImpactSummary,
+    meta: Option<ContextPackMeta>,
+) -> PlanChangeResponse {
+    let mut reuse_candidates = Vec::new();
+    let mut sibling_clone_targets = Vec::new();
+    for item in items {
+        if item.category == "target" {
+            continue;
+        }
+        if is_shared_module_path(&item.file_path) {
+            reuse_candidates.push(item.clone());
+        } else {
+            sibling_clone_targets.push(item.clone());
+        }
+    }
+
+    let verification_plan = next_steps
+        .iter()
+        .map(|step| format!("Run `{step}` and confirm the result before changing code."))
+        .collect();
+
+    let mut integration_checks = Vec::new();
+    for repo in &change_impact.confirmed_downstream_repos {
+        integration_checks.push(format!(
+            "Integration: verify confirmed downstream consumer `{repo}` still works after this change."
+        ));
+    }
+    for repo in &change_impact.probable_downstream_repos {
+        integration_checks.push(format!(
+            "Integration: check probable downstream `{repo}` (partial evidence) for impact."
+        ));
+    }
+
+    let mut display_ownership_checks = Vec::new();
+    for caller in &change_impact.cross_repo_callers {
+        display_ownership_checks.push(format!(
+            "Display ownership: cross-service ref `{}::{}` — confirm display fields are sourced \
+             from the owner service (snapshot/API), not a direct cross-service DB lookup, and \
+             that access control stays in the owner.",
+            caller.repo, caller.symbol_name
+        ));
+    }
+
+    let mut write_path_or_state_machine_risks = Vec::new();
+    for caller in &change_impact.cross_repo_callers {
+        write_path_or_state_machine_risks.push(format!(
+            "Cross-repo caller `{}::{}` depends on this behavior — preserve its contract.",
+            caller.repo, caller.symbol_name
+        ));
+    }
+    for unresolved in &change_impact.unresolved_possible {
+        write_path_or_state_machine_risks.push(format!(
+            "Unresolved possible impact: `{unresolved}` — confirm before changing."
+        ));
+    }
+    if change_impact.truncated_repos.is_some() {
+        write_path_or_state_machine_risks.push(
+            "Downstream fan-out was capped — affected repos exist beyond the listed set."
+                .to_owned(),
+        );
+    }
+
+    let mut exclusion_ledger = Vec::new();
+    if let Some(truncated) = &change_impact.truncated_repos {
+        exclusion_ledger.push(format!(
+            "Downstream fan-out capped: {} repo(s) omitted ({}).",
+            truncated.count,
+            truncated.reason_codes.join(", ")
+        ));
+    }
+    if let Some(meta) = &meta {
+        for warning in &meta.warnings {
+            exclusion_ledger.push(format!("Planning warning: {warning}"));
+        }
+    }
+    exclusion_ledger
+        .push("standards_to_preserve: not yet computed (no standards engine).".to_owned());
+    exclusion_ledger
+        .push("required_braingent_records: not yet computed (no record ingestion).".to_owned());
+    let contract = PlanChangeContract {
+        schema_version: PLAN_CHANGE_SCHEMA_VERSION,
+        sections: PLAN_CHANGE_SECTIONS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        exclusion_ledger,
+    };
+
+    PlanChangeResponse {
+        target: target.to_owned(),
+        found,
+        reuse_candidates,
+        sibling_clone_targets,
+        standards_to_preserve: Vec::new(),
+        integration_checks,
+        cross_repo_reachability: planning_proofs.to_vec(),
+        display_ownership_checks,
+        write_path_or_state_machine_risks,
+        required_braingent_records: Vec::new(),
+        open_unknowns: unresolved_gaps.to_vec(),
+        pass_two_gap_dimensions: PASS_TWO_GAP_DIMENSIONS
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
+        v1_completeness_checklist: V1_COMPLETENESS_CHECKLIST
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
+        verification_plan,
+        contract,
+        meta,
+    }
+}
+
+pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
+    let mut violations = Vec::new();
+    if plan.contract.schema_version != PLAN_CHANGE_SCHEMA_VERSION {
+        violations.push(format!(
+            "schema_version {} != expected {PLAN_CHANGE_SCHEMA_VERSION}",
+            plan.contract.schema_version
+        ));
+    }
+    if !plan
+        .contract
+        .sections
+        .iter()
+        .map(String::as_str)
+        .eq(PLAN_CHANGE_SECTIONS)
+    {
+        violations.push(format!(
+            "section manifest {:?} != canonical {PLAN_CHANGE_SECTIONS:?}",
+            plan.contract.sections
+        ));
+    }
+    violations
+}
+
+pub fn run_plan_change(
+    ctx: &McpContext,
+    request: ModePackRequest,
+) -> Result<PlanChangeResponse, McpServerError> {
+    let pack = planning_pack_tool(ctx, request)?;
+    let data = &pack.data;
+    Ok(build_plan_change(
+        &data.target,
+        data.found,
+        &data.items,
+        &data.unresolved_gaps,
+        &data.planning_proofs,
+        &data.next_steps,
+        &data.change_impact,
+        pack.meta.clone(),
+    ))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ContextPackData {
     pub mode: String,
@@ -1084,22 +1325,39 @@ fn assemble_context_pack_for_symbol(
         .map(|item| item.repo.clone())
         .collect::<Vec<_>>();
     items.extend(contract_impact_items);
-    items.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then(left.repo.cmp(&right.repo))
-            .then(left.file_path.cmp(&right.file_path))
-            .then(left.line_start.cmp(&right.line_start))
-            .then(left.symbol_name.cmp(&right.symbol_name))
-            .then(left.symbol_id.cmp(&right.symbol_id))
-    });
+    sort_pack_items(&mut items);
     items.dedup_by(|left, right| {
         left.symbol_id == right.symbol_id && left.category == right.category
     });
     if let Some(repo) = options.repo_filter {
         items.retain(|item| item.repo == repo);
     }
+
+    if mode == PackMode::Planning {
+        // KNOWN CEILING: the reuse boost re-ranks the top `limit*5` base-ranked
+        // candidates; a canonical symbol ranked below that window for a very
+        // high-fan-out target is not rescued. The window keeps the boost (and
+        // the bounded re-sort below) cheap.
+        let window = options.limit.saturating_mul(5).min(items.len());
+        let graph = ctx.graph();
+        // Precompute distinct consumer counts in one pre-pass so the boost loop
+        // does map lookups instead of per-item graph I/O, deduped by symbol_id.
+        let mut consumer_counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for item in &items[..window] {
+            consumer_counts
+                .entry(item.symbol_id.clone())
+                .or_insert_with(|| consumer_count(graph, &item.symbol_id));
+        }
+        apply_reuse_boost_with(&mut items[..window], |symbol_id| {
+            consumer_counts.get(symbol_id).copied().unwrap_or(0)
+        });
+        // The boost only raised window items' scores, and the window holds the
+        // top base-ranked candidates, so every boosted item still outranks the
+        // untouched tail — re-sorting just the window keeps global order.
+        sort_pack_items(&mut items[..window]);
+    }
+
     items.truncate(options.limit);
 
     let evidence_populated = items.len() <= 20;
@@ -2497,12 +2755,82 @@ fn populate_evidence_chain<S: gather_step_storage::GraphStore>(
 /// Items with a confirmed evidence chain (graph-proven path from anchor) are
 /// boosted by 50 score points so they appear before lexical-only hits at
 /// equivalent depth. The list is re-sorted by the updated scores.
-fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
-    for item in items.iter_mut() {
-        if item.evidence_chain.is_some() {
-            item.score = item.score.saturating_add(50);
-        }
+/// Whether a file path lives in a shared / design-system module — a strong
+/// signal that a symbol there is the canonical reusable thing rather than a
+/// local one-off. Markers are matched as-is (paths are conventionally
+/// lowercase), avoiding an allocation.
+fn is_shared_module_path(file_path: &str) -> bool {
+    // A path heuristic spanning common JS, Rust, Go, and Python shared-module
+    // layouts. NOTE: this is a heuristic; the pipeline-wide canonical signal
+    // (pack_assembly's `Canonical`) is the longer-term source of truth, pending
+    // threading it onto `PackItem`.
+    const MARKERS: &[&str] = &[
+        "shared/",
+        "design-system",
+        "packages/",
+        "/ui/components",
+        "@shared",
+        "common/",
+        "/lib/",
+        "libs/",
+        "internal/",
+        "/pkg/",
+    ];
+    MARKERS.iter().any(|marker| file_path.contains(marker))
+}
+
+/// S3 graph-derived reuse boost. A symbol in a shared/design-system path or
+/// consumed by many modules is more likely the canonical reusable surface, so
+/// it should rank above local candidates. Consumer influence is capped so a
+/// single hub node cannot dominate the ranking.
+fn reuse_evidence_boost(file_path: &str, consumer_count: usize) -> u16 {
+    let mut boost = 0_u16;
+    if is_shared_module_path(file_path) {
+        boost = boost.saturating_add(40);
     }
+    // Each consumer adds weight, capped at 30 so a single hub node cannot
+    // dominate the ranking; 3 points per consumer => up to +90.
+    let consumers = u16::try_from(consumer_count.min(30)).unwrap_or(u16::MAX);
+    boost.saturating_add(consumers.saturating_mul(3))
+}
+
+/// Distinct reuse consumers of a symbol: the source nodes of inbound edges,
+/// excluding structural `Defines`/`Imports` edges that do not represent a
+/// caller/user. Mirrors the edge-kind filter used by the resolution scorer so
+/// the count reflects real consumers, not raw inbound-edge volume.
+fn consumer_count<S: gather_step_storage::GraphStore>(graph: &S, symbol_id: &str) -> usize {
+    let Ok(node_id) = decode_node_id(symbol_id) else {
+        return 0;
+    };
+    let Ok(incoming) = graph.get_incoming(node_id) else {
+        return 0;
+    };
+    incoming
+        .iter()
+        .filter(|edge| edge.kind.is_consumer_edge())
+        .map(|edge| edge.source)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// Apply the graph-derived reuse boost to planning-pack items via a
+/// consumer-count lookup. Generic over the lookup so the boost is unit-testable
+/// without a graph store. Must run BEFORE truncation so a canonical reusable
+/// symbol can be promoted into the pack, not merely reordered within an
+/// already-cut set.
+fn apply_reuse_boost_with(items: &mut [PackItem], consumer_count: impl Fn(&str) -> usize) {
+    for item in items.iter_mut() {
+        if item.category == "target" {
+            continue;
+        }
+        let boost = reuse_evidence_boost(&item.file_path, consumer_count(&item.symbol_id));
+        item.score = item.score.saturating_add(boost);
+    }
+}
+
+/// Canonical ordering for planning-pack items: descending score, then stable
+/// lexical tie-breaks for deterministic output.
+fn sort_pack_items(items: &mut [PackItem]) {
     items.sort_by(|left, right| {
         right
             .score
@@ -2513,6 +2841,15 @@ fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
             .then(left.symbol_name.cmp(&right.symbol_name))
             .then(left.symbol_id.cmp(&right.symbol_id))
     });
+}
+
+fn apply_planning_evidence_ranking(items: &mut [PackItem]) {
+    for item in items.iter_mut() {
+        if item.evidence_chain.is_some() {
+            item.score = item.score.saturating_add(50);
+        }
+    }
+    sort_pack_items(items);
 }
 
 fn mode_pack_tool(
@@ -3525,12 +3862,12 @@ fn pack_resolution_edge_score(ctx: &McpContext, symbol_id: &str) -> Result<i32, 
     let outgoing = ctx.graph().get_outgoing(node_id)?;
     let incoming_score = incoming
         .iter()
-        .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+        .filter(|edge| edge.kind.is_consumer_edge())
         .count()
         .min(6);
     let outgoing_score = outgoing
         .iter()
-        .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+        .filter(|edge| edge.kind.is_consumer_edge())
         .count()
         .min(6);
     let mut boundary_edges = 0usize;
@@ -5170,6 +5507,332 @@ mod tests {
         let mut items = vec![make_pack_item(80, "a.rs", true)];
         apply_planning_evidence_ranking(&mut items);
         assert_eq!(items[0].score, 130);
+    }
+
+    #[test]
+    fn reuse_ranking_promotes_shared_component_over_bespoke_fork() {
+        use super::{apply_reuse_boost_with, sort_pack_items};
+
+        let fork = make_pack_item(100, "src/features/orders/OrderButtonFork.tsx", false);
+        let shared = make_pack_item(80, "packages/ui/components/Button.tsx", false);
+        let mut items = vec![fork.clone(), shared.clone()];
+
+        let mut raw = items.clone();
+        sort_pack_items(&mut raw);
+        assert_eq!(raw[0].file_path, fork.file_path);
+
+        apply_reuse_boost_with(&mut items, |symbol_id| {
+            if symbol_id == shared.symbol_id { 10 } else { 0 }
+        });
+        sort_pack_items(&mut items);
+
+        assert_eq!(
+            items[0].file_path, shared.file_path,
+            "shared component must rank top-1 after the reuse boost"
+        );
+        assert_ne!(
+            items[0].file_path, fork.file_path,
+            "bespoke fork must not be top-1"
+        );
+    }
+
+    #[test]
+    fn reuse_evidence_boost_prefers_shared_and_widely_consumed() {
+        use super::reuse_evidence_boost;
+
+        // Local one-off with no consumers gets no reuse boost.
+        assert_eq!(
+            reuse_evidence_boost("src/features/orders/local-button.tsx", 0),
+            0
+        );
+
+        // A shared / design-system symbol is boosted even with no consumers.
+        assert!(reuse_evidence_boost("packages/ui/components/Button.tsx", 0) > 0);
+
+        // More consumers => larger boost (the canonical reusable thing).
+        assert!(reuse_evidence_boost("src/x.ts", 10) > reuse_evidence_boost("src/x.ts", 1));
+
+        // A shared + widely-consumed symbol outranks a local one-off.
+        assert!(
+            reuse_evidence_boost("packages/ui/Button.tsx", 8)
+                > reuse_evidence_boost("src/features/orders/local-button.tsx", 0)
+        );
+    }
+
+    #[test]
+    fn reuse_boost_promotes_canonical_symbol_past_truncation() {
+        use super::{apply_reuse_boost_with, sort_pack_items};
+
+        // The local one-off has the higher base score; the shared, widely
+        // consumed component has a lower base score and would be cut by a
+        // base-score truncate to 1 — unless reuse ranking runs before the cut.
+        let mut items = vec![
+            make_pack_item(100, "src/features/orders/local.tsx", false),
+            make_pack_item(80, "packages/ui/components/Button.tsx", false),
+        ];
+
+        apply_reuse_boost_with(&mut items, |symbol_id| {
+            if symbol_id.contains("Button") { 12 } else { 0 }
+        });
+        sort_pack_items(&mut items);
+        items.truncate(1);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].file_path, "packages/ui/components/Button.tsx");
+    }
+
+    #[test]
+    fn build_plan_change_projects_pack_into_typed_sections() {
+        use super::build_plan_change;
+
+        let mut target_item = make_pack_item(200, "src/orders/create-order.ts", false);
+        target_item.category = "target".to_owned();
+        let items = vec![
+            make_pack_item(120, "packages/ui/components/Button.tsx", false),
+            make_pack_item(90, "src/features/orders/local-helper.ts", false),
+            target_item,
+        ];
+        let gaps = vec!["Who emits status FINALIZED?".to_owned()];
+        let proofs = vec![serde_json::json!({"repo": "alert", "edge": "ConsumesApiFrom"})];
+        let next_steps = vec!["crud_trace".to_owned()];
+        let change_impact = super::ChangeImpactSummary {
+            confirmed_downstream_repos: vec!["alert".to_owned()],
+            cross_repo_callers: vec![super::CrossRepoCaller {
+                file_path: "src/consumer.ts".to_owned(),
+                line_start: None,
+                repo: "report".to_owned(),
+                symbol_id: "id_consumer".to_owned(),
+                symbol_kind: "function".to_owned(),
+                symbol_name: "useOrderTotals".to_owned(),
+                evidence: None,
+            }],
+            ..Default::default()
+        };
+
+        let plan = build_plan_change(
+            "createOrder",
+            true,
+            &items,
+            &gaps,
+            &proofs,
+            &next_steps,
+            &change_impact,
+            None,
+        );
+
+        assert!(plan.found);
+        // Shared component => reuse candidate; local helper => sibling target;
+        // the target item is excluded from both.
+        assert_eq!(plan.reuse_candidates.len(), 1);
+        assert_eq!(
+            plan.reuse_candidates[0].file_path,
+            "packages/ui/components/Button.tsx"
+        );
+        assert_eq!(plan.sibling_clone_targets.len(), 1);
+        assert_eq!(
+            plan.sibling_clone_targets[0].file_path,
+            "src/features/orders/local-helper.ts"
+        );
+        assert_eq!(plan.open_unknowns, gaps);
+        assert_eq!(plan.cross_repo_reachability.len(), 1);
+        assert_eq!(plan.verification_plan.len(), 1);
+        assert_eq!(plan.integration_checks.len(), 1);
+        assert!(plan.integration_checks[0].contains("alert"));
+        assert_eq!(plan.write_path_or_state_machine_risks.len(), 1);
+        assert!(plan.write_path_or_state_machine_risks[0].contains("report::useOrderTotals"));
+        // Contract: sections awaiting later work still exist (empty).
+        assert!(plan.standards_to_preserve.is_empty());
+        assert!(plan.required_braingent_records.is_empty());
+    }
+
+    #[test]
+    fn plan_change_includes_pass_two_and_v1_checklists() {
+        use super::{ChangeImpactSummary, build_plan_change};
+
+        let plan = build_plan_change(
+            "anyTarget",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+
+        assert_eq!(
+            plan.pass_two_gap_dimensions.len(),
+            8,
+            "all 8 pass-2 dimensions must be present: {:?}",
+            plan.pass_two_gap_dimensions
+        );
+
+        assert!(!plan.v1_completeness_checklist.is_empty());
+        assert!(
+            plan.v1_completeness_checklist
+                .iter()
+                .all(|item| item.contains("→ verify:")),
+            "every v1-completeness item must carry a verify step"
+        );
+        assert!(
+            plan.v1_completeness_checklist
+                .iter()
+                .any(|item| item.contains("Derived-field blast radius")),
+            "deviation checklist item missing"
+        );
+
+        for section in ["pass_two_gap_dimensions", "v1_completeness_checklist"] {
+            assert!(
+                plan.contract.sections.iter().any(|s| s == section),
+                "missing section in manifest: {section}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_change_surfaces_display_ownership_for_cross_service_refs() {
+        use super::{ChangeImpactSummary, build_plan_change};
+
+        let change_impact = ChangeImpactSummary {
+            cross_repo_callers: vec![super::CrossRepoCaller {
+                file_path: "src/action_panel.ts".to_owned(),
+                line_start: None,
+                repo: "reporting".to_owned(),
+                symbol_id: "id_hub".to_owned(),
+                symbol_kind: "function".to_owned(),
+                symbol_name: "renderActionPanel".to_owned(),
+                evidence: None,
+            }],
+            ..Default::default()
+        };
+        let plan = build_plan_change(
+            "getOrderDisplayName",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &change_impact,
+            None,
+        );
+
+        assert!(
+            plan.display_ownership_checks
+                .iter()
+                .any(|check| check.contains("reporting")),
+            "display ownership not surfaced for cross-service ref: {:?}",
+            plan.display_ownership_checks
+        );
+        assert!(
+            plan.contract
+                .sections
+                .iter()
+                .any(|s| s == "display_ownership_checks")
+        );
+    }
+
+    #[test]
+    fn plan_change_omits_display_ownership_without_cross_service_refs() {
+        use super::{ChangeImpactSummary, build_plan_change};
+
+        let plan = build_plan_change(
+            "localOnly",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+        assert!(
+            plan.display_ownership_checks.is_empty(),
+            "no cross-service refs should mean no display-ownership prompts"
+        );
+    }
+
+    #[test]
+    fn plan_change_contract_gate_validates_deterministic_metadata() {
+        use super::{
+            ChangeImpactSummary, PLAN_CHANGE_SCHEMA_VERSION, PLAN_CHANGE_SECTIONS,
+            build_plan_change, validate_plan_change_contract,
+        };
+
+        let mut plan = build_plan_change(
+            "createOrder",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+
+        // A freshly built product satisfies the contract: current schema
+        // version and the exact canonical section manifest, deterministically.
+        assert_eq!(plan.contract.schema_version, PLAN_CHANGE_SCHEMA_VERSION);
+        assert!(
+            plan.contract
+                .sections
+                .iter()
+                .map(String::as_str)
+                .eq(PLAN_CHANGE_SECTIONS)
+        );
+        assert!(validate_plan_change_contract(&plan).is_empty());
+
+        // The gate fails on a stale schema version.
+        plan.contract.schema_version = 99;
+        assert!(!validate_plan_change_contract(&plan).is_empty());
+        plan.contract.schema_version = PLAN_CHANGE_SCHEMA_VERSION;
+
+        // The gate fails on a mangled section manifest (missing/renamed section).
+        plan.contract.sections.pop();
+        assert!(!validate_plan_change_contract(&plan).is_empty());
+    }
+
+    #[test]
+    fn plan_change_exclusion_ledger_records_capped_fan_out() {
+        use super::{ChangeImpactSummary, TruncatedRepos, build_plan_change};
+
+        let change_impact = ChangeImpactSummary {
+            truncated_repos: Some(TruncatedRepos {
+                count: 4,
+                names: vec!["a".to_owned(), "b".to_owned()],
+                reason_codes: vec!["fan_out_cap".to_owned()],
+            }),
+            ..Default::default()
+        };
+        let plan = build_plan_change(
+            "createOrder",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &change_impact,
+            None,
+        );
+
+        assert!(
+            plan.contract
+                .exclusion_ledger
+                .iter()
+                .any(|entry| entry.contains("capped") && entry.contains('4')),
+            "ledger should record the capped fan-out: {:?}",
+            plan.contract.exclusion_ledger
+        );
+
+        // Sections that are not yet computed are recorded, so an empty value is
+        // never silently read as "nothing applies".
+        assert!(
+            plan.contract
+                .exclusion_ledger
+                .iter()
+                .any(|entry| entry.contains("standards_to_preserve")),
+            "ledger should record not-yet-computed sections: {:?}",
+            plan.contract.exclusion_ledger
+        );
     }
 
     #[test]

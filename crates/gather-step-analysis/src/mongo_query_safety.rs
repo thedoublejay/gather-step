@@ -1,0 +1,297 @@
+//! Structural safety detectors for Mongo queries, aggregations, and Atlas
+//! search-index definitions. Pure over a [`serde_json::Value`] so they are
+//! testable without a live parser.
+
+use serde_json::Value;
+
+pub const RULE_INDEX_DEFEAT: &str = "GS-MONGO-INDEX-DEFEAT";
+pub const RULE_UNSAFE_COERCION: &str = "GS-MONGO-UNSAFE-COERCION";
+pub const RULE_NULL_PARENT_PATH: &str = "GS-MONGO-NULL-PARENT-PATH";
+pub const RULE_ATLAS_INDEX_DRIFT: &str = "GS-MONGO-ATLAS-INDEX-DRIFT";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MongoQueryFinding {
+    pub rule_id: &'static str,
+    pub confidence: f64,
+    pub message: String,
+    pub path: String,
+}
+
+#[must_use]
+pub fn analyze_mongo_value(value: &Value) -> Vec<MongoQueryFinding> {
+    let mut findings = Vec::new();
+    walk(value, "$", &mut findings);
+    findings.sort_by(|left, right| {
+        left.rule_id
+            .cmp(right.rule_id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    findings
+}
+
+#[must_use]
+pub fn analyze_atlas_index_drift(
+    index_def: &Value,
+    referenced_fields: &[&str],
+) -> Vec<MongoQueryFinding> {
+    let mappings = index_def.get("mappings");
+    let dynamic = mappings
+        .and_then(|m| m.get("dynamic"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if dynamic {
+        return Vec::new();
+    }
+    let mapped: Vec<&str> = mappings
+        .and_then(|m| m.get("fields"))
+        .and_then(Value::as_object)
+        .map(|fields| fields.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    let mut findings: Vec<MongoQueryFinding> = referenced_fields
+        .iter()
+        .filter(|field| !mapped.contains(*field))
+        .map(|field| MongoQueryFinding {
+            rule_id: RULE_ATLAS_INDEX_DRIFT,
+            confidence: 0.75,
+            message: format!(
+                "Field `{field}` is queried but absent from the `dynamic:false` Atlas index \
+                 mapping; the search silently matches nothing on it. Add it to the mapping."
+            ),
+            path: (*field).to_owned(),
+        })
+        .collect();
+    findings.sort_by(|left, right| left.path.cmp(&right.path));
+    findings
+}
+
+fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = format!("{path}.{key}");
+                match key.as_str() {
+                    "$lookup" => detect_index_defeat(child, &child_path, findings),
+                    "$toObjectId" => findings.push(MongoQueryFinding {
+                        rule_id: RULE_UNSAFE_COERCION,
+                        confidence: 0.8,
+                        message: "Bare `$toObjectId` throws on a malformed id; use `$convert` \
+                                  with an `onError` fallback for untrusted input."
+                            .to_owned(),
+                        path: child_path.clone(),
+                    }),
+                    "$set" => detect_null_parent_path(child, &child_path, findings),
+                    _ => {}
+                }
+                walk(child, &child_path, findings);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                walk(item, &format!("{path}[{index}]"), findings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn detect_index_defeat(lookup: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
+    if mentions_operator(lookup, "$toString") || mentions_operator(lookup, "$toObjectId") {
+        findings.push(MongoQueryFinding {
+            rule_id: RULE_INDEX_DEFEAT,
+            confidence: 0.7,
+            message: "`$lookup` coerces its join key (`$toString`/`$toObjectId`), defeating the \
+                      index on the join field; align field types or pre-store the join key."
+                .to_owned(),
+            path: path.to_owned(),
+        });
+    }
+}
+
+fn detect_null_parent_path(set_doc: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
+    let Value::Object(map) = set_doc else {
+        return;
+    };
+    for (field, expr) in map {
+        let Some((parent, _)) = field.rsplit_once('.') else {
+            continue;
+        };
+        if value_guards_parent(expr) || sibling_assigns_parent(map, parent) {
+            continue;
+        }
+        findings.push(MongoQueryFinding {
+            rule_id: RULE_NULL_PARENT_PATH,
+            confidence: 0.6,
+            message: format!(
+                "`$set` on dotted path `{field}` has no existence/`$type:object` guard on parent \
+                 `{parent}`; a null or scalar parent will be clobbered or error."
+            ),
+            path: format!("{path}.{field}"),
+        });
+    }
+}
+
+fn value_guards_parent(expr: &Value) -> bool {
+    mentions_operator(expr, "$ifNull") || mentions_operator(expr, "$cond")
+}
+
+fn sibling_assigns_parent(map: &serde_json::Map<String, Value>, parent: &str) -> bool {
+    map.keys()
+        .any(|key| key == parent || parent.starts_with(&format!("{key}.")))
+}
+
+fn mentions_operator(value: &Value, op: &str) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, child)| key == op || mentions_operator(child, op)),
+        Value::Array(items) => items.iter().any(|item| mentions_operator(item, op)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH, RULE_UNSAFE_COERCION, analyze_mongo_value,
+    };
+    use serde_json::json;
+
+    fn rule_ids(value: &serde_json::Value) -> Vec<&'static str> {
+        analyze_mongo_value(value)
+            .into_iter()
+            .map(|finding| finding.rule_id)
+            .collect()
+    }
+
+    #[test]
+    fn flags_lookup_that_coerces_join_key_but_not_index_aligned_lookup() {
+        let coercing = json!([{
+            "$lookup": {
+                "from": "users",
+                "let": { "uid": "$userId" },
+                "pipeline": [
+                    { "$match": { "$expr": { "$eq": [{ "$toString": "$_id" }, "$$uid"] } } }
+                ],
+                "as": "user"
+            }
+        }]);
+        assert!(rule_ids(&coercing).contains(&RULE_INDEX_DEFEAT));
+
+        let aligned = json!([{
+            "$lookup": {
+                "from": "users",
+                "localField": "userId",
+                "foreignField": "_id",
+                "as": "user"
+            }
+        }]);
+        assert!(!rule_ids(&aligned).contains(&RULE_INDEX_DEFEAT));
+    }
+
+    #[test]
+    fn flags_bare_to_object_id_but_not_convert_with_on_error() {
+        let bare = json!({ "$match": { "_id": { "$toObjectId": "$$req.id" } } });
+        assert!(rule_ids(&bare).contains(&RULE_UNSAFE_COERCION));
+
+        let safe = json!({
+            "$match": {
+                "_id": { "$convert": { "input": "$$req.id", "to": "objectId", "onError": null } }
+            }
+        });
+        assert!(!rule_ids(&safe).contains(&RULE_UNSAFE_COERCION));
+    }
+
+    #[test]
+    fn flags_unguarded_dotted_set_but_not_guarded_sibling() {
+        let unguarded = json!({ "$set": { "meta.flags.active": true } });
+        assert!(rule_ids(&unguarded).contains(&RULE_NULL_PARENT_PATH));
+
+        let guarded_value =
+            json!({ "$set": { "meta.flags.active": { "$ifNull": ["$meta.flags.active", true] } } });
+        assert!(!rule_ids(&guarded_value).contains(&RULE_NULL_PARENT_PATH));
+
+        let guarded_sibling =
+            json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
+        assert!(!rule_ids(&guarded_sibling).contains(&RULE_NULL_PARENT_PATH));
+    }
+
+    #[test]
+    fn flags_unmapped_field_on_dynamic_false_index_but_not_mapped_field() {
+        use super::{RULE_ATLAS_INDEX_DRIFT, analyze_atlas_index_drift};
+
+        let index = json!({
+            "mappings": { "dynamic": false, "fields": { "title": {}, "body": {} } }
+        });
+        let findings = analyze_atlas_index_drift(&index, &["title", "entity"]);
+        let ids: Vec<_> = findings.iter().map(|f| f.rule_id).collect();
+        assert!(ids.contains(&RULE_ATLAS_INDEX_DRIFT));
+        assert!(findings.iter().any(|f| f.path == "entity"));
+        assert!(!findings.iter().any(|f| f.path == "title"));
+
+        let dynamic_index = json!({ "mappings": { "dynamic": true } });
+        assert!(analyze_atlas_index_drift(&dynamic_index, &["anything"]).is_empty());
+    }
+
+    #[test]
+    fn trap_detectors_cover_each_pattern_and_clean_siblings() {
+        use super::{
+            RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH, RULE_UNSAFE_COERCION,
+            analyze_atlas_index_drift,
+        };
+
+        let trap_a = json!([{ "$lookup": {
+            "from": "u", "let": { "k": "$userId" },
+            "pipeline": [{ "$match": { "$expr": { "$eq": [{ "$toString": "$_id" }, "$$k"] } } }],
+            "as": "u"
+        }}]);
+        let clean_a = json!([{ "$lookup": {
+            "from": "u", "localField": "userId", "foreignField": "_id", "as": "u"
+        }}]);
+        assert!(rule_ids(&trap_a).contains(&RULE_INDEX_DEFEAT));
+        assert!(!rule_ids(&clean_a).contains(&RULE_INDEX_DEFEAT));
+
+        let trap_b = json!({ "_id": { "$toObjectId": "$$req.id" } });
+        let clean_b = json!({ "_id": { "$convert": { "input": "$$req.id", "to": "objectId", "onError": null } } });
+        assert!(rule_ids(&trap_b).contains(&RULE_UNSAFE_COERCION));
+        assert!(!rule_ids(&clean_b).contains(&RULE_UNSAFE_COERCION));
+
+        let trap_c = json!({ "$set": { "meta.flags.active": true } });
+        let clean_c = json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
+        assert!(rule_ids(&trap_c).contains(&RULE_NULL_PARENT_PATH));
+        assert!(!rule_ids(&clean_c).contains(&RULE_NULL_PARENT_PATH));
+
+        let index = json!({ "mappings": { "dynamic": false, "fields": { "title": {} } } });
+        let trap_d = analyze_atlas_index_drift(&index, &["title", "entity"]);
+        assert!(
+            trap_d
+                .iter()
+                .any(|f| f.rule_id == RULE_ATLAS_INDEX_DRIFT && f.path == "entity")
+        );
+        assert!(!trap_d.iter().any(|f| f.path == "title"));
+    }
+
+    #[test]
+    fn clean_pipeline_yields_no_findings() {
+        let clean = json!([
+            { "$match": { "status": "active" } },
+            { "$project": { "name": 1, "email": 1 } }
+        ]);
+        assert!(analyze_mongo_value(&clean).is_empty());
+    }
+
+    #[test]
+    fn findings_are_deterministically_sorted() {
+        let value = json!({
+            "$set": { "a.b": true },
+            "stage": { "$toObjectId": "$x" }
+        });
+        let first = analyze_mongo_value(&value);
+        let second = analyze_mongo_value(&value);
+        assert_eq!(first, second);
+        let ids: Vec<_> = first.iter().map(|f| f.rule_id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+}

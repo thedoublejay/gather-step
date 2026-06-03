@@ -52,7 +52,7 @@ impl WorkspaceStores {
 
     pub fn open_read_only_search(root: impl AsRef<Path>) -> Result<Self, WorkspaceStoresError> {
         let root = root.as_ref().to_path_buf();
-        let graph = Arc::new(GraphStoreDb::open(root.join("graph.redb"))?);
+        let graph = Arc::new(GraphStoreDb::open_read_only(root.join("graph.redb"))?);
         let search = Arc::new(TantivySearchStore::open_read_only(root.join("search"))?);
         let metadata = Arc::new(MetadataStoreDb::open(root.join("metadata.sqlite"))?);
         Ok(Self {

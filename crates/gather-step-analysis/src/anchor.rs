@@ -148,7 +148,7 @@ fn score_candidate<S: GraphStore>(
     if boundary_bonus > 0.0 {
         let downstream = outgoing
             .iter()
-            .filter(|edge| !matches!(edge.kind, EdgeKind::Defines | EdgeKind::Imports))
+            .filter(|edge| edge.kind.is_consumer_edge())
             .count();
         rationale.push(AnchorRationale::ControllerService {
             downstream_nodes: downstream,

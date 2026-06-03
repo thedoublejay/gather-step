@@ -349,6 +349,72 @@ fn write_qa_reference_v4_workspace(root: &Path) {
 }
 
 #[test]
+fn resolution_snapshot_matches_golden() {
+    use gather_step_analysis::GraphQuery;
+
+    let temp = TempDir::new("resolution-snapshot");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["--json", "index"]);
+
+    let graph =
+        GraphStoreDb::open(temp.path().join(".gather-step/storage/graph.redb")).expect("graph");
+    let actual = GraphQuery::new(&graph)
+        .resolution_fingerprint()
+        .expect("fingerprint")
+        .join("\n");
+
+    let golden_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/resolution_snapshot.golden");
+    if env::var_os("GATHER_STEP_BLESS_SNAPSHOT").is_some() {
+        fs::create_dir_all(golden_path.parent().expect("golden parent")).expect("golden dir");
+        fs::write(&golden_path, &actual).expect("write golden");
+    }
+
+    let expected = fs::read_to_string(&golden_path).unwrap_or_else(|_| {
+        panic!(
+            "missing golden {}; regenerate with GATHER_STEP_BLESS_SNAPSHOT=1",
+            golden_path.display()
+        )
+    });
+    assert_eq!(
+        actual, expected,
+        "resolution snapshot drifted; if the change is intended, regenerate with GATHER_STEP_BLESS_SNAPSHOT=1"
+    );
+}
+
+#[test]
+fn read_command_during_graph_lock_succeeds_via_snapshot() {
+    let temp = TempDir::new("graph-lock");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["--json", "index"]);
+
+    let graph_path = temp
+        .path()
+        .join(".gather-step")
+        .join("storage")
+        .join("graph.redb");
+    let held = GraphStoreDb::open(&graph_path).expect("should hold the graph lock");
+
+    let output = run_ok(temp.path(), &["search", "OrderList", "--json"]);
+    let search_json = stdout_json(&output);
+    assert_eq!(search_json["event"], "search_completed");
+    assert!(
+        search_json["hits"]
+            .as_array()
+            .expect("hits array")
+            .iter()
+            .any(|item| item["symbol_name"] == "OrderList"),
+        "snapshot read should return the indexed hit while the store is held"
+    );
+
+    drop(held);
+    let recovered = run_ok(temp.path(), &["search", "OrderList", "--json"]);
+    assert_eq!(stdout_json(&recovered)["event"], "search_completed");
+}
+
+#[test]
 fn cli_commands_work_on_indexed_fixture_workspace() {
     let temp = TempDir::new("cli-commands");
     write_fixture_workspace(temp.path());
@@ -439,12 +505,17 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     let status = run_ok(temp.path(), &["status", "--json"]);
     let status_json = stdout_json(&status);
     assert_eq!(status_json["event"], "status_completed");
-    assert!(
-        !status_json["repos"]
-            .as_array()
-            .expect("repos array")
-            .is_empty()
-    );
+    let status_repos = status_json["repos"].as_array().expect("repos array");
+    assert!(!status_repos.is_empty());
+    for repo in status_repos {
+        let freshness = repo["freshness"]
+            .as_str()
+            .expect("each repo should carry a freshness verdict");
+        assert!(
+            matches!(freshness, "fresh" | "stale" | "never_indexed" | "unknown"),
+            "unexpected freshness verdict in status output: {freshness}"
+        );
+    }
 
     let search = run_ok(temp.path(), &["search", "OrderList", "--json"]);
     let search_json = stdout_json(&search);
@@ -1164,7 +1235,7 @@ fn metadata_schema_user_version_mismatch_reports_recovery_hint() {
 }
 
 #[test]
-fn concurrent_graph_open_reports_stable_process_error() {
+fn concurrent_graph_open_reads_via_snapshot() {
     let temp = TempDir::new("concurrent-open");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
@@ -1172,10 +1243,8 @@ fn concurrent_graph_open_reports_stable_process_error() {
 
     let _held_graph = GraphStoreDb::open(temp.path().join(".gather-step/storage/graph.redb"))
         .expect("graph should open and hold the redb lock");
-    let output = run_fail(temp.path(), &["status", "--json"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Another gather-step process is using this workspace"));
-    assert!(stderr.contains("Stop `gather-step watch`"));
+    let output = run_ok(temp.path(), &["status", "--json"]);
+    assert_eq!(stdout_json(&output)["event"], "status_completed");
 }
 
 #[test]

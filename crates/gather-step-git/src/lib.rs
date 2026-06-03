@@ -24,7 +24,8 @@ pub use classify::{
 };
 pub use history::{
     CommitFact, CommitFileChangeKind, CommitFileDelta, GitHistoryError, GitHistoryIndexer,
-    GitHistorySyncError, GitIndexerOptions, GitRepoSource, HistorySyncOutcome,
+    GitHistorySyncError, GitIndexerOptions, GitRepoSource, HistorySyncOutcome, IndexFreshness,
+    classify_freshness,
 };
 pub use intelligence::{
     RepoIntelligenceError, RepoIntelligenceOptions, RepoIntelligenceReport,

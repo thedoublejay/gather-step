@@ -686,6 +686,77 @@ impl TantivySearchStore {
             file_path_stored,
         })
     }
+
+    /// Disjunction fallback for multi-**word** capability queries: each
+    /// whitespace-separated word becomes a `Should` clause and a hit must match
+    /// at least a majority of them (`ceil(n/2)`).
+    ///
+    /// Gated on the *original* query containing two or more words. A single
+    /// identifier such as `createOrderUseCase` is one word — even though it
+    /// camelCase-splits into several tokens — and must not fuzzily match
+    /// siblings that merely share tokens (e.g. `updateOrderUseCase`). Only a
+    /// genuine phrase like `email notification delivery` should relax to OR.
+    fn execute_search_disjunctive(
+        &self,
+        query_text: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let words: Vec<&str> = query_text.split_whitespace().collect();
+        if words.len() < 2 {
+            return Ok(Vec::new());
+        }
+
+        let reader = self.reader.lock();
+        let searcher = reader.searcher();
+        // Fuzzy on: this is the last-resort recall pass.
+        let parser = self.build_query_parser(true);
+        let clauses: Vec<(Occur, Box<dyn Query>)> = words
+            .iter()
+            .map(|word| {
+                // Expand each word into (word OR synonyms) so capability phrases
+                // bridge to the symbol vocabulary (e.g. "login" -> authenticate).
+                let mut sub: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                let (word_query, _) = parser.parse_query_lenient(word);
+                sub.push((Occur::Should, word_query));
+                for synonym in synonym_terms(word) {
+                    let (synonym_query, _) = parser.parse_query_lenient(synonym);
+                    sub.push((Occur::Should, synonym_query));
+                }
+                let clause: Box<dyn Query> = if sub.len() == 1 {
+                    sub.pop().expect("clause exists").1
+                } else {
+                    Box::new(BooleanQuery::from(sub))
+                };
+                (Occur::Should, clause)
+            })
+            .collect();
+        // INTENTIONAL RECALL BEHAVIOR: ceil(n/2) is 1 for a 2-word query, so
+        // the last-resort fallback can match a symbol covering a single token
+        // (possibly via fuzzy/synonym). This trades exact-phrase precision for
+        // recall and only fires after both conjunctive passes returned empty;
+        // callers must not treat a non-empty fallback result as an exact match.
+        let floor = words.len().div_ceil(2).max(1);
+        let query: Box<dyn Query> =
+            Box::new(BooleanQuery::with_minimum_required_clauses(clauses, floor));
+        let query = self.apply_filters(query, filters);
+
+        let fetch_limit = limit.max(1).saturating_mul(5).min(MAX_RESULT_WINDOW);
+        let collector = TopDocs::with_limit(fetch_limit).order_by_score();
+        let docs: Vec<(f32, DocAddress)> = searcher.search(&query, &collector)?;
+
+        let mut hits = docs
+            .into_iter()
+            .map(|(score, address)| self.decode_hit(&searcher, address, score, false))
+            .collect::<Result<Vec<_>, _>>()?;
+        rerank_hits(&mut hits, query_text);
+
+        Ok(hits
+            .into_iter()
+            .take(limit.max(1))
+            .map(|scored| scored.hit)
+            .collect())
+    }
 }
 
 impl SearchStore for TantivySearchStore {
@@ -718,7 +789,17 @@ impl SearchStore for TantivySearchStore {
             return Ok(exact_hits);
         }
 
-        self.execute_search(trimmed, limit, false, true, filters)
+        let fuzzy_hits = self.execute_search(trimmed, limit, false, true, filters)?;
+        if !fuzzy_hits.is_empty() {
+            return Ok(fuzzy_hits);
+        }
+
+        // Both conjunctive passes require every query term to match, so a
+        // multi-word capability query ("email notification delivery") returns
+        // nothing when a symbol covers only some terms. Fall back to a
+        // disjunction with a majority floor so reuse-discovery queries still
+        // surface partial matches instead of an empty result.
+        self.execute_search_disjunctive(trimmed, limit, filters)
     }
 
     fn delete_by_files(&self, files: &[(&str, &str)]) -> Result<(), SearchStoreError> {
@@ -1071,6 +1152,62 @@ fn infra_repo_penalty(symbol_exact_boost: f32, is_exported: bool, repo: &str) ->
     if is_infra { 0.85 } else { 1.0 }
 }
 
+/// Curated concept→vocabulary synonym map (S4).
+///
+/// Returns extra terms to OR into a query word's clause in the disjunction
+/// fallback so capability phrases bridge to the identifiers code actually uses
+/// (e.g. "login" → authenticate). Intentionally small and high-signal; the
+/// original word is always searched too, so an empty list is a safe no-op.
+fn synonym_terms(word: &str) -> &'static [&'static str] {
+    // Symmetric concept groups: any member expands to the whole group, so
+    // recall does not depend on which side of a synonym pair the user typed
+    // (e.g. "login" and "authenticate" reach each other). The word's own clause
+    // is also added by the caller; a duplicate OR clause is harmless.
+    const GROUPS: &[&[&str]] = &[
+        &["login", "signin", "auth", "authenticate", "authentication"],
+        &["logout", "signout", "deauthenticate"],
+        &[
+            "paginate",
+            "pagination",
+            "paging",
+            "cursor",
+            "offset",
+            "page",
+        ],
+        &["delete", "remove", "destroy"],
+        &["create", "add", "insert"],
+        &["update", "edit", "modify"],
+        &["list", "fetch", "get", "find"],
+    ];
+    for group in GROUPS {
+        if group.iter().any(|member| word.eq_ignore_ascii_case(member)) {
+            return group;
+        }
+    }
+    &[]
+}
+
+/// Term-coverage boost (S2).
+///
+/// Rewards hits whose symbol-name tokens cover a larger fraction of the query's
+/// tokens, so a higher-coverage match outranks a lower-coverage one at equal
+/// base score. Scales linearly up to +25% at full coverage. Callers apply this
+/// only for multi-word queries; for a single identifier it is meaningless.
+fn query_term_coverage_boost(query_tokens: &[String], symbol_name: &str) -> f32 {
+    if query_tokens.is_empty() {
+        return 1.0;
+    }
+    let symbol_tokens = tokenize_camel_case(symbol_name);
+    let covered = query_tokens
+        .iter()
+        .filter(|qt| symbol_tokens.iter().any(|st| st == *qt))
+        .count();
+    // Token counts are tiny; u16 conversion avoids the cast-precision-loss lint.
+    let coverage = f32::from(u16::try_from(covered).unwrap_or(u16::MAX))
+        / f32::from(u16::try_from(query_tokens.len()).unwrap_or(u16::MAX));
+    1.0 + coverage * 0.25
+}
+
 fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
     let newest_timestamp = hits
         .iter()
@@ -1086,6 +1223,10 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
     let query_is_pascal = query.chars().next().is_some_and(|c| c.is_ascii_uppercase());
     // Tokenize the query once for the file-path token match boost.
     let query_tokens = tokenize_camel_case(query);
+    // Coverage boost only applies to genuine multi-word capability queries,
+    // mirroring the disjunction fallback — a single identifier must not be
+    // re-ranked by partial token overlap.
+    let multiword_query = query.split_whitespace().count() >= 2;
 
     for scored in hits.iter_mut() {
         let export_boost = if scored.hit.is_exported { 1.10 } else { 1.0 };
@@ -1110,6 +1251,10 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
         // Raised from 1.4× to break ties between multiple same-name hits where
         // secondary factors (BM25, recency) were pulling unrelated-repo symbols
         // above the user's likely target.
+        // NOTE: for a multi-word query (which contains spaces) this exact-match
+        // boost is always neutral — symbol names have no spaces, so neither
+        // comparison can hit. Term-coverage is the ordering signal for
+        // multi-word queries; this boost only differentiates single-token ones.
         let symbol_name_matches = scored.hit.symbol_name.eq_ignore_ascii_case(query);
         let symbol_token_matches = !symbol_name_matches
             && first_code_token(&scored.hit.symbol_name).eq_ignore_ascii_case(query);
@@ -1154,6 +1299,13 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
         let infra_penalty =
             infra_repo_penalty(symbol_exact_boost, scored.hit.is_exported, &scored.hit.repo);
 
+        // term-coverage boost (S2) — higher query-term coverage ranks higher.
+        let coverage_boost = if multiword_query {
+            query_term_coverage_boost(&query_tokens, &scored.hit.symbol_name)
+        } else {
+            1.0
+        };
+
         scored.hit.adjusted_score = scored.base_score
             * export_boost
             * exact_boost
@@ -1163,7 +1315,8 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
             * pascal_type_boost
             * path_boost
             * hook_boost
-            * infra_penalty;
+            * infra_penalty
+            * coverage_boost;
     }
 
     hits.sort_by(|left, right| {
@@ -1172,6 +1325,11 @@ fn rerank_hits(hits: &mut [ScoredSearchHit], query: &str) {
             .adjusted_score
             .partial_cmp(&left.hit.adjusted_score)
             .unwrap_or(Ordering::Equal)
+            // Deterministic tie-breaks so equal-score hits have a stable order
+            // regardless of the underlying Tantivy doc-id ordering.
+            .then_with(|| left.hit.symbol_name.cmp(&right.hit.symbol_name))
+            .then_with(|| left.file_path_stored.cmp(&right.file_path_stored))
+            .then_with(|| left.hit.node_id.cmp(&right.hit.node_id))
     });
 }
 
@@ -1548,6 +1706,170 @@ mod tests {
         assert_eq!(results[0].symbol_name, "backend_standard");
         assert_eq!(results[0].node_kind, NodeKind::Repo);
         assert!(results[0].exact_match);
+    }
+
+    #[test]
+    fn partial_multiword_query_recovers_via_disjunction_fallback() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("or-fallback")).expect("store should open");
+        let mut symbol = node("dispatchEmailNotification", "src/notifications/dispatch.ts");
+        // Keep `content` empty so the match can only come from the symbol-name
+        // tokens (dispatch / email / notification), making the assertion precise.
+        symbol.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&symbol, 1))
+            .expect("document should index");
+
+        // Capability-style query: two of three terms ("email", "notification")
+        // match the symbol's camelCase tokens; "delivery" appears nowhere. The
+        // conjunctive (AND) default returns nothing, so a disjunction fallback
+        // with a majority floor must surface the symbol for reuse discovery.
+        let results = store
+            .search("email notification delivery", 10)
+            .expect("search should succeed");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "partial multi-word query should match via OR fallback"
+        );
+        assert_eq!(results[0].symbol_name, "dispatchEmailNotification");
+    }
+
+    #[test]
+    fn single_identifier_miss_does_not_fall_back_to_token_sharing_sibling() {
+        let store =
+            TantivySearchStore::open(temp_search_dir("or-precision")).expect("store should open");
+        let mut existing = node("updateOrderUseCase", "src/b.ts");
+        existing.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&existing, 1))
+            .expect("document should index");
+
+        // No `createOrderUseCase` exists. Because the query is a single
+        // identifier (one word), the disjunction fallback must NOT fire and
+        // resurrect the token-sharing sibling `updateOrderUseCase` on the
+        // shared Order/Use/Case tokens. Adversarial guard for the OR fallback.
+        let results = store
+            .search("createOrderUseCase", 10)
+            .expect("search should succeed");
+
+        assert!(
+            results.is_empty(),
+            "single-identifier miss must not OR-match a token-sharing sibling"
+        );
+    }
+
+    #[test]
+    fn rerank_prefers_higher_query_term_coverage_on_equal_base_score() {
+        use super::{ScoredSearchHit, SearchHit, rerank_hits};
+
+        fn scored(symbol: &str, base: f32) -> ScoredSearchHit {
+            ScoredSearchHit {
+                hit: SearchHit {
+                    node_id: node_id("service-a", "src/x.ts", NodeKind::Function, symbol),
+                    repo: "service-a".to_owned(),
+                    file_path: String::new(),
+                    symbol_name: symbol.to_owned(),
+                    node_kind: NodeKind::Function,
+                    adjusted_score: 0.0,
+                    exact_match: false,
+                    is_exported: true,
+                    lang: "typescript".to_owned(),
+                },
+                base_score: base,
+                last_modified: 1,
+                file_path_stored: String::new(),
+            }
+        }
+
+        // Equal base score and identical flags. Against "email notification
+        // delivery", `dispatchEmailNotification` covers two query terms while
+        // `deliveryService` covers one. The higher-coverage hit must rank first
+        // even though it is listed second in the input.
+        let mut hits = vec![
+            scored("deliveryService", 1.0),
+            scored("dispatchEmailNotification", 1.0),
+        ];
+        rerank_hits(&mut hits, "email notification delivery");
+
+        assert_eq!(hits[0].hit.symbol_name, "dispatchEmailNotification");
+    }
+
+    #[test]
+    fn rerank_breaks_score_ties_deterministically_by_symbol_name() {
+        use super::{ScoredSearchHit, SearchHit, rerank_hits};
+
+        fn scored(symbol: &str) -> ScoredSearchHit {
+            ScoredSearchHit {
+                hit: SearchHit {
+                    node_id: node_id("service-a", "src/x.ts", NodeKind::Function, symbol),
+                    repo: "service-a".to_owned(),
+                    file_path: String::new(),
+                    symbol_name: symbol.to_owned(),
+                    node_kind: NodeKind::Function,
+                    adjusted_score: 0.0,
+                    exact_match: false,
+                    is_exported: true,
+                    lang: "typescript".to_owned(),
+                },
+                base_score: 1.0,
+                last_modified: 1,
+                file_path_stored: String::new(),
+            }
+        }
+
+        // Single-word query (no coverage boost): both hits resolve to the same
+        // adjusted score, so the symbol-name tie-break must impose a stable
+        // order regardless of input order.
+        let mut hits = vec![scored("zebra"), scored("alpha")];
+        rerank_hits(&mut hits, "unrelated");
+
+        assert_eq!(hits[0].hit.symbol_name, "alpha");
+        assert_eq!(hits[1].hit.symbol_name, "zebra");
+    }
+
+    #[test]
+    fn disjunction_fallback_bridges_query_synonyms_to_symbol_vocabulary() {
+        let store = TantivySearchStore::open(temp_search_dir("synonym-fallback"))
+            .expect("store should open");
+        let mut symbol = node("authenticateUser", "src/auth/authenticate-user.ts");
+        symbol.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&symbol, 1))
+            .expect("document should index");
+
+        // "login" is a concept synonym of the symbol's "authenticate" token;
+        // "workflow" matches nothing. Without synonym expansion the disjunction
+        // fallback finds no matching term and returns empty; the login →
+        // authenticate bridge must surface the symbol for capability search.
+        let results = store
+            .search("login workflow", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_name, "authenticateUser");
+    }
+
+    #[test]
+    fn disjunction_fallback_synonyms_are_symmetric() {
+        let store = TantivySearchStore::open(temp_search_dir("synonym-symmetric"))
+            .expect("store should open");
+        let mut symbol = node("loginUser", "src/auth/login-user.ts");
+        symbol.signature = None;
+        store
+            .index_symbol(&SearchDocument::from_node(&symbol, 1))
+            .expect("document should index");
+
+        // Reverse of the previous test: the symbol uses "login" and the query
+        // uses "authenticate". Symmetric synonym groups must bridge either
+        // direction, so recall does not depend on which term the user typed.
+        let results = store
+            .search("authenticate workflow", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol_name, "loginUser");
     }
 
     #[test]

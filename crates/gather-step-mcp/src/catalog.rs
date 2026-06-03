@@ -92,7 +92,10 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
         "planning_pack",
         "Context pack for architecture and planning tasks",
     ),
-    ("plan_change", "Alias for planning-oriented context"),
+    (
+        "plan_change",
+        "Typed plan-change product (twelve planning sections)",
+    ),
     ("debug_pack", "Context pack for debugging production issues"),
     ("fix_pack", "Context pack scoped for a bug fix"),
     ("fix_surface", "Get a narrower fix-oriented surface"),

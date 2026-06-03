@@ -5,6 +5,37 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.3.1 (2026-06-02)
+
+Release status: **prepared**.
+
+Planning- and reuse-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, and adds the first batch of v4.3.1 gap-closure work (lock-contention disclosure, a display-ownership planning dimension, and mongo/Atlas structural detectors). Partial against the full v4.3.0/v4.3.1 backlog — see the PR for the done/deferred ledger.
+
+### Added
+
+- **`gather-step doctor` code-quality advisories** — non-gating findings over the indexed graph: dependency cycles (incl. cross-repo, via Tarjan SCC), mock/fixture imports leaking into production modules, and local forks of shared/design-system components that should be reused.
+- **Graph-ranked reuse evidence** in planning packs: reuse candidates are ranked by sibling-consumer count, shared/design-system membership, and cross-repo proof strength before truncation, so a blessed shared component ranks above a bespoke fork (S3).
+- **Typed `plan_change` product** with a fixed, contract-checked section set (E1). Sections are always present (possibly empty), with an exclusion ledger recording what was dropped so a capped result is never read as exhaustive.
+- **Display-ownership planning dimension** (`display_ownership_checks`): every cross-service reference surfaces the question of whether display fields come from the owner service (snapshot/API) rather than a direct cross-service DB lookup (DSO1).
+- **Mongo/Atlas structural safety detectors** with stable rule IDs and confidence: `$lookup` join-key coercion that defeats an index (`GS-MONGO-INDEX-DEFEAT`), bare `$toObjectId` on untrusted input (`GS-MONGO-UNSAFE-COERCION`), unguarded dotted-path `$set` (`GS-MONGO-NULL-PARENT-PATH`), and `dynamic:false` Atlas index↔doc-field drift (`GS-MONGO-ATLAS-INDEX-DRIFT`) (MQS1–MQS3, AIX1).
+- **Query-time index freshness** (`fresh`/`stale`/`never_indexed`) is now classified against the working tree's HEAD and surfaced per repo in `gather-step status` (A13).
+- **Multi-path traversal provenance**: graph traversals now report every distinct path into a node plus `depth_capped`/`truncated` signals when a walk is cut short by depth or fan-out bounds (B8/B9).
+
+### Changed
+
+- **Multi-word search recall**: a conjunctive query that returns nothing now falls back to a disjunction with a min-should-match floor, so a capability query sharing most of its terms still finds the target symbol (S1). Hits are re-ranked by query-term coverage (S2) and expanded through a curated synonym map (S4).
+- **Unified `min_confidence` edge filter** across trace/impact/pack traversal, with `None`-confidence edges treated as trusted (A14).
+- The `plan_change` contract gate is now **evidentiary** — it asserts schema version, the exact section manifest, and the exclusion ledger, not just section presence (G7).
+
+### Fixed
+
+- `batch_query` now routes `plan_change` requests to the typed product instead of the raw planning pack.
+- Read commands no longer block or fail when the graph store is held by an in-progress index or watch: they route to the holding daemon when one is serving, otherwise read a point-in-time snapshot of the graph. When neither is possible the command exits with a distinct, documented code and (under `--json`) a `degraded: graph_locked` disclosure, so a blocked read can never be mistaken for an empty-but-successful result.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.1`.
+
 ## v4.2.1 (2026-06-02)
 
 Release status: **prepared**.

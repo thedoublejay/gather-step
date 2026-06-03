@@ -1,7 +1,8 @@
 use std::{
-    fs,
+    env, fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use gather_step_core::{
@@ -551,6 +552,7 @@ pub trait GraphStore {
 pub struct GraphStoreDb {
     db: Database,
     path: PathBuf,
+    snapshot_cleanup: Option<PathBuf>,
     /// Active-`BulkModeGuard` reference count. When > 0, write
     /// transactions use `Durability::None` to skip fsync. The counter
     /// (rather than a flat `AtomicBool`) is what makes
@@ -623,6 +625,14 @@ impl GraphStoreError {
 /// once the working set fits.
 const DEFAULT_GRAPH_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
+impl Drop for GraphStoreDb {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.snapshot_cleanup.take() {
+            let _ = fs::remove_file(snapshot);
+        }
+    }
+}
+
 impl GraphStoreDb {
     fn is_missing_table_error(error: &impl core::fmt::Display) -> bool {
         error.to_string().contains("does not exist")
@@ -660,6 +670,7 @@ impl GraphStoreDb {
         let store = Self {
             db,
             path,
+            snapshot_cleanup: None,
             bulk_mode: std::sync::atomic::AtomicUsize::new(0),
         };
         if is_new {
@@ -668,6 +679,59 @@ impl GraphStoreDb {
             store.validate_schema_version()?;
         }
         Ok(store)
+    }
+
+    /// Open the graph store for reading without contending on the writer lock.
+    ///
+    /// The fast path is a normal [`Self::open`]. When the store is held by
+    /// another process (an in-progress index or watch) it falls back to a
+    /// point-in-time copy of the database file and opens that, so a read during
+    /// a write returns the last committed state instead of blocking. The copy is
+    /// removed when the returned store is dropped.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, GraphStoreError> {
+        let path = path.as_ref().to_path_buf();
+        match Self::open(&path) {
+            Err(
+                GraphStoreError::StorageHeld { .. } | GraphStoreError::StorageHeldByDaemon { .. },
+            ) => Self::open_snapshot(&path),
+            other => other,
+        }
+    }
+
+    fn open_snapshot(path: &Path) -> Result<Self, GraphStoreError> {
+        let snapshot_path = Self::snapshot_path(path);
+        fs::copy(path, &snapshot_path)?;
+        let mut builder = Database::builder();
+        builder.set_cache_size(DEFAULT_GRAPH_CACHE_BYTES);
+        let db = builder.open(&snapshot_path).map_err(|error| {
+            let _ = fs::remove_file(&snapshot_path);
+            Self::map_open_error(path, error)
+        })?;
+        let store = Self {
+            db,
+            path: path.to_path_buf(),
+            snapshot_cleanup: Some(snapshot_path),
+            bulk_mode: std::sync::atomic::AtomicUsize::new(0),
+        };
+        store.validate_schema_version()?;
+        Ok(store)
+    }
+
+    fn snapshot_path(path: &Path) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("graph");
+        env::temp_dir().join(format!(
+            "gather-step-snapshot-{stem}-{}-{id}.redb",
+            std::process::id()
+        ))
+    }
+
+    /// Whether this store is backed by a read-only snapshot copy rather than the
+    /// live database file.
+    #[must_use]
+    pub fn is_snapshot(&self) -> bool {
+        self.snapshot_cleanup.is_some()
     }
 
     fn write_schema_version(&self) -> Result<(), GraphStoreError> {
@@ -3920,6 +3984,34 @@ mod tests {
             err,
             super::GraphStoreError::StorageHeld { path } if path == graph_path
         ));
+    }
+
+    #[test]
+    fn open_read_only_falls_back_to_snapshot_when_held() {
+        let (_workspace, _storage, graph_path) = temp_workspace_graph_path("held-snapshot");
+        let function = node("service-a", "src/a.ts", NodeKind::Function, "execute", 0);
+
+        let holder = GraphStoreDb::open(&graph_path).expect("first open should succeed");
+        holder
+            .insert_node(&function)
+            .expect("committed write before the snapshot");
+
+        let reader =
+            GraphStoreDb::open_read_only(&graph_path).expect("read-only open should snapshot");
+        assert!(reader.is_snapshot(), "held read must use a snapshot copy");
+        let loaded = reader
+            .get_node(function.id)
+            .expect("snapshot read should succeed")
+            .expect("committed node should be visible in the snapshot");
+        assert_eq!(loaded.name, "execute");
+        drop(reader);
+        drop(holder);
+
+        let direct = GraphStoreDb::open_read_only(&graph_path).expect("uncontended read-only open");
+        assert!(
+            !direct.is_snapshot(),
+            "an uncontended read must use the live file, not a snapshot"
+        );
     }
 
     #[test]

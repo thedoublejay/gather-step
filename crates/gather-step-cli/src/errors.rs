@@ -6,6 +6,36 @@ use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError}
 
 const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
+pub const GRAPH_LOCKED_EXIT_CODE: u8 = 75;
+
+#[must_use]
+pub fn graph_lock_contention(error: &Error) -> bool {
+    for cause in error.chain() {
+        if let Some(graph_error) = cause.downcast_ref::<GraphStoreError>()
+            && matches!(
+                graph_error,
+                GraphStoreError::StorageHeld { .. } | GraphStoreError::StorageHeldByDaemon { .. }
+            )
+        {
+            return true;
+        }
+    }
+    let full = error_chain_text(error);
+    contains_ascii_case_insensitive(&full, "locked by gather-step pid")
+        || contains_ascii_case_insensitive(&full, "already locked by another gather-step process")
+        || contains_ascii_case_insensitive(&full, "database already open")
+}
+
+#[must_use]
+pub fn graph_locked_json_disclosure(error: &Error) -> String {
+    serde_json::json!({
+        "event": "command_failed",
+        "degraded": "graph_locked",
+        "message": format_operator_error(error),
+    })
+    .to_string()
+}
+
 #[must_use]
 pub fn format_operator_error(error: &Error) -> String {
     let full = error_chain_text(error);
@@ -175,6 +205,45 @@ mod tests {
             !msg.contains("schema version mismatch"),
             "permission-denied error must not be remapped to schema-mismatch message: {msg}"
         );
+    }
+
+    #[test]
+    fn graph_lock_contention_detects_typed_lock_errors() {
+        use super::{GRAPH_LOCKED_EXIT_CODE, graph_lock_contention, graph_locked_json_disclosure};
+
+        let held = gather_step_storage::GraphStoreError::StorageHeld {
+            path: PathBuf::from("/tmp/graph.redb"),
+        };
+        let err: anyhow::Error = anyhow::Error::new(held);
+        assert!(graph_lock_contention(&err), "StorageHeld must be detected");
+
+        let by_daemon = gather_step_storage::GraphStoreError::StorageHeldByDaemon {
+            path: PathBuf::from("/tmp/graph.redb"),
+            pid: 4242,
+            started_at_epoch_ms: 1,
+            workspace_root: "/ws".to_owned(),
+        };
+        let err: anyhow::Error = anyhow::Error::new(by_daemon);
+        assert!(
+            graph_lock_contention(&err),
+            "StorageHeldByDaemon must be detected"
+        );
+
+        let disclosure: serde_json::Value =
+            serde_json::from_str(&graph_locked_json_disclosure(&err)).expect("valid json");
+        assert_eq!(disclosure["degraded"], "graph_locked");
+        assert_eq!(disclosure["event"], "command_failed");
+
+        assert_ne!(GRAPH_LOCKED_EXIT_CODE, 0);
+        assert_ne!(GRAPH_LOCKED_EXIT_CODE, 1);
+    }
+
+    #[test]
+    fn graph_lock_contention_ignores_unrelated_errors() {
+        use super::graph_lock_contention;
+
+        let err: anyhow::Error = anyhow::Error::msg("read /tmp/foo: permission denied");
+        assert!(!graph_lock_contention(&err));
     }
 
     #[test]
