@@ -10,17 +10,15 @@ pub enum SharedComponentError {
     Store(#[from] GraphStoreError),
 }
 
+// Design-system-specific markers only. Generic shared-code dirs (`/lib/`,
+// `common/`, bare `packages/`, `internal/`, `/pkg/`) are deliberately excluded:
+// they over-match ordinary code (`src/lib/api`) and inflate the "shared" set.
 const DESIGN_SYSTEM_MARKERS: &[&str] = &[
-    "shared/",
     "design-system",
-    "packages/",
-    "/ui/components",
     "@shared",
-    "common/",
-    "/lib/",
-    "libs/",
-    "internal/",
-    "/pkg/",
+    "shared/components",
+    "packages/ui",
+    "/ui/components",
 ];
 
 #[must_use]
@@ -148,7 +146,11 @@ mod tests {
     #[test]
     fn design_system_path_markers() {
         assert!(is_design_system_path("packages/ui/components/Button.tsx"));
-        assert!(is_design_system_path("src/shared/Card.tsx"));
+        assert!(is_design_system_path("src/shared/components/Card.tsx"));
+        assert!(is_design_system_path("libs/design-system/Modal.tsx"));
+        // Generic shared-code dirs must NOT be treated as design-system.
+        assert!(!is_design_system_path("src/lib/api.ts"));
+        assert!(!is_design_system_path("src/common/utils.ts"));
         assert!(!is_design_system_path("src/features/orders/Button.tsx"));
     }
 

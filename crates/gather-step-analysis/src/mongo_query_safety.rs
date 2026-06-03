@@ -42,15 +42,14 @@ pub fn analyze_atlas_index_drift(
     if dynamic {
         return Vec::new();
     }
-    let mapped: Vec<&str> = mappings
-        .and_then(|m| m.get("fields"))
-        .and_then(Value::as_object)
-        .map(|fields| fields.keys().map(String::as_str).collect())
-        .unwrap_or_default();
+    let mut mapped = std::collections::BTreeSet::new();
+    if let Some(fields) = mappings.and_then(|m| m.get("fields")) {
+        collect_mapped_fields(fields, "", &mut mapped);
+    }
 
     let mut findings: Vec<MongoQueryFinding> = referenced_fields
         .iter()
-        .filter(|field| !mapped.contains(*field))
+        .filter(|field| !mapped.contains(**field))
         .map(|field| MongoQueryFinding {
             rule_id: RULE_ATLAS_INDEX_DRIFT,
             confidence: 0.75,
@@ -63,6 +62,27 @@ pub fn analyze_atlas_index_drift(
         .collect();
     findings.sort_by(|left, right| left.path.cmp(&right.path));
     findings
+}
+
+fn collect_mapped_fields(
+    fields: &Value,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    let Some(map) = fields.as_object() else {
+        return;
+    };
+    for (name, def) in map {
+        let full = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        if let Some(nested) = def.get("fields") {
+            collect_mapped_fields(nested, &full, out);
+        }
+        out.insert(full);
+    }
 }
 
 fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
@@ -80,7 +100,7 @@ fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
                             .to_owned(),
                         path: child_path.clone(),
                     }),
-                    "$set" => detect_null_parent_path(child, &child_path, findings),
+                    "$set" | "$addFields" => detect_null_parent_path(child, &child_path, findings),
                     _ => {}
                 }
                 walk(child, &child_path, findings);
@@ -96,12 +116,27 @@ fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
 }
 
 fn detect_index_defeat(lookup: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
-    if mentions_operator(lookup, "$toString") || mentions_operator(lookup, "$toObjectId") {
+    // Only the join condition defeats the index. That lives in a `$match` stage
+    // of the sub-pipeline; coercion in a `$project`/`$addFields` (merely shaping
+    // output) does not, and the `localField`/`foreignField` form has no pipeline.
+    let coerces_join_key = lookup
+        .get("pipeline")
+        .and_then(Value::as_array)
+        .is_some_and(|stages| {
+            stages.iter().any(|stage| {
+                stage.get("$match").is_some_and(|matcher| {
+                    mentions_operator(matcher, "$toString")
+                        || mentions_operator(matcher, "$toObjectId")
+                })
+            })
+        });
+    if coerces_join_key {
         findings.push(MongoQueryFinding {
             rule_id: RULE_INDEX_DEFEAT,
             confidence: 0.7,
-            message: "`$lookup` coerces its join key (`$toString`/`$toObjectId`), defeating the \
-                      index on the join field; align field types or pre-store the join key."
+            message: "`$lookup` coerces its join key (`$toString`/`$toObjectId`) in the match \
+                      stage, defeating the index on the join field; align field types or \
+                      pre-store the join key."
                 .to_owned(),
             path: path.to_owned(),
         });
@@ -112,27 +147,26 @@ fn detect_null_parent_path(set_doc: &Value, path: &str, findings: &mut Vec<Mongo
     let Value::Object(map) = set_doc else {
         return;
     };
-    for (field, expr) in map {
+    for field in map.keys() {
         let Some((parent, _)) = field.rsplit_once('.') else {
             continue;
         };
-        if value_guards_parent(expr) || sibling_assigns_parent(map, parent) {
+        // Only a sibling assignment that establishes the parent object is a real
+        // guard. An `$ifNull`/`$cond` on the assigned value guards the value, not
+        // the parent path's existence, so it does not suppress the finding.
+        if sibling_assigns_parent(map, parent) {
             continue;
         }
         findings.push(MongoQueryFinding {
             rule_id: RULE_NULL_PARENT_PATH,
             confidence: 0.6,
             message: format!(
-                "`$set` on dotted path `{field}` has no existence/`$type:object` guard on parent \
-                 `{parent}`; a null or scalar parent will be clobbered or error."
+                "`$set`/`$addFields` on dotted path `{field}` has no existence/`$type:object` \
+                 guard on parent `{parent}`; a null or scalar parent will be clobbered or error."
             ),
             path: format!("{path}.{field}"),
         });
     }
-}
-
-fn value_guards_parent(expr: &Value) -> bool {
-    mentions_operator(expr, "$ifNull") || mentions_operator(expr, "$cond")
 }
 
 fn sibling_assigns_parent(map: &serde_json::Map<String, Value>, parent: &str) -> bool {
@@ -203,21 +237,40 @@ mod tests {
     }
 
     #[test]
-    fn flags_unguarded_dotted_set_but_not_guarded_sibling() {
+    fn flags_unguarded_dotted_set_in_set_and_add_fields_but_not_guarded_sibling() {
         let unguarded = json!({ "$set": { "meta.flags.active": true } });
         assert!(rule_ids(&unguarded).contains(&RULE_NULL_PARENT_PATH));
 
-        let guarded_value =
-            json!({ "$set": { "meta.flags.active": { "$ifNull": ["$meta.flags.active", true] } } });
-        assert!(!rule_ids(&guarded_value).contains(&RULE_NULL_PARENT_PATH));
+        // `$addFields` is an alias of `$set` and must be covered too.
+        let add_fields = json!({ "$addFields": { "meta.flags.active": true } });
+        assert!(rule_ids(&add_fields).contains(&RULE_NULL_PARENT_PATH));
 
+        // An `$ifNull` on the assigned value guards the value, not the parent
+        // path's existence — so it is still flagged (no false negative).
+        let value_only_guard =
+            json!({ "$set": { "meta.flags.active": { "$ifNull": ["$meta.flags.active", true] } } });
+        assert!(rule_ids(&value_only_guard).contains(&RULE_NULL_PARENT_PATH));
+
+        // A sibling that establishes the parent object IS a real guard.
         let guarded_sibling =
             json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
         assert!(!rule_ids(&guarded_sibling).contains(&RULE_NULL_PARENT_PATH));
     }
 
     #[test]
-    fn flags_unmapped_field_on_dynamic_false_index_but_not_mapped_field() {
+    fn lookup_projection_coercion_does_not_flag_index_defeat() {
+        // Coercion in a `$project` of the sub-pipeline shapes output; it is not
+        // the join key, so it must not be flagged.
+        let projecting = json!([{ "$lookup": {
+            "from": "u", "localField": "userId", "foreignField": "_id",
+            "pipeline": [{ "$project": { "label": { "$toString": "$_id" } } }],
+            "as": "u"
+        }}]);
+        assert!(!rule_ids(&projecting).contains(&RULE_INDEX_DEFEAT));
+    }
+
+    #[test]
+    fn flags_unmapped_field_on_dynamic_false_index_but_not_mapped_or_nested_field() {
         use super::{RULE_ATLAS_INDEX_DRIFT, analyze_atlas_index_drift};
 
         let index = json!({
@@ -228,6 +281,15 @@ mod tests {
         assert!(ids.contains(&RULE_ATLAS_INDEX_DRIFT));
         assert!(findings.iter().any(|f| f.path == "entity"));
         assert!(!findings.iter().any(|f| f.path == "title"));
+
+        // A nested mapping (`entity.name`) must not be reported as unmapped.
+        let nested = json!({
+            "mappings": { "dynamic": false, "fields": { "entity": { "fields": { "name": {} } } } }
+        });
+        let nested_findings =
+            analyze_atlas_index_drift(&nested, &["entity.name", "entity.missing"]);
+        assert!(nested_findings.iter().all(|f| f.path != "entity.name"));
+        assert!(nested_findings.iter().any(|f| f.path == "entity.missing"));
 
         let dynamic_index = json!({ "mappings": { "dynamic": true } });
         assert!(analyze_atlas_index_drift(&dynamic_index, &["anything"]).is_empty());
