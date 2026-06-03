@@ -29,7 +29,14 @@ struct DoctorOutput {
     pack_metrics: PackDoctorOutput,
     repos: Vec<RepoDoctorOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    quality_advisories: Vec<String>,
+    quality_advisories: Vec<QualityAdvisory>,
+}
+
+#[derive(Debug, Serialize)]
+struct QualityAdvisory {
+    rule_id: &'static str,
+    confidence: f64,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,7 +159,10 @@ pub(crate) fn execute(
             payload.quality_advisories.len()
         ));
         for advisory in &payload.quality_advisories {
-            lines.push(format!("  - {advisory}"));
+            lines.push(format!(
+                "  - [{}] ({:.2}) {}",
+                advisory.rule_id, advisory.confidence, advisory.message
+            ));
         }
     }
     let payload_json = json!(payload);
@@ -172,22 +182,35 @@ const MAX_ADVISORIES_PER_CATEGORY: usize = 50;
 fn collect_quality_advisories(
     storage: &StorageCoordinator,
     repos: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<QualityAdvisory>> {
     let graph = storage.graph();
+    let repo_set: std::collections::BTreeSet<&str> = repos.iter().map(String::as_str).collect();
     let mut advisories = Vec::new();
 
     let cycles = find_cycles(graph, Some(&[EdgeKind::Imports, EdgeKind::Calls]))
         .context("detecting dependency cycles")?;
     push_capped(
         &mut advisories,
-        cycles.iter().map(|cycle| {
-            let scope = if cycle.cross_repo {
-                " (cross-repo)"
-            } else {
-                ""
-            };
-            format!("Dependency cycle{scope}: {}", cycle.nodes.join(" -> "))
-        }),
+        "GS-GRAPH-DEPENDENCY-CYCLE",
+        0.9,
+        cycles
+            .iter()
+            // Scope to the repos under inspection so `--repo X` does not report
+            // cycles that do not involve `X`.
+            .filter(|cycle| {
+                cycle
+                    .repos
+                    .iter()
+                    .any(|repo| repo_set.contains(repo.as_str()))
+            })
+            .map(|cycle| {
+                let scope = if cycle.cross_repo {
+                    " (cross-repo)"
+                } else {
+                    ""
+                };
+                format!("Dependency cycle{scope}: {}", cycle.nodes.join(" -> "))
+            }),
         "dependency cycle",
     );
 
@@ -196,6 +219,8 @@ fn collect_quality_advisories(
             .with_context(|| format!("detecting mock leakage in `{repo}`"))?;
         push_capped(
             &mut advisories,
+            "GS-FE-MOCK-IN-PRODUCTION",
+            0.8,
             leaks.iter().map(|leak| {
                 format!(
                     "Mock import in production (`{repo}`): {} imports {}",
@@ -209,6 +234,8 @@ fn collect_quality_advisories(
             .with_context(|| format!("auditing shared-component reuse in `{repo}`"))?;
         push_capped(
             &mut advisories,
+            "GS-FE-SHARED-COMPONENT-FORK",
+            0.5,
             forks.iter().map(|fork| {
                 format!(
                     "Reuse opportunity (`{repo}`): {} duplicates shared `{}` ({})",
@@ -222,17 +249,31 @@ fn collect_quality_advisories(
     Ok(advisories)
 }
 
-fn push_capped(advisories: &mut Vec<String>, items: impl Iterator<Item = String>, label: &str) {
+fn push_capped(
+    advisories: &mut Vec<QualityAdvisory>,
+    rule_id: &'static str,
+    confidence: f64,
+    items: impl Iterator<Item = String>,
+    label: &str,
+) {
     let collected: Vec<String> = items.collect();
     let total = collected.len();
-    for item in collected.into_iter().take(MAX_ADVISORIES_PER_CATEGORY) {
-        advisories.push(item);
+    for message in collected.into_iter().take(MAX_ADVISORIES_PER_CATEGORY) {
+        advisories.push(QualityAdvisory {
+            rule_id,
+            confidence,
+            message,
+        });
     }
     if total > MAX_ADVISORIES_PER_CATEGORY {
-        advisories.push(format!(
-            "... and {} more {label} finding(s) not shown",
-            total - MAX_ADVISORIES_PER_CATEGORY
-        ));
+        advisories.push(QualityAdvisory {
+            rule_id,
+            confidence,
+            message: format!(
+                "... and {} more {label} finding(s) not shown",
+                total - MAX_ADVISORIES_PER_CATEGORY
+            ),
+        });
     }
 }
 

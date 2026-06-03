@@ -427,6 +427,13 @@ pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
             plan.contract.sections
         ));
     }
+    if plan.contract.exclusion_ledger.is_empty() {
+        violations.push(
+            "exclusion_ledger is empty; an evidentiary contract must record what was excluded \
+             or not yet computed"
+                .to_owned(),
+        );
+    }
     violations
 }
 
@@ -5789,6 +5796,24 @@ mod tests {
         // The gate fails on a mangled section manifest (missing/renamed section).
         plan.contract.sections.pop();
         assert!(!validate_plan_change_contract(&plan).is_empty());
+
+        // The gate fails when the exclusion ledger is emptied.
+        let mut ledger_plan = build_plan_change(
+            "createOrder",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+        assert!(!ledger_plan.contract.exclusion_ledger.is_empty());
+        ledger_plan.contract.exclusion_ledger.clear();
+        assert!(
+            !validate_plan_change_contract(&ledger_plan).is_empty(),
+            "emptying the exclusion ledger must fail the gate"
+        );
     }
 
     #[test]
