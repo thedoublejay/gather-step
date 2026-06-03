@@ -12,11 +12,37 @@ where
     F: FnOnce(&AppContext) -> Result<RenderedCommand>,
 {
     let output = app.output();
-    if let Some(rendered) = try_daemon_first(app, request) {
-        return rendered.emit(&output);
+    let mut rendered = match try_daemon_first(app, request) {
+        Some(rendered) => rendered,
+        None => local(app)?,
+    };
+    // `pack` output is asserted byte-for-byte against the MCP tool (CLI/MCP
+    // parity); it carries freshness via its own response instead.
+    if !matches!(request, DaemonRequest::Pack { .. }) {
+        inject_freshness(app, &mut rendered);
     }
+    rendered.emit(&output)
+}
 
-    local(app)?.emit(&output)
+/// Attach a query-time index-freshness verdict to read-command output so a query
+/// against a stale index can be recognized rather than trusted blindly.
+/// Best-effort: reads only the registry + metadata + git (never the lockable
+/// graph), and is skipped silently when the workspace is unindexed.
+fn inject_freshness(app: &AppContext, rendered: &mut RenderedCommand) {
+    let paths = app.workspace_paths();
+    let freshness = crate::freshness::freshness_from_paths(
+        &paths.registry_path,
+        &paths.storage_root.join("metadata.sqlite"),
+    );
+    if freshness.is_empty() {
+        return;
+    }
+    if let Some(serde_json::Value::Object(map)) = rendered.payload.as_mut()
+        && !map.contains_key("freshness")
+        && let Ok(value) = serde_json::to_value(&freshness)
+    {
+        map.insert("freshness".to_owned(), value);
+    }
 }
 
 fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<RenderedCommand> {

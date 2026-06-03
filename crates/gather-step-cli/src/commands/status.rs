@@ -6,7 +6,6 @@ use gather_step_analysis::{
     GraphQuery, SemanticHealthReport, semantic_health_for_repo, semantic_health_for_workspace,
 };
 use gather_step_core::{DepthLevel, RegistryStore};
-use gather_step_git::{GitHistoryIndexer, GitRepoSource, IndexFreshness};
 use gather_step_mcp::output::redact::relativize_to_workspace;
 use gather_step_storage::{ContextPackStats, GraphStore, MetadataStore, StorageCoordinator};
 use serde::Serialize;
@@ -196,7 +195,8 @@ pub(crate) fn execute(
                 .metadata()
                 .get_last_commit_sha(repo)
                 .with_context(|| format!("loading indexed commit SHA for `{repo}`"))?;
-            let freshness = repo_freshness(repo, &registered.path, indexed_sha.as_deref());
+            let freshness =
+                crate::freshness::repo_freshness(repo, &registered.path, indexed_sha.as_deref());
 
             Ok(RepoStatusOutput {
                 repo: repo.clone(),
@@ -338,22 +338,6 @@ fn format_semantic_summary(health: &SemanticHealthReport) -> String {
         health.payload_contract_links.total_targets,
         health.orphan_topics
     )
-}
-
-fn repo_freshness(repo: &str, path: &std::path::Path, indexed_sha: Option<&str>) -> String {
-    let indexer = GitHistoryIndexer::new(GitRepoSource::from_path(path), repo);
-    match indexer.index_freshness(indexed_sha) {
-        Ok(freshness) => freshness_label(&freshness).to_owned(),
-        Err(_) => "unknown".to_owned(),
-    }
-}
-
-fn freshness_label(freshness: &IndexFreshness) -> &'static str {
-    match freshness {
-        IndexFreshness::Fresh { .. } => "fresh",
-        IndexFreshness::Stale { .. } => "stale",
-        IndexFreshness::NeverIndexed { .. } => "never_indexed",
-    }
 }
 
 fn depth_label(depth: DepthLevel) -> &'static str {
@@ -512,20 +496,20 @@ mod tests {
         use gather_step_git::IndexFreshness;
 
         assert_eq!(
-            super::freshness_label(&IndexFreshness::Fresh {
+            crate::freshness::freshness_label(&IndexFreshness::Fresh {
                 head_sha: "abc".to_owned()
             }),
             "fresh"
         );
         assert_eq!(
-            super::freshness_label(&IndexFreshness::Stale {
+            crate::freshness::freshness_label(&IndexFreshness::Stale {
                 indexed_sha: "old".to_owned(),
                 head_sha: "new".to_owned()
             }),
             "stale"
         );
         assert_eq!(
-            super::freshness_label(&IndexFreshness::NeverIndexed {
+            crate::freshness::freshness_label(&IndexFreshness::NeverIndexed {
                 head_sha: "abc".to_owned()
             }),
             "never_indexed"

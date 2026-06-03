@@ -419,6 +419,29 @@ fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
 }
 
 #[test]
+fn read_commands_surface_query_time_freshness() {
+    let temp = TempDir::new("query-freshness");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["--json", "index"]);
+
+    let output = run_ok(temp.path(), &["search", "OrderList", "--json"]);
+    let json = stdout_json(&output);
+    assert_eq!(json["event"], "search_completed");
+    let freshness = json["freshness"]
+        .as_array()
+        .expect("read output should carry a freshness verdict per repo");
+    assert!(!freshness.is_empty());
+    for entry in freshness {
+        let verdict = entry["freshness"].as_str().expect("freshness verdict");
+        assert!(
+            matches!(verdict, "fresh" | "stale" | "never_indexed" | "unknown"),
+            "unexpected freshness verdict: {verdict}"
+        );
+    }
+}
+
+#[test]
 fn pack_plan_change_mode_returns_typed_product() {
     let temp = TempDir::new("plan-change-cli");
     write_fixture_workspace(temp.path());
