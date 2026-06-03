@@ -13,6 +13,7 @@ Planning- and reuse-quality release. Fixes retrieval recall so reuse search stop
 
 ### Added
 
+- **`gather-step doctor` code-quality advisories** — non-gating findings over the indexed graph: dependency cycles (incl. cross-repo, via Tarjan SCC), mock/fixture imports leaking into production modules, and local forks of shared/design-system components that should be reused.
 - **Graph-ranked reuse evidence** in planning packs: reuse candidates are ranked by sibling-consumer count, shared/design-system membership, and cross-repo proof strength before truncation, so a blessed shared component ranks above a bespoke fork (S3).
 - **Typed `plan_change` product** with a fixed, contract-checked section set (E1). Sections are always present (possibly empty), with an exclusion ledger recording what was dropped so a capped result is never read as exhaustive.
 - **Display-ownership planning dimension** (`display_ownership_checks`): every cross-service reference surfaces the question of whether display fields come from the owner service (snapshot/API) rather than a direct cross-service DB lookup (DSO1).
