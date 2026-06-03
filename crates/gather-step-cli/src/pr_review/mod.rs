@@ -15,5 +15,6 @@ pub mod index_runner;
 pub mod multi_pr;
 pub mod overlay;
 pub mod parity;
+pub mod target;
 #[cfg(test)]
 pub(crate) mod test_helpers;
