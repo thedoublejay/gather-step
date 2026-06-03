@@ -250,7 +250,7 @@ const V1_COMPLETENESS_CHECKLIST: [&str; 19] = [
     "Partial-migration tail: zero residual call-sites workspace-wide? → verify: grep shows no residual callers.",
     "Release-profile divergence: verify flags on the installed profile. → verify: check [profile.dist].",
     "Teardown under-spec: disposable artifacts specify creation/reuse-key/safe-delete/in-flight-writer guard. → verify: all four present.",
-    "Schema-version forward-compat: a version-mismatch refusal/rebuild path exists. → verify: mismatch is refused, not mis-read.",
+    "Schema-version forward-compat: a version-mismatch refusal/rebuild path exists. → verify: mismatch is refused, not misread.",
     "Derived-field blast radius: enumerate source, projection writer, all readers, filters, search/index, backfill. → verify: all six listed.",
     "Cross-service ownership: should the owner publish a snapshot/resolver before adopting a join? → verify: question answered.",
     "Lossy rollback: enumerate unrecoverable rows/fields. → verify: rollback notes list them.",
