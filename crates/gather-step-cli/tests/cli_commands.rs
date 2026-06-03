@@ -349,6 +349,41 @@ fn write_qa_reference_v4_workspace(root: &Path) {
 }
 
 #[test]
+fn resolution_snapshot_matches_golden() {
+    use gather_step_analysis::GraphQuery;
+
+    let temp = TempDir::new("resolution-snapshot");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["--json", "index"]);
+
+    let graph =
+        GraphStoreDb::open(temp.path().join(".gather-step/storage/graph.redb")).expect("graph");
+    let actual = GraphQuery::new(&graph)
+        .resolution_fingerprint()
+        .expect("fingerprint")
+        .join("\n");
+
+    let golden_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/resolution_snapshot.golden");
+    if env::var_os("GATHER_STEP_BLESS_SNAPSHOT").is_some() {
+        fs::create_dir_all(golden_path.parent().expect("golden parent")).expect("golden dir");
+        fs::write(&golden_path, &actual).expect("write golden");
+    }
+
+    let expected = fs::read_to_string(&golden_path).unwrap_or_else(|_| {
+        panic!(
+            "missing golden {}; regenerate with GATHER_STEP_BLESS_SNAPSHOT=1",
+            golden_path.display()
+        )
+    });
+    assert_eq!(
+        actual, expected,
+        "resolution snapshot drifted; if the change is intended, regenerate with GATHER_STEP_BLESS_SNAPSHOT=1"
+    );
+}
+
+#[test]
 fn read_command_during_graph_lock_succeeds_via_snapshot() {
     let temp = TempDir::new("graph-lock");
     write_fixture_workspace(temp.path());

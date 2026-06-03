@@ -181,6 +181,45 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         }
         Ok(counts)
     }
+
+    pub fn resolution_fingerprint(&self) -> Result<Vec<String>, QueryError> {
+        let mut labels: FxHashMap<[u8; 16], String> = FxHashMap::default();
+        let mut node_ids: Vec<NodeId> = Vec::new();
+        for kind in NodeKind::all() {
+            for node in self.store.nodes_by_type(*kind)? {
+                let label = node
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| format!("{}::{}", node.repo, node.name));
+                labels.insert(node.id.as_bytes(), label);
+                node_ids.push(node.id);
+            }
+        }
+
+        let mut lines = Vec::new();
+        for node_id in node_ids {
+            for edge in self.store.get_outgoing(node_id)? {
+                let source = labels
+                    .get(&edge.source.as_bytes())
+                    .map_or("<unknown>", String::as_str);
+                let target = labels
+                    .get(&edge.target.as_bytes())
+                    .map_or("<unknown>", String::as_str);
+                let resolver = edge.metadata.resolver.as_deref().unwrap_or("none");
+                let confidence = edge
+                    .metadata
+                    .confidence
+                    .map_or_else(|| "none".to_owned(), |value| value.to_string());
+                lines.push(format!(
+                    "{source}\t{}\t{target}\t{resolver}\t{confidence}",
+                    edge.kind
+                ));
+            }
+        }
+        lines.sort();
+        lines.dedup();
+        Ok(lines)
+    }
 }
 
 #[cfg(test)]
