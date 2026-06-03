@@ -54,11 +54,6 @@ async fn run_main() -> Result<commands::CliOutcome> {
 
 /// Print the operator-facing error to stderr and return an exit code.
 ///
-/// Graph lock contention (REL1) returns a dedicated exit code and, under
-/// `--json`, a `degraded: graph_locked` disclosure on stdout so a blocked read
-/// can never be mistaken for an empty-but-successful result. All other failures
-/// return exit code 1.
-///
 /// Returning `ExitCode` rather than calling `std::process::exit(1)` lets
 /// tokio's runtime tear down cleanly and lets stdio buffers flush — important
 /// for `pr-review` (which prints a structured report on stdout) and any
@@ -78,8 +73,6 @@ fn print_operator_error_and_code(error: &Error) -> ExitCode {
     ExitCode::from(1)
 }
 
-/// Best-effort check of the raw argv for the global `--json` flag. Used only on
-/// the error path, where the parsed `Cli` is unavailable.
 fn wants_json_output() -> bool {
     std::env::args().any(|arg| arg == "--json")
 }

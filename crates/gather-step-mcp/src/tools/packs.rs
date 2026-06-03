@@ -207,15 +207,8 @@ pub struct ContextPackResponse {
     pub meta: Option<ContextPackMeta>,
 }
 
-/// Schema version of the [`PlanChangeResponse`] contract. Bump on any change to
-/// the section set or contract shape. v2 adds `display_ownership_checks` (DSO1);
-/// v3 adds `pass_two_gap_dimensions` (B1) and `v1_completeness_checklist`
-/// (B3 + WS-16).
 const PLAN_CHANGE_SCHEMA_VERSION: u8 = 3;
 
-/// The fixed `plan_change` section names, in canonical order. The contract
-/// manifest must equal this exactly so consumers (and the G7 gate) can assert
-/// completeness deterministically.
 const PLAN_CHANGE_SECTIONS: [&str; 12] = [
     "reuse_candidates",
     "sibling_clone_targets",
@@ -231,8 +224,6 @@ const PLAN_CHANGE_SECTIONS: [&str; 12] = [
     "verification_plan",
 ];
 
-/// B1: the eight fixed pass-2 gap-enumeration dimensions, surfaced as a required
-/// checklist on every plan so a planner cannot skip them.
 const PASS_TWO_GAP_DIMENSIONS: [&str; 8] = [
     "State machine: does this add/alter a status or lifecycle state? Enumerate transitions and conflict handling.",
     "Token/URL security: are tokens, signed URLs, or IDs exposed or accepted? Validate scope, expiry, and tampering.",
@@ -244,8 +235,6 @@ const PASS_TWO_GAP_DIMENSIONS: [&str; 8] = [
     "Notification: should this change emit or suppress a user/system notification?",
 ];
 
-/// B3 (v1-completeness) + WS-16 (v1 deviation taxonomy V1–V9), folded into one
-/// checklist. Every item carries a `→ verify:` so progress is observable.
 const V1_COMPLETENESS_CHECKLIST: [&str; 19] = [
     "Scale test: does it hold at production data volume? → verify: run against a realistic-size fixture.",
     "Failure-path lifecycle: are partial-failure and retry paths handled? → verify: exercise the failure branch.",
@@ -268,10 +257,6 @@ const V1_COMPLETENESS_CHECKLIST: [&str; 19] = [
     "Implied-surface sweep: events/audit/notification/rate-limit/idempotency even when the spec is silent. → verify: sweep performed.",
 ];
 
-/// Evidentiary contract for the typed `plan_change` product (WS-3 / G7):
-/// deterministic metadata (schema version + the fixed section manifest) plus an
-/// exclusion ledger recording what was dropped from the response and why, so a
-/// consumer never mistakes a capped/filtered result for an exhaustive one.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PlanChangeContract {
     pub schema_version: u8,
@@ -280,50 +265,27 @@ pub struct PlanChangeContract {
     pub exclusion_ledger: Vec<String>,
 }
 
-/// Typed `plan_change` product (WS-3 / E1).
-///
-/// A distinct response shape — not an alias for the planning pack — with the
-/// twelve fixed planning sections. v1 projects the existing planning-pack data
-/// into these sections; later slices (B7 proactive queries, G7 evidentiary
-/// fields) enrich them. Every section is always present (possibly empty) so the
-/// contract is stable for consumers and the G7 gate.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct PlanChangeResponse {
     pub target: String,
     pub found: bool,
-    /// Existing reusable symbols a change should prefer over a new fork —
-    /// shared/design-system members surfaced by the S3 reuse ranking.
     pub reuse_candidates: Vec<PackItem>,
-    /// Local siblings worth cloning/aligning with (same neighbourhood, not in a
-    /// shared module).
     pub sibling_clone_targets: Vec<PackItem>,
     pub standards_to_preserve: Vec<String>,
     pub integration_checks: Vec<String>,
-    /// Cross-repo reachability proofs (producer/consumer edges) for the target.
     pub cross_repo_reachability: Vec<serde_json::Value>,
-    /// DSO1: for each cross-service reference, the display-ownership question —
-    /// confirm display fields come from the owner service (snapshot/API), not a
-    /// direct cross-service DB lookup, and that access control stays in the owner.
     pub display_ownership_checks: Vec<String>,
     pub write_path_or_state_machine_risks: Vec<String>,
     pub required_braingent_records: Vec<String>,
     pub open_unknowns: Vec<String>,
-    /// B1: the eight fixed pass-2 gap-enumeration dimensions (required checklist).
     pub pass_two_gap_dimensions: Vec<String>,
-    /// B3 + WS-16: the v1-completeness checklist with the v1 deviation taxonomy
-    /// folded in; every item carries a `→ verify:`.
     pub v1_completeness_checklist: Vec<String>,
     pub verification_plan: Vec<String>,
-    /// Evidentiary contract: schema version, section manifest, exclusion ledger.
     pub contract: PlanChangeContract,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<ContextPackMeta>,
 }
 
-/// Project planning-pack pieces into the typed `plan_change` sections (WS-3 /
-/// E1). Pure over its inputs so the projection is unit-testable without an MCP
-/// context or graph. Reuse candidates are shared-module members; remaining
-/// related items become sibling clone targets.
 fn build_plan_change(
     target: &str,
     found: bool,
@@ -352,8 +314,6 @@ fn build_plan_change(
         .map(|step| format!("Run `{step}` and confirm the result before changing code."))
         .collect();
 
-    // B7: surface the change-impact evidence the planning pack already gathered
-    // into the typed sections, rather than leaving them empty.
     let mut integration_checks = Vec::new();
     for repo in &change_impact.confirmed_downstream_repos {
         integration_checks.push(format!(
@@ -366,9 +326,6 @@ fn build_plan_change(
         ));
     }
 
-    // DSO1: every cross-service reference raises the display-ownership question
-    // as a named planning dimension (REG-13833 — a cross-service display lookup
-    // was added without planning who owns the field).
     let mut display_ownership_checks = Vec::new();
     for caller in &change_impact.cross_repo_callers {
         display_ownership_checks.push(format!(
@@ -398,8 +355,6 @@ fn build_plan_change(
         );
     }
 
-    // G7: exclusion ledger — record what was dropped from the response so a
-    // consumer never reads a capped/filtered result as exhaustive.
     let mut exclusion_ledger = Vec::new();
     if let Some(truncated) = &change_impact.truncated_repos {
         exclusion_ledger.push(format!(
@@ -413,8 +368,6 @@ fn build_plan_change(
             exclusion_ledger.push(format!("Planning warning: {warning}"));
         }
     }
-    // Sections that are intentionally not computed yet are recorded here so an
-    // empty value is read as "not computed", not "nothing applies".
     exclusion_ledger
         .push("standards_to_preserve: not yet computed (no standards engine).".to_owned());
     exclusion_ledger
@@ -433,8 +386,6 @@ fn build_plan_change(
         found,
         reuse_candidates,
         sibling_clone_targets,
-        // Not yet computed; their absence is recorded in the exclusion ledger
-        // so an empty value is not read as "nothing applies".
         standards_to_preserve: Vec::new(),
         integration_checks,
         cross_repo_reachability: planning_proofs.to_vec(),
@@ -456,9 +407,6 @@ fn build_plan_change(
     }
 }
 
-/// G7 contract gate: assert a [`PlanChangeResponse`] carries deterministic
-/// contract metadata — the current schema version and the exact canonical
-/// section manifest. Returns the list of violations (empty == passes).
 pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
     let mut violations = Vec::new();
     if plan.contract.schema_version != PLAN_CHANGE_SCHEMA_VERSION {
@@ -482,8 +430,6 @@ pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
     violations
 }
 
-/// Build the typed `plan_change` product (WS-3 / E1): run the planning pack,
-/// then project its data into the twelve fixed sections.
 pub fn run_plan_change(
     ctx: &McpContext,
     request: ModePackRequest,
@@ -1387,9 +1333,6 @@ fn assemble_context_pack_for_symbol(
         items.retain(|item| item.repo == repo);
     }
 
-    // S3: apply the graph-derived reuse boost on a bounded candidate window
-    // BEFORE the cut, then re-sort, so a canonical reusable symbol can be
-    // promoted into the pack rather than discarded by the base-score truncate.
     if mode == PackMode::Planning {
         // KNOWN CEILING: the reuse boost re-ranks the top `limit*5` base-ranked
         // candidates; a canonical symbol ranked below that window for a very
@@ -2870,7 +2813,7 @@ fn consumer_count<S: gather_step_storage::GraphStore>(graph: &S, symbol_id: &str
         .len()
 }
 
-/// Apply the S3 graph-derived reuse boost to planning-pack items via a
+/// Apply the graph-derived reuse boost to planning-pack items via a
 /// consumer-count lookup. Generic over the lookup so the boost is unit-testable
 /// without a graph store. Must run BEFORE truncation so a canonical reusable
 /// symbol can be promoted into the pack, not merely reordered within an
@@ -5567,6 +5510,33 @@ mod tests {
     }
 
     #[test]
+    fn reuse_ranking_promotes_shared_component_over_bespoke_fork() {
+        use super::{apply_reuse_boost_with, sort_pack_items};
+
+        let fork = make_pack_item(100, "src/features/orders/OrderButtonFork.tsx", false);
+        let shared = make_pack_item(80, "packages/ui/components/Button.tsx", false);
+        let mut items = vec![fork.clone(), shared.clone()];
+
+        let mut raw = items.clone();
+        sort_pack_items(&mut raw);
+        assert_eq!(raw[0].file_path, fork.file_path);
+
+        apply_reuse_boost_with(&mut items, |symbol_id| {
+            if symbol_id == shared.symbol_id { 10 } else { 0 }
+        });
+        sort_pack_items(&mut items);
+
+        assert_eq!(
+            items[0].file_path, shared.file_path,
+            "shared component must rank top-1 after the reuse boost"
+        );
+        assert_ne!(
+            items[0].file_path, fork.file_path,
+            "bespoke fork must not be top-1"
+        );
+    }
+
+    #[test]
     fn reuse_evidence_boost_prefers_shared_and_widely_consumed() {
         use super::reuse_evidence_boost;
 
@@ -5666,7 +5636,6 @@ mod tests {
         assert_eq!(plan.open_unknowns, gaps);
         assert_eq!(plan.cross_repo_reachability.len(), 1);
         assert_eq!(plan.verification_plan.len(), 1);
-        // B7: change-impact evidence now populates these sections.
         assert_eq!(plan.integration_checks.len(), 1);
         assert!(plan.integration_checks[0].contains("alert"));
         assert_eq!(plan.write_path_or_state_machine_risks.len(), 1);
@@ -5691,7 +5660,6 @@ mod tests {
             None,
         );
 
-        // B1: all eight pass-2 gap dimensions are present as a required checklist.
         assert_eq!(
             plan.pass_two_gap_dimensions.len(),
             8,
@@ -5699,8 +5667,6 @@ mod tests {
             plan.pass_two_gap_dimensions
         );
 
-        // B3 + WS-16: the v1-completeness checklist is non-empty and every item
-        // carries a `→ verify:` so progress is observable.
         assert!(!plan.v1_completeness_checklist.is_empty());
         assert!(
             plan.v1_completeness_checklist
@@ -5708,15 +5674,13 @@ mod tests {
                 .all(|item| item.contains("→ verify:")),
             "every v1-completeness item must carry a verify step"
         );
-        // WS-16: the deviation taxonomy (V1–V9) is folded into the checklist.
         assert!(
             plan.v1_completeness_checklist
                 .iter()
                 .any(|item| item.contains("Derived-field blast radius")),
-            "V6 deviation item missing from checklist"
+            "deviation checklist item missing"
         );
 
-        // Both new sections are part of the deterministic contract manifest.
         for section in ["pass_two_gap_dimensions", "v1_completeness_checklist"] {
             assert!(
                 plan.contract.sections.iter().any(|s| s == section),
@@ -5731,12 +5695,12 @@ mod tests {
 
         let change_impact = ChangeImpactSummary {
             cross_repo_callers: vec![super::CrossRepoCaller {
-                file_path: "src/action_hub.ts".to_owned(),
+                file_path: "src/action_panel.ts".to_owned(),
                 line_start: None,
-                repo: "label-review".to_owned(),
+                repo: "reporting".to_owned(),
                 symbol_id: "id_hub".to_owned(),
                 symbol_kind: "function".to_owned(),
-                symbol_name: "renderActionHub".to_owned(),
+                symbol_name: "renderActionPanel".to_owned(),
                 evidence: None,
             }],
             ..Default::default()
@@ -5752,16 +5716,13 @@ mod tests {
             None,
         );
 
-        // DSO1: cross-service references raise the display-ownership question as
-        // a named section, citing the owning service.
         assert!(
             plan.display_ownership_checks
                 .iter()
-                .any(|check| check.contains("label-review")),
+                .any(|check| check.contains("reporting")),
             "display ownership not surfaced for cross-service ref: {:?}",
             plan.display_ownership_checks
         );
-        // The new section is part of the deterministic contract manifest.
         assert!(
             plan.contract
                 .sections

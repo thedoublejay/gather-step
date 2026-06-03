@@ -6,16 +6,8 @@ use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError}
 
 const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
-/// Sysexits-style exit code (`EX_TEMPFAIL`) returned when a read command cannot
-/// proceed because the graph store is locked by another gather-step process
-/// (REL1). Distinct from the generic failure code (1) so a caller — CI, a
-/// wrapper, or an agent — can tell "blocked, results incomplete" apart from
-/// "ran fine, found nothing" and never silently fall back to grep.
 pub const GRAPH_LOCKED_EXIT_CODE: u8 = 75;
 
-/// True when the error chain carries graph-store lock contention
-/// (`StorageHeld` / `StorageHeldByDaemon`), including the text-fallback forms
-/// produced when the typed error is flattened to a string mid-chain.
 #[must_use]
 pub fn graph_lock_contention(error: &Error) -> bool {
     for cause in error.chain() {
@@ -34,8 +26,6 @@ pub fn graph_lock_contention(error: &Error) -> bool {
         || contains_ascii_case_insensitive(&full, "database already open")
 }
 
-/// Machine-readable degraded-mode disclosure for `--json` consumers when a read
-/// command is blocked by graph lock contention (REL1).
 #[must_use]
 pub fn graph_locked_json_disclosure(error: &Error) -> String {
     serde_json::json!({
@@ -239,15 +229,11 @@ mod tests {
             "StorageHeldByDaemon must be detected"
         );
 
-        // The JSON disclosure names the degraded mode so a blocked read can
-        // never look like an empty-but-successful result.
         let disclosure: serde_json::Value =
             serde_json::from_str(&graph_locked_json_disclosure(&err)).expect("valid json");
         assert_eq!(disclosure["degraded"], "graph_locked");
         assert_eq!(disclosure["event"], "command_failed");
 
-        // The dedicated exit code is distinct from success (0) and the generic
-        // failure code (1) so callers can branch on it.
         assert_ne!(GRAPH_LOCKED_EXIT_CODE, 0);
         assert_ne!(GRAPH_LOCKED_EXIT_CODE, 1);
     }

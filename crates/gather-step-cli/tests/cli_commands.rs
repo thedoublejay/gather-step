@@ -348,15 +348,9 @@ fn write_qa_reference_v4_workspace(root: &Path) {
     .expect("notifications fixture source");
 }
 
-/// REL1 end-to-end: while the graph store is held by another handle (simulating
-/// an in-progress index/watch), a read command must exit with the dedicated
-/// lock-contention code (75) and, under `--json`, disclose `degraded:
-/// graph_locked` on stdout — so a blocked read can never look like an
-/// empty-but-successful result. The lock is held in-process; the read runs as a
-/// separate binary, exercising redb's real cross-process file lock.
 #[test]
 fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
-    let temp = TempDir::new("graph-lock-rel1");
+    let temp = TempDir::new("graph-lock");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
     run_ok(temp.path(), &["--json", "index"]);
@@ -385,8 +379,6 @@ fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
     assert_eq!(disclosure["event"], "command_failed");
     assert_eq!(disclosure["degraded"], "graph_locked");
 
-    // Without --json the exit code is still the distinct 75 and the operator
-    // message lands on stderr (no machine disclosure on stdout).
     let plain = gather_step()
         .arg("--workspace")
         .arg(temp.path())
@@ -404,8 +396,6 @@ fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
         "plain-mode lock failure must not emit a machine disclosure on stdout"
     );
 
-    // Releasing the lock lets the same read succeed — proving 75 meant "blocked",
-    // not "broken".
     drop(held);
     let recovered = run_ok(temp.path(), &["search", "OrderList", "--json"]);
     assert_eq!(stdout_json(&recovered)["event"], "search_completed");
@@ -504,7 +494,6 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     assert_eq!(status_json["event"], "status_completed");
     let status_repos = status_json["repos"].as_array().expect("repos array");
     assert!(!status_repos.is_empty());
-    // A13: each repo row carries a query-time index-freshness verdict.
     for repo in status_repos {
         let freshness = repo["freshness"]
             .as_str()

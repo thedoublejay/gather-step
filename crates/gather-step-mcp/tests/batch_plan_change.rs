@@ -45,9 +45,6 @@ async fn batch_query_plan_change_returns_typed_product() {
         body.contains("verification_plan") && body.contains("\"sections\""),
         "batch plan_change must include the contract section manifest: {body}"
     );
-    // The newer sections must round-trip through the batch route too: DSO1
-    // (display ownership) and B1/B3/WS-16 (the pass-2 + v1-completeness
-    // checklists), plus the current contract schema version.
     for section in [
         "display_ownership_checks",
         "pass_two_gap_dimensions",

@@ -38,8 +38,6 @@ struct RepoStatusOutput {
     path: String,
     path_exists: bool,
     depth_level: String,
-    /// Query-time index freshness vs the working tree's HEAD (A13): one of
-    /// `fresh`, `stale`, `never_indexed`, or `unknown` (git unavailable).
     freshness: String,
     last_indexed_at: Option<String>,
     registry_file_count: u64,
@@ -342,9 +340,6 @@ fn format_semantic_summary(health: &SemanticHealthReport) -> String {
     )
 }
 
-/// Classify a repo's index freshness vs its current git HEAD (A13). Opening
-/// git is best-effort: a non-git path or git failure yields `unknown` rather
-/// than failing the whole status command.
 fn repo_freshness(repo: &str, path: &std::path::Path, indexed_sha: Option<&str>) -> String {
     let indexer = GitHistoryIndexer::new(GitRepoSource::from_path(path), repo);
     match indexer.index_freshness(indexed_sha) {
@@ -501,7 +496,6 @@ mod tests {
             Some("status_completed"),
             "status payload should have event=status_completed"
         );
-        // A13: every repo row carries a query-time index-freshness verdict.
         for repo in repos {
             let freshness = repo["freshness"]
                 .as_str()

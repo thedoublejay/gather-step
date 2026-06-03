@@ -1,32 +1,14 @@
-//! Mongo/Atlas structural safety detectors (WS-G3).
-//!
-//! These flag AST-detectable antipatterns that recur in ad-hoc mongo queries
-//! and aggregations, not just migrations. Each finding carries a stable rule ID
-//! and a confidence score so it can be surfaced in review without prose-only
-//! noise (the v4.3.1 non-goal "no prose-only findings" applies here).
-//!
-//! The detectors are pure over a [`serde_json::Value`] modelling a mongo
-//! operation (an update document or an aggregation pipeline), so they are
-//! unit-testable without a live parser. Wiring the parser's pipeline extraction
-//! into these detectors is a separate concern (tracked under MQS1's key files).
+//! Structural safety detectors for Mongo queries, aggregations, and Atlas
+//! search-index definitions. Pure over a [`serde_json::Value`] so they are
+//! testable without a live parser.
 
 use serde_json::Value;
 
-/// MQS1 — an aggregation `$lookup` whose join key is coerced (`$toString` /
-/// `$toObjectId`) inside a sub-pipeline, defeating the index on the join field.
 pub const RULE_INDEX_DEFEAT: &str = "GS-MONGO-INDEX-DEFEAT";
-/// MQS2 — a bare `$toObjectId` coercion (recommend `$convert` with `onError`).
 pub const RULE_UNSAFE_COERCION: &str = "GS-MONGO-UNSAFE-COERCION";
-/// MQS3 — a `$set` on a dotted path with no existence/`$type:object` guard on
-/// the parent, which can clobber or fail on a null/scalar parent.
 pub const RULE_NULL_PARENT_PATH: &str = "GS-MONGO-NULL-PARENT-PATH";
-/// AIX1 — a doc field is referenced in a `$search`/filter but absent from a
-/// `dynamic:false` Atlas search-index mapping, so the query silently matches
-/// nothing on that field.
 pub const RULE_ATLAS_INDEX_DRIFT: &str = "GS-MONGO-ATLAS-INDEX-DRIFT";
 
-/// One mongo-query-safety finding. `path` is a dotted location into the analysed
-/// value so a caller can point at the offending stage/field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MongoQueryFinding {
     pub rule_id: &'static str,
@@ -35,9 +17,6 @@ pub struct MongoQueryFinding {
     pub path: String,
 }
 
-/// Analyse a JSON-shaped mongo operation (update document or aggregation
-/// pipeline) for the WS-G3 structural traps. Findings are sorted by
-/// `(rule_id, path)` so the output is deterministic.
 #[must_use]
 pub fn analyze_mongo_value(value: &Value) -> Vec<MongoQueryFinding> {
     let mut findings = Vec::new();
@@ -50,10 +29,6 @@ pub fn analyze_mongo_value(value: &Value) -> Vec<MongoQueryFinding> {
     findings
 }
 
-/// AIX1: flag doc fields referenced in a `$search`/filter that are absent from
-/// a `dynamic:false` Atlas search-index mapping. A `dynamic:true` (or missing —
-/// Atlas defaults to dynamic) mapping covers all fields, so it never drifts.
-/// Pure over the index definition + the referenced field set.
 #[must_use]
 pub fn analyze_atlas_index_drift(
     index_def: &Value,
@@ -120,9 +95,6 @@ fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
     }
 }
 
-/// MQS1: a `$lookup` is index-defeating when its join key is coerced with
-/// `$toString`/`$toObjectId` (typically inside a `let` + sub-`pipeline`). The
-/// index-aligned `localField`/`foreignField` form does no coercion.
 fn detect_index_defeat(lookup: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
     if mentions_operator(lookup, "$toString") || mentions_operator(lookup, "$toObjectId") {
         findings.push(MongoQueryFinding {
@@ -136,8 +108,6 @@ fn detect_index_defeat(lookup: &Value, path: &str, findings: &mut Vec<MongoQuery
     }
 }
 
-/// MQS3: a dotted-path key under `$set` is unguarded when neither the value nor
-/// the sibling assignments establish the parent object first.
 fn detect_null_parent_path(set_doc: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
     let Value::Object(map) = set_doc else {
         return;
@@ -161,20 +131,15 @@ fn detect_null_parent_path(set_doc: &Value, path: &str, findings: &mut Vec<Mongo
     }
 }
 
-/// The assigned expression itself guards the parent (e.g. `$ifNull`/`$cond`).
 fn value_guards_parent(expr: &Value) -> bool {
     mentions_operator(expr, "$ifNull") || mentions_operator(expr, "$cond")
 }
 
-/// A sibling key in the same `$set` establishes the parent (or an ancestor) as
-/// an object before the dotted write — i.e. a sibling that is exactly the
-/// parent path or a prefix-ancestor of it.
 fn sibling_assigns_parent(map: &serde_json::Map<String, Value>, parent: &str) -> bool {
     map.keys()
         .any(|key| key == parent || parent.starts_with(&format!("{key}.")))
 }
 
-/// Whether `value` contains `op` as an object key anywhere in its tree.
 fn mentions_operator(value: &Value, op: &str) -> bool {
     match value {
         Value::Object(map) => map
@@ -201,7 +166,6 @@ mod tests {
 
     #[test]
     fn flags_lookup_that_coerces_join_key_but_not_index_aligned_lookup() {
-        // GO4(a): a $lookup coercing the join key with $toString defeats the index.
         let coercing = json!([{
             "$lookup": {
                 "from": "users",
@@ -214,7 +178,6 @@ mod tests {
         }]);
         assert!(rule_ids(&coercing).contains(&RULE_INDEX_DEFEAT));
 
-        // An index-aligned localField/foreignField join is clean.
         let aligned = json!([{
             "$lookup": {
                 "from": "users",
@@ -228,11 +191,9 @@ mod tests {
 
     #[test]
     fn flags_bare_to_object_id_but_not_convert_with_on_error() {
-        // GO4(b): bare $toObjectId on untrusted input.
         let bare = json!({ "$match": { "_id": { "$toObjectId": "$$req.id" } } });
         assert!(rule_ids(&bare).contains(&RULE_UNSAFE_COERCION));
 
-        // $convert with onError is the safe sibling — no $toObjectId key.
         let safe = json!({
             "$match": {
                 "_id": { "$convert": { "input": "$$req.id", "to": "objectId", "onError": null } }
@@ -243,16 +204,13 @@ mod tests {
 
     #[test]
     fn flags_unguarded_dotted_set_but_not_guarded_sibling() {
-        // GO4(c): dotted $set with no parent guard.
         let unguarded = json!({ "$set": { "meta.flags.active": true } });
         assert!(rule_ids(&unguarded).contains(&RULE_NULL_PARENT_PATH));
 
-        // Guarded by wrapping the value in $ifNull.
         let guarded_value =
             json!({ "$set": { "meta.flags.active": { "$ifNull": ["$meta.flags.active", true] } } });
         assert!(!rule_ids(&guarded_value).contains(&RULE_NULL_PARENT_PATH));
 
-        // Guarded by establishing the parent in a sibling assignment.
         let guarded_sibling =
             json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
         assert!(!rule_ids(&guarded_sibling).contains(&RULE_NULL_PARENT_PATH));
@@ -262,7 +220,6 @@ mod tests {
     fn flags_unmapped_field_on_dynamic_false_index_but_not_mapped_field() {
         use super::{RULE_ATLAS_INDEX_DRIFT, analyze_atlas_index_drift};
 
-        // GO4(d): a dynamic:false index missing a referenced field.
         let index = json!({
             "mappings": { "dynamic": false, "fields": { "title": {}, "body": {} } }
         });
@@ -270,14 +227,48 @@ mod tests {
         let ids: Vec<_> = findings.iter().map(|f| f.rule_id).collect();
         assert!(ids.contains(&RULE_ATLAS_INDEX_DRIFT));
         assert!(findings.iter().any(|f| f.path == "entity"));
-        assert!(
-            !findings.iter().any(|f| f.path == "title"),
-            "a mapped field must not drift"
-        );
+        assert!(!findings.iter().any(|f| f.path == "title"));
 
-        // A dynamic:true index covers every field — no drift.
         let dynamic_index = json!({ "mappings": { "dynamic": true } });
         assert!(analyze_atlas_index_drift(&dynamic_index, &["anything"]).is_empty());
+    }
+
+    #[test]
+    fn trap_detectors_cover_each_pattern_and_clean_siblings() {
+        use super::{
+            RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH, RULE_UNSAFE_COERCION,
+            analyze_atlas_index_drift,
+        };
+
+        let trap_a = json!([{ "$lookup": {
+            "from": "u", "let": { "k": "$userId" },
+            "pipeline": [{ "$match": { "$expr": { "$eq": [{ "$toString": "$_id" }, "$$k"] } } }],
+            "as": "u"
+        }}]);
+        let clean_a = json!([{ "$lookup": {
+            "from": "u", "localField": "userId", "foreignField": "_id", "as": "u"
+        }}]);
+        assert!(rule_ids(&trap_a).contains(&RULE_INDEX_DEFEAT));
+        assert!(!rule_ids(&clean_a).contains(&RULE_INDEX_DEFEAT));
+
+        let trap_b = json!({ "_id": { "$toObjectId": "$$req.id" } });
+        let clean_b = json!({ "_id": { "$convert": { "input": "$$req.id", "to": "objectId", "onError": null } } });
+        assert!(rule_ids(&trap_b).contains(&RULE_UNSAFE_COERCION));
+        assert!(!rule_ids(&clean_b).contains(&RULE_UNSAFE_COERCION));
+
+        let trap_c = json!({ "$set": { "meta.flags.active": true } });
+        let clean_c = json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
+        assert!(rule_ids(&trap_c).contains(&RULE_NULL_PARENT_PATH));
+        assert!(!rule_ids(&clean_c).contains(&RULE_NULL_PARENT_PATH));
+
+        let index = json!({ "mappings": { "dynamic": false, "fields": { "title": {} } } });
+        let trap_d = analyze_atlas_index_drift(&index, &["title", "entity"]);
+        assert!(
+            trap_d
+                .iter()
+                .any(|f| f.rule_id == RULE_ATLAS_INDEX_DRIFT && f.path == "entity")
+        );
+        assert!(!trap_d.iter().any(|f| f.path == "title"));
     }
 
     #[test]
@@ -298,7 +289,6 @@ mod tests {
         let first = analyze_mongo_value(&value);
         let second = analyze_mongo_value(&value);
         assert_eq!(first, second);
-        // Findings come back sorted by (rule_id, path).
         let ids: Vec<_> = first.iter().map(|f| f.rule_id).collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();

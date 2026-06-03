@@ -5,9 +5,6 @@ use gather_step_storage::{GraphStore, GraphStoreError};
 use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
-/// Maximum out-edges a single node contributes, and the maximum number of
-/// distinct in-paths recorded per node, before a traversal marks itself
-/// `truncated`. Bounds memory/work on very-high-fan-out hub nodes.
 const DEFAULT_FANOUT_CAP: usize = 256;
 
 #[derive(Debug, Error)]
@@ -19,22 +16,15 @@ pub enum QueryError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraversalStep {
     pub node_id: NodeId,
-    /// The first (BFS-shortest) path of edge kinds discovered into this node.
     pub edge_kinds: Vec<EdgeKind>,
     pub depth: usize,
-    /// Every distinct path of edge kinds that reaches this node (capped at
-    /// `DEFAULT_FANOUT_CAP`). A node reachable N ways reports N caller paths.
     pub in_paths: Vec<Vec<EdgeKind>>,
 }
 
-/// The result of a bounded graph traversal, carrying the visited steps plus
-/// signals about whether the walk was cut short by a depth or fan-out bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraversalOutcome {
     pub steps: Vec<TraversalStep>,
-    /// At least one node sat at `max_depth` with deeper edges left unfollowed.
     pub depth_capped: bool,
-    /// At least one node's fan-out (or recorded in-paths) hit `DEFAULT_FANOUT_CAP`.
     pub truncated: bool,
 }
 
@@ -96,9 +86,6 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
             .steps)
     }
 
-    /// Bounded BFS that records multi-path provenance (every distinct path into
-    /// each node) and signals when the walk was cut short by the depth limit
-    /// (`depth_capped`) or the fan-out bound (`truncated`).
     pub fn traverse_with_provenance(
         &self,
         start: NodeId,
@@ -108,11 +95,8 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
     ) -> Result<TraversalOutcome, QueryError> {
         let mut queue = VecDeque::from([(start, Vec::<EdgeKind>::new(), 0_usize)]);
         let mut enqueued = FxHashSet::from_iter([start.as_bytes()]);
-        // Discovery order of reached nodes, so step order is deterministic.
         let mut order: Vec<NodeId> = Vec::new();
-        // First-discovered path + depth per node.
         let mut primary: FxHashMap<[u8; 16], (Vec<EdgeKind>, usize)> = FxHashMap::default();
-        // Every distinct path into each node (bounded).
         let mut in_paths: FxHashMap<[u8; 16], Vec<Vec<EdgeKind>>> = FxHashMap::default();
         let mut depth_capped = false;
         let mut truncated = false;
@@ -387,8 +371,6 @@ mod tests {
 
         let query = GraphQuery::new(&store);
 
-        // A chain longer than max_depth: c sits at the depth boundary and still
-        // has an outgoing edge to d, so the traversal must flag depth capping.
         let capped = query
             .traverse_with_provenance(a.id, &[EdgeKind::Calls], 2, None)
             .expect("traversal should succeed");
@@ -399,7 +381,6 @@ mod tests {
         );
         assert!(!capped.truncated);
 
-        // A depth that reaches the whole chain leaves nothing capped.
         let full = query
             .traverse_with_provenance(a.id, &[EdgeKind::Calls], 8, None)
             .expect("traversal should succeed");
@@ -416,7 +397,6 @@ mod tests {
         let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 1);
         let b = node("service-a", "src/a.ts", NodeKind::Function, "b", 2);
         let c = node("service-a", "src/a.ts", NodeKind::Function, "c", 3);
-        // sink is reachable three ways: root->a->sink, root->b->sink, root->c->sink.
         let sink = node("service-a", "src/a.ts", NodeKind::Function, "sink", 4);
         store
             .bulk_insert(
@@ -463,8 +443,6 @@ mod tests {
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let hub = node("service-a", "src/a.ts", NodeKind::Function, "hub", 0);
 
-        // A hub node with more out-edges than DEFAULT_FANOUT_CAP (256) must trip
-        // the truncation signal rather than silently exploring a bounded subset.
         let fan_out = 300_u16;
         let mut nodes = vec![file.clone(), hub.clone()];
         let mut edges = Vec::new();
