@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
 use gather_step_mcp::tools::{
     events::{TraceEventRequest, TraceRouteRequest, trace_event_tool, trace_route_tool},
-    packs::{ContextPackRequest, context_pack_tool},
+    packs::{ContextPackRequest, ModePackRequest, context_pack_tool, run_plan_change},
 };
 use serde_json::json;
 
@@ -23,6 +23,8 @@ pub enum PackModeArg {
     Review,
     #[value(name = "change_impact", alias = "change-impact")]
     ChangeImpact,
+    #[value(name = "plan_change", alias = "plan-change")]
+    PlanChange,
 }
 
 impl PackModeArg {
@@ -33,6 +35,7 @@ impl PackModeArg {
             Self::Fix => "fix",
             Self::Review => "review",
             Self::ChangeImpact => "change_impact",
+            Self::PlanChange => "plan_change",
         }
     }
 }
@@ -60,7 +63,7 @@ pub struct PackArgs {
         long,
         value_enum,
         default_value_t = PackModeArg::Planning,
-        help = "Pack mode: planning, debug, fix, review, or change_impact"
+        help = "Pack mode: planning, debug, fix, review, change_impact, or plan_change"
     )]
     pub mode: PackModeArg,
     #[arg(long, default_value_t = 6, help = "Maximum ranked items to include")]
@@ -118,6 +121,38 @@ pub(crate) fn execute(
     args: &PackArgs,
 ) -> Result<RenderedCommand> {
     let target = resolve_target(ctx, args)?;
+
+    // The `plan_change` mode returns the typed product (identical sections to the
+    // MCP `plan_change` tool), not the untyped context pack.
+    if args.mode == PackModeArg::PlanChange {
+        let plan = run_plan_change(
+            ctx,
+            ModePackRequest {
+                budget_bytes: args.budget_bytes,
+                depth: Some(args.depth),
+                limit: Some(args.limit),
+                repo: repo_filter,
+                target,
+            },
+        )?;
+        let mut lines = vec![format!(
+            "plan_change for {} ({} sections)",
+            plan.target,
+            plan.contract.sections.len()
+        )];
+        if !plan.reuse_candidates.is_empty() {
+            lines.push(format!("Reuse candidates: {}", plan.reuse_candidates.len()));
+        }
+        if !plan.open_unknowns.is_empty() {
+            lines.push(format!("Open unknowns: {}", plan.open_unknowns.join("; ")));
+        }
+        let payload = json!({
+            "event": "plan_change_completed",
+            "plan_change": plan,
+        });
+        return Ok(RenderedCommand::success(payload, lines));
+    }
+
     let response = context_pack_tool(
         ctx,
         ContextPackRequest {

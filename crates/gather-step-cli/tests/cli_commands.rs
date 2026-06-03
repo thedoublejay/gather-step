@@ -419,6 +419,50 @@ fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
 }
 
 #[test]
+fn pack_plan_change_mode_returns_typed_product() {
+    let temp = TempDir::new("plan-change-cli");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["--json", "index"]);
+
+    let output = run_ok(
+        temp.path(),
+        &["pack", "--mode", "plan_change", "OrderList", "--json"],
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["event"], "plan_change_completed");
+
+    // The CLI must return the same typed sections + contract as the MCP tool.
+    let plan = &json["plan_change"];
+    for section in [
+        "reuse_candidates",
+        "display_ownership_checks",
+        "pass_two_gap_dimensions",
+        "v1_completeness_checklist",
+        "verification_plan",
+    ] {
+        assert!(
+            plan.get(section).is_some(),
+            "missing typed section `{section}`"
+        );
+    }
+    assert_eq!(plan["contract"]["schema_version"], 3);
+    assert_eq!(
+        plan["contract"]["sections"]
+            .as_array()
+            .expect("sections array")
+            .len(),
+        12
+    );
+    assert!(
+        !plan["contract"]["exclusion_ledger"]
+            .as_array()
+            .expect("ledger array")
+            .is_empty()
+    );
+}
+
+#[test]
 fn cli_commands_work_on_indexed_fixture_workspace() {
     let temp = TempDir::new("cli-commands");
     write_fixture_workspace(temp.path());

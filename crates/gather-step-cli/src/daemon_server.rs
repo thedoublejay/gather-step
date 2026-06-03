@@ -300,6 +300,7 @@ fn parse_pack_mode(mode: &str) -> Result<PackModeArg> {
         "fix" => Ok(PackModeArg::Fix),
         "review" => Ok(PackModeArg::Review),
         "change_impact" => Ok(PackModeArg::ChangeImpact),
+        "plan_change" => Ok(PackModeArg::PlanChange),
         _ => anyhow::bail!("Unsupported pack mode `{mode}`."),
     }
 }
