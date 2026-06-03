@@ -31,6 +31,25 @@ pub struct RepoConfig {
     pub depth: Option<DepthLevel>,
 }
 
+impl RepoConfig {
+    #[must_use]
+    pub fn resolve_root(&self, config_root: &Path) -> PathBuf {
+        let rel = normalize_repo_path(Path::new(&self.path));
+        if rel.as_os_str().is_empty() {
+            config_root.to_path_buf()
+        } else {
+            config_root.join(rel)
+        }
+    }
+
+    #[must_use]
+    pub fn normalized_rel_path(&self) -> String {
+        normalize_repo_path(Path::new(&self.path))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GithubConfig {
@@ -198,7 +217,7 @@ impl GatherStepConfig {
         })?;
 
         for repo in &self.repos {
-            let repo_root = config_root.join(&repo.path);
+            let repo_root = repo.resolve_root(config_root);
             let metadata = match fs::symlink_metadata(&repo_root) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
