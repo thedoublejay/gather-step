@@ -9,6 +9,7 @@ pub mod contract_drift;
 pub mod conventions;
 pub mod cross_repo;
 pub mod crud_trace;
+pub mod cycles;
 pub mod dead_code;
 pub mod deployment_topology;
 pub mod event_topology;
@@ -38,6 +39,7 @@ pub use cross_repo::{
 pub use crud_trace::{
     CrudTrace, CrudTraceEntry, CrudTraceError, CrudTraceRole, trace_crud_route, trace_crud_symbol,
 };
+pub use cycles::{Cycle, CycleError, find_cycles};
 pub use dead_code::{
     ConfidenceBand, DeadCodeError, DeadCodeFinding, DeadCodeReport, DetectorBasis, find_dead_code,
     find_dead_code_with_manifest,
