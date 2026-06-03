@@ -349,7 +349,7 @@ fn write_qa_reference_v4_workspace(root: &Path) {
 }
 
 #[test]
-fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
+fn read_command_during_graph_lock_succeeds_via_snapshot() {
     let temp = TempDir::new("graph-lock");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
@@ -362,38 +362,16 @@ fn read_command_during_graph_lock_exits_distinctly_and_discloses() {
         .join("graph.redb");
     let held = GraphStoreDb::open(&graph_path).expect("should hold the graph lock");
 
-    let output = gather_step()
-        .arg("--workspace")
-        .arg(temp.path())
-        .args(["search", "OrderList", "--json"])
-        .output()
-        .expect("command should run");
-
-    assert_eq!(
-        output.status.code(),
-        Some(75),
-        "read under lock must exit with the distinct lock-contention code 75; stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let disclosure = stdout_json(&output);
-    assert_eq!(disclosure["event"], "command_failed");
-    assert_eq!(disclosure["degraded"], "graph_locked");
-
-    let plain = gather_step()
-        .arg("--workspace")
-        .arg(temp.path())
-        .args(["search", "OrderList"])
-        .output()
-        .expect("command should run");
-    assert_eq!(plain.status.code(), Some(75));
+    let output = run_ok(temp.path(), &["search", "OrderList", "--json"]);
+    let search_json = stdout_json(&output);
+    assert_eq!(search_json["event"], "search_completed");
     assert!(
-        String::from_utf8_lossy(&plain.stderr).contains("Another gather-step process"),
-        "plain-mode lock error should explain the contention on stderr: {}",
-        String::from_utf8_lossy(&plain.stderr)
-    );
-    assert!(
-        plain.stdout.is_empty(),
-        "plain-mode lock failure must not emit a machine disclosure on stdout"
+        search_json["hits"]
+            .as_array()
+            .expect("hits array")
+            .iter()
+            .any(|item| item["symbol_name"] == "OrderList"),
+        "snapshot read should return the indexed hit while the store is held"
     );
 
     drop(held);
@@ -1222,7 +1200,7 @@ fn metadata_schema_user_version_mismatch_reports_recovery_hint() {
 }
 
 #[test]
-fn concurrent_graph_open_reports_stable_process_error() {
+fn concurrent_graph_open_reads_via_snapshot() {
     let temp = TempDir::new("concurrent-open");
     write_fixture_workspace(temp.path());
     run_ok(temp.path(), &["init"]);
@@ -1230,10 +1208,8 @@ fn concurrent_graph_open_reports_stable_process_error() {
 
     let _held_graph = GraphStoreDb::open(temp.path().join(".gather-step/storage/graph.redb"))
         .expect("graph should open and hold the redb lock");
-    let output = run_fail(temp.path(), &["status", "--json"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Another gather-step process is using this workspace"));
-    assert!(stderr.contains("Stop `gather-step watch`"));
+    let output = run_ok(temp.path(), &["status", "--json"]);
+    assert_eq!(stdout_json(&output)["event"], "status_completed");
 }
 
 #[test]
