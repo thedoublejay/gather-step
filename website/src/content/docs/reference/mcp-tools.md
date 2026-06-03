@@ -293,7 +293,7 @@ Used automatically when the assistant needs planning-oriented context focused on
 
 > "Help me plan this change."
 
-Alias of `planning_pack`. It exists for clients that prefer a more task-shaped name.
+Returns a typed planning product with a fixed, contract-checked set of sections — each always present, carrying a deterministic contract (schema version, section manifest, exclusion ledger). Distinct from `planning_pack`, which returns the untyped planning context pack.
 
 ### `debug_pack`
 
