@@ -1,7 +1,11 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
-use gather_step_analysis::{SemanticHealthReport, semantic_health_for_repo};
+use gather_step_analysis::{
+    SemanticHealthReport, analyze_shared_component_reuse, find_cycles, find_mock_leakage,
+    semantic_health_for_repo,
+};
+use gather_step_core::EdgeKind;
 use gather_step_core::NodeKind;
 use gather_step_core::RegistryStore;
 use gather_step_parser::resolve::{ResolutionInput, is_non_actionable_unresolved_call};
@@ -24,6 +28,8 @@ struct DoctorOutput {
     issue_count: usize,
     pack_metrics: PackDoctorOutput,
     repos: Vec<RepoDoctorOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    quality_advisories: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,12 +96,16 @@ pub(crate) fn execute(
 
     let issue_count = repos.iter().map(|repo| repo.issues.len()).sum();
     let pack_metrics = pack_metrics(storage.metadata()).context("computing pack diagnostics")?;
+    let repo_names: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
+    let quality_advisories = collect_quality_advisories(storage, &repo_names)
+        .context("collecting code-quality advisories")?;
     let payload = DoctorOutput {
         event: "doctor_completed",
         ok: issue_count == 0,
         issue_count,
         pack_metrics,
         repos,
+        quality_advisories,
     };
 
     let mut lines = Vec::new();
@@ -136,6 +146,15 @@ pub(crate) fn execute(
             payload.pack_metrics.unresolved_packs
         ));
     }
+    if !payload.quality_advisories.is_empty() {
+        lines.push(format!(
+            "Code-quality advisories ({}):",
+            payload.quality_advisories.len()
+        ));
+        for advisory in &payload.quality_advisories {
+            lines.push(format!("  - {advisory}"));
+        }
+    }
     let payload_json = json!(payload);
     Ok(if issue_count == 0 {
         RenderedCommand::success(payload_json, lines)
@@ -146,6 +165,75 @@ pub(crate) fn execute(
             format!("doctor found {issue_count} issue(s)"),
         )
     })
+}
+
+const MAX_ADVISORIES_PER_CATEGORY: usize = 50;
+
+fn collect_quality_advisories(
+    storage: &StorageCoordinator,
+    repos: &[String],
+) -> Result<Vec<String>> {
+    let graph = storage.graph();
+    let mut advisories = Vec::new();
+
+    let cycles = find_cycles(graph, Some(&[EdgeKind::Imports, EdgeKind::Calls]))
+        .context("detecting dependency cycles")?;
+    push_capped(
+        &mut advisories,
+        cycles.iter().map(|cycle| {
+            let scope = if cycle.cross_repo {
+                " (cross-repo)"
+            } else {
+                ""
+            };
+            format!("Dependency cycle{scope}: {}", cycle.nodes.join(" -> "))
+        }),
+        "dependency cycle",
+    );
+
+    for repo in repos {
+        let leaks = find_mock_leakage(graph, repo)
+            .with_context(|| format!("detecting mock leakage in `{repo}`"))?;
+        push_capped(
+            &mut advisories,
+            leaks.iter().map(|leak| {
+                format!(
+                    "Mock import in production (`{repo}`): {} imports {}",
+                    leak.importer_file, leak.mock_file
+                )
+            }),
+            "mock import in production",
+        );
+
+        let forks = analyze_shared_component_reuse(graph, repo)
+            .with_context(|| format!("auditing shared-component reuse in `{repo}`"))?;
+        push_capped(
+            &mut advisories,
+            forks.iter().map(|fork| {
+                format!(
+                    "Reuse opportunity (`{repo}`): {} duplicates shared `{}` ({})",
+                    fork.local_file, fork.shared_symbol, fork.shared_file
+                )
+            }),
+            "reuse opportunity",
+        );
+    }
+
+    Ok(advisories)
+}
+
+fn push_capped(advisories: &mut Vec<String>, items: impl Iterator<Item = String>, label: &str) {
+    let collected: Vec<String> = items.collect();
+    let total = collected.len();
+    for item in collected.into_iter().take(MAX_ADVISORIES_PER_CATEGORY) {
+        advisories.push(item);
+    }
+    if total > MAX_ADVISORIES_PER_CATEGORY {
+        advisories.push(format!(
+            "... and {} more {label} finding(s) not shown",
+            total - MAX_ADVISORIES_PER_CATEGORY
+        ));
+    }
 }
 
 fn inspect_repo(
