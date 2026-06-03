@@ -15,6 +15,7 @@ pub mod deployment_topology;
 pub mod event_topology;
 pub mod evidence;
 pub mod impact;
+pub mod mock_leakage;
 pub mod mongo_query_safety;
 pub mod overview;
 pub mod pack_assembly;
@@ -58,6 +59,7 @@ pub use event_topology::{
 pub use impact::{
     BoundaryRole, EvidenceBand, ImpactError, ImpactMap, ImpactedFile, shared_contract_impact,
 };
+pub use mock_leakage::{MockLeakage, MockLeakageError, find_mock_leakage, is_mock_path};
 pub use mongo_query_safety::{
     MongoQueryFinding, RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH,
     RULE_UNSAFE_COERCION, analyze_atlas_index_drift, analyze_mongo_value,
