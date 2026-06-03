@@ -443,7 +443,7 @@ pub fn run_plan_change(
 ) -> Result<PlanChangeResponse, McpServerError> {
     let pack = planning_pack_tool(ctx, request)?;
     let data = &pack.data;
-    Ok(build_plan_change(
+    let mut response = build_plan_change(
         &data.target,
         data.found,
         &data.items,
@@ -452,6 +452,43 @@ pub fn run_plan_change(
         &data.next_steps,
         &data.change_impact,
         pack.meta.clone(),
+    );
+    if let Some(meta) = response.meta.as_mut()
+        && let Some(warning) = staleness_warning(ctx)
+    {
+        meta.warnings.push(warning);
+    }
+    Ok(response)
+}
+
+/// A warning naming any repo whose index is stale relative to its current git
+/// HEAD, or `None` when everything is current. Computed fresh per call (never
+/// cached) and best-effort: an unreadable registry/repo is treated as current.
+fn staleness_warning(ctx: &McpContext) -> Option<String> {
+    let registry = gather_step_core::RegistryStore::open(&ctx.config.registry_path).ok()?;
+    let mut stale: Vec<String> = registry
+        .registry()
+        .repos
+        .iter()
+        .filter_map(|(repo, registered)| {
+            let indexed_sha = ctx.metadata().get_last_commit_sha(repo).ok().flatten();
+            let indexer = gather_step_git::GitHistoryIndexer::new(
+                gather_step_git::GitRepoSource::from_path(&registered.path),
+                repo,
+            );
+            match indexer.index_freshness(indexed_sha.as_deref()) {
+                Ok(gather_step_git::IndexFreshness::Stale { .. }) => Some(repo.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    if stale.is_empty() {
+        return None;
+    }
+    stale.sort();
+    Some(format!(
+        "Index is stale relative to HEAD for repo(s): {}. Re-run `gather-step index`.",
+        stale.join(", ")
     ))
 }
 
