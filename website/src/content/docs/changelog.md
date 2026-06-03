@@ -29,7 +29,7 @@ Planning- and reuse-quality release. Fixes retrieval recall so reuse search stop
 ### Fixed
 
 - `batch_query` now routes `plan_change` requests to the typed product instead of the raw planning pack.
-- Graph **lock contention** on read commands now exits with a distinct, documented code and (under `--json`) a `degraded: graph_locked` disclosure, so a blocked read can never be mistaken for an empty-but-successful result (REL1).
+- Read commands no longer block or fail when the graph store is held by an in-progress index or watch: they route to the holding daemon when one is serving, otherwise read a point-in-time snapshot of the graph. When neither is possible the command exits with a distinct, documented code and (under `--json`) a `degraded: graph_locked` disclosure, so a blocked read can never be mistaken for an empty-but-successful result.
 
 ### Release-wide
 
