@@ -319,8 +319,6 @@ fn daemon_pid_path(workspace_path: &Path) -> PathBuf {
 
 #[cfg(unix)]
 const MAX_DAEMON_REQUEST_BYTES: u64 = 64 * 1024;
-#[cfg(unix)]
-const DAEMON_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(unix)]
 pub struct DaemonServer {
@@ -408,11 +406,12 @@ impl DaemonServer {
         loop {
             tokio::select! {
                 () = cancel.cancelled() => {
-                    // Hard shutdown: abort every in-flight handler so storage
-                    // handles and blocking threads are not leaked.
-                    handlers.abort_all();
-                    // Drain the JoinSet so that all tasks are confirmed gone
-                    // before returning (and before the caller drops stores).
+                    // Stop accepting new clients and wait for active handlers.
+                    // A handler may already be inside spawn_blocking with an
+                    // Arc<DaemonRuntime>, which owns WorkspaceStores and the
+                    // redb graph lock. Aborting the async wrapper would detach
+                    // that blocking task and let RuntimeCleanupGuard remove the
+                    // daemon files while the graph was still locked.
                     while handlers.join_next().await.is_some() {}
                     return Ok(());
                 }
@@ -420,7 +419,14 @@ impl DaemonServer {
                 // does not grow without bound across long-lived daemon runs.
                 Some(_) = handlers.join_next(), if !handlers.is_empty() => {}
                 accept = listener.accept() => {
-                    let (stream, _) = accept.context("accepting daemon client")?;
+                    let (stream, _) = match accept {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            cancel.cancel();
+                            while handlers.join_next().await.is_some() {}
+                            return Err(error).context("accepting daemon client");
+                        }
+                    };
                     let app = app.clone();
                     let runtime = runtime.clone();
                     let permit = Arc::clone(&semaphore)
@@ -430,17 +436,10 @@ impl DaemonServer {
                     let handler_cancel = cancel.clone();
                     handlers.spawn(async move {
                         let _permit = permit; // released when handler exits
-                        match tokio::time::timeout(
-                            DAEMON_REQUEST_TIMEOUT,
-                            handle_client(app, runtime, stream, allowed_uid, handler_cancel),
-                        )
-                        .await
+                        if let Err(error) =
+                            handle_client(app, runtime, stream, allowed_uid, handler_cancel).await
                         {
-                            Ok(Ok(())) => {}
-                            Ok(Err(error)) => {
-                                tracing::warn!(%error, "Daemon client handling failed.");
-                            }
-                            Err(_) => tracing::warn!("Daemon client timed out."),
+                            tracing::warn!(%error, "Daemon client handling failed.");
                         }
                     });
                 }
@@ -487,11 +486,15 @@ async fn handle_client(
     let (read_half, mut write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
     let mut request_line = String::new();
-    reader
-        .take(MAX_DAEMON_REQUEST_BYTES)
-        .read_line(&mut request_line)
-        .await
-        .context("reading daemon request")?;
+    let mut limited_reader = reader.take(MAX_DAEMON_REQUEST_BYTES);
+    tokio::select! {
+        result = limited_reader.read_line(&mut request_line) => {
+            result.context("reading daemon request")?;
+        }
+        () = cancel.cancelled() => {
+            return Ok(());
+        }
+    }
 
     let result = match serde_json::from_str::<DaemonRequest>(&request_line) {
         Ok(request) => {
@@ -739,6 +742,7 @@ mod tests {
         io::{BufRead, BufReader, Write},
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
     };
 
     use anyhow::Result;
@@ -864,6 +868,27 @@ mod tests {
 
         cancel.cancel();
         daemon_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_shutdown_cleans_runtime_files_with_idle_client() -> Result<()> {
+        let workspace = TestWorkspace::new("idle-client");
+        let app = app(workspace.path());
+        let Some(daemon) = bind_daemon_or_skip(&app)? else {
+            return Ok(());
+        };
+        let socket_path = daemon_socket_path(workspace.path());
+        let pid_path = daemon_pid_path(workspace.path());
+        let cancel = CancellationToken::new();
+        let daemon_task = tokio::spawn(daemon.serve_until_cancelled(cancel.clone()));
+        let _idle_client = std::os::unix::net::UnixStream::connect(&socket_path)?;
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), daemon_task).await???;
+
+        assert!(!socket_path.exists());
+        assert!(!pid_path.exists());
         Ok(())
     }
 }

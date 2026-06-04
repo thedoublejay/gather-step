@@ -35,6 +35,7 @@ Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse
 
 - `batch_query` now routes `plan_change` requests to the typed product instead of the raw planning pack.
 - Read commands no longer silently return empty-but-successful results when the graph store is held by an in-progress index or watch: they use the workspace daemon first, retry through the daemon named by lock metadata if a local open races the holder, and otherwise exit with a distinct, documented code and (under `--json`) a `degraded: graph_locked` disclosure, so a blocked read can never be mistaken for "found nothing".
+- Daemon, `watch`, and `serve --watch` shutdown paths now wait for active request/index tasks to release graph handles before removing daemon pid/socket metadata. This prevents stale metadata cleanup from orphaning a still-running graph owner after cancellation, idle clients, accept errors, or shutdown timeouts.
 
 ### Release-wide
 

@@ -414,20 +414,30 @@ pub async fn run(app: &AppContext, args: WatchArgs) -> Result<()> {
         }
         () = cancel.cancelled() => {}
     }
-    let watch_result = watch_task.await.context("watch task crashed")?;
-    if let Err(error) = watch_result {
-        bail!(
-            "filesystem watcher failed: {}",
-            operator_error_detail(&error.to_string())
-        );
-    }
-    daemon_task.await.context("daemon task crashed")??;
+    let watch_result = watch_task.await;
+    cancel.cancel();
+    let daemon_result = daemon_task.await;
     let status = watcher.status();
     drop(watcher);
     drop(stores);
     drop(daemon_metadata);
     if let Err(error) = event_task.await {
         tracing::warn!(?error, "Watch event task crashed.");
+    }
+    match watch_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            bail!(
+                "filesystem watcher failed: {}",
+                operator_error_detail(&error.to_string())
+            );
+        }
+        Err(error) => return Err(error).context("watch task crashed"),
+    }
+    match daemon_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(error).context("daemon task crashed"),
     }
     if output.is_json() {
         output.emit(&WatchStatusOutput {
