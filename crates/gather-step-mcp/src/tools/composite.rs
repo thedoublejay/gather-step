@@ -22,8 +22,9 @@ use crate::{
         },
         orientation::{RepoSummary, list_repos},
         packs::{
-            ContextPackRequest, ModePackRequest, change_impact_pack_tool, context_pack_tool,
-            debug_pack_tool, fix_pack_tool, planning_pack_tool, review_pack_tool, run_plan_change,
+            ContextPackRequest, ContextPackResponse, ModePackRequest, apply_stale_index_warning,
+            change_impact_pack_tool, context_pack_tool, debug_pack_tool, fix_pack_tool,
+            planning_pack_tool, review_pack_tool, run_plan_change,
         },
         repo_intelligence::{
             DeadCodeRequest, RepoScopedRequest, WhoOwnsRequest, get_conventions_tool,
@@ -510,27 +511,27 @@ fn execute_batch_op(ctx: &McpContext, op: BatchQueryOperation) -> BatchQueryResu
         }),
         "context_pack" | "get_context_pack" => {
             parse_and_run::<ContextPackRequest, _>(op.arguments, |args| {
-                context_pack_tool(ctx, args).and_then(to_value)
+                pack_value(ctx, context_pack_tool(ctx, args))
             })
         }
         "planning_pack" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
-            planning_pack_tool(ctx, args).and_then(to_value)
+            pack_value(ctx, planning_pack_tool(ctx, args))
         }),
         "plan_change" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
             run_plan_change(ctx, args).and_then(to_value)
         }),
         "debug_pack" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
-            debug_pack_tool(ctx, args).and_then(to_value)
+            pack_value(ctx, debug_pack_tool(ctx, args))
         }),
         "fix_pack" | "fix_surface" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
-            fix_pack_tool(ctx, args).and_then(to_value)
+            pack_value(ctx, fix_pack_tool(ctx, args))
         }),
         "review_pack" => parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
-            review_pack_tool(ctx, args).and_then(to_value)
+            pack_value(ctx, review_pack_tool(ctx, args))
         }),
         "change_impact_pack" | "get_change_impact_pack" => {
             parse_and_run::<ModePackRequest, _>(op.arguments, |args| {
-                change_impact_pack_tool(ctx, args).and_then(to_value)
+                pack_value(ctx, change_impact_pack_tool(ctx, args))
             })
         }
         _ => Err(McpServerError::InvalidInput(format!(
@@ -567,6 +568,19 @@ where
 fn to_value<T: Serialize>(value: T) -> Result<Value, McpServerError> {
     serde_json::to_value(value)
         .map_err(|error| McpServerError::Internal(format!("response serialize: {error}")))
+}
+
+/// Serialize a pack tool result for `batch_query`, attaching a stale-index
+/// warning when any repo lags its git HEAD. Keeps freshness at the query-time
+/// boundary instead of the precompute funnels.
+fn pack_value(
+    ctx: &McpContext,
+    result: Result<ContextPackResponse, McpServerError>,
+) -> Result<Value, McpServerError> {
+    result.and_then(|mut response| {
+        apply_stale_index_warning(ctx, &mut response);
+        to_value(response)
+    })
 }
 
 pub(crate) fn resolve_target(

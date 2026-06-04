@@ -461,6 +461,19 @@ pub fn run_plan_change(
     Ok(response)
 }
 
+/// Append a stale-index warning to a query-time pack response when any repo's
+/// index lags its git HEAD. Call only from query-time outer entry points (the
+/// CLI `pack` command, MCP pack server methods, `batch_query`) — never from the
+/// precompute funnels, which would bake the warning into cached packs and break
+/// CLI/MCP pack parity.
+pub fn apply_stale_index_warning(ctx: &McpContext, response: &mut ContextPackResponse) {
+    if let Some(meta) = response.meta.as_mut()
+        && let Some(warning) = staleness_warning(ctx)
+    {
+        meta.warnings.push(warning);
+    }
+}
+
 /// A warning naming any repo whose index is stale relative to its current git
 /// HEAD, or `None` when everything is current. Computed fresh per call (never
 /// cached) and best-effort: an unreadable registry/repo is treated as current.

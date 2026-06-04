@@ -81,6 +81,24 @@ fn stdout_json(output: &process::Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should contain valid json")
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("git should run");
+    assert!(status.success(), "git {} failed", args.join(" "));
+}
+
+fn git_init_commit(repo: &Path) {
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["config", "user.name", "Test"]);
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "init"]);
+}
+
 fn sorted_json_keys(value: &Value) -> Vec<String> {
     let mut keys: Vec<String> = value
         .as_object()
@@ -439,6 +457,43 @@ fn read_commands_surface_query_time_freshness() {
             "unexpected freshness verdict: {verdict}"
         );
     }
+}
+
+#[test]
+fn pack_surfaces_stale_index_warning_when_head_advances() {
+    let temp = TempDir::new("pack-stale-freshness");
+    write_fixture_workspace(temp.path());
+
+    // The fixture only stubs empty `.git` dirs; freshness needs a real HEAD, so
+    // promote each configured repo to a real git repo with one commit.
+    let backend = temp.path().join("apps/backend_standard");
+    let frontend = temp.path().join("apps/frontend_standard");
+    git_init_commit(&backend);
+    git_init_commit(&frontend);
+
+    run_ok(temp.path(), &["init"]);
+    run_ok(temp.path(), &["--json", "index"]);
+
+    // Advance HEAD on one repo after indexing → its index is now stale.
+    fs::write(frontend.join("src/extra.ts"), "export const extra = 1;\n").expect("write new file");
+    git(&frontend, &["add", "-A"]);
+    git(&frontend, &["commit", "-q", "-m", "advance head"]);
+
+    let output = run_ok(
+        temp.path(),
+        &["pack", "--mode", "planning", "OrderList", "--json"],
+    );
+    let json = stdout_json(&output);
+    assert_eq!(json["event"], "context_pack_completed");
+    let warnings = json["meta"]["warnings"]
+        .as_array()
+        .expect("generic pack meta should carry a warnings array when the index is stale");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("Index is stale relative to HEAD"))),
+        "generic pack output must surface a stale-index warning; observed={warnings:?}"
+    );
 }
 
 #[test]

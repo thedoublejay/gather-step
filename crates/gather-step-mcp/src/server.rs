@@ -51,7 +51,7 @@ use crate::{
         orientation::{GraphSchemaResponse, ListReposResponse, get_graph_schema, list_repos},
         packs::{
             ContextPackRequest, ContextPackResponse, ModePackRequest, PlanChangeResponse,
-            change_impact_pack_tool as run_change_impact_pack,
+            apply_stale_index_warning, change_impact_pack_tool as run_change_impact_pack,
             context_pack_tool as run_context_pack, debug_pack_tool as run_debug_pack,
             fix_pack_tool as run_fix_pack, planning_pack_tool as run_planning_pack,
             review_pack_tool as run_review_pack, run_plan_change,
@@ -604,9 +604,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("context_pack", &args, move || {
-            run_context_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_context_pack(&ctx, request))
         })
         .await
     }
@@ -756,9 +754,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("get_context_pack", &args, move || {
-            run_context_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_context_pack(&ctx, request))
         })
         .await
     }
@@ -775,9 +771,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("planning_pack", &args, move || {
-            run_planning_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_planning_pack(&ctx, request))
         })
         .await
     }
@@ -813,9 +807,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("debug_pack", &args, move || {
-            run_debug_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_debug_pack(&ctx, request))
         })
         .await
     }
@@ -832,9 +824,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("fix_pack", &args, move || {
-            run_fix_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_fix_pack(&ctx, request))
         })
         .await
     }
@@ -851,9 +841,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("fix_surface", &args, move || {
-            run_fix_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_fix_pack(&ctx, request))
         })
         .await
     }
@@ -870,9 +858,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("review_pack", &args, move || {
-            run_review_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_review_pack(&ctx, request))
         })
         .await
     }
@@ -889,9 +875,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("change_impact_pack", &args, move || {
-            run_change_impact_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_change_impact_pack(&ctx, request))
         })
         .await
     }
@@ -908,9 +892,7 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("get_change_impact_pack", &args, move || {
-            run_change_impact_pack(&ctx, request)
-                .map(Json)
-                .map_err(|error| error.to_string())
+            pack_with_freshness(&ctx, run_change_impact_pack(&ctx, request))
         })
         .await
     }
@@ -1061,4 +1043,19 @@ impl GatherStepMcpServer {
         })
         .await
     }
+}
+
+/// Attach a stale-index warning (when any repo lags its git HEAD) to a pack
+/// tool result before serializing. Applied at the MCP server boundary so it
+/// never reaches the precompute funnels.
+fn pack_with_freshness(
+    ctx: &McpContext,
+    result: Result<ContextPackResponse, McpServerError>,
+) -> Result<Json<ContextPackResponse>, String> {
+    result
+        .map(|mut response| {
+            apply_stale_index_warning(ctx, &mut response);
+            Json(response)
+        })
+        .map_err(|error| error.to_string())
 }

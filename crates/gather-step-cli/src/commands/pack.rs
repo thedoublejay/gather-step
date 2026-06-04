@@ -4,7 +4,10 @@ use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
 use gather_step_mcp::tools::{
     events::{TraceEventRequest, TraceRouteRequest, trace_event_tool, trace_route_tool},
-    packs::{ContextPackRequest, ModePackRequest, context_pack_tool, run_plan_change},
+    packs::{
+        ContextPackRequest, ModePackRequest, apply_stale_index_warning, context_pack_tool,
+        run_plan_change,
+    },
 };
 use serde_json::json;
 
@@ -151,7 +154,7 @@ pub(crate) fn execute(
         return Ok(RenderedCommand::success(payload, lines));
     }
 
-    let response = context_pack_tool(
+    let mut response = context_pack_tool(
         ctx,
         ContextPackRequest {
             budget_bytes: args.budget_bytes,
@@ -162,6 +165,7 @@ pub(crate) fn execute(
             target: target.clone(),
         },
     )?;
+    apply_stale_index_warning(ctx, &mut response);
 
     let payload = json!({
         "event": "context_pack_completed",
