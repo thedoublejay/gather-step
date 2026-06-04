@@ -380,6 +380,59 @@ fn serve_watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
 }
 
 #[test]
+fn watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
+    let workspace = stage_fixture_workspace();
+    run_ok_json(workspace.path(), &["index"]);
+
+    let search_before = run_ok_json(workspace.path(), &["search", "OrderController"]);
+    let status_before = run_ok_json(workspace.path(), &["status"]);
+
+    let mut child = gather_step()
+        .arg("--workspace")
+        .arg(workspace.path())
+        .arg("--no-banner")
+        .arg("watch")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("watch should spawn");
+
+    let daemon_pid = workspace.path().join(".gather-step/daemon.pid");
+    let daemon_sock = workspace.path().join(".gather-step/daemon.sock");
+    if !wait_for_daemon_or_skip(&mut child, &daemon_pid, &daemon_sock) {
+        return;
+    }
+
+    let search_during = run_ok_json_retry(workspace.path(), &["search", "OrderController"]);
+    let status_during = run_ok_json_retry(workspace.path(), &["status"]);
+
+    assert_eq!(search_before, search_during);
+    assert_eq!(status_before, status_during);
+
+    let status = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("kill should run");
+    assert!(status.success(), "kill -INT should succeed");
+
+    let exited = wait_for_child_exit(&mut child);
+    let stderr = read_child_stderr(&mut child);
+    assert!(
+        exited.success(),
+        "The watch command should exit cleanly.\nStderr:\n{stderr}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && (daemon_pid.exists() || daemon_sock.exists()) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!daemon_pid.exists(), "daemon pid file should be cleaned up");
+    assert!(!daemon_sock.exists(), "daemon socket should be cleaned up");
+}
+
+#[test]
 fn watch_rejects_concurrent_index_with_storage_held_error_and_cleans_up_daemon_files() {
     let workspace = stage_fixture_workspace();
     run_ok_json(workspace.path(), &["index"]);
