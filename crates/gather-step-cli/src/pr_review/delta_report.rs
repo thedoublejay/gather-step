@@ -41,7 +41,7 @@ fn serialize_path_forward_slash<S: Serializer>(
 /// <https://braingent.dev>). Bump this when the report shape changes; callers
 /// must reference it instead of hard-coding the literal so the JSON, Markdown,
 /// frontmatter, and tests stay aligned.
-pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Top-level output struct for `gather-step pr-review`.
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +51,11 @@ pub struct DeltaReport {
     pub safety: SafetyMetadata,
     /// Paths of files that changed between base and head.
     pub changed_files: Vec<String>,
+    /// Changed files grouped by owning repo. Each path is attributed to the
+    /// configured repo whose path is its longest matching prefix; paths that
+    /// match no repo are grouped under `<workspace>`. In a polyrepo review each
+    /// repo carries its own changes.
+    pub changed_files_by_repo: Vec<RepoChangedFiles>,
     /// `true` if the list was truncated at 200 entries.
     pub changed_files_truncated: bool,
     /// Canonical, query-time evidence metadata for the surfaces in this delta
@@ -91,6 +96,14 @@ impl DeltaReport {
     pub fn refresh_evidence(&mut self) {
         self.evidence = collect_delta_report_evidence(self);
     }
+}
+
+/// Changed files owned by a single repo, for the per-repo grouping in
+/// [`DeltaReport::changed_files_by_repo`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RepoChangedFiles {
+    pub repo: String,
+    pub files: Vec<String>,
 }
 
 // ─── Impact summary (Phase 3 Tasks 1+2) ──────────────────────────────────────
@@ -2442,6 +2455,7 @@ mod tests {
                 config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
+            changed_files_by_repo: vec![],
             changed_files_truncated: false,
             evidence: vec![],
             routes: RouteDeltas::default(),
@@ -2475,6 +2489,7 @@ mod tests {
             keys,
             [
                 "changed_files",
+                "changed_files_by_repo",
                 "changed_files_truncated",
                 "contract_alignments",
                 "decorators",
@@ -2515,25 +2530,25 @@ mod tests {
         );
     }
 
-    /// Hard-pin the wire-version literal `1`. This catches an accidental bump
+    /// Hard-pin the wire-version literal `2`. This catches an accidental bump
     /// of `DELTA_REPORT_SCHEMA_VERSION` that the surrounding tests would
-    /// otherwise tautologically pass — Braingent renderers, MCP consumers,
-    /// and the website docs all key off this literal.
+    /// otherwise tautologically pass — every renderer, MCP consumer, and the
+    /// website docs all key off this literal.
     #[test]
-    fn schema_version_wire_literal_is_one() {
+    fn schema_version_wire_literal_is_two() {
         assert_eq!(
             super::DELTA_REPORT_SCHEMA_VERSION,
-            1,
-            "v4 QA planning resets the public DeltaReport schema_version to 1; \
-             a bump must be intentional and accompanied by a CHANGELOG entry, \
-             docs/website update, and Braingent-side coordination."
+            2,
+            "the public DeltaReport schema_version is 2 (per-repo changed-file \
+             grouping); a bump must be intentional and accompanied by a CHANGELOG \
+             entry and docs/website update."
         );
-        let report = make_empty_report(1);
+        let report = make_empty_report(2);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(
             json["schema_version"],
-            serde_json::Value::Number(1.into()),
-            "DeltaReport JSON must serialize `schema_version` as the literal `1`"
+            serde_json::Value::Number(2.into()),
+            "DeltaReport JSON must serialize `schema_version` as the literal `2`"
         );
     }
 
@@ -2915,6 +2930,10 @@ mod tests {
                 config_hash: "cfg".to_owned(),
             },
             changed_files: vec!["backend/src/routes.ts".to_owned()],
+            changed_files_by_repo: vec![RepoChangedFiles {
+                repo: "backend".to_owned(),
+                files: vec!["backend/src/routes.ts".to_owned()],
+            }],
             changed_files_truncated: false,
             evidence: vec![],
             routes: RouteDeltas {
@@ -3093,6 +3112,7 @@ mod tests {
             keys,
             [
                 "changed_files",
+                "changed_files_by_repo",
                 "changed_files_truncated",
                 "contract_alignments",
                 "decorators",

@@ -43,8 +43,9 @@ use crate::{
         delta_report::{
             CleanupPolicy, ContractAlignments, DELTA_REPORT_SCHEMA_VERSION, DecoratorDeltas,
             DeltaReport, DeploymentDeltas, EventDeltas, GITHUB_COMMENT_LIMIT,
-            PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
-            SymbolDeltas, build_suggested_followups, synthesize_review_pack_commands,
+            PayloadContractDeltas, RepoChangedFiles, ReviewMetadata, RiskSeverity, RouteDeltas,
+            SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            synthesize_review_pack_commands,
         },
         engine::{ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
         extract::{
@@ -1675,6 +1676,8 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .map(|(name, _)| name.to_owned())
     .collect();
 
+    let changed_files_by_repo =
+        group_changed_files_by_repo(head_config.as_ref(), &changed_files_display);
     let mut report = DeltaReport {
         schema_version: DELTA_REPORT_SCHEMA_VERSION,
         metadata: ReviewMetadata {
@@ -1701,6 +1704,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             config_hash: cache_key_struct.config_hash.clone(),
         },
         changed_files: changed_files_display,
+        changed_files_by_repo,
         changed_files_truncated,
         evidence: Vec::new(),
         routes: route_deltas,
@@ -1900,6 +1904,46 @@ fn map_changed_repos_from_config(
 
     // If nothing changed at all, return empty (not "<workspace>").
     result_set.into_iter().collect()
+}
+
+/// Group changed file paths by their owning repo, mirroring
+/// [`map_changed_repos_from_config`]'s longest-prefix attribution. Paths that
+/// match no configured repo are grouped under `<workspace>`. Repos are sorted
+/// by name for stable output; file order within each repo is preserved.
+fn group_changed_files_by_repo(
+    config: Option<&GatherStepConfig>,
+    changed_paths: &[String],
+) -> Vec<RepoChangedFiles> {
+    let repos: Vec<(String, String)> = config.map_or_else(Vec::new, |cfg| {
+        cfg.repos
+            .iter()
+            .map(|repo| (repo.name.clone(), repo.path.clone()))
+            .collect()
+    });
+
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    for file_path in changed_paths {
+        let matched = repos
+            .iter()
+            .filter(|(_, repo_path)| {
+                let prefix = repo_path.trim_end_matches('/');
+                file_path == prefix || file_path.starts_with(&format!("{prefix}/"))
+            })
+            .max_by_key(|(_, repo_path)| repo_path.trim_end_matches('/').len());
+
+        let owner = matched.map_or("<workspace>", |(name, _)| name.as_str());
+        grouped
+            .entry(owner.to_owned())
+            .or_default()
+            .push(file_path.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(repo, files)| RepoChangedFiles { repo, files })
+        .collect()
 }
 
 /// Mark the artifact root as Quarantined on error.
@@ -4068,6 +4112,56 @@ mod tests {
     }
 
     #[test]
+    fn group_changed_files_by_repo_attributes_and_groups() {
+        let config = GatherStepConfig {
+            allow_listed_repos: vec![],
+            repos: vec![
+                gather_step_core::RepoConfig {
+                    name: "repo_a".to_owned(),
+                    path: "repo_a".to_owned(),
+                    depth: None,
+                },
+                gather_step_core::RepoConfig {
+                    name: "repo_b".to_owned(),
+                    path: "repo_b".to_owned(),
+                    depth: None,
+                },
+            ],
+            github: None,
+            jira: None,
+            indexing: gather_step_core::IndexingConfig::default(),
+            deployment: gather_step_core::DeploymentConfig::default(),
+        };
+
+        let changed = vec![
+            "repo_a/src/x.ts".to_owned(),
+            "repo_a/src/y.ts".to_owned(),
+            "repo_b/main.ts".to_owned(),
+            "README.md".to_owned(),
+        ];
+
+        // Sorted by repo name (`<workspace>` < `repo_a` < `repo_b`); file order
+        // within each repo is preserved.
+        assert_eq!(
+            group_changed_files_by_repo(Some(&config), &changed),
+            vec![
+                RepoChangedFiles {
+                    repo: "<workspace>".to_owned(),
+                    files: vec!["README.md".to_owned()],
+                },
+                RepoChangedFiles {
+                    repo: "repo_a".to_owned(),
+                    files: vec!["repo_a/src/x.ts".to_owned(), "repo_a/src/y.ts".to_owned()],
+                },
+                RepoChangedFiles {
+                    repo: "repo_b".to_owned(),
+                    files: vec!["repo_b/main.ts".to_owned()],
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn config_override_rewrites_parent_config_for_child_repo_worktree() {
         let root = TempDir::new("pr-review-parent-config");
         let parent = root.path();
@@ -4951,6 +5045,7 @@ indexing:
                 config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
+            changed_files_by_repo: vec![],
             changed_files_truncated: false,
             evidence: vec![],
             routes: RouteDeltas::default(),

@@ -412,6 +412,7 @@ mod tests {
                 config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
+            changed_files_by_repo: vec![],
             changed_files_truncated: false,
             evidence: vec![],
             routes: RouteDeltas::default(),
