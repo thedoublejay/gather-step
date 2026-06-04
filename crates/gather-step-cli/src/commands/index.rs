@@ -510,7 +510,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // backpressure when analytics is slower than storage commits.
     let analytics_queue_depth = config.repos.len().max(1);
     let (analytics_tx, analytics_rx) = kanal::bounded::<AnalyticsJob>(analytics_queue_depth);
-    let (analytics_result_tx, analytics_result_rx) = kanal::unbounded::<AnalyticsRepoResult>();
+    let (analytics_result_tx, analytics_result_rx) =
+        kanal::bounded::<AnalyticsRepoResult>(analytics_queue_depth);
     let indexer_ref = &indexer;
     let config_ref = &config;
     let config_root_ref = &config_root;

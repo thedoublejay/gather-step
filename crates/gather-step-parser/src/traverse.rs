@@ -444,6 +444,21 @@ pub fn collect_repo_files(
                 guard.summary.skipped_excluded += 1;
                 return WalkState::Continue;
             }
+            if is_binary_path(&relative_path) {
+                guard.summary.skipped_binary += 1;
+                return WalkState::Continue;
+            }
+
+            let Some(language) = classify_language(&relative_path) else {
+                guard.summary.skipped_unsupported += 1;
+                return WalkState::Continue;
+            };
+
+            if !config.include_languages.is_empty() && !config.include_languages.contains(&language)
+            {
+                guard.summary.skipped_excluded += 1;
+                return WalkState::Continue;
+            }
 
             let mut file = match fs::File::open(path) {
                 Ok(file) => file,
@@ -478,19 +493,8 @@ pub fn collect_repo_files(
                 });
                 return WalkState::Quit;
             }
-            if is_binary_path(&relative_path) || is_binary(&bytes) {
+            if is_binary(&bytes) {
                 guard.summary.skipped_binary += 1;
-                return WalkState::Continue;
-            }
-
-            let Some(language) = classify_language(&relative_path) else {
-                guard.summary.skipped_unsupported += 1;
-                return WalkState::Continue;
-            };
-
-            if !config.include_languages.is_empty() && !config.include_languages.contains(&language)
-            {
-                guard.summary.skipped_excluded += 1;
                 return WalkState::Continue;
             }
 
@@ -602,6 +606,14 @@ pub fn collect_selected_repo_files(
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
+        let Some(language) = classify_language(&normalized) else {
+            summary.skipped_unsupported += 1;
+            continue;
+        };
+        if !config.include_languages.is_empty() && !config.include_languages.contains(&language) {
+            summary.skipped_unsupported += 1;
+            continue;
+        }
         let mut file = match fs::File::open(&full_path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -635,15 +647,6 @@ pub fn collect_selected_repo_files(
         })?;
         if is_binary(&bytes) {
             summary.skipped_binary += 1;
-            continue;
-        }
-
-        let Some(language) = classify_language(&normalized) else {
-            summary.skipped_unsupported += 1;
-            continue;
-        };
-        if !config.include_languages.is_empty() && !config.include_languages.contains(&language) {
-            summary.skipped_unsupported += 1;
             continue;
         }
 
@@ -1263,6 +1266,48 @@ mod tests {
         assert_eq!(parse_byte_size("2MB"), Some(2 * 1024 * 1024));
         assert_eq!(parse_byte_size("3 GB"), Some(3 * 1024 * 1024 * 1024));
         assert_eq!(parse_byte_size("bogus"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_unsupported_unreadable_file_before_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TestDir::new("unsupported-permissions");
+        let unreadable = temp_dir.path().join("unreadable.txt");
+        fs::write(&unreadable, "not source\n").expect("fixture should write");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+            .expect("fixture permissions should be set");
+
+        let result = collect_repo_files(temp_dir.path(), &TraverseConfig::default());
+
+        let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+        let summary = result.expect("unsupported files should be skipped before open");
+        assert!(summary.files.is_empty());
+        assert_eq!(summary.skipped_unsupported, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_walk_skips_unsupported_unreadable_file_before_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TestDir::new("selected-unsupported-permissions");
+        let unreadable = temp_dir.path().join("unreadable.txt");
+        fs::write(&unreadable, "not source\n").expect("fixture should write");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+            .expect("fixture permissions should be set");
+
+        let result = collect_selected_repo_files(
+            temp_dir.path(),
+            &[PathBuf::from("unreadable.txt")],
+            &TraverseConfig::default(),
+        );
+
+        let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+        let summary = result.expect("unsupported selected files should be skipped before open");
+        assert!(summary.files.is_empty());
+        assert_eq!(summary.skipped_unsupported, 1);
     }
 
     #[cfg(unix)]
