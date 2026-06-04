@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Error, Result, bail};
 use gather_step_core::{GatherStepConfig, RegistryStore, WorkspaceStats};
 use gather_step_git::worktrees::{ReviewWorktree, create_detached_worktree, remove_worktree};
 use gather_step_storage::{IndexingOptions, index_workspace_with_storage};
@@ -124,6 +124,14 @@ pub fn run_review_index(
         }
         _ => &full_config,
     };
+    config
+        .validate_repo_roots_against_config_root(config_root)
+        .with_context(|| {
+            format!(
+                "validating review config repo roots from `{}`",
+                config_path.display()
+            )
+        })?;
 
     // Ensure the review storage directory exists (artifact_root creation
     // already does this, but guard here too so the function is self-contained).
@@ -210,23 +218,21 @@ pub fn materialize_polyrepo_worktree(
         if let Some(parent) = dest.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
         {
-            cleanup_created_worktrees(&mut worktrees);
-            return Err(error)
-                .with_context(|| format!("creating worktree parent `{}`", parent.display()));
+            let primary = Error::new(error)
+                .context(format!("creating worktree parent `{}`", parent.display()));
+            return Err(error_with_cleanup_context(&mut worktrees, primary));
         }
         let worktree = match create_detached_worktree(&spec.git_repo_root, &dest, &change.head_sha)
         {
             Ok(worktree) => worktree,
             Err(error) => {
-                cleanup_created_worktrees(&mut worktrees);
-                return Err(error).with_context(|| {
-                    format!(
-                        "checking out `{}`@`{}` into `{}`",
-                        spec.repo_name,
-                        change.head_sha,
-                        dest.display()
-                    )
-                });
+                let primary = Error::new(error).context(format!(
+                    "checking out `{}`@`{}` into `{}`",
+                    spec.repo_name,
+                    change.head_sha,
+                    dest.display()
+                ));
+                return Err(error_with_cleanup_context(&mut worktrees, primary));
             }
         };
         worktrees.push(worktree);
@@ -234,23 +240,51 @@ pub fn materialize_polyrepo_worktree(
 
     let config_path = worktree_root.join(CONFIG_FILENAME);
     if let Err(error) = std::fs::write(&config_path, config_bytes) {
-        cleanup_created_worktrees(&mut worktrees);
-        return Err(error)
-            .with_context(|| format!("writing review config to `{}`", config_path.display()));
+        let primary = Error::new(error).context(format!(
+            "writing review config to `{}`",
+            config_path.display()
+        ));
+        return Err(error_with_cleanup_context(&mut worktrees, primary));
     }
 
     Ok(worktrees)
 }
 
-fn cleanup_created_worktrees(worktrees: &mut Vec<ReviewWorktree>) {
+fn error_with_cleanup_context(worktrees: &mut Vec<ReviewWorktree>, primary: Error) -> Error {
+    match cleanup_created_worktrees(worktrees) {
+        Ok(()) => primary,
+        Err(cleanup_error) => primary.context(format!(
+            "rollback cleanup failed after polyrepo worktree materialization error: {cleanup_error}"
+        )),
+    }
+}
+
+fn cleanup_created_worktrees(worktrees: &mut Vec<ReviewWorktree>) -> Result<()> {
+    let mut failures = Vec::new();
     for worktree in worktrees.drain(..) {
         if let Err(error) = remove_worktree(&worktree) {
             tracing::warn!(
                 error = %error,
+                repo = %worktree.repo.display(),
                 worktree = %worktree.root.display(),
                 "polyrepo worktree materialization failed and cleanup could not remove a previously-created child worktree.",
             );
+            failures.push(format!(
+                "`{}` from source repo `{}`: {error}",
+                worktree.root.display(),
+                worktree.repo.display()
+            ));
         }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "failed to remove {} previously-created polyrepo review worktree(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
     }
 }
 
@@ -260,6 +294,7 @@ fn cleanup_created_worktrees(worktrees: &mut Vec<ReviewWorktree>) {
 mod tests {
     use std::{fs, path::Path, process::Command};
 
+    use gather_step_git::worktrees::ReviewWorktree;
     use gather_step_storage::IndexingOptions;
 
     use crate::pr_review::{
@@ -269,7 +304,7 @@ mod tests {
         test_helpers::TempDir,
     };
 
-    use super::{materialize_polyrepo_worktree, run_review_index};
+    use super::{cleanup_created_worktrees, materialize_polyrepo_worktree, run_review_index};
 
     // ── git helpers ───────────────────────────────────────────────────────────
 
@@ -431,6 +466,69 @@ mod tests {
         assert!(
             !source_gather.exists(),
             "source workspace `.gather-step/` must NOT exist; review indexer polluted the workspace"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_review_index_rejects_symlinked_repo_root_in_review_config() {
+        let source_ws = TempDir::new("source-symlink");
+        let cache_root = TempDir::new("cache-symlink");
+        let artifact_root = create_artifact_root(
+            cache_root.path(),
+            source_ws.path(),
+            "base",
+            "head",
+            "run-symlink",
+        )
+        .expect("artifact root should create");
+
+        let outside = TempDir::new("outside-repo");
+        fs::create_dir_all(outside.path().join("src")).expect("outside src");
+        std::os::unix::fs::symlink(outside.path(), artifact_root.worktree_root.join("repo_a"))
+            .expect("symlink repo root");
+        fs::write(
+            artifact_root.worktree_root.join("gather-step.config.yaml"),
+            "repos:\n  - name: repo_a\n    path: repo_a\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .expect("config should write");
+
+        let error = run_review_index(&artifact_root, None, IndexingOptions::default())
+            .expect_err("review config validation should reject symlinked repo roots");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("validating review config repo roots"),
+            "error should identify the review-config validation phase: {rendered}"
+        );
+        assert!(
+            rendered.contains("symlinked repo root"),
+            "error should preserve the config validation reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn cleanup_created_worktrees_errors_when_a_child_worktree_cannot_be_removed() {
+        let temp = TempDir::new("cleanup-failure");
+        let fake_repo = temp.path().join("not-a-git-repo");
+        fs::create_dir_all(&fake_repo).expect("fake repo dir");
+        let mut worktrees = vec![ReviewWorktree {
+            repo: fake_repo,
+            root: temp.path().join("repo_a"),
+            sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        }];
+
+        let error = cleanup_created_worktrees(&mut worktrees)
+            .expect_err("cleanup must surface child worktree removal failures");
+
+        assert!(
+            error
+                .to_string()
+                .contains("previously-created polyrepo review worktree"),
+            "cleanup error should describe leaked child worktrees: {error}"
+        );
+        assert!(
+            worktrees.is_empty(),
+            "cleanup should drain attempted worktrees even when removal fails"
         );
     }
 

@@ -955,11 +955,17 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             error = %e,
                             repo = %change.repo_name,
                             "Could not resolve repo HEAD for the baseline check."
                         );
+                        baseline_warnings.push(format!(
+                            "Could not resolve HEAD for repo `{}` during the baseline check: {e}. \
+                             The baseline index may not represent --base; pass --no-baseline-check \
+                             to suppress this warning.",
+                            change.repo_name
+                        ));
                     }
                 }
             }
@@ -1001,7 +1007,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     }
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, "Could not resolve workspace HEAD for the baseline check.");
+                    tracing::warn!(error = %e, "Could not resolve workspace HEAD for the baseline check.");
+                    baseline_warnings.push(format!(
+                        "Could not resolve workspace HEAD during the baseline check: {e}. \
+                         The baseline index may not represent --base; pass --no-baseline-check \
+                         to suppress this warning."
+                    ));
                 }
             }
         }
@@ -1921,7 +1932,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .collect();
 
     let changed_files_by_repo =
-        group_changed_files_by_repo(head_config.as_ref(), &changed_files_display);
+        group_changed_files_by_repo(head_config.as_ref(), &all_changed_paths);
     let mut report = DeltaReport {
         schema_version: DELTA_REPORT_SCHEMA_VERSION,
         metadata: ReviewMetadata {
@@ -3058,6 +3069,48 @@ mod tests {
         (ws, base_sha, head_sha)
     }
 
+    fn build_large_changed_files_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: myrepo\n    path: myrepo\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+
+        let src = ws.join("myrepo/src/generated");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            ws.join("myrepo/package.json"),
+            r#"{"name":"myrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(ws.join("myrepo/src/base.ts"), "export const base = 1;\n").unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base"]);
+        let base_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "-b", "feature/large-change"]);
+        for i in 0..=MAX_CHANGED_FILES {
+            fs::write(
+                src.join(format!("file_{i:03}.ts")),
+                format!("export const value_{i} = {i};\n"),
+            )
+            .unwrap();
+        }
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "head: add many files"]);
+        let head_sha = git_head_sha(&ws);
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, base_sha, head_sha)
+    }
+
     /// Create a non-git workspace root with two independent child repos that
     /// both have the same branch names but different commit SHAs.
     fn build_polyrepo_fixture(root: &Path) -> (PathBuf, String, String) {
@@ -3103,6 +3156,20 @@ mod tests {
         }
 
         (ws, "main".to_owned(), "feature/polyrepo".to_owned())
+    }
+
+    fn repo_change(
+        repo_name: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> crate::pr_review::changed::RepoChange {
+        crate::pr_review::changed::RepoChange {
+            repo_name: repo_name.to_owned(),
+            base_sha: base_sha.to_owned(),
+            head_sha: head_sha.to_owned(),
+            diff_base_sha: base_sha.to_owned(),
+            files: vec![],
+        }
     }
 
     /// Returns `(workspace_path, advanced_base_sha, feature_head_sha)` where
@@ -4120,6 +4187,134 @@ mod tests {
                     .as_array()
                     .is_some_and(|files| files.iter().any(|file| file == "repo_b/src/added.ts"))
         }));
+    }
+
+    #[test]
+    fn composite_review_sha_is_order_stable_and_distinguishes_base_from_head() {
+        let first = PerRepoChanges {
+            repos: vec![
+                repo_change("repo_b", "base-b", "head-b"),
+                repo_change("repo_a", "base-a", "head-a"),
+            ],
+            skipped: vec![],
+        };
+        let reordered = PerRepoChanges {
+            repos: vec![
+                repo_change("repo_a", "base-a", "head-a"),
+                repo_change("repo_b", "base-b", "head-b"),
+            ],
+            skipped: vec![],
+        };
+
+        let first_base = composite_review_sha(&first, false);
+        let reordered_base = composite_review_sha(&reordered, false);
+        let first_head = composite_review_sha(&first, true);
+
+        assert_eq!(
+            first_base, reordered_base,
+            "composite SHAs must be deterministic regardless of repo iteration order"
+        );
+        assert_ne!(
+            first_base, first_head,
+            "base and head composite SHAs must reflect different per-repo refs"
+        );
+        assert!(
+            first_base.contains("repo_a=base-a") && first_base.contains("repo_b=base-b"),
+            "display form should retain the per-repo manifest: {first_base}"
+        );
+    }
+
+    #[test]
+    fn pr_review_changed_files_by_repo_uses_full_uncapped_change_set() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("large-change-ws");
+        let cache_tmp = TempDir::new("large-change-cache");
+        let (ws, base_sha, head_sha) = build_large_changed_files_fixture(ws_tmp.path());
+        index_baseline_workspace(&ws);
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let changed_files = report["changed_files"].as_array().unwrap();
+
+        assert_eq!(
+            changed_files.len(),
+            MAX_CHANGED_FILES,
+            "top-level changed_files remains display-capped"
+        );
+        assert_eq!(report["changed_files_truncated"], true);
+
+        let grouped = report["changed_files_by_repo"].as_array().unwrap();
+        let myrepo = grouped
+            .iter()
+            .find(|row| row["repo"] == "myrepo")
+            .expect("myrepo group should exist");
+        let grouped_files = myrepo["files"].as_array().unwrap();
+        assert!(
+            grouped_files.len() > MAX_CHANGED_FILES,
+            "changed_files_by_repo must carry paths beyond the display cap; got {} files",
+            grouped_files.len()
+        );
+        let last_path = format!("myrepo/src/generated/file_{MAX_CHANGED_FILES:03}.ts");
+        assert!(
+            grouped_files
+                .iter()
+                .any(|file| file.as_str() == Some(last_path.as_str())),
+            "changed_files_by_repo must include paths beyond the display cap"
+        );
+    }
+
+    #[test]
+    fn pr_review_bails_when_polyrepo_has_no_reviewable_repos() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("polyrepo-empty-ws");
+        let cache_tmp = TempDir::new("polyrepo-empty-cache");
+        let (ws, _, _) = build_polyrepo_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: "main".to_owned(),
+            head: "main".to_owned(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let error =
+            run_inner(&app, &args).expect_err("polyrepo reviews with no changed repos should fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("No configured repos had reviewable changes"),
+            "error should explain that every configured repo was skipped: {rendered}"
+        );
+        assert!(
+            rendered.contains("Skipping repo `repo_a`: no changes"),
+            "error should preserve skipped repo details: {rendered}"
+        );
     }
 
     // ── Test: keep_cache leaves artifact root ─────────────────────────────────

@@ -5,11 +5,11 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
-## v4.3.1 (2026-06-02)
+## v4.3.0 (2026-06-04)
 
 Release status: **prepared**.
 
-Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, wires polyrepo `pr-review` ref resolution and synthetic worktree indexing into the command path, and adds the v4.3.1 gap-closure work (lock-contention disclosure, a display-ownership planning dimension, and mongo/Atlas structural detectors).
+Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, wires polyrepo `pr-review` ref resolution and synthetic worktree indexing into the command path, adds lock-contention disclosure and cleanup hardening, and refreshes Cargo and website dependencies.
 
 ### Added
 
@@ -17,29 +17,38 @@ Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse
 - **Multi-repo review worktree** — `pr-review` checks out each changed repo at its head into one synthesized worktree, then indexes it as a single workspace.
 - **Stale-index warnings on `context_pack`** — generic `context_pack` queries surface a stale-index warning in `meta.warnings` when the index lags the current git HEAD, matching the existing `plan_change` behaviour.
 - **`gather-step doctor` code-quality advisories** — non-gating findings over the indexed graph: dependency cycles (incl. cross-repo, via Tarjan SCC), mock/fixture imports leaking into production modules, and local forks of shared/design-system components that should be reused.
-- **Graph-ranked reuse evidence** in planning packs: reuse candidates are ranked by sibling-consumer count, shared/design-system membership, and cross-repo proof strength before truncation, so a blessed shared component ranks above a bespoke fork (S3).
-- **Typed `plan_change` product** with a fixed, contract-checked section set (E1). Sections are always present (possibly empty), with an exclusion ledger recording what was dropped so a capped result is never read as exhaustive.
-- **Display-ownership planning dimension** (`display_ownership_checks`): every cross-service reference surfaces the question of whether display fields come from the owner service (snapshot/API) rather than a direct cross-service DB lookup (DSO1).
-- **Mongo/Atlas structural safety detectors** with stable rule IDs and confidence: `$lookup` join-key coercion that defeats an index (`GS-MONGO-INDEX-DEFEAT`), bare `$toObjectId` on untrusted input (`GS-MONGO-UNSAFE-COERCION`), unguarded dotted-path `$set` (`GS-MONGO-NULL-PARENT-PATH`), and `dynamic:false` Atlas index↔doc-field drift (`GS-MONGO-ATLAS-INDEX-DRIFT`) (MQS1–MQS3, AIX1).
-- **Query-time index freshness** (`fresh`/`stale`/`never_indexed`) is now classified against the working tree's HEAD and surfaced per repo in `gather-step status` (A13).
-- **Multi-path traversal provenance**: graph traversals now report every distinct path into a node plus `depth_capped`/`truncated` signals when a walk is cut short by depth or fan-out bounds (B8/B9).
+- **Graph-ranked reuse evidence** in planning packs: reuse candidates are ranked by sibling-consumer count, shared/design-system membership, and cross-repo proof strength before truncation, so a blessed shared component ranks above a bespoke fork.
+- **Typed `plan_change` product** with a fixed, contract-checked section set. Sections are always present (possibly empty), with an exclusion ledger recording what was dropped so a capped result is never read as exhaustive.
+- **Display-ownership planning dimension** (`display_ownership_checks`): every cross-service reference surfaces the question of whether display fields come from the owner service (snapshot/API) rather than a direct cross-service DB lookup.
+- **Mongo/Atlas structural safety detectors** with stable rule IDs and confidence: `$lookup` join-key coercion that defeats an index (`GS-MONGO-INDEX-DEFEAT`), bare `$toObjectId` on untrusted input (`GS-MONGO-UNSAFE-COERCION`), unguarded dotted-path `$set` (`GS-MONGO-NULL-PARENT-PATH`), and `dynamic:false` Atlas index↔doc-field drift (`GS-MONGO-ATLAS-INDEX-DRIFT`).
+- **Query-time index freshness** (`fresh`/`stale`/`never_indexed`) is now classified against the working tree's HEAD and surfaced per repo in `gather-step status`.
+- **Multi-path traversal provenance**: graph traversals now report every distinct path into a node plus `depth_capped`/`truncated` signals when a walk is cut short by depth or fan-out bounds.
 
 ### Changed
 
 - **`DeltaReport.schema_version` is now `2`** — the PR-review report gains `changed_files_by_repo`, grouping changed files by their owning repo (paths matching no repo are grouped under `<workspace>`).
-- **Multi-word search recall**: a conjunctive query that returns nothing now falls back to a disjunction with a min-should-match floor, so a capability query sharing most of its terms still finds the target symbol (S1). Hits are re-ranked by query-term coverage (S2) and expanded through a curated synonym map (S4).
-- **Unified `min_confidence` edge filter** across trace/impact/pack traversal, with `None`-confidence edges treated as trusted (A14).
-- The `plan_change` contract gate is now **evidentiary** — it asserts schema version, the exact section manifest, and the exclusion ledger, not just section presence (G7).
+- **Multi-word search recall**: a conjunctive query that returns nothing now falls back to a disjunction with a min-should-match floor, so a capability query sharing most of its terms still finds the target symbol. Hits are re-ranked by query-term coverage and expanded through a curated synonym map.
+- **Unified `min_confidence` edge filter** across trace/impact/pack traversal, with `None`-confidence edges treated as trusted.
+- The `plan_change` contract gate is now **evidentiary** — it asserts schema version, the exact section manifest, and the exclusion ledger, not just section presence.
 
 ### Fixed
 
 - `batch_query` now routes `plan_change` requests to the typed product instead of the raw planning pack.
 - Read commands no longer silently return empty-but-successful results when the graph store is held by an in-progress index or watch: they use the workspace daemon first, retry through the daemon named by lock metadata if a local open races the holder, and otherwise exit with a distinct, documented code and (under `--json`) a `degraded: graph_locked` disclosure, so a blocked read can never be mistaken for "found nothing".
 - Daemon, `watch`, and `serve --watch` shutdown paths now wait for active request/index tasks to release graph handles before removing daemon pid/socket metadata. This prevents stale metadata cleanup from orphaning a still-running graph owner after cancellation, idle clients, accept errors, or shutdown timeouts.
+- Review indexing now validates the effective reviewed config's repo roots before indexing, matching the normal `index`/`watch`/`serve` containment checks for missing paths, symlinked repo roots, and paths outside the config root.
+- Query-time freshness no longer collapses metadata read failures into `never_indexed`: unreadable metadata is reported as `unknown` for registered repos and logged, while genuinely absent stores remain omitted.
+- `pr-review` baseline-check resolver failures are now surfaced in report warnings instead of being debug-only, so the default baseline guard cannot silently become a no-op.
+- Polyrepo review cleanup now fails visibly if rollback cannot remove a previously-created child worktree, and `changed_files_by_repo` is derived from the full changed-file set even when the top-level display list is capped.
+
+### Dependencies
+
+- Refreshed the Cargo lockfile to the latest Rust 1.96-compatible versions, including `bitflags 2.11.1 → 2.12.1`, `cc 1.2.62 → 1.2.63`, `inotify 0.11.1 → 0.11.2`, `kqueue 1.1.1 → 1.2.0`, `log 0.4.30 → 0.4.32`, `shlex 1.3.0 → 2.0.1`, `uuid 1.23.1 → 1.23.2`, and `zerocopy 0.8.49 → 0.8.50`.
+- Bumped website dependencies: `astro 6.4.2 → 6.4.4` and `@astrojs/starlight 0.39.2 → 0.39.3`, with the Bun lockfile refreshed.
 
 ### Release-wide
 
-- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.1`.
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.0`.
 
 ## v4.2.1 (2026-06-02)
 

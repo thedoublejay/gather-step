@@ -277,6 +277,28 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn try_daemon_after_lock_returns_none_when_holder_socket_is_missing() {
+        let workspace = TestWorkspace::new("missing-socket");
+        let app = app(workspace.path());
+        let error = anyhow::Error::new(GraphStoreError::StorageHeldByDaemon {
+            path: workspace.path().join(".gather-step/storage/graph.redb"),
+            pid: std::process::id(),
+            started_at_epoch_ms: 42,
+            workspace_root: workspace.path().display().to_string(),
+        })
+        .context("opening read-only workspace storage");
+
+        let rendered =
+            try_daemon_after_lock(&app, &DaemonRequest::Status { repo_filter: None }, &error);
+
+        assert!(
+            rendered.is_none(),
+            "socket-missing daemon fallback should preserve the original lock error"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn try_daemon_after_lock_retries_through_holder_daemon() -> Result<()> {
         let workspace = TestWorkspace::new("lock-retry");
