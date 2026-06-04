@@ -225,7 +225,9 @@ helps narrow down the target when the name is ambiguous.
 
 **4. `context_pack`**
 Builds a task-shaped context slice for a given target symbol and mode. Modes
-include `planning`, `debug`, `fix`, `review`, and `change_impact`. This is the
+include `planning`, `debug`, `fix`, `review`, and `change_impact`. For a typed,
+contract-checked planning product use the dedicated `plan_change` tool (or the
+CLI `pack --mode plan_change`). This is the
 primary tool for giving an AI assistant a bounded, relevant view of the code
 it needs to work with — ranked items, semantic bridges, next-step suggestions,
 and identified gaps.

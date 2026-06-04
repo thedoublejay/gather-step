@@ -7,6 +7,7 @@
 pub mod affected;
 pub mod artifact_root;
 pub mod cache;
+pub mod changed;
 pub mod cleanup;
 pub mod delta_report;
 pub mod engine;
@@ -15,5 +16,6 @@ pub mod index_runner;
 pub mod multi_pr;
 pub mod overlay;
 pub mod parity;
+pub mod target;
 #[cfg(test)]
 pub(crate) mod test_helpers;

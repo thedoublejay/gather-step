@@ -20,7 +20,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use gather_step_core::GatherStepConfig;
 use gather_step_git::{
-    refs::{ChangedFile, changed_files, merge_base, resolve_range},
+    refs::{ChangedFile, changed_files, merge_base, resolve_range, resolve_ref},
     worktrees::{ReviewWorktree, create_detached_worktree, remove_worktree},
 };
 use gather_step_storage::IndexingOptions;
@@ -40,11 +40,13 @@ use crate::{
             compute_cache_key, is_cache_key_active, pick_seed_source, seed_artifact_root,
             try_reuse_cache,
         },
+        changed::{PerRepoChanges, resolve_per_repo_changes},
         delta_report::{
             CleanupPolicy, ContractAlignments, DELTA_REPORT_SCHEMA_VERSION, DecoratorDeltas,
             DeltaReport, DeploymentDeltas, EventDeltas, GITHUB_COMMENT_LIMIT,
-            PayloadContractDeltas, ReviewMetadata, RiskSeverity, RouteDeltas, SafetyMetadata,
-            SymbolDeltas, build_suggested_followups, synthesize_review_pack_commands,
+            PayloadContractDeltas, RepoChangedFiles, ReviewMetadata, RiskSeverity, RouteDeltas,
+            SafetyMetadata, SymbolDeltas, build_suggested_followups,
+            synthesize_review_pack_commands,
         },
         engine::{ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
         extract::{
@@ -58,11 +60,13 @@ use crate::{
             routes::{extract_route_deltas, find_route_node_id},
             symbols::{extract_symbol_deltas, find_symbol_node_id},
         },
+        index_runner::materialize_polyrepo_worktree,
         multi_pr::{
             coordinator::{PrSetRunArgs, run_pr_set},
             gh::{GhResolveOptions, resolve_pr_set_from_gh, slugify_set_id},
             manifest::PrSetManifest,
         },
+        target::ReviewTarget,
     },
     storage_context::StorageContext,
 };
@@ -600,7 +604,7 @@ enum RunOutcome {
     CacheHit(ReviewArtifactRoot),
     ColdRun {
         artifact_root: ReviewArtifactRoot,
-        worktree: gather_step_git::worktrees::ReviewWorktree,
+        worktrees: Vec<ReviewWorktree>,
         elapsed_ms: u64,
         total_repos: usize,
         /// Surfaces not supported by the active review engine.  Kept typed
@@ -626,7 +630,7 @@ enum RunOutcome {
 /// `pr-review clean --run-id <id>` or `pr-review clean --older-than <duration>`.
 struct ReviewCleanupGuard {
     artifact_root_path: Option<std::path::PathBuf>,
-    worktree: Option<ReviewWorktree>,
+    worktrees: Vec<ReviewWorktree>,
     retention: CacheRetention,
 }
 
@@ -634,19 +638,19 @@ impl ReviewCleanupGuard {
     fn new(retention: CacheRetention) -> Self {
         Self {
             artifact_root_path: None,
-            worktree: None,
+            worktrees: Vec::new(),
             retention,
         }
     }
 
-    fn arm(&mut self, artifact_root_path: std::path::PathBuf, worktree: Option<ReviewWorktree>) {
+    fn arm(&mut self, artifact_root_path: std::path::PathBuf, worktrees: Vec<ReviewWorktree>) {
         self.artifact_root_path = Some(artifact_root_path);
-        self.worktree = worktree;
+        self.worktrees = worktrees;
     }
 
     fn disarm(&mut self) {
         self.artifact_root_path = None;
-        self.worktree = None;
+        self.worktrees.clear();
     }
 }
 
@@ -657,7 +661,7 @@ impl Drop for ReviewCleanupGuard {
             // Drop the references so we don't double-cleanup if a later
             // explicit cleanup path runs, but do not touch disk.
             self.artifact_root_path = None;
-            self.worktree = None;
+            self.worktrees.clear();
             return;
         }
         // Worktree removal is the gate for artifact-root removal: if `git
@@ -667,15 +671,15 @@ impl Drop for ReviewCleanupGuard {
         // at. Quarantine instead so the user can run `pr-review clean
         // --run-id <id>` once the worktree state is unstuck.
         let mut worktree_removed = true;
-        if let Some(wt) = self.worktree.take()
-            && let Err(e) = remove_worktree(&wt)
-        {
-            worktree_removed = false;
-            tracing::warn!(
-                error = %e,
-                worktree = %wt.root.display(),
-                "pr-review cleanup guard: Failed to remove the worktree on a panic or early-return path; leaving the artifact for manual cleanup.",
-            );
+        for wt in self.worktrees.drain(..) {
+            if let Err(e) = remove_worktree(&wt) {
+                worktree_removed = false;
+                tracing::warn!(
+                    error = %e,
+                    worktree = %wt.root.display(),
+                    "pr-review cleanup guard: Failed to remove a worktree on a panic or early-return path; leaving the artifact for manual cleanup.",
+                );
+            }
         }
         if let Some(path) = self.artifact_root_path.take() {
             if !worktree_removed {
@@ -728,6 +732,73 @@ impl CacheRetention {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ReviewResolution {
+    base_sha: String,
+    head_sha: String,
+    changed: Vec<ChangedFile>,
+    per_repo_changes: Option<PerRepoChanges>,
+    synthetic_target: Option<ReviewTarget>,
+}
+
+fn build_review_target(
+    config_root: &Path,
+    config: &GatherStepConfig,
+    repo_filter: Option<&str>,
+) -> Result<ReviewTarget> {
+    let mut target = ReviewTarget::from_config(config_root, config);
+    if let Some(wanted) = repo_filter {
+        target.repos.retain(|repo| repo.repo_name == wanted);
+        if target.repos.is_empty() {
+            bail!("Repo `{wanted}` was not found in the workspace config.");
+        }
+    }
+    Ok(target)
+}
+
+fn target_requires_synthetic_worktree(target: &ReviewTarget) -> bool {
+    target.repos.iter().any(|repo| !repo.repo_path.is_empty())
+}
+
+fn composite_review_sha(changes: &PerRepoChanges, head: bool) -> String {
+    let mut parts: Vec<String> = changes
+        .repos
+        .iter()
+        .map(|repo| {
+            let sha = if head { &repo.head_sha } else { &repo.base_sha };
+            format!("{}={sha}", repo.repo_name)
+        })
+        .collect();
+    parts.sort();
+    let joined = parts.join(",");
+    let hash = blake3::hash(joined.as_bytes());
+    let hex = hash.to_hex();
+    format!("polyrepo:{}:{joined}", &hex[..16])
+}
+
+fn direct_affected_repos(changes: &PerRepoChanges) -> AffectedRepos {
+    let mut repos: Vec<String> = changes
+        .repos
+        .iter()
+        .map(|repo| repo.repo_name.clone())
+        .collect();
+    repos.sort();
+    repos.dedup();
+    AffectedRepos {
+        repos,
+        all_repos: false,
+        expansion_truncated: false,
+    }
+}
+
+fn skipped_repo_messages(changes: &PerRepoChanges) -> Vec<String> {
+    changes
+        .skipped
+        .iter()
+        .map(|repo| format!("Skipping repo `{}`: {}.", repo.repo_name, repo.reason))
+        .collect()
+}
+
 /// Core implementation — returns `(rendered_string, threshold_exceeded)`.
 ///
 /// `threshold_exceeded` is `true` when the effective [`SeverityMode`] is
@@ -754,80 +825,10 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         args.format
     };
 
-    // ── 1. Resolve refs ────────────────────────────────────────────────────
-    let resolved =
-        resolve_range(&app.workspace_path, &args.base, &args.head).with_context(|| {
-            format!(
-                "Resolving refs `{}..{}` in `{}`.",
-                args.base,
-                args.head,
-                app.workspace_path.display()
-            )
-        })?;
-
-    let base_sha = resolved.base.sha.clone();
-    let head_sha = resolved.head.sha.clone();
-
-    // ── 1b. Baseline-index coherence check ────────────────────────────────
-    // Warn (but do not abort) when the workspace HEAD differs from the resolved
-    // base SHA.  In that case the workspace's `.gather-step/storage` was most
-    // likely indexed against the feature branch, so baseline deltas will be
-    // empty or misleading.  Users who intentionally index from a different ref
-    // (e.g. CI) can suppress this with `--no-baseline-check`.
-    let mut baseline_warnings: Vec<String> = Vec::new();
-    if !args.no_baseline_check {
-        match gather_step_git::refs::resolve_ref(&app.workspace_path, "HEAD") {
-            Ok(ws_head) => {
-                let ws_short = &ws_head.sha[..ws_head.sha.len().min(12)];
-                let base_short = &base_sha[..base_sha.len().min(12)];
-                if ws_head.sha != base_sha {
-                    baseline_warnings.push(format!(
-                        "The workspace HEAD {ws_short} does not match --base {base_short}; \
-                         the baseline index may not represent the base reference. \
-                         Re-run after `git checkout {base_short}` and `gather-step index` \
-                         for accurate deltas, or pass --no-baseline-check to suppress this warning."
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "Could not resolve workspace HEAD for the baseline check.");
-            }
-        }
-    }
-
-    // ── 2. Changed files ───────────────────────────────────────────────────
-    let diff_base_sha = merge_base(&app.workspace_path, &base_sha, &head_sha)
-        .with_context(|| format!("Finding the merge-base for `{base_sha}` and `{head_sha}`."))?;
-    let changed =
-        changed_files(&app.workspace_path, &diff_base_sha, &head_sha).with_context(|| {
-            format!("Listing changed files between merge-base `{diff_base_sha}` and `{head_sha}`.")
-        })?;
-
-    let all_changed_paths: Vec<String> = changed
-        .iter()
-        .map(|cf: &ChangedFile| cf.path.clone())
-        .collect();
-
-    let changed_files_truncated = all_changed_paths.len() > MAX_CHANGED_FILES;
-    let changed_files_display: Vec<String> = all_changed_paths
-        .iter()
-        .take(MAX_CHANGED_FILES)
-        .cloned()
-        .collect();
-
-    // ── 3b. Cache key ──────────────────────────────────────────────────────
-    // Read the config file the engine will actually use, so the cache key
-    // identifies "same config" exactly when the config the head worktree
-    // sees is identical.
-    //
-    // Selection precedence:
-    //   1. `--config <path>` override → read once, then hash and write those
-    //      exact bytes into the worktree.
-    //   2. Otherwise, hash the bytes committed at `<head_sha>:gather-step.config.yaml`
-    //      via `git show`. This is what the detached worktree will check out,
-    //      not the user's working tree (which may be at a different ref).
-    //   3. If neither is readable, hash empty bytes — the indexer will fail
-    //      later with a clearer error if a config is genuinely required.
+    // ── 1. Load review config, when present ────────────────────────────────
+    // Single-repo reviews can still rely on the config committed at `head`.
+    // Synthetic polyrepo reviews need the workspace-level config up front so
+    // refs and changed files are resolved in child git repositories.
     let config_override_path: Option<PathBuf> = args.config.clone();
     if let Some(path) = config_override_path.as_ref() {
         if !path.exists() {
@@ -843,6 +844,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             );
         }
     }
+
     let baseline_workspace_path = config_override_path
         .as_ref()
         .and_then(|path| path.parent().map(PathBuf::from))
@@ -860,30 +862,254 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     } else {
         None
     };
-    let config_worktree_bytes: Option<Vec<u8>> = match (
-        config_override_path.as_ref(),
-        config_override_bytes.as_ref(),
-    ) {
-        (Some(path), Some(bytes)) => Some(prepare_review_config_override(
-            &app.workspace_path,
-            path,
-            bytes,
-        )?),
-        _ => None,
+
+    let workspace_config_bytes: Option<Vec<u8>> =
+        if let Some(bytes) = config_override_bytes.as_ref() {
+            Some(bytes.clone())
+        } else {
+            match std::fs::read(&baseline_workspace_paths.config_path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Reading workspace config `{}`.",
+                            baseline_workspace_paths.config_path.display()
+                        )
+                    });
+                }
+            }
+        };
+
+    let workspace_config: Option<GatherStepConfig> = workspace_config_bytes
+        .as_ref()
+        .map(|bytes| {
+            let raw = std::str::from_utf8(bytes).with_context(|| {
+                format!(
+                    "Reading workspace config `{}` as UTF-8.",
+                    baseline_workspace_paths.config_path.display()
+                )
+            })?;
+            GatherStepConfig::from_yaml_str(raw).with_context(|| {
+                format!(
+                    "Parsing workspace config `{}`.",
+                    baseline_workspace_paths.config_path.display()
+                )
+            })
+        })
+        .transpose()?;
+
+    let review_target: Option<ReviewTarget> = workspace_config
+        .as_ref()
+        .map(|config| {
+            build_review_target(&baseline_workspace_path, config, app.repo_filter.as_deref())
+        })
+        .transpose()?;
+    let workspace_root_is_git = resolve_ref(&baseline_workspace_path, "HEAD").is_ok();
+    let uses_synthetic_worktree = review_target
+        .as_ref()
+        .is_some_and(|target| !workspace_root_is_git && target_requires_synthetic_worktree(target));
+
+    // ── 2. Resolve refs and changed files ─────────────────────────────────
+    let mut baseline_warnings: Vec<String> = Vec::new();
+    let resolution = if uses_synthetic_worktree {
+        let target = review_target
+            .clone()
+            .expect("synthetic worktree mode requires a loaded review target");
+        let per_repo_changes = resolve_per_repo_changes(&target, &args.base, &args.head);
+        baseline_warnings.extend(skipped_repo_messages(&per_repo_changes));
+        if per_repo_changes.repos.is_empty() {
+            let details = if baseline_warnings.is_empty() {
+                "No configured repos changed in the requested range.".to_owned()
+            } else {
+                baseline_warnings.join(" ")
+            };
+            bail!(
+                "No configured repos had reviewable changes for `{}..{}`. {details}",
+                args.base,
+                args.head
+            );
+        }
+
+        if !args.no_baseline_check {
+            for change in &per_repo_changes.repos {
+                let Some(spec) = target
+                    .repos
+                    .iter()
+                    .find(|repo| repo.repo_name == change.repo_name)
+                else {
+                    continue;
+                };
+                match resolve_ref(&spec.git_repo_root, "HEAD") {
+                    Ok(ws_head) => {
+                        let ws_short = &ws_head.sha[..ws_head.sha.len().min(12)];
+                        let base_short = &change.base_sha[..change.base_sha.len().min(12)];
+                        if ws_head.sha != change.base_sha {
+                            baseline_warnings.push(format!(
+                                "Repo `{}` HEAD {ws_short} does not match --base {base_short}; \
+                                 the baseline index may not represent the base reference. \
+                                 Re-run after checking out `{}` at {base_short} and `gather-step index`, \
+                                 or pass --no-baseline-check to suppress this warning.",
+                                change.repo_name, change.repo_name
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            repo = %change.repo_name,
+                            "Could not resolve repo HEAD for the baseline check."
+                        );
+                        baseline_warnings.push(format!(
+                            "Could not resolve HEAD for repo `{}` during the baseline check: {e}. \
+                             The baseline index may not represent --base; pass --no-baseline-check \
+                             to suppress this warning.",
+                            change.repo_name
+                        ));
+                    }
+                }
+            }
+        }
+
+        ReviewResolution {
+            base_sha: composite_review_sha(&per_repo_changes, false),
+            head_sha: composite_review_sha(&per_repo_changes, true),
+            changed: per_repo_changes.all_files(),
+            per_repo_changes: Some(per_repo_changes),
+            synthetic_target: Some(target),
+        }
+    } else {
+        let resolved =
+            resolve_range(&app.workspace_path, &args.base, &args.head).with_context(|| {
+                format!(
+                    "Resolving refs `{}..{}` in `{}`.",
+                    args.base,
+                    args.head,
+                    app.workspace_path.display()
+                )
+            })?;
+
+        let base_sha = resolved.base.sha.clone();
+        let head_sha = resolved.head.sha.clone();
+
+        if !args.no_baseline_check {
+            match resolve_ref(&app.workspace_path, "HEAD") {
+                Ok(ws_head) => {
+                    let ws_short = &ws_head.sha[..ws_head.sha.len().min(12)];
+                    let base_short = &base_sha[..base_sha.len().min(12)];
+                    if ws_head.sha != base_sha {
+                        baseline_warnings.push(format!(
+                            "The workspace HEAD {ws_short} does not match --base {base_short}; \
+                             the baseline index may not represent the base reference. \
+                             Re-run after `git checkout {base_short}` and `gather-step index` \
+                             for accurate deltas, or pass --no-baseline-check to suppress this warning."
+                        ));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Could not resolve workspace HEAD for the baseline check.");
+                    baseline_warnings.push(format!(
+                        "Could not resolve workspace HEAD during the baseline check: {e}. \
+                         The baseline index may not represent --base; pass --no-baseline-check \
+                         to suppress this warning."
+                    ));
+                }
+            }
+        }
+
+        let diff_base_sha =
+            merge_base(&app.workspace_path, &base_sha, &head_sha).with_context(|| {
+                format!("Finding the merge-base for `{base_sha}` and `{head_sha}`.")
+            })?;
+        let changed =
+            changed_files(&app.workspace_path, &diff_base_sha, &head_sha).with_context(|| {
+                format!(
+                    "Listing changed files between merge-base `{diff_base_sha}` and `{head_sha}`."
+                )
+            })?;
+
+        ReviewResolution {
+            base_sha,
+            head_sha,
+            changed,
+            per_repo_changes: None,
+            synthetic_target: None,
+        }
     };
+
+    let ReviewResolution {
+        base_sha,
+        head_sha,
+        changed,
+        per_repo_changes,
+        synthetic_target,
+    } = resolution;
+
+    let all_changed_paths: Vec<String> = changed
+        .iter()
+        .map(|cf: &ChangedFile| cf.path.clone())
+        .collect();
+
+    let changed_files_truncated = all_changed_paths.len() > MAX_CHANGED_FILES;
+    let changed_files_display: Vec<String> = all_changed_paths
+        .iter()
+        .take(MAX_CHANGED_FILES)
+        .cloned()
+        .collect();
+
+    // ── 3b. Cache key ──────────────────────────────────────────────────────
+    // Read the config file the engine will actually use, so the cache key
+    // identifies "same config" exactly when the config the head worktree
+    // sees is identical.
+    let synthetic_config_bytes = if synthetic_target.is_some() {
+        Some(workspace_config_bytes.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Polyrepo pr-review requires a workspace `gather-step.config.yaml`; pass --config or run from the indexed workspace root."
+            )
+        })?)
+    } else {
+        None
+    };
+    let config_worktree_bytes: Option<Vec<u8>> =
+        if let Some(bytes) = synthetic_config_bytes.as_ref() {
+            Some(bytes.clone())
+        } else {
+            match (
+                config_override_path.as_ref(),
+                config_override_bytes.as_ref(),
+            ) {
+                (Some(path), Some(bytes)) => Some(prepare_review_config_override(
+                    &app.workspace_path,
+                    path,
+                    bytes,
+                )?),
+                _ => None,
+            }
+        };
     let config_bytes: Vec<u8> = if let Some(bytes) = config_override_bytes.as_ref() {
+        config_worktree_bytes
+            .clone()
+            .unwrap_or_else(|| bytes.clone())
+    } else if let Some(bytes) = synthetic_config_bytes.as_ref() {
         bytes.clone()
     } else {
         read_config_at_sha(&app.workspace_path, &head_sha)
     };
+    let review_workspace_path = if synthetic_target.is_some() {
+        baseline_workspace_path.clone()
+    } else {
+        app.workspace_path.clone()
+    };
     let cache_key_struct =
-        compute_cache_key(&app.workspace_path, &base_sha, &head_sha, &config_bytes);
+        compute_cache_key(&review_workspace_path, &base_sha, &head_sha, &config_bytes);
 
     // ── 4. Artifact root ───────────────────────────────────────────────────
     let cache_root = args
         .cache_root
         .clone()
-        .unwrap_or_else(|| default_cache_root(&app.workspace_path));
+        .unwrap_or_else(|| default_cache_root(&review_workspace_path));
+    let mut review_app = app.clone();
+    review_app.workspace_path.clone_from(&review_workspace_path);
 
     // Best-effort cleanup guard. Armed on cold-run paths after the worktree is
     // created; disarmed on the happy path before the explicit cleanup block
@@ -902,7 +1128,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             tracing::warn!(error = %e, "Cache lookup failed; falling back to a cold run.");
             None
         }) {
-        let workspace_ctx = StorageContext::workspace_read_only(app);
+        let workspace_ctx = StorageContext::workspace_read_only(&review_app);
         let _review_ctx = StorageContext::review_checked(
             &workspace_ctx,
             hit_root.root.clone(),
@@ -919,13 +1145,13 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // Cache miss: create a fresh artifact root, worktree, and index.
         let run_id = generate_run_id();
 
-        let artifact_root = plan_artifact_root(&cache_root, &app.workspace_path, &run_id)
+        let artifact_root = plan_artifact_root(&cache_root, &review_workspace_path, &run_id)
             .with_context(|| format!("Planning the artifact root for run `{run_id}`."))?;
 
         // Safety guard: construct both contexts and verify no path overlap before
         // creating review directories, writing the marker, or opening any review
         // storage.
-        let workspace_ctx = StorageContext::workspace_read_only(app);
+        let workspace_ctx = StorageContext::workspace_read_only(&review_app);
         let _review_ctx = StorageContext::review_checked(
             &workspace_ctx,
             artifact_root.root.clone(),
@@ -945,38 +1171,57 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         .with_context(|| format!("Creating the artifact root for run `{run_id}`."))?;
 
         // ── 5. Materialize worktree ────────────────────────────────────────
-        // `materialize_artifact_root` pre-creates the worktree directory; git worktree
-        // add refuses to clobber an existing directory, so remove it first.
-        if artifact_root.worktree_root.exists() {
-            std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
-                format!(
-                    "Removing the pre-created worktree placeholder at `{}`.",
-                    artifact_root.worktree_root.display()
-                )
-            })?;
-        }
-
-        let worktree = match create_detached_worktree(
-            &app.workspace_path,
-            &artifact_root.worktree_root,
-            &head_sha,
-        ) {
-            Ok(wt) => wt,
-            Err(e) => {
-                quarantine_on_error(&artifact_root);
-                return Err(e).with_context(|| {
+        let worktrees = if let (Some(target), Some(changes)) =
+            (synthetic_target.as_ref(), per_repo_changes.as_ref())
+        {
+            match materialize_polyrepo_worktree(
+                &artifact_root.worktree_root,
+                target,
+                changes,
+                &config_bytes,
+            ) {
+                Ok(worktrees) => worktrees,
+                Err(e) => {
+                    quarantine_on_error(&artifact_root);
+                    return Err(e)
+                        .with_context(|| "Creating the synthetic polyrepo review worktree.");
+                }
+            }
+        } else {
+            // `materialize_artifact_root` pre-creates the worktree directory; git worktree
+            // add refuses to clobber an existing directory, so remove it first.
+            if artifact_root.worktree_root.exists() {
+                std::fs::remove_dir(&artifact_root.worktree_root).with_context(|| {
                     format!(
-                        "Creating the detached worktree at `{}`.",
+                        "Removing the pre-created worktree placeholder at `{}`.",
                         artifact_root.worktree_root.display()
                     )
-                });
+                })?;
             }
+
+            let worktree = match create_detached_worktree(
+                &app.workspace_path,
+                &artifact_root.worktree_root,
+                &head_sha,
+            ) {
+                Ok(wt) => wt,
+                Err(e) => {
+                    quarantine_on_error(&artifact_root);
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Creating the detached worktree at `{}`.",
+                            artifact_root.worktree_root.display()
+                        )
+                    });
+                }
+            };
+            vec![worktree]
         };
 
         // Arm the cleanup guard now that both the artifact root and worktree
         // exist on disk. Any panic or `?`-propagated error after this point
         // will trigger best-effort cleanup via Drop.
-        cleanup_guard.arm(artifact_root.root.clone(), Some(worktree.clone()));
+        cleanup_guard.arm(artifact_root.root.clone(), worktrees.clone());
 
         // ── 5a. --config override ─────────────────────────────────────────
         // When the user passed `--config <path>`, write the exact bytes that
@@ -985,10 +1230,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // whatever the head commit checked in (or the absent-file case).
         // Done AFTER worktree creation so we overwrite the committed config
         // rather than racing with `git worktree add`.
-        if let (Some(src), Some(bytes)) = (
-            config_override_path.as_ref(),
-            config_worktree_bytes.as_ref(),
-        ) {
+        if synthetic_target.is_none()
+            && let (Some(src), Some(bytes)) = (
+                config_override_path.as_ref(),
+                config_worktree_bytes.as_ref(),
+            )
+        {
             let dst = artifact_root.worktree_root.join("gather-step.config.yaml");
             if let Err(e) = std::fs::write(&dst, bytes) {
                 quarantine_on_error(&artifact_root);
@@ -1059,24 +1306,28 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             }
         };
 
-        let affected: Option<AffectedRepos> = head_cfg_for_affected.as_ref().map(|cfg| {
-            let a = match affected_baseline_coord.as_ref() {
-                Some(coord) => compute_affected_repos(cfg, &changed, Some(coord.graph())),
-                None => {
-                    compute_affected_repos::<gather_step_storage::GraphStoreDb>(cfg, &changed, None)
+        let affected: Option<AffectedRepos> = if let Some(changes) = per_repo_changes.as_ref() {
+            Some(direct_affected_repos(changes))
+        } else {
+            head_cfg_for_affected.as_ref().map(|cfg| {
+                let a = match affected_baseline_coord.as_ref() {
+                    Some(coord) => compute_affected_repos(cfg, &changed, Some(coord.graph())),
+                    None => compute_affected_repos::<gather_step_storage::GraphStoreDb>(
+                        cfg, &changed, None,
+                    ),
+                };
+                if !a.all_repos && !a.repos.is_empty() {
+                    tracing::info!(
+                        repos = ?a.repos,
+                        truncated = a.expansion_truncated,
+                        "seeded baseline + reindexing {} affected repos: {:?}",
+                        a.repos.len(),
+                        a.repos
+                    );
                 }
-            };
-            if !a.all_repos && !a.repos.is_empty() {
-                tracing::info!(
-                    repos = ?a.repos,
-                    truncated = a.expansion_truncated,
-                    "seeded baseline + reindexing {} affected repos: {:?}",
-                    a.repos.len(),
-                    a.repos
-                );
-            }
-            a
-        });
+                a
+            })
+        };
 
         // ── 6. Materialize via engine ──────────────────────────────────────
         let index_start = Instant::now();
@@ -1106,7 +1357,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
         RunOutcome::ColdRun {
             artifact_root,
-            worktree,
+            worktrees,
             elapsed_ms,
             total_repos: engine_total_repos,
             unsupported_surfaces: engine_unsupported,
@@ -1114,18 +1365,18 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     };
 
     // Destructure the outcome for the remainder of the function.
-    let (artifact_root, worktree_opt, elapsed_ms, total_repos_hint, run_unsupported_surfaces) =
+    let (artifact_root, worktrees, elapsed_ms, total_repos_hint, run_unsupported_surfaces) =
         match outcome {
-            RunOutcome::CacheHit(root) => (root, None, 0u64, None, vec![]),
+            RunOutcome::CacheHit(root) => (root, Vec::new(), 0u64, None, vec![]),
             RunOutcome::ColdRun {
                 artifact_root,
-                worktree,
+                worktrees,
                 elapsed_ms,
                 total_repos,
                 unsupported_surfaces,
             } => (
                 artifact_root,
-                Some(worktree),
+                worktrees,
                 elapsed_ms,
                 Some(total_repos),
                 unsupported_surfaces,
@@ -1135,18 +1386,23 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // ── 7. Head config-derived repo names ─────────────────────────────────
     let config_path = artifact_root.worktree_root.join("gather-step.config.yaml");
     let head_config = GatherStepConfig::from_yaml_file(&config_path).ok();
-    let indexed_repos: Vec<String> = head_config.as_ref().map_or_else(
+    let indexed_repos: Vec<String> = per_repo_changes.as_ref().map_or_else(
         || {
-            let n = total_repos_hint.unwrap_or(0);
-            (0..n).map(|i| format!("repo-{i}")).collect()
+            head_config.as_ref().map_or_else(
+                || {
+                    let n = total_repos_hint.unwrap_or(0);
+                    (0..n).map(|i| format!("repo-{i}")).collect()
+                },
+                |config| config.repos.iter().map(|r| r.name.clone()).collect(),
+            )
         },
-        |config| config.repos.iter().map(|r| r.name.clone()).collect(),
+        |changes| direct_affected_repos(changes).repos,
     );
     let changed_repos = map_changed_repos_from_config(head_config.as_ref(), &all_changed_paths);
 
     // ── 8. Build report ────────────────────────────────────────────────────
     let ws_paths = baseline_workspace_paths.clone();
-    let ws_hash = workspace_hash(&app.workspace_path);
+    let ws_hash = workspace_hash(&review_workspace_path);
     let cache_key = format!("{ws_hash}:{base_sha}:{head_sha}");
 
     let cleanup_policy = if args.keep_cache {
@@ -1675,10 +1931,12 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     .map(|(name, _)| name.to_owned())
     .collect();
 
+    let changed_files_by_repo =
+        group_changed_files_by_repo(head_config.as_ref(), &all_changed_paths);
     let mut report = DeltaReport {
         schema_version: DELTA_REPORT_SCHEMA_VERSION,
         metadata: ReviewMetadata {
-            workspace: app.workspace_path.clone(),
+            workspace: review_workspace_path.clone(),
             base_input: args.base.clone(),
             base_sha: base_sha.clone(),
             head_input: args.head.clone(),
@@ -1701,6 +1959,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             config_hash: cache_key_struct.config_hash.clone(),
         },
         changed_files: changed_files_display,
+        changed_files_by_repo,
         changed_files_truncated,
         evidence: Vec::new(),
         routes: route_deltas,
@@ -1773,16 +2032,16 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // Fresh run: remove the worktree then the artifact root.  Errors are
         // logged but do not fail the command — the marker is already Completed.
         let mut worktree_removed_cleanly = true;
-        if let Some(wt) = worktree_opt
-            && let Err(e) = remove_worktree(&wt)
-        {
-            worktree_removed_cleanly = false;
-            tracing::warn!(
-                error = %e,
-                worktree = %wt.root.display(),
-                "pr-review cleanup: Failed to remove the worktree. \
-                 `git worktree remove` may have left a dangling pointer in `.git/worktrees/`.",
-            );
+        for wt in worktrees {
+            if let Err(e) = remove_worktree(&wt) {
+                worktree_removed_cleanly = false;
+                tracing::warn!(
+                    error = %e,
+                    worktree = %wt.root.display(),
+                    "pr-review cleanup: Failed to remove a worktree. \
+                     `git worktree remove` may have left a dangling pointer in `.git/worktrees/`.",
+                );
+            }
         }
         if worktree_removed_cleanly {
             // remove_worktree already does belt-and-suspenders directory removal
@@ -1871,7 +2130,7 @@ fn map_changed_repos_from_config(
     let repos: Vec<(String, String)> = config.map_or_else(Vec::new, |cfg| {
         cfg.repos
             .iter()
-            .map(|repo| (repo.name.clone(), repo.path.clone()))
+            .map(|repo| (repo.name.clone(), repo.normalized_rel_path()))
             .collect()
     });
 
@@ -1884,7 +2143,9 @@ fn map_changed_repos_from_config(
                 // Match if the file path starts with the repo path prefix
                 // (with a directory separator boundary).
                 let prefix = repo_path.trim_end_matches('/');
-                file_path == prefix || file_path.starts_with(&format!("{prefix}/"))
+                prefix.is_empty()
+                    || file_path == prefix
+                    || file_path.starts_with(&format!("{prefix}/"))
             })
             .max_by_key(|(_, repo_path)| repo_path.trim_end_matches('/').len());
 
@@ -1900,6 +2161,48 @@ fn map_changed_repos_from_config(
 
     // If nothing changed at all, return empty (not "<workspace>").
     result_set.into_iter().collect()
+}
+
+/// Group changed file paths by their owning repo, mirroring
+/// [`map_changed_repos_from_config`]'s longest-prefix attribution. Paths that
+/// match no configured repo are grouped under `<workspace>`. Repos are sorted
+/// by name for stable output; file order within each repo is preserved.
+fn group_changed_files_by_repo(
+    config: Option<&GatherStepConfig>,
+    changed_paths: &[String],
+) -> Vec<RepoChangedFiles> {
+    let repos: Vec<(String, String)> = config.map_or_else(Vec::new, |cfg| {
+        cfg.repos
+            .iter()
+            .map(|repo| (repo.name.clone(), repo.normalized_rel_path()))
+            .collect()
+    });
+
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    for file_path in changed_paths {
+        let matched = repos
+            .iter()
+            .filter(|(_, repo_path)| {
+                let prefix = repo_path.trim_end_matches('/');
+                prefix.is_empty()
+                    || file_path == prefix
+                    || file_path.starts_with(&format!("{prefix}/"))
+            })
+            .max_by_key(|(_, repo_path)| repo_path.trim_end_matches('/').len());
+
+        let owner = matched.map_or("<workspace>", |(name, _)| name.as_str());
+        grouped
+            .entry(owner.to_owned())
+            .or_default()
+            .push(file_path.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(repo, files)| RepoChangedFiles { repo, files })
+        .collect()
 }
 
 /// Mark the artifact root as Quarantined on error.
@@ -2766,6 +3069,109 @@ mod tests {
         (ws, base_sha, head_sha)
     }
 
+    fn build_large_changed_files_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: myrepo\n    path: myrepo\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+
+        let src = ws.join("myrepo/src/generated");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            ws.join("myrepo/package.json"),
+            r#"{"name":"myrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(ws.join("myrepo/src/base.ts"), "export const base = 1;\n").unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "base"]);
+        let base_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "-b", "feature/large-change"]);
+        for i in 0..=MAX_CHANGED_FILES {
+            fs::write(
+                src.join(format!("file_{i:03}.ts")),
+                format!("export const value_{i} = {i};\n"),
+            )
+            .unwrap();
+        }
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "head: add many files"]);
+        let head_sha = git_head_sha(&ws);
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, base_sha, head_sha)
+    }
+
+    /// Create a non-git workspace root with two independent child repos that
+    /// both have the same branch names but different commit SHAs.
+    fn build_polyrepo_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: repo_a\n    path: repo_a\n  - name: repo_b\n    path: repo_b\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+
+        for repo in ["repo_a", "repo_b"] {
+            let repo_root = ws.join(repo);
+            let src = repo_root.join("src");
+            fs::create_dir_all(&src).unwrap();
+            fs::write(
+                repo_root.join("package.json"),
+                format!(r#"{{"name":"{repo}","version":"0.0.1"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                src.join("hello.ts"),
+                format!("export function hello(): string {{ return '{repo}'; }}\n"),
+            )
+            .unwrap();
+
+            git_run(&repo_root, &["init", "--initial-branch=main"]);
+            git_run(&repo_root, &["config", "user.email", "test@example.com"]);
+            git_run(&repo_root, &["config", "user.name", "Test"]);
+            git_run(&repo_root, &["config", "commit.gpgsign", "false"]);
+            git_run(&repo_root, &["config", "tag.gpgsign", "false"]);
+            git_run(&repo_root, &["add", "."]);
+            git_run(&repo_root, &["commit", "--message", "base"]);
+
+            git_run(&repo_root, &["checkout", "-b", "feature/polyrepo"]);
+            fs::write(
+                src.join("added.ts"),
+                format!("export function added(): string {{ return '{repo}-added'; }}\n"),
+            )
+            .unwrap();
+            git_run(&repo_root, &["add", "."]);
+            git_run(&repo_root, &["commit", "--message", "head: add file"]);
+            git_run(&repo_root, &["checkout", "main"]);
+        }
+
+        (ws, "main".to_owned(), "feature/polyrepo".to_owned())
+    }
+
+    fn repo_change(
+        repo_name: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> crate::pr_review::changed::RepoChange {
+        crate::pr_review::changed::RepoChange {
+            repo_name: repo_name.to_owned(),
+            base_sha: base_sha.to_owned(),
+            head_sha: head_sha.to_owned(),
+            diff_base_sha: base_sha.to_owned(),
+            files: vec![],
+        }
+    }
+
     /// Returns `(workspace_path, advanced_base_sha, feature_head_sha)` where
     /// `base` and `head` have diverged from their merge-base.
     fn build_diverged_fixture(root: &Path) -> (PathBuf, String, String) {
@@ -3047,7 +3453,7 @@ mod tests {
         );
 
         let mut guard = ReviewCleanupGuard::new(CacheRetention::Keep);
-        guard.arm(artifact_root.clone(), None);
+        guard.arm(artifact_root.clone(), Vec::new());
         drop(guard);
 
         assert!(
@@ -3078,7 +3484,7 @@ mod tests {
         };
 
         let mut guard = ReviewCleanupGuard::new(CacheRetention::Discard);
-        guard.arm(artifact_root.clone(), Some(worktree));
+        guard.arm(artifact_root.clone(), vec![worktree]);
         drop(guard);
 
         assert!(
@@ -3701,6 +4107,216 @@ mod tests {
         assert!(followups.len() >= 3, "expected >= 3 followups");
     }
 
+    #[test]
+    fn pr_review_materializes_polyrepo_child_worktrees() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("polyrepo-run-ws");
+        let cache_tmp = TempDir::new("polyrepo-run-cache");
+        let (ws, base_ref, head_ref) = build_polyrepo_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_ref,
+            head: head_ref,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        let meta = &report["metadata"];
+        assert_eq!(meta["workspace"], ws.to_string_lossy().as_ref());
+        assert!(
+            meta["base_sha"]
+                .as_str()
+                .is_some_and(|sha| sha.starts_with("polyrepo:")),
+            "polyrepo base metadata should carry a composite SHA: {meta:?}"
+        );
+        assert!(
+            meta["head_sha"]
+                .as_str()
+                .is_some_and(|sha| sha.starts_with("polyrepo:")),
+            "polyrepo head metadata should carry a composite SHA: {meta:?}"
+        );
+
+        let changed_files: Vec<&str> = report["changed_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert!(changed_files.contains(&"repo_a/src/added.ts"));
+        assert!(changed_files.contains(&"repo_b/src/added.ts"));
+
+        let changed_repos: Vec<&str> = meta["changed_repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(changed_repos, vec!["repo_a", "repo_b"]);
+
+        let indexed_repos: Vec<&str> = meta["indexed_repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        assert_eq!(indexed_repos, vec!["repo_a", "repo_b"]);
+
+        let grouped = report["changed_files_by_repo"].as_array().unwrap();
+        assert!(grouped.iter().any(|row| {
+            row["repo"] == "repo_a"
+                && row["files"]
+                    .as_array()
+                    .is_some_and(|files| files.iter().any(|file| file == "repo_a/src/added.ts"))
+        }));
+        assert!(grouped.iter().any(|row| {
+            row["repo"] == "repo_b"
+                && row["files"]
+                    .as_array()
+                    .is_some_and(|files| files.iter().any(|file| file == "repo_b/src/added.ts"))
+        }));
+    }
+
+    #[test]
+    fn composite_review_sha_is_order_stable_and_distinguishes_base_from_head() {
+        let first = PerRepoChanges {
+            repos: vec![
+                repo_change("repo_b", "base-b", "head-b"),
+                repo_change("repo_a", "base-a", "head-a"),
+            ],
+            skipped: vec![],
+        };
+        let reordered = PerRepoChanges {
+            repos: vec![
+                repo_change("repo_a", "base-a", "head-a"),
+                repo_change("repo_b", "base-b", "head-b"),
+            ],
+            skipped: vec![],
+        };
+
+        let first_base = composite_review_sha(&first, false);
+        let reordered_base = composite_review_sha(&reordered, false);
+        let first_head = composite_review_sha(&first, true);
+
+        assert_eq!(
+            first_base, reordered_base,
+            "composite SHAs must be deterministic regardless of repo iteration order"
+        );
+        assert_ne!(
+            first_base, first_head,
+            "base and head composite SHAs must reflect different per-repo refs"
+        );
+        assert!(
+            first_base.contains("repo_a=base-a") && first_base.contains("repo_b=base-b"),
+            "display form should retain the per-repo manifest: {first_base}"
+        );
+    }
+
+    #[test]
+    fn pr_review_changed_files_by_repo_uses_full_uncapped_change_set() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("large-change-ws");
+        let cache_tmp = TempDir::new("large-change-cache");
+        let (ws, base_sha, head_sha) = build_large_changed_files_fixture(ws_tmp.path());
+        index_baseline_workspace(&ws);
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        let changed_files = report["changed_files"].as_array().unwrap();
+
+        assert_eq!(
+            changed_files.len(),
+            MAX_CHANGED_FILES,
+            "top-level changed_files remains display-capped"
+        );
+        assert_eq!(report["changed_files_truncated"], true);
+
+        let grouped = report["changed_files_by_repo"].as_array().unwrap();
+        let myrepo = grouped
+            .iter()
+            .find(|row| row["repo"] == "myrepo")
+            .expect("myrepo group should exist");
+        let grouped_files = myrepo["files"].as_array().unwrap();
+        assert!(
+            grouped_files.len() > MAX_CHANGED_FILES,
+            "changed_files_by_repo must carry paths beyond the display cap; got {} files",
+            grouped_files.len()
+        );
+        let last_path = format!("myrepo/src/generated/file_{MAX_CHANGED_FILES:03}.ts");
+        assert!(
+            grouped_files
+                .iter()
+                .any(|file| file.as_str() == Some(last_path.as_str())),
+            "changed_files_by_repo must include paths beyond the display cap"
+        );
+    }
+
+    #[test]
+    fn pr_review_bails_when_polyrepo_has_no_reviewable_repos() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("polyrepo-empty-ws");
+        let cache_tmp = TempDir::new("polyrepo-empty-cache");
+        let (ws, _, _) = build_polyrepo_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: "main".to_owned(),
+            head: "main".to_owned(),
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let error =
+            run_inner(&app, &args).expect_err("polyrepo reviews with no changed repos should fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("No configured repos had reviewable changes"),
+            "error should explain that every configured repo was skipped: {rendered}"
+        );
+        assert!(
+            rendered.contains("Skipping repo `repo_a`: no changes"),
+            "error should preserve skipped repo details: {rendered}"
+        );
+    }
+
     // ── Test: keep_cache leaves artifact root ─────────────────────────────────
 
     #[test]
@@ -4064,6 +4680,109 @@ mod tests {
         assert_eq!(
             map_changed_repos_from_config(Some(&config), &changed),
             vec!["api"]
+        );
+    }
+
+    #[test]
+    fn group_changed_files_by_repo_attributes_and_groups() {
+        let config = GatherStepConfig {
+            allow_listed_repos: vec![],
+            repos: vec![
+                gather_step_core::RepoConfig {
+                    name: "repo_a".to_owned(),
+                    path: "repo_a".to_owned(),
+                    depth: None,
+                },
+                gather_step_core::RepoConfig {
+                    name: "repo_b".to_owned(),
+                    path: "repo_b".to_owned(),
+                    depth: None,
+                },
+            ],
+            github: None,
+            jira: None,
+            indexing: gather_step_core::IndexingConfig::default(),
+            deployment: gather_step_core::DeploymentConfig::default(),
+        };
+
+        let changed = vec![
+            "repo_a/src/x.ts".to_owned(),
+            "repo_a/src/y.ts".to_owned(),
+            "repo_b/main.ts".to_owned(),
+            "README.md".to_owned(),
+        ];
+
+        // Sorted by repo name (`<workspace>` < `repo_a` < `repo_b`); file order
+        // within each repo is preserved.
+        assert_eq!(
+            group_changed_files_by_repo(Some(&config), &changed),
+            vec![
+                RepoChangedFiles {
+                    repo: "<workspace>".to_owned(),
+                    files: vec!["README.md".to_owned()],
+                },
+                RepoChangedFiles {
+                    repo: "repo_a".to_owned(),
+                    files: vec!["repo_a/src/x.ts".to_owned(), "repo_a/src/y.ts".to_owned()],
+                },
+                RepoChangedFiles {
+                    repo: "repo_b".to_owned(),
+                    files: vec!["repo_b/main.ts".to_owned()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn changed_file_repo_mapping_normalizes_dot_paths() {
+        let root_config = GatherStepConfig {
+            allow_listed_repos: vec![],
+            repos: vec![gather_step_core::RepoConfig {
+                name: "root_repo".to_owned(),
+                path: ".".to_owned(),
+                depth: None,
+            }],
+            github: None,
+            jira: None,
+            indexing: gather_step_core::IndexingConfig::default(),
+            deployment: gather_step_core::DeploymentConfig::default(),
+        };
+        let root_changed = vec!["src/lib.rs".to_owned()];
+        assert_eq!(
+            map_changed_repos_from_config(Some(&root_config), &root_changed),
+            vec!["root_repo"]
+        );
+        assert_eq!(
+            group_changed_files_by_repo(Some(&root_config), &root_changed),
+            vec![RepoChangedFiles {
+                repo: "root_repo".to_owned(),
+                files: vec!["src/lib.rs".to_owned()],
+            }]
+        );
+
+        let nested_config = GatherStepConfig {
+            allow_listed_repos: vec![],
+            repos: vec![gather_step_core::RepoConfig {
+                name: "api".to_owned(),
+                path: "./services/api".to_owned(),
+                depth: None,
+            }],
+            github: None,
+            jira: None,
+            indexing: gather_step_core::IndexingConfig::default(),
+            deployment: gather_step_core::DeploymentConfig::default(),
+        };
+        let nested_changed = vec!["services/api/src/main.rs".to_owned()];
+        assert_eq!(
+            map_changed_repos_from_config(Some(&nested_config), &nested_changed),
+            vec!["api"]
+        );
+        assert_eq!(
+            group_changed_files_by_repo(Some(&nested_config), &nested_changed),
+            vec![RepoChangedFiles {
+                repo: "api".to_owned(),
+                files: vec!["services/api/src/main.rs".to_owned()],
+            }]
         );
     }
 
@@ -4951,6 +5670,7 @@ indexing:
                 config_hash: "cfg".to_owned(),
             },
             changed_files: vec![],
+            changed_files_by_repo: vec![],
             changed_files_truncated: false,
             evidence: vec![],
             routes: RouteDeltas::default(),

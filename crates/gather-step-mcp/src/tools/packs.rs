@@ -427,6 +427,13 @@ pub fn validate_plan_change_contract(plan: &PlanChangeResponse) -> Vec<String> {
             plan.contract.sections
         ));
     }
+    if plan.contract.exclusion_ledger.is_empty() {
+        violations.push(
+            "exclusion_ledger is empty; an evidentiary contract must record what was excluded \
+             or not yet computed"
+                .to_owned(),
+        );
+    }
     violations
 }
 
@@ -436,7 +443,7 @@ pub fn run_plan_change(
 ) -> Result<PlanChangeResponse, McpServerError> {
     let pack = planning_pack_tool(ctx, request)?;
     let data = &pack.data;
-    Ok(build_plan_change(
+    let mut response = build_plan_change(
         &data.target,
         data.found,
         &data.items,
@@ -445,6 +452,56 @@ pub fn run_plan_change(
         &data.next_steps,
         &data.change_impact,
         pack.meta.clone(),
+    );
+    if let Some(meta) = response.meta.as_mut()
+        && let Some(warning) = staleness_warning(ctx)
+    {
+        meta.warnings.push(warning);
+    }
+    Ok(response)
+}
+
+/// Append a stale-index warning to a query-time pack response when any repo's
+/// index lags its git HEAD. Call only from query-time outer entry points (the
+/// CLI `pack` command, MCP pack server methods, `batch_query`) — never from the
+/// precompute funnels, which would bake the warning into cached packs and break
+/// CLI/MCP pack parity.
+pub fn apply_stale_index_warning(ctx: &McpContext, response: &mut ContextPackResponse) {
+    if let Some(meta) = response.meta.as_mut()
+        && let Some(warning) = staleness_warning(ctx)
+    {
+        meta.warnings.push(warning);
+    }
+}
+
+/// A warning naming any repo whose index is stale relative to its current git
+/// HEAD, or `None` when everything is current. Computed fresh per call (never
+/// cached) and best-effort: an unreadable registry/repo is treated as current.
+fn staleness_warning(ctx: &McpContext) -> Option<String> {
+    let registry = gather_step_core::RegistryStore::open(&ctx.config.registry_path).ok()?;
+    let mut stale: Vec<String> = registry
+        .registry()
+        .repos
+        .iter()
+        .filter_map(|(repo, registered)| {
+            let indexed_sha = ctx.metadata().get_last_commit_sha(repo).ok().flatten();
+            let indexer = gather_step_git::GitHistoryIndexer::new(
+                gather_step_git::GitRepoSource::from_path(&registered.path),
+                repo,
+            );
+            match indexer.index_freshness(indexed_sha.as_deref()) {
+                Ok(gather_step_git::IndexFreshness::Stale { .. }) => Some(repo.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    if stale.is_empty() {
+        return None;
+    }
+    stale.sort();
+    Some(format!(
+        "Index is stale relative to HEAD for repo(s): {}. Re-run `gather-step index`.",
+        stale.join(", ")
     ))
 }
 
@@ -5789,6 +5846,24 @@ mod tests {
         // The gate fails on a mangled section manifest (missing/renamed section).
         plan.contract.sections.pop();
         assert!(!validate_plan_change_contract(&plan).is_empty());
+
+        // The gate fails when the exclusion ledger is emptied.
+        let mut ledger_plan = build_plan_change(
+            "createOrder",
+            true,
+            &[],
+            &[],
+            &[],
+            &[],
+            &ChangeImpactSummary::default(),
+            None,
+        );
+        assert!(!ledger_plan.contract.exclusion_ledger.is_empty());
+        ledger_plan.contract.exclusion_ledger.clear();
+        assert!(
+            !validate_plan_change_contract(&ledger_plan).is_empty(),
+            "emptying the exclusion ledger must fail the gate"
+        );
     }
 
     #[test]

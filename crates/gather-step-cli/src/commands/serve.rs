@@ -227,9 +227,9 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
 
     let watch_cancel = cancel.clone();
     let watch_runner = Arc::clone(&watcher);
-    let watch_task = tokio::spawn(async move { watch_runner.run(watch_cancel).await });
+    let mut watch_task = tokio::spawn(async move { watch_runner.run(watch_cancel).await });
     let daemon_cancel = cancel.clone();
-    let daemon_task =
+    let mut daemon_task =
         tokio::spawn(async move { daemon.serve_until_cancelled(daemon_cancel).await });
     let mcp_cancel = cancel.clone();
     let mcp_server = GatherStepMcpServer::with_cancel(ctx, mcp_cancel.clone());
@@ -240,21 +240,9 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
         signal = tokio::signal::ctrl_c() => {
             signal?;
             cancel.cancel();
-            if let Err(_timeout) = tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut mcp_task).await {
-                tracing::warn!(
-                    timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
-                    "MCP shutdown timed out; aborting",
-                );
-                mcp_task.abort();
-                let _ = mcp_task.await;
-            }
-            shutdown_watch_task(watch_task).await;
-            if let Err(_timeout) = tokio::time::timeout(SHUTDOWN_TIMEOUT, daemon_task).await {
-                tracing::warn!(
-                    timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
-                    "daemon shutdown timed out; aborting",
-                );
-            }
+            shutdown_mcp_task(&mut mcp_task).await;
+            shutdown_watch_task(&mut watch_task).await;
+            shutdown_daemon_task(&mut daemon_task).await;
             stores.search().flush()?;
             drop(watcher);
             // Watcher dropped → broadcast channel closes → event task exits on
@@ -274,13 +262,8 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
     cancel.cancel();
     // Normal completion path (MCP exited first): drive hard shutdown the same
     // way as Ctrl-C so watch/daemon tasks cannot retain handles after return.
-    shutdown_watch_task(watch_task).await;
-    if let Err(_timeout) = tokio::time::timeout(SHUTDOWN_TIMEOUT, daemon_task).await {
-        tracing::warn!(
-            timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
-            "daemon shutdown timed out; aborting",
-        );
-    }
+    shutdown_watch_task(&mut watch_task).await;
+    shutdown_daemon_task(&mut daemon_task).await;
     stores.search().flush()?;
     drop(watcher);
     if tokio::time::timeout(Duration::from_secs(2), event_task)
@@ -299,7 +282,7 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
-/// Wait for the watch task to exit, aborting on timeout.
+/// Wait for the watch task to exit.
 ///
 /// The event task is NOT awaited here: the outer `watcher: Arc<WorkspaceWatcher>`
 /// still owns the broadcast sender, so `events.recv()` inside the event task
@@ -307,18 +290,61 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
 /// caller drops `watcher` after this function returns and then awaits (or
 /// aborts) the event task at that point.
 async fn shutdown_watch_task(
-    watch_task: tokio::task::JoinHandle<Result<(), gather_step_storage::WatcherError>>,
+    watch_task: &mut tokio::task::JoinHandle<Result<(), gather_step_storage::WatcherError>>,
 ) {
-    match tokio::time::timeout(SHUTDOWN_TIMEOUT, watch_task).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => tracing::warn!(?error, "Serve watch task exited with an error."),
-        Ok(Err(error)) => tracing::warn!(?error, "Serve watch task crashed."),
+    let result = match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut *watch_task).await {
+        Ok(result) => result,
         Err(_timeout) => {
             tracing::warn!(
                 timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
-                "watch shutdown timed out; continuing teardown (watch task abandoned)",
+                "watch shutdown timed out; waiting for graph handles to close",
             );
+            watch_task.await
         }
+    };
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(?error, "Serve watch task exited with an error."),
+        Err(error) => tracing::warn!(?error, "Serve watch task crashed."),
+    }
+}
+
+async fn shutdown_daemon_task(daemon_task: &mut tokio::task::JoinHandle<Result<()>>) {
+    let result = match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut *daemon_task).await {
+        Ok(result) => result,
+        Err(_timeout) => {
+            tracing::warn!(
+                timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
+                "daemon shutdown timed out; waiting for graph handles to close",
+            );
+            daemon_task.await
+        }
+    };
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(?error, "Serve daemon task exited with an error."),
+        Err(error) => tracing::warn!(?error, "Serve daemon task crashed."),
+    }
+}
+
+async fn shutdown_mcp_task(
+    mcp_task: &mut tokio::task::JoinHandle<Result<(), gather_step_mcp::McpServerError>>,
+) {
+    let result = match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut *mcp_task).await {
+        Ok(result) => result,
+        Err(_timeout) => {
+            tracing::warn!(
+                timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
+                "MCP shutdown timed out; waiting for graph handles to close",
+            );
+            mcp_task.await
+        }
+    };
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if is_expected_stdio_disconnect(&error) => {}
+        Ok(Err(error)) => tracing::warn!(?error, "MCP task exited with an error."),
+        Err(error) => tracing::warn!(?error, "MCP task crashed."),
     }
 }
 

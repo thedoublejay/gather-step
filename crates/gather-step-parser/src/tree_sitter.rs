@@ -126,6 +126,15 @@ pub fn parse_file(
     parse_file_with_context(repo, repo_root, file, &[], &aliases)
 }
 
+pub(crate) fn parse_file_base(
+    repo: &str,
+    repo_root: &Path,
+    file: &FileEntry,
+) -> Result<ParsedFile, ParseError> {
+    let aliases = PathAliases::empty();
+    parse_file_core(repo, repo_root, file, &[], &aliases, false)
+}
+
 /// Like [`parse_file`], but only applies framework-specific extractors listed
 /// in `active_frameworks`. The orchestrator detects the frameworks for a repo
 /// once and passes them through, so per-file parsing doesn't re-scan
@@ -154,7 +163,7 @@ pub fn parse_file_with_packs(
     active_packs: &[crate::frameworks::profile::ResolvedPack],
     path_aliases: &PathAliases,
 ) -> Result<ParsedFile, ParseError> {
-    parse_file_core(repo, repo_root, file, active_packs, path_aliases)
+    parse_file_core(repo, repo_root, file, active_packs, path_aliases, true)
 }
 
 /// Entry point used by the orchestrator for auto-detected repos: takes
@@ -182,7 +191,7 @@ pub fn parse_file_with_context(
             options: serde_norway::Value::Null,
         })
         .collect();
-    parse_file_core(repo, repo_root, file, &packs, path_aliases)
+    parse_file_core(repo, repo_root, file, &packs, path_aliases, true)
 }
 
 fn parse_file_core(
@@ -191,6 +200,7 @@ fn parse_file_core(
     file: &FileEntry,
     active_packs_arg: &[crate::frameworks::profile::ResolvedPack],
     path_aliases: &PathAliases,
+    run_augmentations: bool,
 ) -> Result<ParsedFile, ParseError> {
     // Clear the path-existence cache once per repo boundary (not per file).
     // Existence checks are stable across files within the same repo root.
@@ -339,41 +349,43 @@ fn parse_file_core(
             };
         }
 
-        let mut active_pack_refs = active_packs_arg.to_vec();
-        if !active_pack_refs
-            .iter()
-            .any(|pack| pack.id == crate::frameworks::registry::PackId::SharedLib)
-        {
-            active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                id: crate::frameworks::registry::PackId::SharedLib,
-                options: serde_norway::Value::Null,
-            });
-        }
-        if !active_pack_refs
-            .iter()
-            .any(|pack| pack.id == crate::frameworks::registry::PackId::FrontendHooks)
-        {
-            active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                id: crate::frameworks::registry::PackId::FrontendHooks,
-                options: serde_norway::Value::Null,
-            });
-        }
+        if run_augmentations {
+            let mut active_pack_refs = active_packs_arg.to_vec();
+            if !active_pack_refs
+                .iter()
+                .any(|pack| pack.id == crate::frameworks::registry::PackId::SharedLib)
+            {
+                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
+                    id: crate::frameworks::registry::PackId::SharedLib,
+                    options: serde_norway::Value::Null,
+                });
+            }
+            if !active_pack_refs
+                .iter()
+                .any(|pack| pack.id == crate::frameworks::registry::PackId::FrontendHooks)
+            {
+                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
+                    id: crate::frameworks::registry::PackId::FrontendHooks,
+                    options: serde_norway::Value::Null,
+                });
+            }
 
-        let registry =
-            BUILTIN_REGISTRY.get_or_init(crate::frameworks::registry::PackRegistry::builtin);
-        let mut seen_groups = rustc_hash::FxHashSet::default();
-        for pack in &active_pack_refs {
-            let pack_id = pack.id;
-            if !pack_id.applies_to_language(file.language) {
-                continue;
+            let registry =
+                BUILTIN_REGISTRY.get_or_init(crate::frameworks::registry::PackRegistry::builtin);
+            let mut seen_groups = rustc_hash::FxHashSet::default();
+            for pack in &active_pack_refs {
+                let pack_id = pack.id;
+                if !pack_id.applies_to_language(file.language) {
+                    continue;
+                }
+                let group = pack_id.aug_group();
+                if !seen_groups.insert(group) {
+                    continue;
+                }
+                let augmentation = registry.augment(pack_id, &state_snapshot_oxc!());
+                append_unique_nodes(&mut state.nodes, augmentation.nodes);
+                state.edges.extend(augmentation.edges);
             }
-            let group = pack_id.aug_group();
-            if !seen_groups.insert(group) {
-                continue;
-            }
-            let augmentation = registry.augment(pack_id, &state_snapshot_oxc!());
-            append_unique_nodes(&mut state.nodes, augmentation.nodes);
-            state.edges.extend(augmentation.edges);
         }
 
         let mut parsed = ParsedFile {
@@ -389,8 +401,10 @@ fn parse_file_core(
             constant_strings: state.constant_strings,
             parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
         };
-        crate::projection::augment_projection_fields(&mut parsed);
-        apply_workspace_semantic_edges(&mut parsed, repo_root);
+        if run_augmentations {
+            crate::projection::augment_projection_fields(&mut parsed);
+            apply_workspace_semantic_edges(&mut parsed, repo_root);
+        }
         return Ok(parsed);
     }
 
@@ -501,54 +515,56 @@ fn parse_file_core(
         };
     }
 
-    // Build the final active-packs list from the caller-supplied slice.
-    // SharedLib and FrontendHooks always run for TS/JS files regardless of
-    // which packs were requested, so we append them when absent.
-    let mut active_pack_refs = active_packs_arg.to_vec();
-    if matches!(file.language, Language::TypeScript | Language::JavaScript) {
-        if !active_pack_refs
-            .iter()
-            .any(|pack| pack.id == PackId::SharedLib)
-        {
-            active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                id: PackId::SharedLib,
-                options: serde_norway::Value::Null,
-            });
+    if run_augmentations {
+        // Build the final active-packs list from the caller-supplied slice.
+        // SharedLib and FrontendHooks always run for TS/JS files regardless of
+        // which packs were requested, so we append them when absent.
+        let mut active_pack_refs = active_packs_arg.to_vec();
+        if matches!(file.language, Language::TypeScript | Language::JavaScript) {
+            if !active_pack_refs
+                .iter()
+                .any(|pack| pack.id == PackId::SharedLib)
+            {
+                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
+                    id: PackId::SharedLib,
+                    options: serde_norway::Value::Null,
+                });
+            }
+            if !active_pack_refs
+                .iter()
+                .any(|pack| pack.id == PackId::FrontendHooks)
+            {
+                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
+                    id: PackId::FrontendHooks,
+                    options: serde_norway::Value::Null,
+                });
+            }
         }
-        if !active_pack_refs
-            .iter()
-            .any(|pack| pack.id == PackId::FrontendHooks)
-        {
-            active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                id: PackId::FrontendHooks,
-                options: serde_norway::Value::Null,
-            });
-        }
-    }
 
-    // Reuse a single process-wide registry: `builtin()` allocates a 15-entry
-    // Vec<PackEntry> and was previously called per file.
-    let registry = BUILTIN_REGISTRY.get_or_init(PackRegistry::builtin);
+        // Reuse a single process-wide registry: `builtin()` allocates a 15-entry
+        // Vec<PackEntry> and was previously called per file.
+        let registry = BUILTIN_REGISTRY.get_or_init(PackRegistry::builtin);
 
-    // Deduplicate by augmentation *group* and run each group exactly once.
-    // Multiple packs may share a group (e.g. Azure + LaunchDarkly both map
-    // to AugGroup::Azure).  A fresh snapshot is taken before each group so
-    // every group sees the accumulated output of all previous groups,
-    // preserving the original sequential augmentation semantics.
-    let mut seen_groups = rustc_hash::FxHashSet::default();
-    for pack in &active_pack_refs {
-        let pack_id = pack.id;
-        if !pack_id.applies_to_language(file.language) {
-            continue;
+        // Deduplicate by augmentation *group* and run each group exactly once.
+        // Multiple packs may share a group (e.g. Azure + LaunchDarkly both map
+        // to AugGroup::Azure).  A fresh snapshot is taken before each group so
+        // every group sees the accumulated output of all previous groups,
+        // preserving the original sequential augmentation semantics.
+        let mut seen_groups = rustc_hash::FxHashSet::default();
+        for pack in &active_pack_refs {
+            let pack_id = pack.id;
+            if !pack_id.applies_to_language(file.language) {
+                continue;
+            }
+            let group = pack_id.aug_group();
+            if !seen_groups.insert(group) {
+                // Another pack in this group was already processed.
+                continue;
+            }
+            let augmentation = registry.augment(pack_id, &state_snapshot!());
+            append_unique_nodes(&mut state.nodes, augmentation.nodes);
+            state.edges.extend(augmentation.edges);
         }
-        let group = pack_id.aug_group();
-        if !seen_groups.insert(group) {
-            // Another pack in this group was already processed.
-            continue;
-        }
-        let augmentation = registry.augment(pack_id, &state_snapshot!());
-        append_unique_nodes(&mut state.nodes, augmentation.nodes);
-        state.edges.extend(augmentation.edges);
     }
 
     let mut parsed = ParsedFile {
@@ -564,8 +580,10 @@ fn parse_file_core(
         constant_strings: state.constant_strings,
         parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
-    crate::projection::augment_projection_fields(&mut parsed);
-    apply_workspace_semantic_edges(&mut parsed, repo_root);
+    if run_augmentations {
+        crate::projection::augment_projection_fields(&mut parsed);
+        apply_workspace_semantic_edges(&mut parsed, repo_root);
+    }
     Ok(parsed)
 }
 

@@ -1,5 +1,8 @@
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Error, Result};
 use gather_step_mcp::output::redact::relativize_to_workspace;
+use gather_step_storage::GraphStoreError;
 use tracing::warn;
 
 use crate::{
@@ -12,11 +15,43 @@ where
     F: FnOnce(&AppContext) -> Result<RenderedCommand>,
 {
     let output = app.output();
-    if let Some(rendered) = try_daemon_first(app, request) {
-        return rendered.emit(&output);
+    let mut rendered = match try_daemon_first(app, request) {
+        Some(rendered) => rendered,
+        None => match local(app) {
+            Ok(rendered) => rendered,
+            Err(error) => match try_daemon_after_lock(app, request, &error) {
+                Some(rendered) => rendered,
+                None => return Err(error),
+            },
+        },
+    };
+    // `pack` output is asserted byte-for-byte against the MCP tool (CLI/MCP
+    // parity); it carries freshness via its own response instead.
+    if !matches!(request, DaemonRequest::Pack { .. }) {
+        inject_freshness(app, &mut rendered);
     }
+    rendered.emit(&output)
+}
 
-    local(app)?.emit(&output)
+/// Attach a query-time index-freshness verdict to read-command output so a query
+/// against a stale index can be recognized rather than trusted blindly.
+/// Best-effort: reads only the registry + metadata + git (never the lockable
+/// graph), and is skipped silently when the workspace is unindexed.
+fn inject_freshness(app: &AppContext, rendered: &mut RenderedCommand) {
+    let paths = app.workspace_paths();
+    let freshness = crate::freshness::freshness_from_paths(
+        &paths.registry_path,
+        &paths.storage_root.join("metadata.sqlite"),
+    );
+    if freshness.is_empty() {
+        return;
+    }
+    if let Some(serde_json::Value::Object(map)) = rendered.payload.as_mut()
+        && !map.contains_key("freshness")
+        && let Ok(value) = serde_json::to_value(&freshness)
+    {
+        map.insert("freshness".to_owned(), value);
+    }
 }
 
 fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<RenderedCommand> {
@@ -48,6 +83,63 @@ fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<Rendere
     }
 }
 
+fn try_daemon_after_lock(
+    app: &AppContext,
+    request: &DaemonRequest,
+    error: &Error,
+) -> Option<RenderedCommand> {
+    let daemon_workspace = daemon_workspace_from_graph_lock(error)?;
+    let client = match DaemonClient::try_connect(&daemon_workspace) {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            warn!(
+                workspace = %app.workspace_path.display(),
+                daemon_workspace = %daemon_workspace.display(),
+                request = request_name(request),
+                "local read hit a graph lock held by a daemon, but no request socket was available; preserving lock-contention failure"
+            );
+            return None;
+        }
+        Err(connect_error) => {
+            warn!(
+                workspace = %app.workspace_path.display(),
+                daemon_workspace = %daemon_workspace.display(),
+                request = request_name(request),
+                %connect_error,
+                "local read hit a graph lock held by a daemon, but daemon inspection failed; preserving lock-contention failure"
+            );
+            return None;
+        }
+    };
+
+    match client.call(request) {
+        Ok(rendered) => Some(rendered),
+        Err(call_error) => {
+            warn!(
+                workspace = %app.workspace_path.display(),
+                daemon_workspace = %daemon_workspace.display(),
+                request = request_name(request),
+                %call_error,
+                "local read hit a graph lock held by a daemon, but daemon retry failed; preserving lock-contention failure"
+            );
+            None
+        }
+    }
+}
+
+fn daemon_workspace_from_graph_lock(error: &Error) -> Option<PathBuf> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<GraphStoreError>()
+            .and_then(|graph_error| match graph_error {
+                GraphStoreError::StorageHeldByDaemon { workspace_root, .. } => {
+                    Some(PathBuf::from(workspace_root))
+                }
+                _ => None,
+            })
+    })
+}
+
 fn request_name(request: &DaemonRequest) -> &'static str {
     match request {
         DaemonRequest::Search { .. } => "search",
@@ -60,5 +152,179 @@ fn request_name(request: &DaemonRequest) -> &'static str {
         DaemonRequest::EventsOrphans { .. } => "events_orphans",
         DaemonRequest::Impact { .. } => "impact",
         DaemonRequest::Pack { .. } => "pack",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::{
+        fs,
+        path::Path,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    #[cfg(unix)]
+    use anyhow::Result;
+    use gather_step_storage::GraphStoreError;
+    #[cfg(unix)]
+    use indicatif::MultiProgress;
+    #[cfg(unix)]
+    use tokio_util::sync::CancellationToken;
+
+    #[cfg(unix)]
+    use crate::{
+        app::{AppContext, ColorModeArg},
+        daemon_protocol::DaemonRequest,
+        daemon_server::DaemonServer,
+    };
+
+    use super::daemon_workspace_from_graph_lock;
+    #[cfg(unix)]
+    use super::try_daemon_after_lock;
+
+    #[cfg(unix)]
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(unix)]
+    struct TestWorkspace {
+        root: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl TestWorkspace {
+        fn new(name: &str) -> Self {
+            let id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+            let root =
+                PathBuf::from("/tmp").join(format!("gsd-proxy-{name}-{}-{id}", std::process::id()));
+            fs::create_dir_all(&root).expect("test workspace should exist");
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(unix)]
+    fn app(workspace_root: &Path) -> AppContext {
+        AppContext {
+            workspace_path: workspace_root.to_path_buf(),
+            repo_filter: None,
+            json_output: false,
+            no_interactive: true,
+            stdin_is_tty: false,
+            stdout_is_tty: false,
+            stderr_is_tty: false,
+            ci_env_set: true,
+            color_mode: ColorModeArg::Auto,
+            show_banner: false,
+            multi_progress: MultiProgress::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn bind_daemon_or_skip(app: &AppContext) -> Result<Option<DaemonServer>> {
+        match DaemonServer::bind(app) {
+            Ok(daemon) => Ok(Some(daemon)),
+            Err(error) if unix_socket_bind_is_not_permitted(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_socket_bind_is_not_permitted(error: &anyhow::Error) -> bool {
+        error.to_string().contains("binding")
+            && error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+            })
+    }
+
+    #[test]
+    fn daemon_workspace_from_graph_lock_extracts_daemon_holder_workspace() {
+        let error = anyhow::Error::new(GraphStoreError::StorageHeldByDaemon {
+            path: PathBuf::from("/tmp/ws/.gather-step/storage/graph.redb"),
+            pid: 1234,
+            started_at_epoch_ms: 42,
+            workspace_root: "/tmp/ws".to_owned(),
+        })
+        .context("opening read-only workspace storage");
+
+        assert_eq!(
+            daemon_workspace_from_graph_lock(&error),
+            Some(PathBuf::from("/tmp/ws"))
+        );
+    }
+
+    #[test]
+    fn daemon_workspace_from_graph_lock_ignores_non_daemon_locks() {
+        let error = anyhow::Error::new(GraphStoreError::StorageHeld {
+            path: PathBuf::from("/tmp/ws/.gather-step/storage/graph.redb"),
+        })
+        .context("opening read-only workspace storage");
+
+        assert_eq!(daemon_workspace_from_graph_lock(&error), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_daemon_after_lock_returns_none_when_holder_socket_is_missing() {
+        let workspace = TestWorkspace::new("missing-socket");
+        let app = app(workspace.path());
+        let error = anyhow::Error::new(GraphStoreError::StorageHeldByDaemon {
+            path: workspace.path().join(".gather-step/storage/graph.redb"),
+            pid: std::process::id(),
+            started_at_epoch_ms: 42,
+            workspace_root: workspace.path().display().to_string(),
+        })
+        .context("opening read-only workspace storage");
+
+        let rendered =
+            try_daemon_after_lock(&app, &DaemonRequest::Status { repo_filter: None }, &error);
+
+        assert!(
+            rendered.is_none(),
+            "socket-missing daemon fallback should preserve the original lock error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_daemon_after_lock_retries_through_holder_daemon() -> Result<()> {
+        let workspace = TestWorkspace::new("lock-retry");
+        let app = app(workspace.path());
+        let Some(daemon) = bind_daemon_or_skip(&app)? else {
+            return Ok(());
+        };
+        let cancel = CancellationToken::new();
+        let daemon_task = tokio::spawn(daemon.serve_until_cancelled(cancel.clone()));
+        let error = anyhow::Error::new(GraphStoreError::StorageHeldByDaemon {
+            path: workspace.path().join(".gather-step/storage/graph.redb"),
+            pid: std::process::id(),
+            started_at_epoch_ms: 42,
+            workspace_root: workspace.path().display().to_string(),
+        })
+        .context("opening read-only workspace storage");
+
+        let rendered =
+            try_daemon_after_lock(&app, &DaemonRequest::Status { repo_filter: None }, &error)
+                .expect("holder daemon retry should render a response");
+
+        assert!(rendered.error.is_none());
+        assert!(rendered.payload.is_some());
+
+        cancel.cancel();
+        daemon_task.await??;
+        Ok(())
     }
 }

@@ -556,7 +556,7 @@ gather-step [GLOBAL FLAGS] pack [--registry <PATH>] [--storage <PATH>] <TARGET> 
 | Argument/Flag | Type | Default | Description |
 |---|---|---|---|
 | `<TARGET>` | string (positional) | required | Target symbol name or hex `symbol_id`. |
-| `--mode <MODE>` | enum | `planning` | Pack mode. Accepts `planning`, `debug`, `fix`, `review`, `change_impact` (also accepted as `change-impact`). |
+| `--mode <MODE>` | enum | `planning` | Pack mode. Accepts `planning`, `debug`, `fix`, `review`, `change_impact` (also `change-impact`), and `plan_change` (also `plan-change`). `plan_change` returns the typed planning product with a fixed, contract-checked section set (identical to the MCP `plan_change` tool) under a `plan_change` key, rather than the untyped context pack. |
 | `--limit <N>` | usize | 6 | Maximum ranked items to include in the pack. |
 | `--depth <N>` | usize | 2 | Traversal depth for caller and callee context. |
 | `--budget-bytes <N>` | usize | — | Optional response byte budget override. When the pack exceeds this limit, items are trimmed from the tail. |
@@ -568,6 +568,7 @@ gather-step [GLOBAL FLAGS] pack [--registry <PATH>] [--storage <PATH>] <TARGET> 
 ```bash
 gather-step --workspace /path/to/workspace pack OrdersService --mode planning
 gather-step --workspace /path/to/workspace pack OrdersService --mode debug --depth 3 --limit 8
+gather-step --workspace /path/to/workspace pack OrdersService --mode plan_change
 ```
 
 **Output shape (`--json`)** — emits one line with `event: "context_pack_completed"`, top-level `response_schema_version`, `data`, and `meta`. The `data` payload contains `mode`, `target`, `found`, ranked `items`, canonical `evidence`, `semantic_bridges`, `transport_links`, `next_steps`, `unresolved_gaps`, `planning_rescue`, and `change_impact`. The `change_impact` block includes `confirmed_downstream_repos`, `probable_downstream_repos`, `downstream_repos` (backward-compatible alias), `truncated_repos`, and canonical evidence on cross-repo callers. The `meta` block includes `resolution`, `resolved_symbol_id`, `candidate_count`, `completeness`, `budget`, `ambiguity`, `resolution_confidence`, `confidence_model_version`, `winner_margin`, and any warnings.

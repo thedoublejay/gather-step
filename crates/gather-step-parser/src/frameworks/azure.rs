@@ -647,7 +647,7 @@ fn parse_local_barrel_file(
         source_bytes: None,
     };
 
-    crate::tree_sitter::parse_file(&parsed.file_node.repo, repo_root, &file).ok()
+    crate::tree_sitter::parse_file_base(&parsed.file_node.repo, repo_root, &file).ok()
 }
 
 thread_local! {
@@ -1481,6 +1481,49 @@ export class ProductHandler {
                 .iter()
                 .any(|e| e.source == parsed.file_node.id && e.target == product_dto_node.id),
             "References edge source must be the file node"
+        );
+    }
+
+    #[test]
+    fn base_parse_keeps_import_bindings_without_shared_lib_augmentation() {
+        let temp_dir = TestDir::new("shared-lib-base-parse");
+        fs::write(
+            temp_dir.path().join("shared_import.ts"),
+            r#"
+import { ProductDto } from '@example/shared-lib/dtos';
+
+export const value: ProductDto | null = null;
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = crate::tree_sitter::parse_file_base(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "shared_import.ts".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should base-parse");
+
+        assert!(
+            parsed
+                .import_bindings
+                .iter()
+                .any(|binding| binding.local_name == "ProductDto"
+                    && binding.source == "@example/shared-lib/dtos"),
+            "base parse should still collect import bindings"
+        );
+        assert!(
+            parsed
+                .nodes
+                .iter()
+                .all(|node| node.kind != gather_step_core::NodeKind::SharedSymbol),
+            "base parse must not run shared-lib augmentation"
         );
     }
 
