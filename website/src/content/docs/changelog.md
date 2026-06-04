@@ -5,14 +5,17 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
-## v4.3.1 (2026-06-02)
+## v4.3.0 (2026-06-02)
 
 Release status: **prepared**.
 
-Planning- and reuse-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, and adds the first batch of v4.3.1 gap-closure work (lock-contention disclosure, a display-ownership planning dimension, and mongo/Atlas structural detectors). Partial against the full v4.3.0/v4.3.1 backlog — see the PR for the done/deferred ledger.
+Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, lays the polyrepo `pr-review` foundations, and adds the v4.3.0 gap-closure work (lock-contention disclosure, a display-ownership planning dimension, and mongo/Atlas structural detectors). Partial against the full v4.3.0 backlog — see the PR for the done/deferred ledger.
 
 ### Added
 
+- **Polyrepo `pr-review` ref resolution** — `--base`/`--head` resolve independently per configured repo (the same ref names in each repo's own history) and changed files are tagged by their owning repo. Repos whose refs do not resolve, or that have no changes in range, are skipped with a recorded note.
+- **Multi-repo review worktree** — `pr-review` checks out each changed repo at its head into one synthesized worktree, then indexes it as a single workspace.
+- **Stale-index warnings on `context_pack`** — generic `context_pack` queries surface a stale-index warning in `meta.warnings` when the index lags the current git HEAD, matching the existing `plan_change` behaviour.
 - **`gather-step doctor` code-quality advisories** — non-gating findings over the indexed graph: dependency cycles (incl. cross-repo, via Tarjan SCC), mock/fixture imports leaking into production modules, and local forks of shared/design-system components that should be reused.
 - **Graph-ranked reuse evidence** in planning packs: reuse candidates are ranked by sibling-consumer count, shared/design-system membership, and cross-repo proof strength before truncation, so a blessed shared component ranks above a bespoke fork (S3).
 - **Typed `plan_change` product** with a fixed, contract-checked section set (E1). Sections are always present (possibly empty), with an exclusion ledger recording what was dropped so a capped result is never read as exhaustive.
@@ -23,6 +26,7 @@ Planning- and reuse-quality release. Fixes retrieval recall so reuse search stop
 
 ### Changed
 
+- **`DeltaReport.schema_version` is now `2`** — the PR-review report gains `changed_files_by_repo`, grouping changed files by their owning repo (paths matching no repo are grouped under `<workspace>`).
 - **Multi-word search recall**: a conjunctive query that returns nothing now falls back to a disjunction with a min-should-match floor, so a capability query sharing most of its terms still finds the target symbol (S1). Hits are re-ranked by query-term coverage (S2) and expanded through a curated synonym map (S4).
 - **Unified `min_confidence` edge filter** across trace/impact/pack traversal, with `None`-confidence edges treated as trusted (A14).
 - The `plan_change` contract gate is now **evidentiary** — it asserts schema version, the exact section manifest, and the exclusion ledger, not just section presence (G7).
@@ -34,7 +38,7 @@ Planning- and reuse-quality release. Fixes retrieval recall so reuse search stop
 
 ### Release-wide
 
-- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.1`.
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.0`.
 
 ## v4.2.1 (2026-06-02)
 
