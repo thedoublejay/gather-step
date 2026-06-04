@@ -225,9 +225,9 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
-version = "2.11.1"
+version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+checksum = "84d7ced0ae9557296835c32bf1b1e02b44c746701f898460fb000d7eaa84f00a"
 
 [[package]]
 name = "bitpacking"
@@ -373,9 +373,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.62"
+version = "1.2.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
+checksum = "556e016178bb5662a08681bbe0f00f8e17631781a4dfc8c45e466e4b185ec27f"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-analysis"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "gather-step-core",
  "gather-step-parser",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-bench"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-core"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "bitcode",
  "blake3",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-deploy"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "gather-step-core",
  "pretty_assertions",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-git"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "blake3",
  "gather-step-core",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-mcp"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-output"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "chrono",
  "gather-step-analysis",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-parser"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-storage"
-version = "4.3.1"
+version = "4.3.0"
 dependencies = [
  "bitcode",
  "blake3",
@@ -1811,7 +1811,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19753d40da53d0ec41604750eeb969097a90fb2d7f7992730d904541c04e2c19"
 dependencies = [
  "bstr",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2502,9 +2502,9 @@ dependencies = [
 
 [[package]]
 name = "inotify"
-version = "0.11.1"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd5b3eaf1a28b758ac0faa5a4254e8ab2705605496f1b1f3fbbc3988ad73d199"
+checksum = "533e68a5842e734946fe159fb03fc9bbbb254f590dd0d8ad321ae5ff7beca2c1"
 dependencies = [
  "bitflags",
  "inotify-sys",
@@ -2681,9 +2681,9 @@ dependencies = [
 
 [[package]]
 name = "kqueue"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac30106d7dce88daf4a3fcb4879ea939476d5074a9b7ddd0fb97fa4bed5596a"
+checksum = "273c0752728918e0ac4976f2b275b6fefb9ecd400585dec929419f3844cd87b5"
 dependencies = [
  "kqueue-sys",
  "libc",
@@ -2793,9 +2793,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.30"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "lru"
@@ -4190,9 +4190,9 @@ checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
 
 [[package]]
 name = "shlex"
-version = "1.3.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook"
@@ -4904,9 +4904,9 @@ checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
-version = "1.20.0"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "typetag"
@@ -4982,9 +4982,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.13.2"
+version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-truncate"
@@ -5035,9 +5035,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.1"
+version = "1.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
+checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -5494,18 +5494,18 @@ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.49"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bce33a6288fa3f072a8c2c7d0f2fdbb90e28298f0135c1f99b96c3db2efcc60b"
+checksum = "3b065d4f0e55f82fae73202e189638116a87c55ab6b8e6c2721e13dd9d854ad1"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.49"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd425244944f4ab65ccff928e7323354c5a018c75838362fdce749dfad2ee1e"
+checksum = "0b631b19d36a892ab55420c92dbc83ccd79274f25be714855d3074aa71cab639"
 dependencies = [
  "proc-macro2",
  "quote",
