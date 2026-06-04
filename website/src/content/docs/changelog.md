@@ -9,7 +9,7 @@ This changelog lists significant user-visible changes. The latest release is sho
 
 Release status: **prepared**.
 
-Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, wires polyrepo `pr-review` ref resolution and synthetic worktree indexing into the command path, adds lock-contention disclosure and cleanup hardening, and refreshes Cargo and website dependencies.
+Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, wires polyrepo `pr-review` ref resolution and synthetic worktree indexing into the command path, adds lock-contention disclosure and cleanup hardening, fixes large-workspace indexing hot paths, and refreshes Cargo and website dependencies.
 
 ### Added
 
@@ -40,6 +40,7 @@ Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse
 - Query-time freshness no longer collapses metadata read failures into `never_indexed`: unreadable metadata is reported as `unknown` for registered repos and logged, while genuinely absent stores remain omitted.
 - `pr-review` baseline-check resolver failures are now surfaced in report warnings instead of being debug-only, so the default baseline guard cannot silently become a no-op.
 - Polyrepo review cleanup now fails visibly if rollback cannot remove a previously-created child worktree, and `changed_files_by_repo` is derived from the full changed-file set even when the top-level display list is capped.
+- Large-workspace indexing no longer replays expensive commit fact extraction before falling back from a stale git-history anchor, and shared-lib barrel resolution no longer recursively runs every framework augmentation while chasing local re-exports.
 
 ### Dependencies
 

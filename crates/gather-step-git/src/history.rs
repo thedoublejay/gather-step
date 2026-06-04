@@ -564,10 +564,56 @@ impl GitHistoryIndexer {
             );
             return Ok(Some(Vec::new()));
         }
+
+        if !self.anchor_reachable_from_head(repo, anchor_sha)? {
+            return Ok(None);
+        }
+
         match self.walk_inner(repo, Some(anchor_sha))? {
             WalkOutcome::Reached(facts) => Ok(Some(facts)),
             WalkOutcome::AnchorMissing => Ok(None),
         }
+    }
+
+    fn anchor_reachable_from_head(
+        &self,
+        repo: &Repository,
+        anchor_sha: &str,
+    ) -> Result<bool, GitHistoryError> {
+        let head_id = repo.head_id().map_err(Box::new)?.detach();
+        let walk = repo
+            .rev_walk([head_id])
+            .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
+            .all()
+            .map_err(Box::new)?;
+
+        let mut seen = 0usize;
+        for info in walk {
+            let info = info.map_err(Box::new)?;
+            let sha = info.id().detach().to_string();
+            if anchor_sha.eq_ignore_ascii_case(&sha) {
+                return Ok(true);
+            }
+
+            seen += 1;
+            if let Some(limit) = self.options.max_incremental_commits
+                && seen >= limit
+            {
+                warn!(
+                    repo = %self.repo,
+                    limit,
+                    "git history walk: incremental cap reached before anchor; falling back to full rebuild",
+                );
+                return Ok(false);
+            }
+        }
+
+        warn!(
+            repo = %self.repo,
+            anchor = %anchor_sha,
+            "git history walk: previous anchor SHA not found in current HEAD ancestry",
+        );
+        Ok(false)
     }
 
     fn walk_inner(
@@ -1122,8 +1168,9 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        CommitFact, CommitFileChangeKind, CommitFileDelta, GitHistoryIndexer, GitRepoSource,
-        HistorySyncOutcome, IndexFreshness, classify_freshness, normalize_author_email_bytes,
+        CommitFact, CommitFileChangeKind, CommitFileDelta, GitHistoryIndexer, GitIndexerOptions,
+        GitRepoSource, HistorySyncOutcome, IndexFreshness, classify_freshness,
+        normalize_author_email_bytes,
     };
 
     #[test]
@@ -1181,8 +1228,8 @@ mod tests {
 
     /// Runs a shell command inside `dir`, panicking with the full stderr on
     /// failure. Used by test helpers that build synthetic git repos.
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
+    fn git_output(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
             .args(args)
             .current_dir(dir)
@@ -1193,7 +1240,11 @@ mod tests {
             .env("GIT_AUTHOR_DATE", "2024-01-01T00:00:00Z")
             .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00Z")
             .output()
-            .expect("git command failed to spawn");
+            .expect("git command failed to spawn")
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = git_output(dir, args);
         assert!(
             output.status.success(),
             "git {args:?} failed:\n{}",
@@ -1265,6 +1316,73 @@ mod tests {
         // misread as a zero-line modification.
         assert_eq!(fact.total_insertions(), 15);
         assert_eq!(fact.total_deletions(), 2);
+    }
+
+    #[test]
+    fn anchor_reachability_preflight_respects_incremental_cap() {
+        let scratch = TempDir::new("anchor-reachability");
+        git(scratch.path(), &["init"]);
+        git(scratch.path(), &["checkout", "-b", "main"]);
+        std::fs::create_dir_all(scratch.path().join("src")).expect("src dir");
+
+        for (file, contents, message) in [
+            ("src/a.rs", "fn a() {}\n", "feat: add a"),
+            ("src/b.rs", "fn b() {}\n", "feat: add b"),
+            ("src/c.rs", "fn c() {}\n", "feat: add c"),
+        ] {
+            std::fs::write(scratch.path().join(file), contents).expect("write fixture file");
+            git(scratch.path(), &["add", "."]);
+            git(scratch.path(), &["commit", "-m", message]);
+        }
+
+        let first_commit = git_output(scratch.path(), &["rev-list", "--max-parents=0", "HEAD"]);
+        assert!(
+            first_commit.status.success(),
+            "git rev-list failed:\n{}",
+            String::from_utf8_lossy(&first_commit.stderr)
+        );
+        let first_commit = String::from_utf8(first_commit.stdout)
+            .expect("commit sha is utf8")
+            .trim()
+            .to_owned();
+
+        let capped = GitHistoryIndexer::new(
+            GitRepoSource::from_path(scratch.path().to_path_buf()),
+            "service-a".to_owned(),
+        )
+        .with_options(GitIndexerOptions {
+            max_incremental_commits: Some(1),
+            ..GitIndexerOptions::default()
+        });
+        let repo = capped.open_repo().expect("repo should open");
+        assert!(
+            !capped
+                .anchor_reachable_from_head(&repo, &first_commit)
+                .expect("preflight should succeed"),
+            "preflight should stop at the incremental cap before reaching the first commit"
+        );
+
+        let uncapped = GitHistoryIndexer::new(
+            GitRepoSource::from_path(scratch.path().to_path_buf()),
+            "service-a".to_owned(),
+        )
+        .with_options(GitIndexerOptions {
+            max_incremental_commits: None,
+            ..GitIndexerOptions::default()
+        });
+        let repo = uncapped.open_repo().expect("repo should open");
+        assert!(
+            uncapped
+                .anchor_reachable_from_head(&repo, &first_commit)
+                .expect("preflight should succeed"),
+            "uncapped preflight should find the reachable first commit"
+        );
+        assert!(
+            !uncapped
+                .anchor_reachable_from_head(&repo, "0000000000000000000000000000000000000000")
+                .expect("preflight should succeed"),
+            "preflight should report a missing anchor without extracting commit facts"
+        );
     }
 
     #[test]
