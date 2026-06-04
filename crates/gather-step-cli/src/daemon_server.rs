@@ -412,18 +412,24 @@ impl DaemonServer {
                     // redb graph lock. Aborting the async wrapper would detach
                     // that blocking task and let RuntimeCleanupGuard remove the
                     // daemon files while the graph was still locked.
-                    while handlers.join_next().await.is_some() {}
+                    while let Some(result) = handlers.join_next().await {
+                        log_if_handler_panicked(result);
+                    }
                     return Ok(());
                 }
                 // Reap any handler that has already completed so the JoinSet
                 // does not grow without bound across long-lived daemon runs.
-                Some(_) = handlers.join_next(), if !handlers.is_empty() => {}
+                Some(result) = handlers.join_next(), if !handlers.is_empty() => {
+                    log_if_handler_panicked(result);
+                }
                 accept = listener.accept() => {
                     let (stream, _) = match accept {
                         Ok(accepted) => accepted,
                         Err(error) => {
                             cancel.cancel();
-                            while handlers.join_next().await.is_some() {}
+                            while let Some(result) = handlers.join_next().await {
+                                log_if_handler_panicked(result);
+                            }
                             return Err(error).context("accepting daemon client");
                         }
                     };
@@ -445,6 +451,18 @@ impl DaemonServer {
                 }
             }
         }
+    }
+}
+
+/// Surface a daemon handler panic instead of dropping it on the floor while
+/// draining or reaping the handler `JoinSet`. Handlers are never aborted, so any
+/// `JoinError` here is a genuine panic worth logging.
+#[cfg(unix)]
+fn log_if_handler_panicked(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && error.is_panic()
+    {
+        tracing::warn!(%error, "Daemon client handler panicked.");
     }
 }
 
