@@ -360,6 +360,7 @@ pub struct RepoIndexPayload {
     pub repo: String,
     pub repo_root: PathBuf,
     pub files: Vec<FileBatch>,
+    pub deleted_file_paths: Vec<String>,
     pub deferred_cross_file_edges: Vec<EdgeData>,
     pub unresolved_inputs: Vec<gather_step_parser::resolve::ResolutionInput>,
     pub payload_records: Vec<PayloadContractStoreRecord>,
@@ -458,17 +459,113 @@ impl RepoIndexer {
     ) -> Result<RepoIndexPayload, RepoIndexerError> {
         let _repo_lock = self.acquire_repo_lock(repo, None)?;
         let repo_root = repo_root.as_ref().to_path_buf();
-        let traversal = collect_repo_files(&repo_root, &self.options.traverse)?;
-        let include_manifest_batch = has_indexable_manifest(&repo_root);
-        self.prepare_repo_files(
+        let has_indexed_file_state = !self
+            .storage
+            .metadata()
+            .file_index_states_by_repo(repo)?
+            .is_empty();
+        if !has_indexed_file_state {
+            let traversal = collect_repo_files(&repo_root, &self.options.traverse)?;
+            let include_manifest_batch = has_indexable_manifest(&repo_root);
+            return self.prepare_repo_files(
+                repo,
+                &repo_root,
+                &traversal.files,
+                &traversal.file_stats,
+                include_manifest_batch,
+                false,
+                detected_frameworks,
+            );
+        }
+
+        let snapshot = snapshot_repo_files(
+            self.storage.metadata(),
             repo,
             &repo_root,
-            &traversal.files,
-            &traversal.file_stats,
+            &self.options.traverse,
+        )?;
+        let changed = classify_changes(self.storage.metadata(), repo, &snapshot)?;
+        let changed_paths = changed
+            .added
+            .iter()
+            .map(|file| TrackedPath {
+                path: file.path.clone(),
+                path_id_bytes: file.path_id_bytes.clone(),
+            })
+            .chain(changed.modified.iter().map(|file| TrackedPath {
+                path: file.path.clone(),
+                path_id_bytes: file.path_id_bytes.clone(),
+            }))
+            .chain(changed.deleted.iter().map(|file| TrackedPath {
+                path: file.path.clone(),
+                path_id_bytes: file.path_id_bytes.clone(),
+            }))
+            .collect::<Vec<_>>();
+        if changed_paths
+            .iter()
+            .any(|path| is_path_alias_config_path(&path.path))
+        {
+            self.path_alias_cache.clear();
+        }
+        let deleted_file_paths = changed
+            .deleted
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        if changed_paths.is_empty() {
+            return Ok(RepoIndexPayload {
+                repo: repo.to_owned(),
+                repo_root,
+                files: Vec::new(),
+                deleted_file_paths,
+                deferred_cross_file_edges: Vec::new(),
+                unresolved_inputs: Vec::new(),
+                payload_records: Vec::new(),
+                file_states: Vec::new(),
+                indexed_file_paths: Vec::new(),
+                indexed_path_ids: Vec::new(),
+                is_cold_index: false,
+                stats: IndexingStats::default(),
+                synthetic_file_count: 0,
+            });
+        }
+
+        let affected_paths = compute_affected_set(self.storage.metadata(), repo, &changed_paths)?;
+        let source_files_by_path = snapshot
+            .source_files
+            .into_iter()
+            .map(|file| {
+                let key = gather_step_core::PathId::from_path(&file.path)
+                    .as_bytes()
+                    .to_vec();
+                (key, file)
+            })
+            .collect::<rustc_hash::FxHashMap<_, _>>();
+        let files_to_index = affected_paths
+            .iter()
+            .filter_map(|path| {
+                source_files_by_path
+                    .get(path.path_id_bytes.as_slice())
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let include_manifest_batch = affected_paths
+            .iter()
+            .any(|path| path.path == "package.json")
+            && snapshot
+                .files_by_path
+                .contains_key(b"package.json".as_ref());
+        let mut payload = self.prepare_repo_files(
+            repo,
+            &repo_root,
+            &files_to_index,
+            &snapshot.file_stats,
             include_manifest_batch,
-            false,
+            true,
             detected_frameworks,
-        )
+        )?;
+        payload.deleted_file_paths = deleted_file_paths;
+        Ok(payload)
     }
 
     /// Write a prepared payload to storage, reconcile, and update metadata.
@@ -481,6 +578,8 @@ impl RepoIndexer {
         let repo = repo.as_str();
         let repo_root = payload.repo_root.clone();
 
+        self.storage
+            .purge_deleted_files(repo, &payload.deleted_file_paths)?;
         self.storage
             .metadata()
             .clear_semantic_metadata_for_files(repo, &payload.indexed_path_ids)?;
@@ -1272,6 +1371,7 @@ impl RepoIndexer {
             repo: repo.to_owned(),
             repo_root: repo_root.to_path_buf(),
             files,
+            deleted_file_paths: Vec::new(),
             deferred_cross_file_edges,
             unresolved_inputs: resolution.unresolved,
             payload_records,
@@ -4399,6 +4499,74 @@ export class ItemController {
         // Storage writes are skipped because content hashes match — no new nodes or edges
         assert_eq!(second_stats.nodes_created, 0);
         assert_eq!(second_stats.edges_created, 0);
+    }
+
+    #[test]
+    fn prepared_payload_warm_noop_skips_parse_before_commit() {
+        let repo_root = TestDir::new("payload-warm-noop-repo");
+        let storage_root = TestDir::new("payload-warm-noop-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+
+        fs::write(
+            repo_root.path().join("src/alpha.ts"),
+            "export function alpha() { return 1; }\n",
+        )
+        .expect("alpha fixture should write");
+        fs::write(
+            repo_root.path().join("src/beta.ts"),
+            "export function beta() { return 2; }\n",
+        )
+        .expect("beta fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+
+        let first_payload = indexer
+            .prepare_repo_payload("payload-service", repo_root.path())
+            .expect("first payload should prepare");
+        assert_eq!(first_payload.stats.files_parsed, 2);
+        let first_stats = indexer
+            .commit_repo_payload(first_payload)
+            .expect("first payload should commit");
+        assert_eq!(first_stats.files_parsed, 2);
+        assert!(first_stats.nodes_created > 0);
+
+        let second_payload = indexer
+            .prepare_repo_payload("payload-service", repo_root.path())
+            .expect("second payload should prepare");
+        assert_eq!(
+            second_payload.stats.files_parsed, 0,
+            "warm no-op prepared payloads should skip parser work before commit"
+        );
+        assert!(
+            second_payload.files.is_empty(),
+            "warm no-op prepared payload should not carry file batches"
+        );
+        let second_stats = indexer
+            .commit_repo_payload(second_payload)
+            .expect("second payload should commit");
+        assert_eq!(second_stats.files_parsed, 0);
+        assert_eq!(second_stats.nodes_created, 0);
+        assert_eq!(second_stats.edges_created, 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(
+            repo_root.path().join("src/beta.ts"),
+            "export function beta() { return 2222; }\n",
+        )
+        .expect("beta fixture should update");
+
+        let third_payload = indexer
+            .prepare_repo_payload("payload-service", repo_root.path())
+            .expect("third payload should prepare");
+        assert_eq!(
+            third_payload.stats.files_parsed, 1,
+            "prepared payload should parse only the changed file"
+        );
+        let third_stats = indexer
+            .commit_repo_payload(third_payload)
+            .expect("third payload should commit");
+        assert_eq!(third_stats.files_parsed, 1);
     }
 
     #[test]
