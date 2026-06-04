@@ -122,8 +122,6 @@ pub(crate) fn execute(
 ) -> Result<RenderedCommand> {
     let target = resolve_target(ctx, args)?;
 
-    // The `plan_change` mode returns the typed product (identical sections to the
-    // MCP `plan_change` tool), not the untyped context pack.
     if args.mode == PackModeArg::PlanChange {
         let plan = run_plan_change(
             ctx,
