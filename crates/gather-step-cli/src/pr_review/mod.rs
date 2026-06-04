@@ -7,6 +7,7 @@
 pub mod affected;
 pub mod artifact_root;
 pub mod cache;
+pub mod changed;
 pub mod cleanup;
 pub mod delta_report;
 pub mod engine;
