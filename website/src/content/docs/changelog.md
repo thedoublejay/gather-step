@@ -5,11 +5,11 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
-## v4.3.0 (2026-06-02)
+## v4.3.1 (2026-06-02)
 
 Release status: **prepared**.
 
-Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, lays the polyrepo `pr-review` foundations, and adds the v4.3.0 gap-closure work (lock-contention disclosure, a display-ownership planning dimension, and mongo/Atlas structural detectors). Partial against the full v4.3.0 backlog — see the PR for the done/deferred ledger.
+Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse search stops returning empty, ranks reuse candidates using the graph, ships a typed `plan_change` product with a stable section contract, wires polyrepo `pr-review` ref resolution and synthetic worktree indexing into the command path, and adds the v4.3.1 gap-closure work (lock-contention disclosure, a display-ownership planning dimension, and mongo/Atlas structural detectors).
 
 ### Added
 
@@ -38,7 +38,7 @@ Planning-, reuse-, and polyrepo-quality release. Fixes retrieval recall so reuse
 
 ### Release-wide
 
-- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.0`.
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.3.1`.
 
 ## v4.2.1 (2026-06-02)
 
@@ -222,7 +222,7 @@ Patch on top of v4.0.0. Fixes deployment topology evidence for the workspace str
 ### Fixed
 
 - Streaming payload commits now run the same deployment-artifact indexing pass as direct repo indexing. This restores `Service -> Deployment` evidence for `deployment-topology where-deployed` after a normal workspace index.
-- Added a regression test that prepares and commits a streaming payload containing a RegASK-like kustomize service and asserts the expected service and deployment nodes are present.
+- Added a regression test that prepares and commits a streaming payload containing an enterprise-like kustomize service and asserts the expected service and deployment nodes are present.
 
 ### Release-wide
 

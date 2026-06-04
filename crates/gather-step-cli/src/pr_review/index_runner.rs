@@ -17,7 +17,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use gather_step_core::{GatherStepConfig, RegistryStore, WorkspaceStats};
-use gather_step_git::worktrees::{ReviewWorktree, create_detached_worktree};
+use gather_step_git::worktrees::{ReviewWorktree, create_detached_worktree, remove_worktree};
 use gather_step_storage::{IndexingOptions, index_workspace_with_storage};
 
 use crate::pr_review::{
@@ -207,27 +207,51 @@ pub fn materialize_polyrepo_worktree(
             );
         }
         let dest = worktree_root.join(&spec.repo_path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating worktree parent `{}`", parent.display()))?;
+        if let Some(parent) = dest.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            cleanup_created_worktrees(&mut worktrees);
+            return Err(error)
+                .with_context(|| format!("creating worktree parent `{}`", parent.display()));
         }
-        let worktree = create_detached_worktree(&spec.git_repo_root, &dest, &change.head_sha)
-            .with_context(|| {
-                format!(
-                    "checking out `{}`@`{}` into `{}`",
-                    spec.repo_name,
-                    change.head_sha,
-                    dest.display()
-                )
-            })?;
+        let worktree = match create_detached_worktree(&spec.git_repo_root, &dest, &change.head_sha)
+        {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                cleanup_created_worktrees(&mut worktrees);
+                return Err(error).with_context(|| {
+                    format!(
+                        "checking out `{}`@`{}` into `{}`",
+                        spec.repo_name,
+                        change.head_sha,
+                        dest.display()
+                    )
+                });
+            }
+        };
         worktrees.push(worktree);
     }
 
     let config_path = worktree_root.join(CONFIG_FILENAME);
-    std::fs::write(&config_path, config_bytes)
-        .with_context(|| format!("writing review config to `{}`", config_path.display()))?;
+    if let Err(error) = std::fs::write(&config_path, config_bytes) {
+        cleanup_created_worktrees(&mut worktrees);
+        return Err(error)
+            .with_context(|| format!("writing review config to `{}`", config_path.display()));
+    }
 
     Ok(worktrees)
+}
+
+fn cleanup_created_worktrees(worktrees: &mut Vec<ReviewWorktree>) {
+    for worktree in worktrees.drain(..) {
+        if let Err(error) = remove_worktree(&worktree) {
+            tracing::warn!(
+                error = %error,
+                worktree = %worktree.root.display(),
+                "polyrepo worktree materialization failed and cleanup could not remove a previously-created child worktree.",
+            );
+        }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

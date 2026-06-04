@@ -2738,7 +2738,7 @@ jobs:
 namePrefix: comment-
 images:
   - name: APP_IMAGE
-    newName: regask.azurecr.io/comment
+    newName: example.azurecr.io/comment
 "#,
         )
         .expect("kustomize fixture should write");
