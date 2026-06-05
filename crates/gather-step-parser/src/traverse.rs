@@ -611,7 +611,7 @@ pub fn collect_selected_repo_files(
             continue;
         };
         if !config.include_languages.is_empty() && !config.include_languages.contains(&language) {
-            summary.skipped_unsupported += 1;
+            summary.skipped_excluded += 1;
             continue;
         }
         let mut file = match fs::File::open(&full_path) {
@@ -1021,6 +1021,32 @@ mod tests {
 
         assert!(summary.files.is_empty());
         assert_eq!(summary.skipped_binary, 1);
+    }
+
+    #[test]
+    fn selected_walk_counts_include_language_mismatch_as_excluded() {
+        let temp_dir = TestDir::new("selected-include-language");
+        fs::create_dir_all(temp_dir.path().join("src")).expect("src directory");
+        fs::write(
+            temp_dir.path().join("src/component.tsx"),
+            "export function Component() { return <main />; }\n",
+        )
+        .expect("tsx source");
+
+        let config = TraverseConfig {
+            include_languages: vec![Language::Python],
+            ..TraverseConfig::default()
+        };
+        let summary = collect_selected_repo_files(
+            temp_dir.path(),
+            &[PathBuf::from("src/component.tsx")],
+            &config,
+        )
+        .expect("selected walk passes");
+
+        assert!(summary.files.is_empty());
+        assert_eq!(summary.skipped_excluded, 1);
+        assert_eq!(summary.skipped_unsupported, 0);
     }
 
     #[test]

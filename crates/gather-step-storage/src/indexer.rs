@@ -4570,6 +4570,118 @@ export class ItemController {
     }
 
     #[test]
+    fn prepared_payload_warm_delete_only_purges_deleted_file() {
+        let repo_root = TestDir::new("payload-warm-delete-repo");
+        let storage_root = TestDir::new("payload-warm-delete-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+
+        fs::write(
+            repo_root.path().join("src/alpha.ts"),
+            "export function alpha() { return 1; }\n",
+        )
+        .expect("alpha fixture should write");
+        fs::write(
+            repo_root.path().join("src/beta.ts"),
+            "export function beta() { return 2; }\n",
+        )
+        .expect("beta fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let first_payload = indexer
+            .prepare_repo_payload("payload-delete-service", repo_root.path())
+            .expect("first payload should prepare");
+        indexer
+            .commit_repo_payload(first_payload)
+            .expect("first payload should commit");
+
+        fs::remove_file(repo_root.path().join("src/beta.ts"))
+            .expect("beta fixture should be removed");
+
+        let delete_payload = indexer
+            .prepare_repo_payload("payload-delete-service", repo_root.path())
+            .expect("delete payload should prepare");
+        assert_eq!(
+            delete_payload.stats.files_parsed, 0,
+            "delete-only prepared payload should not parse surviving files"
+        );
+        assert_eq!(
+            delete_payload.deleted_file_paths,
+            vec!["src/beta.ts"],
+            "delete-only prepared payload must carry deleted paths through commit"
+        );
+
+        let delete_stats = indexer
+            .commit_repo_payload(delete_payload)
+            .expect("delete payload should commit");
+        assert_eq!(delete_stats.files_parsed, 0);
+        assert!(
+            indexer
+                .storage()
+                .graph()
+                .nodes_by_file("payload-delete-service", "src/beta.ts")
+                .expect("beta nodes should load")
+                .is_empty(),
+            "commit should purge graph entries for the deleted file"
+        );
+    }
+
+    #[test]
+    fn prepared_payload_warm_change_reparses_reverse_dependents() {
+        let repo_root = TestDir::new("payload-warm-dependent-repo");
+        let storage_root = TestDir::new("payload-warm-dependent-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+
+        fs::write(
+            repo_root.path().join("src/helper.ts"),
+            "export function helper() { return 1; }\n",
+        )
+        .expect("helper fixture should write");
+        fs::write(
+            repo_root.path().join("src/caller.ts"),
+            "import { helper } from './helper';\nexport function caller() { return helper(); }\n",
+        )
+        .expect("caller fixture should write");
+        fs::write(
+            repo_root.path().join("src/unrelated.ts"),
+            "export function unrelated() { return 3; }\n",
+        )
+        .expect("unrelated fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        let first_payload = indexer
+            .prepare_repo_payload("payload-dependent-service", repo_root.path())
+            .expect("first payload should prepare");
+        indexer
+            .commit_repo_payload(first_payload)
+            .expect("first payload should commit");
+
+        fs::write(
+            repo_root.path().join("src/helper.ts"),
+            "export function helper() { return 2; }\n",
+        )
+        .expect("helper update should write");
+
+        let update_payload = indexer
+            .prepare_repo_payload("payload-dependent-service", repo_root.path())
+            .expect("update payload should prepare");
+        assert_eq!(
+            update_payload.stats.files_parsed, 2,
+            "prepared payload should reparse the changed file and reverse dependents"
+        );
+        assert_eq!(
+            update_payload
+                .files
+                .iter()
+                .map(|file| file.file_path.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["src/caller.ts", "src/helper.ts"]),
+            "prepared payload should not reparse unrelated files"
+        );
+    }
+
+    #[test]
     #[expect(
         clippy::similar_names,
         reason = "repo_a_* and repo_b_* are deliberately parallel test names"
