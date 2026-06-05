@@ -29,6 +29,7 @@ pub enum DaemonRequest {
     Conventions {
         repo_filter: Option<String>,
     },
+    StorageReport,
     EventsTrace {
         subject: String,
         limit: usize,

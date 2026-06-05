@@ -19,7 +19,7 @@ use crate::{
         impact::{self, ImpactArgs},
         pack::{self, PackArgs, PackModeArg},
         search::{self, SearchArgs},
-        status,
+        status, storage_report,
         trace::{self, CrudArgs, TraceCommand},
     },
     daemon_protocol::{DaemonPidFile, DaemonRequest, DaemonResponse},
@@ -158,6 +158,16 @@ pub fn dispatch_request_with_runtime(
                 )
             } else {
                 conventions::run_rendered(&app, &StorageContext::workspace_read_only(&app))
+            }
+        }
+        DaemonRequest::StorageReport => {
+            if let Some(runtime) = runtime {
+                storage_report::run_rendered_with_open_graph(
+                    runtime.stores.root(),
+                    runtime.stores.graph(),
+                )
+            } else {
+                storage_report::run_rendered(&app.workspace_paths().storage_root)
             }
         }
         DaemonRequest::EventsTrace {

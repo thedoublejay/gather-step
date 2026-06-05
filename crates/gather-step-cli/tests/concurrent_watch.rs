@@ -127,6 +127,24 @@ fn run_ok_json_retry(workspace: &Path, args: &[&str]) -> Value {
     }
 }
 
+fn assert_storage_report_completed(report: &Value) {
+    assert_eq!(report["event"], "storage_report_completed");
+    assert!(
+        report["components"].as_array().is_some_and(|components| {
+            components
+                .iter()
+                .any(|component| component["name"] == "graph")
+        }),
+        "storage report should include graph component: {report:#?}"
+    );
+    assert!(
+        report["graph_tables"]
+            .as_array()
+            .is_some_and(|tables| !tables.is_empty()),
+        "storage report should include graph table footprints: {report:#?}"
+    );
+}
+
 fn run_fail_text(workspace: &Path, args: &[&str]) -> String {
     let output = gather_step()
         .arg("--workspace")
@@ -325,6 +343,8 @@ fn serve_watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
         &["trace", "crud", "--method", "GET", "--path", "/orders"],
     );
     let doctor_before = run_ok_json(workspace.path(), &["doctor"]);
+    let storage_report_before = run_ok_json(workspace.path(), &["storage-report"]);
+    assert_storage_report_completed(&storage_report_before);
 
     let mut child = gather_step()
         .arg("--workspace")
@@ -351,6 +371,8 @@ fn serve_watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
         &["trace", "crud", "--method", "GET", "--path", "/orders"],
     );
     let doctor_during = run_ok_json_retry(workspace.path(), &["doctor"]);
+    let storage_report_during = run_ok_json_retry(workspace.path(), &["storage-report"]);
+    assert_storage_report_completed(&storage_report_during);
 
     assert_eq!(search_before, search_during);
     assert_eq!(status_before, status_during);
@@ -387,6 +409,8 @@ fn serve_without_watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
     let search_before = run_ok_json(workspace.path(), &["search", "OrderController"]);
     let status_before = run_ok_json(workspace.path(), &["status"]);
     let doctor_before = run_ok_json(workspace.path(), &["doctor"]);
+    let storage_report_before = run_ok_json(workspace.path(), &["storage-report"]);
+    assert_storage_report_completed(&storage_report_before);
 
     let mut child = gather_step()
         .arg("--workspace")
@@ -408,6 +432,8 @@ fn serve_without_watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
     let search_during = run_ok_json_retry(workspace.path(), &["search", "OrderController"]);
     let status_during = run_ok_json_retry(workspace.path(), &["status"]);
     let doctor_during = run_ok_json_retry(workspace.path(), &["doctor"]);
+    let storage_report_during = run_ok_json_retry(workspace.path(), &["storage-report"]);
+    assert_storage_report_completed(&storage_report_during);
 
     assert_eq!(search_before, search_during);
     assert_eq!(status_before, status_during);
@@ -442,6 +468,8 @@ fn watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
 
     let search_before = run_ok_json(workspace.path(), &["search", "OrderController"]);
     let status_before = run_ok_json(workspace.path(), &["status"]);
+    let storage_report_before = run_ok_json(workspace.path(), &["storage-report"]);
+    assert_storage_report_completed(&storage_report_before);
 
     let mut child = gather_step()
         .arg("--workspace")
@@ -462,6 +490,8 @@ fn watch_proxies_read_only_commands_and_cleans_up_daemon_files() {
 
     let search_during = run_ok_json_retry(workspace.path(), &["search", "OrderController"]);
     let status_during = run_ok_json_retry(workspace.path(), &["status"]);
+    let storage_report_during = run_ok_json_retry(workspace.path(), &["storage-report"]);
+    assert_storage_report_completed(&storage_report_during);
 
     assert_eq!(search_before, search_during);
     assert_eq!(status_before, status_during);
@@ -513,7 +543,9 @@ fn watch_rejects_concurrent_index_with_storage_held_error_and_cleans_up_daemon_f
     let stderr = run_fail_text(workspace.path(), &["index"]);
     assert!(
         stderr.contains("Another gather-step process is using this workspace")
-            && stderr.contains("Stop `gather-step watch` or `gather-step serve --watch`"),
+            && stderr.contains(
+                "Stop `gather-step watch`, `gather-step serve`, or `gather-step serve --watch`"
+            ),
         "expected actionable storage-held error, got:\n{stderr}"
     );
 

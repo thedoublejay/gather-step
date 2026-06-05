@@ -7,6 +7,7 @@ use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError}
 const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
 pub const GRAPH_LOCKED_EXIT_CODE: u8 = 75;
+const GRAPH_LOCKED_MESSAGE: &str = "Another gather-step process is using this workspace. Stop `gather-step watch`, `gather-step serve`, or `gather-step serve --watch`, then retry.";
 
 #[must_use]
 pub fn graph_lock_contention(error: &Error) -> bool {
@@ -48,7 +49,7 @@ pub fn format_operator_error(error: &Error) -> String {
             match graph_error {
                 GraphStoreError::StorageHeld { .. }
                 | GraphStoreError::StorageHeldByDaemon { .. } => {
-                    return "Another gather-step process is using this workspace. Stop `gather-step watch` or `gather-step serve --watch`, then retry.".to_owned();
+                    return GRAPH_LOCKED_MESSAGE.to_owned();
                 }
                 GraphStoreError::Corrupt { .. } => {
                     return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
@@ -86,7 +87,7 @@ pub fn format_operator_error(error: &Error) -> String {
         || contains_ascii_case_insensitive(&full, "already locked by another gather-step process")
         || contains_ascii_case_insensitive(&full, "locked by gather-step pid")
     {
-        return "Another gather-step process is using this workspace. Stop `gather-step watch` or `gather-step serve --watch`, then retry.".to_owned();
+        return GRAPH_LOCKED_MESSAGE.to_owned();
     }
     if contains_ascii_case_insensitive(&full, "db corrupted")
         || contains_ascii_case_insensitive(&full, "corrupt")

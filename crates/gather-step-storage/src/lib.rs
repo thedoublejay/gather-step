@@ -29,7 +29,7 @@ pub use daemon_metadata::{
 };
 pub use footprint::{
     SqliteObjectFootprint, StorageFileFootprint, StorageFootprintComponent, StorageFootprintError,
-    StorageFootprintReport, storage_footprint_report,
+    StorageFootprintReport, storage_footprint_report, storage_footprint_report_with_open_graph,
 };
 pub use graph_store::{
     EdgeCountSummary, GraphCsrSnapshot, GraphStore, GraphStoreDb, GraphStoreError,

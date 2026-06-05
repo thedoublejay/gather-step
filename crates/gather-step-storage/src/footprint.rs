@@ -57,7 +57,20 @@ pub enum StorageFootprintError {
 pub fn storage_footprint_report(
     root: impl AsRef<Path>,
 ) -> Result<StorageFootprintReport, StorageFootprintError> {
-    let root = root.as_ref();
+    storage_footprint_report_inner(root.as_ref(), None)
+}
+
+pub fn storage_footprint_report_with_open_graph(
+    root: impl AsRef<Path>,
+    graph: &GraphStoreDb,
+) -> Result<StorageFootprintReport, StorageFootprintError> {
+    storage_footprint_report_inner(root.as_ref(), Some(graph))
+}
+
+fn storage_footprint_report_inner(
+    root: &Path,
+    open_graph: Option<&GraphStoreDb>,
+) -> Result<StorageFootprintReport, StorageFootprintError> {
     let mut warnings = Vec::new();
     let mut components = Vec::new();
     let mut search_files = Vec::new();
@@ -88,7 +101,10 @@ pub fn storage_footprint_report(
     });
 
     let graph_tables = if graph_path.exists() {
-        GraphStoreDb::open(&graph_path)?.table_footprints()?
+        match open_graph {
+            Some(graph) => graph.table_footprints()?,
+            None => GraphStoreDb::open(&graph_path)?.table_footprints()?,
+        }
     } else {
         warnings.push(format!("graph store not found at {}", graph_path.display()));
         Vec::new()

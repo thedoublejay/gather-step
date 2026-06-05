@@ -27,7 +27,10 @@ where
     };
     // `pack` output is asserted byte-for-byte against the MCP tool (CLI/MCP
     // parity); it carries freshness via its own response instead.
-    if !matches!(request, DaemonRequest::Pack { .. }) {
+    if !matches!(
+        request,
+        DaemonRequest::Pack { .. } | DaemonRequest::StorageReport
+    ) {
         inject_freshness(app, &mut rendered);
     }
     rendered.emit(&output)
@@ -147,6 +150,7 @@ fn request_name(request: &DaemonRequest) -> &'static str {
         DaemonRequest::TraceCrud { .. } => "trace_crud",
         DaemonRequest::Doctor { .. } => "doctor",
         DaemonRequest::Conventions { .. } => "conventions",
+        DaemonRequest::StorageReport => "storage_report",
         DaemonRequest::EventsTrace { .. } => "events_trace",
         DaemonRequest::EventsBlastRadius { .. } => "events_blast_radius",
         DaemonRequest::EventsOrphans { .. } => "events_orphans",

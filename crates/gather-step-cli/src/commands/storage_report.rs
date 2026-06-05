@@ -1,13 +1,18 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
 use console::style;
-use gather_step_storage::{StorageFootprintReport, storage_footprint_report};
+use gather_step_storage::{
+    GraphStoreDb, StorageFootprintReport, storage_footprint_report,
+    storage_footprint_report_with_open_graph,
+};
 use serde::Serialize;
 
-use crate::app::AppContext;
+use crate::{
+    app::AppContext, command_render::RenderedCommand, daemon_protocol::DaemonRequest, daemon_proxy,
+};
 
 #[derive(Debug, Args, Default)]
 pub struct StorageReportArgs {
@@ -23,40 +28,56 @@ struct StorageReportOutput<'a> {
 }
 
 pub fn run(app: &AppContext, args: StorageReportArgs) -> Result<()> {
-    let storage_root = args
-        .storage
-        .unwrap_or_else(|| app.workspace_paths().storage_root);
-    let report = storage_footprint_report(&storage_root)?;
+    let Some(storage_root) = args.storage else {
+        return daemon_proxy::run_read_only_command(app, &DaemonRequest::StorageReport, |app| {
+            run_rendered(&app.workspace_paths().storage_root)
+        });
+    };
+
+    run_rendered(&storage_root)?.emit(&app.output())
+}
+
+pub(crate) fn run_rendered(storage_root: &Path) -> Result<RenderedCommand> {
+    let report = storage_footprint_report(storage_root)?;
+    render_report(&report)
+}
+
+pub(crate) fn run_rendered_with_open_graph(
+    storage_root: &Path,
+    graph: &GraphStoreDb,
+) -> Result<RenderedCommand> {
+    let report = storage_footprint_report_with_open_graph(storage_root, graph)?;
+    render_report(&report)
+}
+
+fn render_report(report: &StorageFootprintReport) -> Result<RenderedCommand> {
     let payload = StorageReportOutput {
         event: "storage_report_completed",
-        report: &report,
+        report,
     };
-    let output = app.output();
-    output.emit(&payload)?;
+    let mut lines = Vec::new();
 
-    if !output.is_json() {
-        output.line(format!(
-            "{} {} ({})",
-            style("Storage report:").bold(),
-            report.storage_root,
-            format_bytes(report.total_bytes)
-        ));
-        output.line("");
-        output.line(render_components(&report));
-        if !report.sqlite_objects.is_empty() {
-            output.line("");
-            output.line(render_sqlite_objects(&report));
-        }
-        if !report.graph_tables.is_empty() {
-            output.line("");
-            output.line(render_graph_tables(&report));
-        }
-        for warning in &report.warnings {
-            output.line(format!("{} {warning}", style("Warning:").yellow().bold()));
-        }
+    lines.push(format!(
+        "{} {} ({})",
+        style("Storage report:").bold(),
+        report.storage_root,
+        format_bytes(report.total_bytes)
+    ));
+    lines.push(String::new());
+    lines.push(render_components(report));
+    if !report.sqlite_objects.is_empty() {
+        lines.push(String::new());
+        lines.push(render_sqlite_objects(report));
+    }
+    if !report.graph_tables.is_empty() {
+        lines.push(String::new());
+        lines.push(render_graph_tables(report));
+    }
+    for warning in &report.warnings {
+        lines.push(format!("{} {warning}", style("Warning:").yellow().bold()));
     }
 
-    Ok(())
+    RenderedCommand::success_serialized(&payload, lines)
 }
 
 fn render_components(report: &StorageFootprintReport) -> String {

@@ -531,13 +531,12 @@ gather-step --workspace /path/to/workspace deployment-topology env-var-consumers
 Reports on-disk size of the workspace's generated state — useful for diagnosing index bloat and confirming that compactions have shrunk the storage tree.
 
 ```bash
-gather-step [GLOBAL FLAGS] storage-report [--storage <PATH>] [--registry <PATH>]
+gather-step [GLOBAL FLAGS] storage-report [--storage <PATH>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--storage <PATH>` | path | `<workspace>/.gather-step/storage` | Inspect this storage directory instead of the workspace default. Useful for inspecting a kept `pr-review` artifact's storage. |
-| `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Inspect this registry file instead of the workspace default. |
 
 **Examples**
 
@@ -547,8 +546,7 @@ gather-step --workspace /path/to/workspace storage-report
 
 # Inspect a kept review artifact
 gather-step storage-report \
-  --storage ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/storage \
-  --registry ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/registry.json
+  --storage ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/storage
 ```
 
 **When to use** — to confirm a `compact` or full reindex actually shrunk the on-disk footprint, or to compare the size of a review artifact against the workspace baseline.
@@ -852,7 +850,7 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 1`) populates `metadata`, `safety`, `changed_files`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
+The report (`schema_version: 2`) populates `metadata`, `safety`, `changed_files`, `changed_files_by_repo`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
 
 The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
 
