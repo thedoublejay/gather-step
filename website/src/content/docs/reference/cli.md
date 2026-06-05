@@ -130,7 +130,7 @@ gather-step --workspace /path/to/workspace --repo backend_standard index --depth
 **Output shape (`--json`)** — emits one line:
 
 ```json
-{"event":"index_completed","config_path":"...","registry_path":"...","storage_root":"...","stats":{"total_repos":3,"indexed_repos":3,"total_files":1200,"total_symbols":8400,"total_edges":42000,"cross_repo_edges":120},"timings":{"total_wall_ms":120000,"graph_build_ms":63000,"parser_augment_ms":2500,"pack_precompute_ms":18000,"metadata_persist_ms":20,"search_flush_ms":200,"durable_sync_ms":150},"repos":[...]}
+{"event":"index_completed","config_path":"...","registry_path":"...","storage_root":"...","stats":{"total_repos":3,"indexed_repos":3,"total_files":1200,"total_symbols":8400,"total_edges":42000,"cross_repo_edges":120},"timings":{"total_wall_ms":120000,"graph_build_ms":63000,"parser_augment_ms":2500,"pack_precompute_ms":18000,"metadata_persist_ms":20,"search_flush_ms":200,"durable_sync_ms":150,"precompute_pack_count":48,"hot_pack_target_count":32,"static_pack_target_count":16},"repos":[{"repo":"backend_standard","files":400,"files_parsed":3,"symbols":2800,"edges":14000,"frameworks":["nestjs"],"git_analytics_status":"indexed"}]}
 ```
 
 The `timings` object splits the index wall time into the main diagnostic
@@ -140,7 +140,17 @@ precompute, or storage durability cost. The summary fields are phase-faithful:
 parse/augment preparation, `pack_precompute_ms` covers context-pack warming,
 and `metadata_persist_ms` covers metadata cache mutation. Cross-repo counting,
 search flush, git analytics, durable sync, and pack target discovery are emitted
-as their own timing fields.
+as their own timing fields. `precompute_pack_count` is the number of packs
+warmed this run; `hot_pack_target_count` and `static_pack_target_count` break
+that target set into on-demand-eligible versus always-precomputed packs.
+
+Each `repos[]` entry reports both `files` and `files_parsed`. `files` is the
+total number of source files indexed for the repo; `files_parsed` is how many
+of those were actually parsed on this run. On a warm incremental pass that
+finds no changes, `files_parsed` is `0` while `files` stays at the full count —
+the gap is the work skipped by the warm prepared-payload path. A large
+`files`-to-`files_parsed` ratio confirms incremental indexing is reusing prior
+parse state rather than reparsing unchanged sources.
 
 **When to use** — after `init`, or when repos have changed significantly enough that an incremental `watch` cycle would be slower than a full rebuild.
 
@@ -521,13 +531,12 @@ gather-step --workspace /path/to/workspace deployment-topology env-var-consumers
 Reports on-disk size of the workspace's generated state — useful for diagnosing index bloat and confirming that compactions have shrunk the storage tree.
 
 ```bash
-gather-step [GLOBAL FLAGS] storage-report [--storage <PATH>] [--registry <PATH>]
+gather-step [GLOBAL FLAGS] storage-report [--storage <PATH>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--storage <PATH>` | path | `<workspace>/.gather-step/storage` | Inspect this storage directory instead of the workspace default. Useful for inspecting a kept `pr-review` artifact's storage. |
-| `--registry <PATH>` | path | `<workspace>/.gather-step/registry.json` | Inspect this registry file instead of the workspace default. |
 
 **Examples**
 
@@ -537,8 +546,7 @@ gather-step --workspace /path/to/workspace storage-report
 
 # Inspect a kept review artifact
 gather-step storage-report \
-  --storage ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/storage \
-  --registry ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/registry.json
+  --storage ~/Library/Caches/gather-step/pr-review/<workspace-hash>/<run-id>/storage
 ```
 
 **When to use** — to confirm a `compact` or full reindex actually shrunk the on-disk footprint, or to compare the size of a review artifact against the workspace baseline.
@@ -842,7 +850,7 @@ gather-step serve --graph .gather-step/storage/graph.redb --registry .gather-ste
 
 Builds an isolated review index for a PR branch and emits a structured delta report. The review index is written to a disposable directory under the OS cache (`<cache>/gather-step/pr-review/<workspace-hash>/<run-id>/`) and deleted on exit unless `--keep-cache` is set.
 
-The report (`schema_version: 1`) populates `metadata`, `safety`, `changed_files`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
+The report (`schema_version: 2`) populates `metadata`, `safety`, `changed_files`, `changed_files_by_repo`, canonical `evidence`, `suggested_followups`, and all typed delta surfaces (`routes`, `symbols`, `payload_contracts`, `events`, `contract_alignments`, `decorators`, `deployment`). Removed and changed payload contracts can carry downstream impact summaries.
 
 The `deployment` surface captures changes to deployment topology: added, removed, and changed deployment targets, env-var additions and removals with the set of consumers that read each var, secret and config-map membership changes, shared-infra additions/removals, and workflow-job changes. Each deployment delta records the artifact kind inferred from the path (`dockerfile`, `compose`, `kubernetes`, `kustomize`, `helm`, `github_actions`, or `unknown`) plus a `change_reasons` list for file, service, stored image evidence, and env-var bindings.
 

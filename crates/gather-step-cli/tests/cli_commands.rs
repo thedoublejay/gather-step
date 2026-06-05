@@ -1372,7 +1372,11 @@ fn concurrent_graph_open_reports_stable_process_error() {
     let output = run_fail(temp.path(), &["status", "--json"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Another gather-step process is using this workspace"));
-    assert!(stderr.contains("Stop `gather-step watch`"));
+    assert!(
+        stderr.contains(
+            "Stop `gather-step watch`, `gather-step serve`, or `gather-step serve --watch`"
+        )
+    );
 }
 
 #[test]

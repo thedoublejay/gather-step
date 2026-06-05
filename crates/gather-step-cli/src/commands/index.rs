@@ -137,12 +137,16 @@ struct IndexTimingOutput {
     context_pack_cache_rows_removed: usize,
     durable_sync_ms: u64,
     precompute_ms: u64,
+    precompute_pack_count: usize,
+    hot_pack_target_count: usize,
+    static_pack_target_count: usize,
 }
 
 #[derive(Debug, Serialize)]
 struct IndexedRepoOutput {
     repo: String,
     files: u64,
+    files_parsed: u64,
     symbols: u64,
     edges: u64,
     frameworks: Vec<String>,
@@ -292,6 +296,7 @@ struct PreparedRepo {
 struct CommittedRepo {
     repo_idx: usize,
     result: WorkspaceRepoResult,
+    files_parsed: u64,
 }
 
 #[expect(
@@ -510,7 +515,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     // backpressure when analytics is slower than storage commits.
     let analytics_queue_depth = config.repos.len().max(1);
     let (analytics_tx, analytics_rx) = kanal::bounded::<AnalyticsJob>(analytics_queue_depth);
-    let (analytics_result_tx, analytics_result_rx) = kanal::unbounded::<AnalyticsRepoResult>();
+    let (analytics_result_tx, analytics_result_rx) =
+        kanal::bounded::<AnalyticsRepoResult>(analytics_queue_depth);
     let indexer_ref = &indexer;
     let config_ref = &config;
     let config_root_ref = &config_root;
@@ -566,6 +572,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
                 writer_timings.recv_wait = writer_timings
                     .recv_wait
                     .saturating_add(elapsed_ms(recv_start));
+                let files_parsed =
+                    u64::try_from(prep.payload.stats.files_parsed).unwrap_or(u64::MAX);
                 let commit_start = Instant::now();
                 indexer_ref
                     .commit_repo_payload(prep.payload)
@@ -608,6 +616,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
 
                 committed.push(CommittedRepo {
                     repo_idx: prep.repo_idx,
+                    files_parsed,
                     result: WorkspaceRepoResult {
                         repo: prep.repo_name.clone(),
                         last_indexed_at: Some(workspace_timestamp_ref.clone()),
@@ -801,6 +810,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         repo_results.push(IndexedRepoOutput {
             repo: c.result.repo.clone(),
             files: c.result.file_count,
+            files_parsed: c.files_parsed,
             symbols: c.result.symbol_count,
             edges: c.result.edge_count,
             frameworks: c.result.frameworks.clone(),
@@ -988,6 +998,11 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     }
 
     let precompute_start = Instant::now();
+    let hot_pack_target_count = hot_pack_targets
+        .iter()
+        .filter(|entry| is_precomputable_pack_mode(&entry.mode))
+        .count();
+    let static_pack_target_count = precomputed_pack_targets.len();
     let precompute_pack_count =
         precompute_pack_call_count(&hot_pack_targets, &precomputed_pack_targets);
     if let Some(bar) = &finalization_bar {
@@ -1068,6 +1083,9 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             context_pack_cache_rows_removed,
             durable_sync_ms,
             precompute_ms,
+            precompute_pack_count,
+            hot_pack_target_count,
+            static_pack_target_count,
         },
         warnings,
         repos: repo_results,

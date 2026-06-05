@@ -99,14 +99,12 @@ fn emit_watch_line(line: &str) -> Result<()> {
 }
 
 pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
-    let daemon_metadata;
     let mcp_config = build_mcp_config(app, args.clone());
     if !args.watch {
-        let ctx = McpContext::open(mcp_config)?;
-        GatherStepMcpServer::new(ctx).serve_stdio().await?;
-        return Ok(());
+        return run_serve_only(app, mcp_config).await;
     }
 
+    let daemon_metadata;
     let defaults = app.workspace_paths();
     let config_path = args.config.clone().unwrap_or(defaults.config_path);
     let mut workspace = GatherStepConfig::from_yaml_file(&config_path)?;
@@ -272,6 +270,72 @@ pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
     {
         tracing::warn!("Serve watch event task did not exit within 2s.");
     }
+    drop(stores);
+    drop(daemon_metadata);
+    if let Err(error) = serve_result
+        && !is_expected_stdio_disconnect(&error)
+    {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// Serve MCP over stdio without the filesystem watcher, while still binding the
+/// workspace daemon so concurrent read-only CLI commands can proxy through this
+/// process instead of failing on the redb open lock this server holds.
+async fn run_serve_only(app: &AppContext, mcp_config: McpServerConfig) -> Result<()> {
+    let storage_root = mcp_config
+        .graph_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    path_safety::reject_symlinked_generated_state(&app.workspace_path, &storage_root)
+        .with_context(|| {
+            format!(
+                "Generated-state path `{}` failed the symlink check.",
+                storage_root.display()
+            )
+        })?;
+    let stores = Arc::new(WorkspaceStores::open_with_workload(
+        &storage_root,
+        SearchWorkload::LongRunning,
+    )?);
+    let daemon_runtime = DaemonRuntime::from_stores(
+        mcp_config.registry_path.clone(),
+        mcp_config.graph_path.clone(),
+        Arc::clone(&stores),
+    );
+    let ctx = McpContext::open_with_stores(mcp_config, Arc::clone(&stores))?;
+    let daemon_metadata =
+        StorageDaemonMetadataGuard::write_for_storage_root(&storage_root, &app.workspace_path)?;
+    let daemon = DaemonServer::bind_with_runtime(app, daemon_runtime)?;
+
+    let cancel = CancellationToken::new();
+    let daemon_cancel = cancel.clone();
+    let mut daemon_task =
+        tokio::spawn(async move { daemon.serve_until_cancelled(daemon_cancel).await });
+    let mcp_cancel = cancel.clone();
+    let mcp_server = GatherStepMcpServer::with_cancel(ctx, mcp_cancel.clone());
+    let mut mcp_task =
+        tokio::spawn(async move { mcp_server.serve_stdio_until_cancelled(mcp_cancel).await });
+    let serve_result = tokio::select! {
+        result = &mut mcp_task => result?,
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            cancel.cancel();
+            shutdown_mcp_task(&mut mcp_task).await;
+            shutdown_daemon_task(&mut daemon_task).await;
+            stores.search().flush()?;
+            drop(stores);
+            drop(daemon_metadata);
+            return Ok(());
+        }
+    };
+    cancel.cancel();
+    // Normal completion path (MCP stdio closed first): drive the same hard
+    // shutdown as Ctrl-C so the daemon task cannot retain the graph handle
+    // after return.
+    shutdown_daemon_task(&mut daemon_task).await;
+    stores.search().flush()?;
     drop(stores);
     drop(daemon_metadata);
     if let Err(error) = serve_result

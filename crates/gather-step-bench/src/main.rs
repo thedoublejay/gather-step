@@ -11,7 +11,10 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gather_step_bench::{
     compare::{BenchmarkResult, Environment, compare_result_dirs},
-    harness::{StorageMetrics, index_workspace_fixture, run_index_pass, run_workspace_index_pass},
+    harness::{
+        StorageMetrics, index_fixture, index_workspace_fixture, run_index_pass,
+        run_workspace_index_pass,
+    },
     link_quality::{
         load_link_quality_task, render_link_quality_report, run_link_quality_benchmark,
     },
@@ -34,6 +37,7 @@ use gather_step_core::high_contract::{
     HIGH_SCENARIO_CONTRACTS, HighContractKind, MIN_HIGH_REAL_WORKSPACE_INDEXED_REPOS,
     MIN_HIGH_REAL_WORKSPACE_TOTAL_FILES, normalize_high_contract_name,
 };
+use gather_step_storage::GraphStore;
 use serde::Serialize;
 
 /// Subcommands for `tool-trace`.
@@ -230,6 +234,46 @@ enum Command {
         #[arg(long)]
         pr_oracle_result: PathBuf,
     },
+    /// Run production `gather-step index` passes and persist profile artifacts.
+    ProfileIndex {
+        /// Workspace root passed to `gather-step --workspace`.
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Path to the gather-step binary to invoke.
+        #[arg(long, default_value = "target/release/gather-step")]
+        gather_step_bin: PathBuf,
+        /// Optional config file to pass through to `gather-step index`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Directory where JSON results and per-pass index artifacts are written.
+        #[arg(long, default_value = "benchmark/results")]
+        output_dir: PathBuf,
+        /// Label for each index pass. Use caller-managed setup for cold,
+        /// warm-noop, one-file-change, or one-repo-change passes.
+        #[arg(long = "pass", default_value = "index")]
+        passes: Vec<String>,
+        /// Pass `--release-gate` through to `gather-step index`.
+        #[arg(long)]
+        release_gate: bool,
+    },
+    /// Verify an indexed fixture against an expected graph JSON file.
+    VerifyGraph {
+        /// Fixture repo directory to index.
+        #[arg(long)]
+        fixture: PathBuf,
+        /// Repository name to assign to the indexed fixture.
+        #[arg(long, default_value = "verified-fixture")]
+        repo: String,
+        /// Expected graph JSON containing `expected_nodes` and `expected_edges`.
+        #[arg(long, default_value = "benchmark/expected/expected-graph.json")]
+        expected: PathBuf,
+        /// Directory where the verifier result JSON is written.
+        #[arg(long, default_value = "benchmark/results")]
+        output_dir: PathBuf,
+        /// Add an impossible expected edge kind to prove the verifier fails.
+        #[arg(long)]
+        seed_missing_edge_kind: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -324,7 +368,87 @@ fn main() -> anyhow::Result<()> {
             &impact_target,
             &pr_oracle_result,
         ),
+        Command::ProfileIndex {
+            workspace,
+            gather_step_bin,
+            config,
+            output_dir,
+            passes,
+            release_gate,
+        } => profile_index_command(
+            &workspace,
+            &gather_step_bin,
+            config.as_deref(),
+            &output_dir,
+            &passes,
+            release_gate,
+        ),
+        Command::VerifyGraph {
+            fixture,
+            repo,
+            expected,
+            output_dir,
+            seed_missing_edge_kind,
+        } => verify_graph_command(
+            &fixture,
+            &repo,
+            &expected,
+            &output_dir,
+            seed_missing_edge_kind.as_deref(),
+        ),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExpectedGraphSpec {
+    expected_nodes: Vec<ExpectedGraphNode>,
+    expected_edges: Vec<ExpectedGraphEdge>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExpectedGraphNode {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExpectedGraphEdge {
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphVerifierReport {
+    fixture: String,
+    repo: String,
+    expected_path: String,
+    passed: bool,
+    expected_node_count: usize,
+    actual_node_count: usize,
+    expected_edge_kind_count: usize,
+    actual_edge_kind_count: usize,
+    missing_nodes: Vec<GraphVerifierNodeKey>,
+    missing_edge_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct GraphVerifierNodeKey {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileIndexReport {
+    workspace: String,
+    gather_step_bin: String,
+    config: Option<String>,
+    passes: Vec<ProfileIndexPassReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileIndexPassReport {
+    label: String,
+    artifact_path: String,
+    index: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -1150,12 +1274,210 @@ fn release_gate_command(
     Ok(())
 }
 
+fn profile_index_command(
+    workspace: &Path,
+    gather_step_bin: &Path,
+    config: Option<&Path>,
+    output_dir: &Path,
+    passes: &[String],
+    release_gate: bool,
+) -> anyhow::Result<()> {
+    if passes.is_empty() {
+        anyhow::bail!("profile-index requires at least one --pass label");
+    }
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("creating output directory {}", output_dir.display()))?;
+
+    let mut pass_reports = Vec::with_capacity(passes.len());
+    for (index, label) in passes.iter().enumerate() {
+        let slug = sanitize_file_component(label);
+        let artifact_path = output_dir.join(format!("profile-index-{index:02}-{slug}.json"));
+        let artifact_path_str = artifact_path
+            .to_str()
+            .context("profile index artifact path must be utf-8")?
+            .to_owned();
+        let mut args = vec![
+            "index".to_owned(),
+            "--artifact-path".to_owned(),
+            artifact_path_str.clone(),
+        ];
+        if release_gate {
+            args.push("--release-gate".to_owned());
+        }
+        let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let index_output = run_gather_step_json(gather_step_bin, workspace, config, &args_ref)
+            .with_context(|| format!("running profile-index pass `{label}`"))?;
+        print_status(&format!(
+            "profile-index pass `{label}` wrote {}",
+            artifact_path.display()
+        ));
+        pass_reports.push(ProfileIndexPassReport {
+            label: label.clone(),
+            artifact_path: artifact_path.display().to_string(),
+            index: index_output,
+        });
+    }
+
+    let report = ProfileIndexReport {
+        workspace: workspace.display().to_string(),
+        gather_step_bin: gather_step_bin.display().to_string(),
+        config: config.map(|path| path.display().to_string()),
+        passes: pass_reports,
+    };
+    let date = chrono::Utc::now().to_rfc3339();
+    let result = BenchmarkResult {
+        environment: Some(Environment::current()),
+        date: date.clone(),
+        sample_sizes: [("profile_index".to_owned(), report.passes.len())]
+            .into_iter()
+            .collect(),
+        comparison_window: None,
+        metrics: serde_json::to_value(&report)?,
+        thresholds_applied: vec![
+            "profile_index: production gather-step index JSON captured per pass".to_owned(),
+            "profile_index: caller owns cold/warm/change workspace setup between passes".to_owned(),
+        ],
+    };
+    write_result(output_dir, "profile_index", &date, &result)?;
+    Ok(())
+}
+
+fn verify_graph_command(
+    fixture: &Path,
+    repo: &str,
+    expected_path: &Path,
+    output_dir: &Path,
+    seed_missing_edge_kind: Option<&str>,
+) -> anyhow::Result<()> {
+    let expected_raw = std::fs::read_to_string(expected_path)
+        .with_context(|| format!("reading expected graph {}", expected_path.display()))?;
+    let mut expected: ExpectedGraphSpec =
+        serde_json::from_str(&expected_raw).context("parsing expected graph JSON")?;
+    if let Some(kind) = seed_missing_edge_kind {
+        expected.expected_edges.push(ExpectedGraphEdge {
+            kind: kind.to_owned(),
+        });
+    }
+
+    let (indexer, _guard) = index_fixture(fixture, repo)?;
+    let graph = indexer.storage().graph();
+    let expected_nodes = expected
+        .expected_nodes
+        .iter()
+        .map(|node| GraphVerifierNodeKey {
+            name: node.name.clone(),
+            kind: node.kind.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_node_kinds = expected_nodes
+        .iter()
+        .map(|node| node.kind.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_nodes = gather_step_core::NodeKind::all()
+        .iter()
+        .filter(|kind| expected_node_kinds.contains(&format!("{kind:?}")))
+        .flat_map(|kind| {
+            graph
+                .nodes_by_type(*kind)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|node| !node.is_virtual)
+                .map(|node| GraphVerifierNodeKey {
+                    name: node.name,
+                    kind: format!("{:?}", node.kind),
+                })
+        })
+        .collect::<BTreeSet<_>>();
+
+    let expected_edge_kinds = expected
+        .expected_edges
+        .iter()
+        .map(|edge| edge.kind.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_edge_kinds = gather_step_core::EdgeKind::all()
+        .iter()
+        .filter_map(|kind| {
+            let kind_name = format!("{kind:?}");
+            if expected_edge_kinds.contains(&kind_name)
+                && graph.count_edges_by_kind(*kind).unwrap_or(0) > 0
+            {
+                Some(kind_name)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let missing_nodes = expected_nodes
+        .difference(&actual_nodes)
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_edge_kinds = expected_edge_kinds
+        .difference(&actual_edge_kinds)
+        .cloned()
+        .collect::<Vec<_>>();
+    let passed = missing_nodes.is_empty() && missing_edge_kinds.is_empty();
+    let report = GraphVerifierReport {
+        fixture: fixture.display().to_string(),
+        repo: repo.to_owned(),
+        expected_path: expected_path.display().to_string(),
+        passed,
+        expected_node_count: expected_nodes.len(),
+        actual_node_count: actual_nodes.len(),
+        expected_edge_kind_count: expected_edge_kinds.len(),
+        actual_edge_kind_count: actual_edge_kinds.len(),
+        missing_nodes,
+        missing_edge_kinds,
+    };
+    let date = chrono::Utc::now().to_rfc3339();
+    let result = BenchmarkResult {
+        environment: Some(Environment::current()),
+        date: date.clone(),
+        sample_sizes: [("verify_graph".to_owned(), 1)].into_iter().collect(),
+        comparison_window: None,
+        metrics: serde_json::to_value(&report)?,
+        thresholds_applied: vec![
+            "verify_graph: every expected node name/kind pair must exist".to_owned(),
+            "verify_graph: every expected edge kind must be present".to_owned(),
+        ],
+    };
+    write_result(output_dir, "verify_graph", &date, &result)?;
+    if !report.passed {
+        anyhow::bail!(
+            "graph verifier failed: {} missing node(s), {} missing edge kind(s)",
+            report.missing_nodes.len(),
+            report.missing_edge_kinds.len()
+        );
+    }
+    print_status("graph verifier: PASS");
+    Ok(())
+}
+
 fn checkout_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .expect("crate should live under gather-step/crates/<name>")
         .to_path_buf()
+}
+
+fn sanitize_file_component(label: &str) -> String {
+    let sanitized = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if sanitized.is_empty() {
+        "pass".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn git_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
@@ -1815,7 +2137,7 @@ fn write_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{planning_check, release_gate_high_contract_check};
+    use super::{planning_check, release_gate_high_contract_check, sanitize_file_component};
     use gather_step_core::high_contract::HighContractKind;
     use serde_json::json;
 
@@ -1884,5 +2206,15 @@ mod tests {
         ]);
 
         assert!(check.passed, "{}", check.summary);
+    }
+
+    #[test]
+    fn sanitize_file_component_keeps_profile_pass_names_filesystem_safe() {
+        assert_eq!(
+            sanitize_file_component("warm no-op/index"),
+            "warm-no-op-index"
+        );
+        assert_eq!(sanitize_file_component("___"), "___");
+        assert_eq!(sanitize_file_component(" / "), "pass");
     }
 }
