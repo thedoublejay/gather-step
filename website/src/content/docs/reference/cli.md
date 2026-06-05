@@ -130,7 +130,7 @@ gather-step --workspace /path/to/workspace --repo backend_standard index --depth
 **Output shape (`--json`)** — emits one line:
 
 ```json
-{"event":"index_completed","config_path":"...","registry_path":"...","storage_root":"...","stats":{"total_repos":3,"indexed_repos":3,"total_files":1200,"total_symbols":8400,"total_edges":42000,"cross_repo_edges":120},"timings":{"total_wall_ms":120000,"graph_build_ms":63000,"parser_augment_ms":2500,"pack_precompute_ms":18000,"metadata_persist_ms":20,"search_flush_ms":200,"durable_sync_ms":150},"repos":[...]}
+{"event":"index_completed","config_path":"...","registry_path":"...","storage_root":"...","stats":{"total_repos":3,"indexed_repos":3,"total_files":1200,"total_symbols":8400,"total_edges":42000,"cross_repo_edges":120},"timings":{"total_wall_ms":120000,"graph_build_ms":63000,"parser_augment_ms":2500,"pack_precompute_ms":18000,"metadata_persist_ms":20,"search_flush_ms":200,"durable_sync_ms":150,"precompute_pack_count":48,"hot_pack_target_count":32,"static_pack_target_count":16},"repos":[{"repo":"backend_standard","files":400,"files_parsed":3,"symbols":2800,"edges":14000,"frameworks":["nestjs"],"git_analytics_status":"indexed"}]}
 ```
 
 The `timings` object splits the index wall time into the main diagnostic
@@ -140,7 +140,17 @@ precompute, or storage durability cost. The summary fields are phase-faithful:
 parse/augment preparation, `pack_precompute_ms` covers context-pack warming,
 and `metadata_persist_ms` covers metadata cache mutation. Cross-repo counting,
 search flush, git analytics, durable sync, and pack target discovery are emitted
-as their own timing fields.
+as their own timing fields. `precompute_pack_count` is the number of packs
+warmed this run; `hot_pack_target_count` and `static_pack_target_count` break
+that target set into on-demand-eligible versus always-precomputed packs.
+
+Each `repos[]` entry reports both `files` and `files_parsed`. `files` is the
+total number of source files indexed for the repo; `files_parsed` is how many
+of those were actually parsed on this run. On a warm incremental pass that
+finds no changes, `files_parsed` is `0` while `files` stays at the full count —
+the gap is the work skipped by the warm prepared-payload path. A large
+`files`-to-`files_parsed` ratio confirms incremental indexing is reusing prior
+parse state rather than reparsing unchanged sources.
 
 **When to use** — after `init`, or when repos have changed significantly enough that an incremental `watch` cycle would be slower than a full rebuild.
 
