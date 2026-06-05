@@ -5,6 +5,35 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.4.0 (2026-06-05)
+
+Release status: **prepared**.
+
+Indexing-performance release. The warm workspace streaming path now skips parser work for unchanged sources before the storage write layer, parses only changed files plus their reverse dependents, carries deletions through prepared-payload commits so removed files are purged on incremental passes, skips opening unsupported or excluded files during traversal, and bounds the indexing analytics channel by repo count. Index JSON gains per-repo parse counts and pack-target counts, and the release adds internal indexing-profile and graph-verifier harnesses.
+
+### Added
+
+- **Per-repo `files_parsed` and pack-target counts in `index --json`** — each `repos[]` entry reports `files_parsed` (files actually parsed this run) alongside `files` (total indexed), so a warm no-op shows `files_parsed: 0` against the full `files` count. The `timings` object gains `precompute_pack_count`, `hot_pack_target_count`, and `static_pack_target_count`.
+
+### Changed
+
+- **Warm prepared-payload parse skip** — on the workspace streaming path (`prepare_repo_payload` + `commit_repo_payload`), unchanged repos and files are no longer parsed before the storage layer can skip them. Warm passes parse only changed files plus their reverse dependents; cold indexing keeps the full traversal path so it does not regress into a hash-then-parse double read.
+- **Classify-before-read traversal** — binary, unsupported, and language-excluded files are now classified before being opened and read, avoiding wasted file opens during traversal.
+- **Bounded indexing analytics channel** — the per-repo analytics result channel is now bounded by repo count instead of unbounded, capping peak memory without serializing the pipeline.
+
+### Fixed
+
+- Streaming commits now carry deleted paths through `RepoIndexPayload`, so stale graph, file-index, and search state for removed files is purged on warm incremental passes rather than lingering until a full reindex.
+- `collect_selected_repo_files` now counts an include-language mismatch as `skipped_excluded` instead of `skipped_unsupported`, matching the full-traversal walk.
+
+### Tooling
+
+- Added internal `gather-step-bench` harnesses: `profile-index` collects production `index --json` artifacts across cold/warm/change passes, and `verify-graph` checks an indexed fixture against an expected node/edge-kind set (with seeded-failure support for the verifier's own tests).
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.4.0`.
+
 ## v4.3.0 (2026-06-04)
 
 Release status: **prepared**.
