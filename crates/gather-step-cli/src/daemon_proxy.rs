@@ -73,7 +73,15 @@ fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<Rendere
     };
 
     match client.call(request) {
-        Ok(rendered) => Some(rendered),
+        Ok(rendered) if !daemon_rejected_request(&rendered) => Some(rendered),
+        Ok(_) => {
+            warn!(
+                workspace = %app.workspace_path.display(),
+                request = request_name(request),
+                "daemon does not understand this request kind (older daemon binary?); falling back to local execution"
+            );
+            None
+        }
         Err(error) => {
             warn!(
                 workspace = %app.workspace_path.display(),
@@ -84,6 +92,17 @@ fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<Rendere
             None
         }
     }
+}
+
+/// A daemon built before this request variant existed responds with a
+/// protocol-level `invalid daemon request` failure rather than executing it.
+/// Treat that as "daemon unavailable for this request" so the caller falls
+/// back to local execution instead of surfacing the parse error.
+fn daemon_rejected_request(rendered: &RenderedCommand) -> bool {
+    rendered
+        .error
+        .as_deref()
+        .is_some_and(|message| message.starts_with("invalid daemon request"))
 }
 
 fn try_daemon_after_lock(
@@ -116,7 +135,16 @@ fn try_daemon_after_lock(
     };
 
     match client.call(request) {
-        Ok(rendered) => Some(rendered),
+        Ok(rendered) if !daemon_rejected_request(&rendered) => Some(rendered),
+        Ok(_) => {
+            warn!(
+                workspace = %app.workspace_path.display(),
+                daemon_workspace = %daemon_workspace.display(),
+                request = request_name(request),
+                "local read hit a graph lock held by a daemon that does not understand this request kind (older daemon binary?); preserving lock-contention failure"
+            );
+            None
+        }
         Err(call_error) => {
             warn!(
                 workspace = %app.workspace_path.display(),
@@ -150,6 +178,7 @@ fn request_name(request: &DaemonRequest) -> &'static str {
         DaemonRequest::TraceCrud { .. } => "trace_crud",
         DaemonRequest::Doctor { .. } => "doctor",
         DaemonRequest::Conventions { .. } => "conventions",
+        DaemonRequest::CrossRepoDeps { .. } => "cross_repo_deps",
         DaemonRequest::StorageReport => "storage_report",
         DaemonRequest::EventsTrace { .. } => "events_trace",
         DaemonRequest::EventsBlastRadius { .. } => "events_blast_radius",
@@ -184,9 +213,26 @@ mod tests {
         daemon_server::DaemonServer,
     };
 
-    use super::daemon_workspace_from_graph_lock;
     #[cfg(unix)]
     use super::try_daemon_after_lock;
+    use super::{daemon_rejected_request, daemon_workspace_from_graph_lock};
+    use crate::command_render::RenderedCommand;
+
+    #[test]
+    fn protocol_rejection_is_distinguished_from_command_failure() {
+        let rejected = RenderedCommand::failure(
+            None,
+            Vec::new(),
+            "invalid daemon request: unknown variant `CrossRepoDeps`",
+        );
+        assert!(daemon_rejected_request(&rejected));
+
+        let command_failure = RenderedCommand::failure(None, Vec::new(), "unknown repo `missing`");
+        assert!(!daemon_rejected_request(&command_failure));
+
+        let success = RenderedCommand::success(serde_json::json!({}), Vec::new());
+        assert!(!daemon_rejected_request(&success));
+    }
 
     #[cfg(unix)]
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);

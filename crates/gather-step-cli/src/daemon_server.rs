@@ -14,7 +14,9 @@ use crate::{
     app::AppContext,
     command_render::RenderedCommand,
     commands::{
-        conventions, doctor,
+        conventions,
+        cross_repo_deps::{self, CrossRepoDepsArgs},
+        doctor,
         events::{self, BlastRadiusArgs, EventsArgs, EventsCommand, OrphansArgs, TraceArgs},
         impact::{self, ImpactArgs},
         pack::{self, PackArgs, PackModeArg},
@@ -158,6 +160,21 @@ pub fn dispatch_request_with_runtime(
                 )
             } else {
                 conventions::run_rendered(&app, &StorageContext::workspace_read_only(&app))
+            }
+        }
+        DaemonRequest::CrossRepoDeps { repo, repo_filter } => {
+            let app = app_with_repo_filter(app, repo_filter);
+            if let Some(runtime) = runtime {
+                cross_repo_deps::execute(
+                    runtime.mcp.as_ref(),
+                    repo.as_deref().or(app.repo_filter.as_deref()),
+                )
+            } else {
+                cross_repo_deps::run_rendered(
+                    &app,
+                    &StorageContext::workspace_read_only(&app),
+                    &CrossRepoDepsArgs { repo },
+                )
             }
         }
         DaemonRequest::StorageReport => {
