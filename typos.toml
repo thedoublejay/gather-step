@@ -9,3 +9,5 @@ extend-exclude = [
 oreder = "oreder"
 # Project name in the v4 QA reference research notes.
 plaintest = "plaintest"
+# Rust TUI crate name.
+ratatui = "ratatui"
