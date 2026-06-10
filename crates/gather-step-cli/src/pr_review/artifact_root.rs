@@ -123,6 +123,13 @@ pub struct ReviewMarker {
     /// Initialized to `created_at` and refreshed on every cache hit so
     /// `--older-than` pruning measures last-use time, not only creation time.
     pub(crate) last_accessed_at: String,
+    /// PID of the process that wrote this marker, so cleanup can tell a live
+    /// `InProgress` run from one that died without finalizing (Ctrl-C, OOM,
+    /// SIGKILL). `None` in markers written before this field existed — those
+    /// keep the old always-protected behavior. PID reuse only delays cleanup
+    /// (a reused PID looks alive), never deletes a live run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pid: Option<u32>,
 }
 
 impl ReviewMarker {
@@ -166,7 +173,25 @@ impl ReviewMarker {
             status,
             cache_key,
             last_accessed_at,
+            pid: None,
         }
+    }
+
+    /// Set the recorded writer PID on a test-fixture marker.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_pid(mut self, pid: Option<u32>) -> Self {
+        self.pid = pid;
+        self
+    }
+
+    /// An `InProgress` marker whose recorded writer process is no longer
+    /// alive — the run died without finalizing, so cleanup may treat the
+    /// artifact like a failed run. Markers without a recorded PID are
+    /// treated as live (protected), preserving pre-PID behavior.
+    #[must_use]
+    pub(crate) fn is_orphaned_in_progress(&self) -> bool {
+        self.status == ReviewStatus::InProgress && self.pid.is_some_and(|pid| !process_alive(pid))
     }
 }
 
@@ -431,6 +456,7 @@ pub fn materialize_artifact_root(
         status: ReviewStatus::InProgress,
         cache_key,
         last_accessed_at: created_at,
+        pid: Some(std::process::id()),
     };
     write_marker_to_path(&marker, &artifact.marker_path)?;
 
@@ -543,6 +569,27 @@ pub fn read_marker(marker_path: &Path) -> Result<ReviewMarker, ArtifactRootError
         });
     }
     Ok(marker)
+}
+
+/// Best-effort liveness probe via `kill` with signal 0.
+///
+/// `true` means a process with that PID exists (exit 0) — including a
+/// reused PID, which is the safe direction: cleanup is merely delayed,
+/// never applied to a live run. A failure to spawn the probe also reports
+/// alive, preserving protection. Non-unix targets always report alive.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_or(true, |status| status.success())
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    true
 }
 
 fn write_marker_to_path(marker: &ReviewMarker, path: &Path) -> Result<(), ArtifactRootError> {
@@ -1000,6 +1047,81 @@ mod tests {
                 ArtifactRootError::Safety(ReviewSafetyError::StorageOverlap { .. })
             ),
             "expected Safety(StorageOverlap), got {err}"
+        );
+    }
+
+    // ── marker pid + orphan detection ─────────────────────────────────────────
+
+    fn pid_fixture_marker(status: ReviewStatus, pid: Option<u32>) -> ReviewMarker {
+        let now = chrono::Utc::now().to_rfc3339();
+        ReviewMarker::new_for_test_fixture(
+            MARKER_SCHEMA_VERSION,
+            "0123456789abcdef".to_owned(),
+            PathBuf::from("/tmp/ws"),
+            "aabbccddeeff".to_owned(),
+            "112233445566".to_owned(),
+            "review-pid-fixture".to_owned(),
+            PathBuf::from("/tmp/ws/storage"),
+            PathBuf::from("/tmp/ws/registry.json"),
+            env!("CARGO_PKG_VERSION").to_owned(),
+            now.clone(),
+            status,
+            None,
+            now,
+        )
+        .with_test_pid(pid)
+    }
+
+    /// PID of a process that has already exited (spawned and reaped here),
+    /// so a liveness probe against it reports dead.
+    #[cfg(unix)]
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn /bin/true");
+        let pid = child.id();
+        child.wait().expect("reap /bin/true");
+        pid
+    }
+
+    #[test]
+    fn marker_json_without_pid_field_reads_as_protected() {
+        let tmp = TempDir::new().unwrap();
+        let marker_path = tmp.path().join(MARKER_FILENAME);
+
+        // A marker serialized before the `pid` field existed.
+        let mut value =
+            serde_json::to_value(pid_fixture_marker(ReviewStatus::InProgress, None)).unwrap();
+        value.as_object_mut().unwrap().remove("pid");
+        std::fs::write(&marker_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let marker = read_marker(&marker_path).expect("old-format marker must deserialize");
+        assert_eq!(marker.pid, None);
+        assert!(
+            !marker.is_orphaned_in_progress(),
+            "markers without a recorded PID must keep the always-protected behavior"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_in_progress_requires_dead_pid_and_in_progress_status() {
+        let live = pid_fixture_marker(ReviewStatus::InProgress, Some(std::process::id()));
+        assert!(
+            !live.is_orphaned_in_progress(),
+            "a live writer process must protect the artifact"
+        );
+
+        let dead = pid_fixture_marker(ReviewStatus::InProgress, Some(dead_pid()));
+        assert!(
+            dead.is_orphaned_in_progress(),
+            "a dead writer process must mark the InProgress artifact orphaned"
+        );
+
+        let completed = pid_fixture_marker(ReviewStatus::Completed, Some(dead_pid()));
+        assert!(
+            !completed.is_orphaned_in_progress(),
+            "only InProgress markers can be orphaned"
         );
     }
 }

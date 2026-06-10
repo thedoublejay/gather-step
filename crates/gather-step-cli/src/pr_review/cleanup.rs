@@ -146,6 +146,7 @@ mod tests {
             status,
             cache_key: None,
             last_accessed_at: accessed_at,
+            pid: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -367,6 +368,7 @@ mod tests {
             status: ReviewStatus::Completed,
             cache_key: None,
             last_accessed_at: accessed_at,
+            pid: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();

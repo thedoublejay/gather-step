@@ -1464,6 +1464,7 @@ fn plant_review_artifact(
     run_id: &str,
     marker_workspace_hash: &str,
     status: gather_step::pr_review::artifact_root::ReviewStatus,
+    pid: Option<u32>,
 ) -> PathBuf {
     use gather_step::pr_review::artifact_root::{
         MARKER_FILENAME, MARKER_SCHEMA_VERSION, ReviewMarker,
@@ -1490,7 +1491,8 @@ fn plant_review_artifact(
         status,
         None,
         accessed_at,
-    );
+    )
+    .with_test_pid(pid);
     let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
     fs::write(root.join(MARKER_FILENAME), json).expect("write marker");
     root
@@ -1581,6 +1583,7 @@ fn full_reindex_wipes_completed_review_artifacts_but_skips_in_progress() {
         "run-completed-reindex-fixture",
         &hash,
         ReviewStatus::Completed,
+        None,
     );
     let in_progress_root = plant_review_artifact(
         &cache_root,
@@ -1588,6 +1591,7 @@ fn full_reindex_wipes_completed_review_artifacts_but_skips_in_progress() {
         "run-inprogress-reindex-fixture",
         &hash,
         ReviewStatus::InProgress,
+        Some(process::id()),
     );
 
     // Sanity: both fixtures exist before the index run.
@@ -1612,5 +1616,91 @@ fn full_reindex_wipes_completed_review_artifacts_but_skips_in_progress() {
     );
 
     // Best-effort cleanup of the surviving InProgress fixture.
+    let _ = fs::remove_dir_all(&workspace_cache);
+}
+
+/// `clean --older-than` must prune an `InProgress` artifact whose recorded
+/// process is dead (the run was killed without finalizing) while still
+/// protecting one whose process is alive — and, for markers with no
+/// recorded PID (written by older versions), keep the always-protected
+/// behavior.
+#[cfg(unix)]
+#[test]
+fn clean_older_than_prunes_dead_pid_in_progress_artifacts() {
+    use gather_step::pr_review::artifact_root::{ReviewStatus, default_cache_root, workspace_hash};
+
+    let temp = TempDir::new("clean-dead-pid");
+    write_fixture_workspace(temp.path());
+    run_ok(temp.path(), &["init"]);
+
+    let canonical_ws = fs::canonicalize(temp.path()).expect("canonical workspace path");
+    let cache_root = default_cache_root(&canonical_ws);
+    let hash = workspace_hash(&canonical_ws);
+    let workspace_cache = cache_root.join(&hash);
+    let _ = fs::remove_dir_all(&workspace_cache);
+    fs::create_dir_all(&workspace_cache).expect("workspace cache dir");
+
+    let dead_pid = {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap /bin/true");
+        pid
+    };
+    let orphaned_root = plant_review_artifact(
+        &cache_root,
+        &canonical_ws,
+        "run-orphaned-dead-pid",
+        &hash,
+        ReviewStatus::InProgress,
+        Some(dead_pid),
+    );
+    let live_root = plant_review_artifact(
+        &cache_root,
+        &canonical_ws,
+        "run-live-pid",
+        &hash,
+        ReviewStatus::InProgress,
+        Some(process::id()),
+    );
+    let legacy_root = plant_review_artifact(
+        &cache_root,
+        &canonical_ws,
+        "run-legacy-no-pid",
+        &hash,
+        ReviewStatus::InProgress,
+        None,
+    );
+
+    // Dry run lists only the orphaned artifact.
+    let dry = run_ok(
+        temp.path(),
+        &["pr-review", "clean", "--older-than", "0d", "--dry-run"],
+    );
+    let dry_stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        dry_stdout.contains("run-orphaned-dead-pid"),
+        "dry run must list the dead-PID InProgress artifact, got:\n{dry_stdout}"
+    );
+    assert!(
+        !dry_stdout.contains("run-live-pid") && !dry_stdout.contains("run-legacy-no-pid"),
+        "dry run must not list live or legacy InProgress artifacts, got:\n{dry_stdout}"
+    );
+    assert!(orphaned_root.exists(), "dry run must not delete anything");
+
+    // Real run prunes the orphan and leaves the protected artifacts.
+    run_ok(temp.path(), &["pr-review", "clean", "--older-than", "0d"]);
+    assert!(
+        !orphaned_root.exists(),
+        "dead-PID InProgress artifact must be pruned by clean --older-than"
+    );
+    assert!(
+        live_root.exists(),
+        "live-PID InProgress artifact must survive clean --older-than"
+    );
+    assert!(
+        legacy_root.exists(),
+        "no-PID InProgress artifact must keep the always-protected behavior"
+    );
+
     let _ = fs::remove_dir_all(&workspace_cache);
 }

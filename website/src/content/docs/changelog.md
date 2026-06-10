@@ -5,6 +5,22 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.4.3 (2026-06-10)
+
+Release status: **prepared**.
+
+Patch on top of v4.4.2. Fixes the review-artifact resource leak where any `pr-review` run killed before finalizing (Ctrl-C, OOM, the MCP tool's own timeout kill) left a permanent `InProgress` artifact — hundreds of MB of redb/tantivy/SQLite state plus dangling git worktrees — that `clean --older-than` and post-reindex cleanup were forbidden to touch.
+
+### Fixed
+
+- **Writer PID in the review marker** — `review-marker.json` now records the PID of the process that created the artifact. Cleanup distinguishes a live `InProgress` run (still protected) from one whose process is dead (treated like a failed run): `pr-review clean --older-than` and the post-reindex artifact wipe now prune orphaned `InProgress` artifacts instead of protecting them forever. Markers written by older versions carry no PID and keep the always-protected behavior; PID reuse only delays cleanup, never deletes a live run.
+- **Graceful-first MCP timeout** — the MCP `pr_review` tool's timeout no longer SIGKILLs its subprocess as the first resort. It sends SIGTERM, waits a 5-second grace window, then falls back to SIGKILL — and a killed run's orphaned artifact is now reapable via the marker PID.
+- **Zombie reap on wait failure** — a `try_wait` error in the MCP subprocess supervisor now kills and reaps the child best-effort instead of returning with the process unreaped.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.4.3`.
+
 ## v4.4.2 (2026-06-10)
 
 Release status: **prepared**.
