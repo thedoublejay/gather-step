@@ -303,9 +303,11 @@ fn run_pr_review_json_child(
 
     let status = wait_with_timeout(&mut child, timeout)?;
 
-    // Even after timeout we still join the reader threads so their FDs
-    // close cleanly; `drain_capped` returns whatever it has buffered when
-    // the pipe closes (which the kill above triggered).
+    // Join the reader threads so their FDs close cleanly; `drain_capped`
+    // returns whatever it has buffered when the pipe closes. On the timeout
+    // error path the `?` above returns early instead: the child is already
+    // terminated, so the pipes close and the dropped handles let the reader
+    // threads finish detached.
     let stdout_capture = stdout_handle
         .join()
         .map_err(|_| "The pr-review stdout reader thread panicked.".to_owned())??;
@@ -420,34 +422,90 @@ fn drain_capped<R: Read + Send>(mut reader: R, max: usize) -> Result<CapturedByt
     })
 }
 
-/// Wait for `child` to exit, killing it if `timeout` elapses.  Returns
-/// the child's exit status on success; returns a sanitised error string
-/// on timeout or wait failure.
+/// Grace window between asking the child to stop (SIGTERM) and forcing it
+/// (SIGKILL). Long enough for the CLI's cleanup guard to remove or
+/// quarantine the review artifact; short enough to keep the MCP timeout
+/// honest.
+const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+
+/// Wait for `child` to exit, stopping it if `timeout` elapses. Returns the
+/// child's exit status on success; returns a sanitised error string on
+/// timeout or wait failure.
+///
+/// Termination is graceful-first on unix — SIGTERM, then [`TERMINATE_GRACE`],
+/// then SIGKILL — because a `SIGKILL`ed run can never finalize its review
+/// artifact and leaves an `InProgress` marker for `pr-review clean` to reap.
 fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus, String> {
-    // A short polling cadence keeps the timeout honest without busy-spinning.
     let pid = child.id();
-    let deadline = Instant::now() + timeout;
+    if let Some(status) = poll_exit(child, timeout)? {
+        return Ok(status);
+    }
+    let termination = if request_graceful_terminate(pid) {
+        if poll_exit(child, TERMINATE_GRACE)?.is_some() {
+            "terminated"
+        } else {
+            let _ = child.kill();
+            let _ = child.wait();
+            "killed after an unanswered SIGTERM"
+        }
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+        "killed"
+    };
+    Err(format!(
+        "The pr-review subprocess (pid {pid}) exceeded the \
+         {timeout_secs}-second timeout and was {termination}.",
+        timeout_secs = timeout.as_secs(),
+    ))
+}
+
+/// Poll `try_wait` until the child exits or `window` elapses. A short
+/// polling cadence keeps the timeout honest without busy-spinning. On a
+/// `try_wait` failure the child is reaped best-effort so the error path
+/// cannot leak a zombie.
+fn poll_exit(
+    child: &mut std::process::Child,
+    window: Duration,
+) -> Result<Option<std::process::ExitStatus>, String> {
+    let deadline = Instant::now() + window;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
+            Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "The pr-review subprocess (pid {pid}) exceeded the \
-                         {timeout_secs}-second timeout and was killed.",
-                        timeout_secs = timeout.as_secs(),
-                    ));
+                    return Ok(None);
                 }
                 thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => return Err(format!("Failed to wait on the pr-review subprocess: {e}.")),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wait on the pr-review subprocess: {e}."));
+            }
         }
     }
+}
+
+/// Ask the child to terminate via `kill -TERM` so its cleanup guard can
+/// finalize the review artifact. Returns `false` (caller falls back to
+/// SIGKILL) when the signal could not be delivered or on non-unix targets.
+#[cfg(unix)]
+fn request_graceful_terminate(pid: u32) -> bool {
+    std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn request_graceful_terminate(_pid: u32) -> bool {
+    false
 }
 
 fn sanitised_failure_message(code: Option<i32>, stderr: &CapturedBytes) -> String {
@@ -714,6 +772,53 @@ mod tests {
         assert!(
             err.contains("timeout"),
             "error should explain timeout: {err}"
+        );
+    }
+
+    /// `sleep` exits on SIGTERM, so the graceful-first path reports the
+    /// child as terminated without falling back to SIGKILL.
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_timeout_terminates_cooperative_child_gracefully() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
+            return;
+        };
+
+        let err = wait_with_timeout(&mut child, Duration::from_millis(200))
+            .expect_err("timeout must fire");
+        assert!(
+            err.contains("was terminated"),
+            "a SIGTERM-cooperative child should not need SIGKILL: {err}"
+        );
+    }
+
+    /// A child that ignores SIGTERM must still die: the grace window
+    /// elapses and the fallback SIGKILL fires.
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_timeout_falls_back_to_sigkill_when_sigterm_is_ignored() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "trap '' TERM; sleep 30"]);
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
+            return;
+        };
+
+        let started = Instant::now();
+        let err = wait_with_timeout(&mut child, Duration::from_millis(200))
+            .expect_err("timeout must fire");
+        assert!(
+            err.contains("killed after an unanswered SIGTERM"),
+            "a SIGTERM-ignoring child must be SIGKILLed: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "fallback must complete within timeout + grace: {err}"
         );
     }
 

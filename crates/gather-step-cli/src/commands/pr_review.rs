@@ -2804,10 +2804,17 @@ pub(crate) fn delete_artifact_with_selector(
             }
         )
     {
-        bail!(
-            "Skipping `{}` because the artifact is InProgress and the selector did not opt in with `--include-active`.",
-            artifact.root.display(),
-        );
+        if marker.is_orphaned_in_progress() {
+            tracing::info!(
+                root = %artifact.root.display(),
+                "The InProgress artifact's recorded process is no longer alive; treating the run as failed and allowing cleanup."
+            );
+        } else {
+            bail!(
+                "Skipping `{}` because the artifact is InProgress and the selector did not opt in with `--include-active`.",
+                artifact.root.display(),
+            );
+        }
     }
 
     // Step 4: no overlap with baseline paths (canonicalized — same check as
@@ -2982,8 +2989,13 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
         all_artifacts
             .into_iter()
             .filter(|a| {
-                // Never delete an active run — it may still be indexing.
-                if matches!(a.marker.status, ReviewStatus::InProgress) {
+                // Never delete an active run — it may still be indexing. A
+                // run whose recorded process is dead can no longer be active:
+                // it was killed without finalizing, so it ages out like a
+                // failed run instead of being protected forever.
+                if matches!(a.marker.status, ReviewStatus::InProgress)
+                    && !a.marker.is_orphaned_in_progress()
+                {
                     return false;
                 }
                 // Unless --include-active is set, skip artifacts whose cache
@@ -3610,6 +3622,7 @@ mod tests {
             status,
             cache_key: None,
             last_accessed_at: created_at,
+            pid: None,
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
@@ -4126,6 +4139,7 @@ mod tests {
             status: ReviewStatus::Completed,
             cache_key: None,
             last_accessed_at: chrono::Utc::now().to_rfc3339(),
+            pid: None,
         };
         let json = serde_json::to_vec_pretty(&marker).unwrap();
         fs::write(root.join(MARKER_FILENAME), json).unwrap();
@@ -4179,6 +4193,7 @@ mod tests {
             status: ReviewStatus::Completed,
             cache_key: None,
             last_accessed_at: chrono::Utc::now().to_rfc3339(),
+            pid: None,
         };
 
         // Write the marker INTO the baseline storage path so re-read works.
@@ -5458,6 +5473,7 @@ indexing:
             status: ReviewStatus::Completed,
             cache_key: None,
             last_accessed_at: chrono::Utc::now().to_rfc3339(),
+            pid: None,
         };
         let planted_json = serde_json::to_vec_pretty(&planted_marker).unwrap();
         fs::write(planted_root.join(MARKER_FILENAME), planted_json).unwrap();
@@ -5536,6 +5552,7 @@ indexing:
             status,
             cache_key,
             last_accessed_at: created_at,
+            pid: None,
         };
 
         let json = serde_json::to_vec_pretty(&marker).expect("serialize marker");
