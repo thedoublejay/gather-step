@@ -131,6 +131,67 @@ pub fn resolve_ref(repo: &Path, input: &str) -> Result<ResolvedRef, RefResolveEr
     })
 }
 
+/// A local branch whose tip no longer matches its upstream tracking ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamDivergence {
+    /// SHA the local branch resolves to.
+    pub local_sha: String,
+    /// Short tracking-ref name (e.g. `"origin/main"`).
+    pub upstream_name: String,
+    /// SHA the upstream tracking ref resolves to.
+    pub upstream_sha: String,
+}
+
+/// Compare a branch-name `input` against its configured upstream tracking ref.
+///
+/// Returns `Ok(None)` when `input` is not a local branch, no upstream is
+/// configured, the tracking ref is absent locally, or both tips match —
+/// divergence is only reported when both sides resolve and differ.
+pub fn upstream_divergence(
+    repo: &Path,
+    input: &str,
+) -> Result<Option<UpstreamDivergence>, RefResolveError> {
+    let r = open_repo(repo)?;
+    let Ok(Some(mut local_ref)) = r.try_find_reference(input) else {
+        return Ok(None);
+    };
+    let local_name = local_ref.name().to_owned();
+    let local_id = local_ref
+        .peel_to_id()
+        .map_err(|e| git_op(repo, e))?
+        .detach();
+
+    let Some(Ok(tracking_name)) =
+        r.branch_remote_tracking_ref_name(local_name.as_ref(), gix::remote::Direction::Fetch)
+    else {
+        return Ok(None);
+    };
+    let Ok(Some(mut tracking_ref)) = r.try_find_reference(tracking_name.as_ref().as_bstr()) else {
+        return Ok(None);
+    };
+    let upstream_id = tracking_ref
+        .peel_to_id()
+        .map_err(|e| git_op(repo, e))?
+        .detach();
+
+    if local_id == upstream_id {
+        return Ok(None);
+    }
+    Ok(Some(UpstreamDivergence {
+        local_sha: local_id.to_string(),
+        upstream_name: tracking_name.as_ref().shorten().to_str_lossy().into_owned(),
+        upstream_sha: upstream_id.to_string(),
+    }))
+}
+
+/// Whether the working tree differs from `HEAD` for tracked files.
+///
+/// Untracked files do not count (matching `gix::Repository::is_dirty`).
+pub fn worktree_dirty(repo: &Path) -> Result<bool, RefResolveError> {
+    let r = open_repo(repo)?;
+    r.is_dirty().map_err(|e| git_op(repo, e))
+}
+
 /// Resolve both ends of a commit range.
 pub fn resolve_range(
     repo: &Path,
@@ -426,5 +487,118 @@ mod tests {
             .iter()
             .any(|f| f.path == "a.txt" && f.change_kind == ChangeKind::Deleted);
         assert!(has_deleted_a, "expected Deleted a.txt in {files:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // upstream_divergence tests
+    // -----------------------------------------------------------------------
+
+    fn clone_repo(origin: &Path, clone: &Path) {
+        helpers::run_git(
+            origin.parent().expect("origin parent"),
+            &[
+                "clone",
+                "--quiet",
+                origin.to_str().expect("utf8 origin path"),
+                clone.to_str().expect("utf8 clone path"),
+            ],
+        );
+        helpers::run_git(clone, &["config", "user.email", "test@example.com"]);
+        helpers::run_git(clone, &["config", "user.name", "Test"]);
+        helpers::run_git(clone, &["config", "commit.gpgsign", "false"]);
+    }
+
+    #[test]
+    fn upstream_divergence_detects_stale_local_branch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let origin = tmp.path().join("origin");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&origin).expect("origin dir");
+        helpers::init_repo(&origin);
+        let stale_sha = helpers::commit_file(&origin, "a.txt", "hello", "init");
+
+        clone_repo(&origin, &clone);
+        let fresh_sha = helpers::commit_file(&origin, "b.txt", "upstream moved", "advance");
+        helpers::run_git(&clone, &["fetch", "--quiet", "origin"]);
+
+        let divergence = upstream_divergence(&clone, "main")
+            .expect("divergence check")
+            .expect("local main should be behind origin/main");
+        assert_eq!(divergence.local_sha, stale_sha);
+        assert_eq!(divergence.upstream_name, "origin/main");
+        assert_eq!(divergence.upstream_sha, fresh_sha);
+    }
+
+    #[test]
+    fn upstream_divergence_none_when_in_sync() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let origin = tmp.path().join("origin");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&origin).expect("origin dir");
+        helpers::init_repo(&origin);
+        helpers::commit_file(&origin, "a.txt", "hello", "init");
+
+        clone_repo(&origin, &clone);
+
+        let divergence = upstream_divergence(&clone, "main").expect("divergence check");
+        assert_eq!(divergence, None);
+    }
+
+    #[test]
+    fn upstream_divergence_none_without_upstream() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        helpers::init_repo(dir);
+        helpers::commit_file(dir, "a.txt", "hello", "init");
+
+        let divergence = upstream_divergence(dir, "main").expect("divergence check");
+        assert_eq!(divergence, None);
+    }
+
+    #[test]
+    fn upstream_divergence_none_for_bare_sha_input() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        helpers::init_repo(dir);
+        let sha = helpers::commit_file(dir, "a.txt", "hello", "init");
+
+        let divergence = upstream_divergence(dir, &sha).expect("divergence check");
+        assert_eq!(divergence, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // worktree_dirty tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn worktree_dirty_false_for_clean_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        helpers::init_repo(dir);
+        helpers::commit_file(dir, "a.txt", "hello", "init");
+
+        assert!(!worktree_dirty(dir).expect("dirty check"));
+    }
+
+    #[test]
+    fn worktree_dirty_true_for_unstaged_edit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        helpers::init_repo(dir);
+        helpers::commit_file(dir, "a.txt", "hello", "init");
+        std::fs::write(dir.join("a.txt"), "edited without commit").expect("write");
+
+        assert!(worktree_dirty(dir).expect("dirty check"));
+    }
+
+    #[test]
+    fn worktree_dirty_ignores_untracked_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        helpers::init_repo(dir);
+        helpers::commit_file(dir, "a.txt", "hello", "init");
+        std::fs::write(dir.join("untracked.txt"), "new file").expect("write");
+
+        assert!(!worktree_dirty(dir).expect("dirty check"));
     }
 }

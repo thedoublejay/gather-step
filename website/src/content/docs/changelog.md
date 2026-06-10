@@ -5,6 +5,24 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.4.2 (2026-06-10)
+
+Release status: **prepared**.
+
+Patch on top of v4.4.1. Hardens `pr-review` against silently comparing PRs to stale state — the class of failure where a behind-upstream local base branch or an outdated workspace index produces a clean-looking but wrong delta report.
+
+### Fixed
+
+- **Upstream-divergence warning for `--base`** — when `--base` is a branch name, `pr-review` now compares it against its configured upstream tracking ref (e.g. `origin/main`). If the local branch has diverged, the report warns with both SHAs instead of silently computing a merge-base that attributes unrelated upstream commits to the PR.
+- **Baseline index freshness gate** — the baseline side of every delta comes from the persistent workspace index, but its indexed commit was never checked against `--base`. Each registered repo's last-indexed commit is now compared with the SHA the review treats as base; the report warns when the index is stale or has no recorded commit, with the exact `gather-step index` remediation.
+- **Dirty-worktree warning** — uncommitted tracked changes in the baseline working tree contaminate the baseline index and can invert deltas; the report now says so explicitly.
+
+All three checks honor `--no-baseline-check` and surface in the report's `metadata.warnings`, which renders before everything else.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.4.2`.
+
 ## v4.4.1 (2026-06-10)
 
 Release status: **prepared**.
