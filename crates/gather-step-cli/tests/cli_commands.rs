@@ -705,6 +705,43 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
     let impact_json = stdout_json(&impact);
     assert_eq!(impact_json["event"], "impact_completed");
 
+    let cross_repo = run_ok(temp.path(), &["cross-repo-deps", "--json"]);
+    let cross_repo_json = stdout_json(&cross_repo);
+    assert_eq!(cross_repo_json["event"], "cross_repo_deps_completed");
+    let cross_repo_repos = cross_repo_json["repos"].as_array().expect("repos array");
+    assert!(
+        cross_repo_repos
+            .iter()
+            .any(|entry| entry["repo"] == "backend_standard"),
+        "cross-repo-deps must cover every configured repo by default"
+    );
+    for entry in cross_repo_repos {
+        assert!(
+            entry["dependencies"].is_array(),
+            "each repo entry must carry a dependencies array"
+        );
+    }
+
+    // The MCP tool name is accepted verbatim so wrappers written against the
+    // MCP surface (`cross_repo_deps`) work unchanged.
+    let cross_repo_alias = run_ok(
+        temp.path(),
+        &["cross_repo_deps", "backend_standard", "--json"],
+    );
+    let cross_repo_alias_json = stdout_json(&cross_repo_alias);
+    let alias_repos = cross_repo_alias_json["repos"]
+        .as_array()
+        .expect("alias repos array");
+    assert_eq!(alias_repos.len(), 1);
+    assert_eq!(alias_repos[0]["repo"], "backend_standard");
+
+    let cross_repo_unknown = run_fail(temp.path(), &["cross-repo-deps", "missing_repo", "--json"]);
+    let unknown_stderr = String::from_utf8_lossy(&cross_repo_unknown.stderr);
+    assert!(
+        unknown_stderr.contains("unknown repo"),
+        "explicit unknown repo must fail loudly, got: {unknown_stderr}"
+    );
+
     let pack = run_ok(
         temp.path(),
         &[

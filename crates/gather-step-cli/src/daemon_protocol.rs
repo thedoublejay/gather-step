@@ -29,6 +29,10 @@ pub enum DaemonRequest {
     Conventions {
         repo_filter: Option<String>,
     },
+    CrossRepoDeps {
+        repo: Option<String>,
+        repo_filter: Option<String>,
+    },
     StorageReport,
     EventsTrace {
         subject: String,

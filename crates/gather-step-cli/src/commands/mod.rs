@@ -1,6 +1,7 @@
 pub mod clean;
 pub mod compact;
 pub mod conventions;
+pub mod cross_repo_deps;
 pub mod deployment_topology;
 pub mod doctor;
 pub mod events;
@@ -66,6 +67,10 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     ("search", "Search indexed symbols, files, and concepts"),
     ("trace", "Trace impact, events, or routes from a target"),
     ("impact", "Inspect change-impact for a symbol or file"),
+    (
+        "cross-repo-deps",
+        "Inspect cross-repo dependency edges per configured repo",
+    ),
     (
         "projection-impact",
         "Trace projected fields, filters, and backfill evidence",
@@ -157,6 +162,8 @@ pub enum Command {
     Doctor(doctor::DoctorArgs),
     Generate(generate::GenerateCommand),
     Impact(impact::ImpactArgs),
+    #[command(name = "cross-repo-deps", visible_alias = "cross_repo_deps")]
+    CrossRepoDeps(cross_repo_deps::CrossRepoDepsArgs),
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
     DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
     #[command(name = "qa-evidence")]
@@ -233,6 +240,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Doctor(args)) => success(doctor::run(&app, args)),
         Some(Command::Generate(command)) => success(generate::run(&app, command)),
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
+        Some(Command::CrossRepoDeps(args)) => success(cross_repo_deps::run(&app, &args)),
         Some(Command::ProjectionImpact(args)) => success(projection_impact::run(&app, args)),
         Some(Command::DeploymentTopology(args)) => success(deployment_topology::run(&app, args)),
         Some(Command::QaEvidence(args)) => success(qa_evidence::run(&app, &args)),
