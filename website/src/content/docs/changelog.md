@@ -5,6 +5,27 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.4.4 (2026-06-10)
+
+Release status: **prepared**.
+
+Patch on top of v4.4.3. Four small, independent index- and read-path wins from the audit's performance phase — none of them change what any command returns.
+
+### Changed
+
+- **Conditional metadata `VACUUM`** — every index run (including the one inside `pr-review`) used to finish with an unconditional `VACUUM`: an O(database size) full-file rewrite even when a warm run changed almost nothing. The post-index finalize now checkpoints the WAL as before but vacuums only when the freelist holds ≥ 256 freed pages (~1 MiB). `gather-step compact` still vacuums unconditionally.
+- **Read-only freshness probe** — the per-command freshness check opened a full metadata store (writer + 4-reader pool, schema bootstrap, `PRAGMA optimize` on drop) for a read-only peek. It now uses a single `SQLITE_OPEN_READ_ONLY` connection that cannot write to the database or its WAL, falling back to the full open only when read-only access is impossible.
+- **Changed files read once, not twice** — on the incremental path a changed file was read once to hash (bytes discarded) and again by the parser. The fd-stable hash read now hands its bytes to the parser, halving I/O on changed files and guaranteeing the parser sees exactly the bytes that were hashed.
+- **No full-buffer copy in the watch traversal** — the watch path cloned each file's entire contents before hashing; it now hashes first and moves the buffer, matching its parallel-walk twin.
+
+### Fixed
+
+- **Unreadable mtimes no longer fake freshness** — an mtime read error was recorded as `0`, so a file whose mtime errored at index time and again at check time could be skipped as "unchanged" despite a same-size content edit. Unknown mtimes are now a sentinel that never matches anything — including another unknown — forcing a rehash. All warm-skip speed is kept; the silent-staleness hole is closed.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.4.4`.
+
 ## v4.4.3 (2026-06-10)
 
 Release status: **prepared**.

@@ -46,8 +46,8 @@ pub use indexer::{
 };
 pub use metadata::{
     CoChangePairRecord, CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord,
-    ContextPackRecord, ContextPackStats, FileAnalytics, FileIndexState, MetadataStore,
-    MetadataStoreDb, MetadataStoreError, PackCallLogEntry, PayloadContractQuery,
+    ContextPackRecord, ContextPackStats, FileAnalytics, FileIndexState, MetadataReadOnly,
+    MetadataStore, MetadataStoreDb, MetadataStoreError, PackCallLogEntry, PayloadContractQuery,
     PayloadContractStoreRecord,
 };
 pub use pack_store::{PackBlob, PackStore};
