@@ -96,6 +96,13 @@ pub struct FileStat {
     pub mtime_ns: i64,
 }
 
+/// Sentinel `mtime_ns` recorded when a file's mtime cannot be read.
+///
+/// Warm-skip comparisons must never treat two unknown mtimes as equal —
+/// a stored unknown matching a current unknown would silently skip
+/// re-hashing a file whose content may have changed at the same size.
+pub const MTIME_UNKNOWN: i64 = i64::MIN;
+
 #[derive(Clone, Debug, Default)]
 pub struct TraversalSummary {
     pub files: Vec<FileEntry>,
@@ -650,7 +657,8 @@ pub fn collect_selected_repo_files(
             continue;
         }
 
-        let source_bytes: std::sync::Arc<[u8]> = bytes.clone().into();
+        let content_hash = hash_bytes(&bytes);
+        let source_bytes: std::sync::Arc<[u8]> = bytes.into_boxed_slice().into();
         let path_id_bytes = PathId::from_path(&normalized).as_bytes().to_vec();
         summary
             .file_stats
@@ -659,7 +667,7 @@ pub fn collect_selected_repo_files(
             path: normalized,
             language,
             size_bytes: file_metadata.len(),
-            content_hash: hash_bytes(&bytes),
+            content_hash,
             source_bytes: Some(source_bytes),
         });
     }
@@ -751,8 +759,9 @@ fn metadata_mtime_ns(metadata: &fs::Metadata) -> i64 {
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
+        .map_or(MTIME_UNKNOWN, |duration| {
+            i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
+        })
 }
 
 fn hash_bytes(bytes: &[u8]) -> [u8; 32] {

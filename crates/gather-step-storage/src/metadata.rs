@@ -181,6 +181,11 @@ const WAL_MMAP_SIZE_BYTES: i64 = 1_073_741_824;
 const WAL_AUTOCHECKPOINT_PAGES: i64 = 10_000;
 const READER_POOL_SIZE: usize = 4;
 
+/// Freed-page count at which the post-index `finalize` runs `VACUUM`.
+/// 256 pages ≈ 1 MiB at the default 4 KiB page size — below that the
+/// reclaim is not worth an O(database size) full-file rewrite.
+const VACUUM_FREELIST_THRESHOLD_PAGES: i64 = 256;
+
 /// Flush the in-memory hit-count buffer to `SQLite` after this many accumulated
 /// increments.  A single-row UPDATE costs ~10 µs; batching 32 increments into
 /// one write transaction keeps per-hit overhead below 1 µs amortised.
@@ -1278,7 +1283,7 @@ impl MetadataStoreDb {
         }
     }
 
-    /// Flush and compact the database after a bulk-indexing run.
+    /// Flush and compact the database unconditionally.
     ///
     /// Issues `PRAGMA wal_checkpoint(TRUNCATE)` to merge the write-ahead log
     /// back into the main database file and reset its size to zero, then
@@ -1286,8 +1291,9 @@ impl MetadataStoreDb {
     /// failure is logged but does not propagate — a partially checkpointed or
     /// un-vacuumed database is still fully consistent.
     ///
-    /// Call this once at the end of a full workspace index run, not during
-    /// incremental per-repo updates.
+    /// `VACUUM` rewrites the entire database file, so this is the
+    /// `gather-step compact` path. Index runs use [`Self::finalize`], which
+    /// skips the rewrite when little space would be reclaimed.
     pub fn try_finalize(&self) -> Result<(), MetadataStoreError> {
         let connection = self.lock_writer()?;
         connection.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
@@ -1295,8 +1301,33 @@ impl MetadataStoreDb {
         Ok(())
     }
 
+    /// Flush the database after a bulk-indexing run, compacting only when
+    /// worthwhile.
+    ///
+    /// The WAL checkpoint always runs (cheap, bounded by WAL size). `VACUUM`
+    /// — an O(database size) full-file rewrite — runs only when the freelist
+    /// holds at least [`VACUUM_FREELIST_THRESHOLD_PAGES`] freed pages, so a
+    /// warm index run that changed almost nothing does not pay it. Returns
+    /// whether the vacuum ran.
+    pub fn try_finalize_if_fragmented(&self) -> Result<bool, MetadataStoreError> {
+        let connection = self.lock_writer()?;
+        connection.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        let freed_pages: i64 =
+            connection.pragma_query_value(None, "freelist_count", |row| row.get(0))?;
+        if freed_pages < VACUUM_FREELIST_THRESHOLD_PAGES {
+            tracing::debug!(
+                freed_pages,
+                threshold = VACUUM_FREELIST_THRESHOLD_PAGES,
+                "Skipping metadata VACUUM; too few freed pages to reclaim."
+            );
+            return Ok(false);
+        }
+        connection.execute_batch("VACUUM;")?;
+        Ok(true)
+    }
+
     pub fn finalize(&self) {
-        if let Err(e) = self.try_finalize() {
+        if let Err(e) = self.try_finalize_if_fragmented() {
             tracing::warn!(error = %e, "Metadata finalization failed.");
         }
     }
@@ -3334,6 +3365,41 @@ fn decode_node_kind(value: i64) -> Result<NodeKind, rusqlite::Error> {
         })
 }
 
+/// Read-only peek at a metadata database for per-command freshness probes.
+///
+/// Opens a single `SQLITE_OPEN_READ_ONLY` connection: no writer, no reader
+/// pool, no schema bootstrap, and no `PRAGMA optimize` on drop — so the
+/// probe that runs before every read command cannot write to the database
+/// file or its WAL. Opening fails when the database requires recovery a
+/// read-only connection cannot perform (e.g. a WAL database without its
+/// `-shm` file); callers should fall back to [`MetadataStoreDb::open`].
+pub struct MetadataReadOnly {
+    connection: Connection,
+}
+
+impl MetadataReadOnly {
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, MetadataStoreError> {
+        let connection = Connection::open_with_flags(
+            path.as_ref(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Ok(Self { connection })
+    }
+
+    /// Read-only mirror of [`MetadataStore::get_last_commit_sha`].
+    pub fn get_last_commit_sha(&self, repo: &str) -> Result<Option<String>, MetadataStoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT last_commit_sha FROM repo_sync_state WHERE repo = ?1",
+                params![repo],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -4999,6 +5065,69 @@ mod tests {
             input.call_sites[0].callee_qualified_hint
         );
 
+        Ok(())
+    }
+
+    // ── read-only probe ───────────────────────────────────────────────────────
+
+    #[test]
+    fn metadata_read_only_reads_after_clean_close() -> Result<(), MetadataStoreError> {
+        let db_path = TestDbPath::new("read-only-probe");
+        {
+            let store = MetadataStoreDb::open(db_path.path())?;
+            store.set_last_commit_sha("repo_a", "aabbccddeeff00112233445566778899aabbccdd", 0)?;
+        }
+
+        let probe = super::MetadataReadOnly::open(db_path.path())?;
+        assert_eq!(
+            probe.get_last_commit_sha("repo_a")?,
+            Some("aabbccddeeff00112233445566778899aabbccdd".to_owned())
+        );
+        assert_eq!(probe.get_last_commit_sha("absent")?, None);
+        Ok(())
+    }
+
+    // ── finalize VACUUM gate ──────────────────────────────────────────────────
+
+    #[test]
+    fn finalize_skips_vacuum_on_compact_database() -> Result<(), MetadataStoreError> {
+        let (_db_path, store) = open_store("vacuum-gate-compact")?;
+
+        assert!(
+            !store.try_finalize_if_fragmented()?,
+            "a freshly created database has no freed pages to reclaim"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_vacuums_when_freelist_exceeds_threshold() -> Result<(), MetadataStoreError> {
+        let (_db_path, store) = open_store("vacuum-gate-fragmented")?;
+
+        // Bloat then drop a table so SQLite frees well over the threshold's
+        // page count (4 MiB of blob rows at 4 KiB pages ≫ 256 pages).
+        {
+            let connection = store.lock_writer()?;
+            connection.execute_batch(
+                "CREATE TABLE bloat (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);",
+            )?;
+            let mut statement =
+                connection.prepare("INSERT INTO bloat (payload) VALUES (zeroblob(4096))")?;
+            for _ in 0..1024 {
+                statement.execute([])?;
+            }
+            statement.finalize()?;
+            connection.execute_batch("DROP TABLE bloat;")?;
+        }
+
+        assert!(
+            store.try_finalize_if_fragmented()?,
+            "dropping ~4 MiB of rows must push the freelist over the vacuum threshold"
+        );
+        assert!(
+            !store.try_finalize_if_fragmented()?,
+            "the vacuum must have reclaimed the freelist"
+        );
         Ok(())
     }
 }

@@ -10,8 +10,8 @@ use rustc_hash::FxHashMap;
 
 use gather_step_core::PathId;
 use gather_step_parser::{
-    FileEntry as SourceFileEntry, FileStat, TraverseConfig, TraverseError, classify_language,
-    collect_selected_repo_files,
+    FileEntry as SourceFileEntry, FileStat, MTIME_UNKNOWN, TraverseConfig, TraverseError,
+    classify_language, collect_selected_repo_files,
 };
 use ignore::WalkBuilder;
 use thiserror::Error;
@@ -147,13 +147,14 @@ pub fn snapshot_repo_files(
         // produced `content_hash`; using the pre-hash stat from a separate
         // `fs::metadata` call risks pairing a stale stat with freshly-read
         // bytes if the file is modified between the two syscalls.
-        let (content_hash, consistent_stat) =
+        let (content_hash, consistent_stat, source_bytes) =
             if let Some(existing) = stored_states.get(&path_id_bytes) {
-                if existing.size_bytes == size_bytes && existing.mtime_ns == mtime_ns {
+                if existing.size_bytes == size_bytes && mtime_matches(existing.mtime_ns, mtime_ns) {
                     // Fast path: the stored stat matches the current stat.
                     // Reuse the stored hash; the current pre-hash stat is a
                     // valid description of the bytes we would read right now
-                    // (nothing changed).
+                    // (nothing changed). No bytes are read, so the parser
+                    // falls back to a disk read if it ever needs this file.
                     if let Some(hash) = bytes_to_hash32(&existing.content_hash) {
                         (
                             hash,
@@ -161,28 +162,29 @@ pub fn snapshot_repo_files(
                                 size_bytes,
                                 mtime_ns,
                             },
+                            None,
                         )
                     } else {
                         // Stored hash is malformed — re-hash with a stable read.
-                        let Some((hash, stat)) = read_hashed_source_stable(path)? else {
+                        let Some((hash, stat, bytes)) = read_hashed_source_stable(path)? else {
                             continue;
                         };
-                        (hash, stat)
+                        (hash, stat, Some(bytes))
                     }
                 } else {
                     // Stat changed — hash the file; use the stat that matches
                     // the bytes we actually read.
-                    let Some((hash, stat)) = read_hashed_source_stable(path)? else {
+                    let Some((hash, stat, bytes)) = read_hashed_source_stable(path)? else {
                         continue;
                     };
-                    (hash, stat)
+                    (hash, stat, Some(bytes))
                 }
             } else {
                 // New file — hash it and record the consistent stat.
-                let Some((hash, stat)) = read_hashed_source_stable(path)? else {
+                let Some((hash, stat, bytes)) = read_hashed_source_stable(path)? else {
                     continue;
                 };
-                (hash, stat)
+                (hash, stat, Some(bytes))
             };
 
         let path_display = relative_path.to_string_lossy().replace('\\', "/");
@@ -191,7 +193,7 @@ pub fn snapshot_repo_files(
             language,
             size_bytes: u64::try_from(consistent_stat.size_bytes).unwrap_or(u64::MAX),
             content_hash,
-            source_bytes: None,
+            source_bytes,
         });
         files_by_path.insert(
             path_id_bytes.clone(),
@@ -297,7 +299,7 @@ fn snapshot_manifest_entry(
     let size_bytes = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
     let mtime_ns = metadata_mtime_ns(&metadata);
     let content_hash = if let Some(existing) = stored_states.get(&path_id_bytes) {
-        if existing.size_bytes == size_bytes && existing.mtime_ns == mtime_ns {
+        if existing.size_bytes == size_bytes && mtime_matches(existing.mtime_ns, mtime_ns) {
             existing.content_hash.clone()
         } else {
             read_manifest_bytes(repo_root)?
@@ -332,9 +334,11 @@ fn snapshot_manifest_entry(
 /// Returns `Ok(None)` for binary files (no hash needed) and on persistent
 /// instability.  The returned [`FileStat`] describes the same bytes that
 /// produced the returned hash.
-fn read_hashed_source_stable(
-    path: &Path,
-) -> Result<Option<([u8; 32], FileStat)>, IncrementalError> {
+/// A stable hash-read result: the content hash, the stat describing the
+/// hashed bytes, and the bytes themselves for the parser to consume.
+type HashedSource = ([u8; 32], FileStat, std::sync::Arc<[u8]>);
+
+fn read_hashed_source_stable(path: &Path) -> Result<Option<HashedSource>, IncrementalError> {
     const MAX_RETRIES: u8 = 2;
 
     for _ in 0..=MAX_RETRIES {
@@ -373,8 +377,11 @@ fn read_hashed_source_stable(
 
         if pre_stat == post_stat {
             // Stat was stable across the read: the hash describes `pre_stat`.
+            // Return the bytes too — the parser consumes them, eliminating a
+            // second disk read of every changed file (and guaranteeing it
+            // parses exactly the bytes that were hashed).
             let hash = *blake3::hash(&bytes).as_bytes();
-            return Ok(Some((hash, pre_stat)));
+            return Ok(Some((hash, pre_stat, bytes.into_boxed_slice().into())));
         }
         // Stat changed — the bytes we read may be a partial or inconsistent
         // view.  Discard them and retry.
@@ -406,8 +413,16 @@ fn metadata_mtime_ns(metadata: &fs::Metadata) -> i64 {
         .modified()
         .ok()
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
+        .map_or(MTIME_UNKNOWN, |duration| {
+            i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Warm-skip mtime equality. An unknown mtime (read error, recorded as
+/// [`MTIME_UNKNOWN`]) never matches anything — including another unknown —
+/// so the file is always re-hashed instead of silently treated as unchanged.
+fn mtime_matches(stored: i64, current: i64) -> bool {
+    stored != MTIME_UNKNOWN && current != MTIME_UNKNOWN && stored == current
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
@@ -882,6 +897,95 @@ mod tests {
                 path_id_bytes: b"src/deleted.ts".to_vec(),
                 content_hash: vec![9, 9, 9],
             }]
+        );
+    }
+
+    #[test]
+    fn mtime_unknown_never_matches_even_itself() {
+        use super::mtime_matches;
+        use gather_step_parser::MTIME_UNKNOWN;
+
+        assert!(mtime_matches(42, 42));
+        assert!(!mtime_matches(42, 43));
+        assert!(
+            !mtime_matches(MTIME_UNKNOWN, 42),
+            "a stored unknown mtime must force a rehash"
+        );
+        assert!(
+            !mtime_matches(42, MTIME_UNKNOWN),
+            "an unreadable current mtime must force a rehash"
+        );
+        assert!(
+            !mtime_matches(MTIME_UNKNOWN, MTIME_UNKNOWN),
+            "two unknown mtimes must never silently match — that would skip \
+             re-hashing a file whose content may have changed at the same size"
+        );
+    }
+
+    #[test]
+    fn snapshot_retains_hashed_bytes_for_changed_files_only() {
+        use gather_step_core::PathId;
+
+        let (_meta_dir, store) = open_metadata("retain-bytes");
+        let repo_root = TestDir::new("retain-bytes-repo");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir");
+        let contents = "export const hello = 1;\n";
+        fs::write(repo_root.path().join("src/hello.ts"), contents).expect("source file");
+
+        let cold =
+            snapshot_repo_files(&store, "repo", repo_root.path(), &TraverseConfig::default())
+                .expect("cold snapshot");
+        let entry = cold
+            .source_files
+            .iter()
+            .find(|file| file.path.ends_with("hello.ts"))
+            .expect("hello.ts in snapshot");
+        assert_eq!(
+            entry.source_bytes.as_deref(),
+            Some(contents.as_bytes()),
+            "a newly hashed file must carry the exact bytes that were hashed \
+             so the parser does not read it a second time"
+        );
+
+        // Persist the cold snapshot's stat so the next pass takes the warm
+        // fast path (stored hash reused, no read).
+        let path_id_bytes = PathId::from_path(Path::new("src/hello.ts"))
+            .as_bytes()
+            .to_vec();
+        let stat = cold
+            .file_stats
+            .get(&path_id_bytes)
+            .copied()
+            .expect("stat for hello.ts");
+        store
+            .upsert_file_states(&[FileIndexState {
+                repo: "repo".to_owned(),
+                file_path: "src/hello.ts".to_owned(),
+                path_id_bytes,
+                content_hash: entry.content_hash.to_vec(),
+                size_bytes: stat.size_bytes,
+                mtime_ns: stat.mtime_ns,
+                ..Default::default()
+            }])
+            .expect("persist file state");
+
+        let warm =
+            snapshot_repo_files(&store, "repo", repo_root.path(), &TraverseConfig::default())
+                .expect("warm snapshot");
+        let warm_entry = warm
+            .source_files
+            .iter()
+            .find(|file| file.path.ends_with("hello.ts"))
+            .expect("hello.ts in warm snapshot");
+        // Stored hashes are 16-byte prefixes (`STORED_CONTENT_HASH_BYTES`),
+        // so `bytes_to_hash32` rejects them and the stat fast path falls
+        // through to a stable re-read — which must also carry its bytes.
+        // (Making the fast path fire for prefix-stored hashes is a separate
+        // change-detection finding, tracked outside this fix.)
+        assert_eq!(
+            warm_entry.source_bytes.as_deref(),
+            Some(contents.as_bytes()),
+            "the warm re-read must hand the hashed bytes to the parser too"
         );
     }
 }

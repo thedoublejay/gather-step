@@ -26,7 +26,7 @@ pub use resolve::{
     ResolutionStrategy, ResolvedCall, resolve_calls, resolve_calls_with_unresolved,
 };
 pub use traverse::{
-    FileEntry, FileStat, Language, TraversalSummary, TraverseConfig, TraverseError,
+    FileEntry, FileStat, Language, MTIME_UNKNOWN, TraversalSummary, TraverseConfig, TraverseError,
     classify_language, collect_repo_files, collect_selected_repo_files,
 };
 pub use tree_sitter::{

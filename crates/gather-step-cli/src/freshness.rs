@@ -2,7 +2,7 @@ use std::path::Path;
 
 use gather_step_core::RegistryStore;
 use gather_step_git::{GitHistoryIndexer, GitRepoSource, IndexFreshness};
-use gather_step_storage::{MetadataStore, MetadataStoreDb};
+use gather_step_storage::{MetadataReadOnly, MetadataStore, MetadataStoreDb, MetadataStoreError};
 use serde::Serialize;
 use tracing::warn;
 
@@ -43,12 +43,19 @@ pub fn workspace_freshness(
     registry: &RegistryStore,
     metadata: &MetadataStoreDb,
 ) -> Vec<RepoFreshness> {
+    workspace_freshness_with(registry, |repo| metadata.get_last_commit_sha(repo))
+}
+
+fn workspace_freshness_with(
+    registry: &RegistryStore,
+    indexed_sha_for_repo: impl Fn(&str) -> Result<Option<String>, MetadataStoreError>,
+) -> Vec<RepoFreshness> {
     registry
         .registry()
         .repos
         .iter()
         .map(|(repo, registered)| {
-            let indexed_sha = match metadata.get_last_commit_sha(repo) {
+            let indexed_sha = match indexed_sha_for_repo(repo) {
                 Ok(indexed_sha) => indexed_sha,
                 Err(error) => {
                     warn!(
@@ -94,18 +101,34 @@ pub fn freshness_from_paths(registry_path: &Path, metadata_path: &Path) -> Vec<R
             return Vec::new();
         }
     };
-    let metadata = match MetadataStoreDb::open(metadata_path) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            warn!(
-                path = %metadata_path.display(),
-                %error,
-                "failed to read metadata store while computing freshness"
-            );
-            return unknown_freshness(&registry);
+    // A read-only connection keeps this per-command probe from writing to
+    // the database or its WAL (the full store bootstraps schema on open and
+    // runs `PRAGMA optimize` on drop). Fall back to the full store when the
+    // read-only open is impossible (e.g. a WAL database whose `-shm` file
+    // a read-only connection cannot recover).
+    match MetadataReadOnly::open(metadata_path) {
+        Ok(metadata) => {
+            workspace_freshness_with(&registry, |repo| metadata.get_last_commit_sha(repo))
         }
-    };
-    workspace_freshness(&registry, &metadata)
+        Err(read_only_error) => match MetadataStoreDb::open(metadata_path) {
+            Ok(metadata) => {
+                warn!(
+                    path = %metadata_path.display(),
+                    %read_only_error,
+                    "read-only freshness probe failed; fell back to a full metadata open"
+                );
+                workspace_freshness(&registry, &metadata)
+            }
+            Err(error) => {
+                warn!(
+                    path = %metadata_path.display(),
+                    %error,
+                    "failed to read metadata store while computing freshness"
+                );
+                unknown_freshness(&registry)
+            }
+        },
+    }
 }
 
 fn unknown_freshness(registry: &RegistryStore) -> Vec<RepoFreshness> {
@@ -132,7 +155,7 @@ pub fn stale_repos(freshness: &[RepoFreshness]) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     use gather_step_core::{GatherStepConfig, RegistryStore};
     use gather_step_git::IndexFreshness;
@@ -225,6 +248,68 @@ mod tests {
         assert_eq!(freshness.len(), 1);
         assert_eq!(freshness[0].repo, "repo_a");
         assert_eq!(freshness[0].freshness, "unknown");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn freshness_probe_reads_without_writing_wal_files() {
+        use gather_step_storage::{MetadataStore, MetadataStoreDb};
+
+        let dir = std::env::temp_dir().join(format!(
+            "gather-step-freshness-readonly-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let workspace = dir.join("workspace");
+        fs::create_dir_all(workspace.join("repo_a")).expect("repo dir");
+
+        let registry_path = dir.join("registry.json");
+        let metadata_path = dir.join("metadata.sqlite");
+        let config = GatherStepConfig::from_yaml_str(
+            "repos:\n  - name: repo_a\n    path: repo_a\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .expect("config should parse");
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_from_config(&config, &workspace)
+            .expect("registry should register repo");
+
+        {
+            let metadata = MetadataStoreDb::open(&metadata_path).expect("metadata should open");
+            metadata
+                .set_last_commit_sha("repo_a", "aabbccddeeff00112233445566778899aabbccdd", 0)
+                .expect("record indexed sha");
+        }
+        let wal_path = PathBuf::from(format!("{}-wal", metadata_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", metadata_path.display()));
+        let _ = fs::remove_file(&wal_path);
+        let _ = fs::remove_file(&shm_path);
+
+        // The probe itself must open read-only — a failure here means the
+        // fallback full open would run and write to the store.
+        gather_step_storage::MetadataReadOnly::open(&metadata_path)
+            .expect("read-only metadata probe must open a cleanly closed database");
+
+        let db_bytes_before = fs::read(&metadata_path).expect("read db before probe");
+
+        let freshness = freshness_from_paths(&registry_path, &metadata_path);
+
+        assert_eq!(freshness.len(), 1);
+        assert_eq!(freshness[0].repo, "repo_a");
+        let db_bytes_after = fs::read(&metadata_path).expect("read db after probe");
+        assert_eq!(
+            db_bytes_before, db_bytes_after,
+            "the per-command freshness probe must not write to the metadata database"
+        );
+        // SQLite creates the -shm/-wal coordination files even for read-only
+        // WAL connections; what matters is that no log content was written.
+        let wal_len = fs::metadata(&wal_path).map_or(0, |meta| meta.len());
+        assert_eq!(
+            wal_len, 0,
+            "the per-command freshness probe must not write WAL frames"
+        );
+        let _ = shm_path; // existence is SQLite coordination, not a write
 
         let _ = fs::remove_dir_all(&dir);
     }
