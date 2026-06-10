@@ -5,6 +5,30 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v4.4.1 (2026-06-10)
+
+Release status: **prepared**.
+
+Patch on top of v4.4.0. Exposes the cross-repo dependency analysis as a first-class CLI subcommand (closing an MCP/CLI surface gap that broke agent wrappers shelling out with the MCP tool name), hardens the daemon proxy against old-daemon/new-CLI version skew, and refreshes Cargo, GitHub Actions, and website dependencies.
+
+### Added
+
+- **`cross-repo-deps` CLI subcommand** — exposes the `cross_repo_deps` analysis (previously MCP-only) on the CLI, with the MCP tool name `cross_repo_deps` kept as a visible alias so wrappers written against the MCP surface invoke it verbatim. Defaults to every configured repo; a positional repo or the global `--repo` flag narrows it, and an unknown repo fails loudly listing the configured repos. Daemon-proxied like the other read commands, and the JSON payload reuses the MCP tool response shape (`dependencies`, `evidence`, per-repo).
+
+### Fixed
+
+- **Daemon version-skew fallback** — a daemon built before a request variant existed answers with a protocol-level `invalid daemon request` failure; the proxy previously emitted that as the command result. It now treats the rejection as "daemon unavailable for this request" and falls back to local execution, preserving the canonical lock-contention error when the older daemon holds the graph lock.
+
+### Changed
+
+- Bumped Cargo dependencies: `chrono 0.4.44 → 0.4.45`, `ignore 0.4.25 → 0.4.26`, `regex 1.12.3 → 1.12.4`, `quick_cache 0.6.22 → 0.6.23`, `ratatui 0.30.0 → 0.30.1`, plus a transitive lockfile refresh.
+- Bumped GitHub Actions: `actions/checkout v6.0.2 → v6.0.3`, `crate-ci/typos v1.47.0 → v1.47.2`, `taiki-e/install-action v2.81.2 → v2.81.9` (tag and SHA pins).
+- Bumped website dependencies: `@astrojs/starlight 0.39.3 → 0.40.0`, `astro 6.4.4 → 6.4.5`, and the pinned Bun `1.3.12 → 1.3.14`.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps, and website package metadata to `4.4.1`.
+
 ## v4.4.0 (2026-06-05)
 
 Release status: **prepared**.
