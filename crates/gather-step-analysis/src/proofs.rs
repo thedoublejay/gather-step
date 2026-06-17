@@ -1018,6 +1018,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -1034,6 +1035,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 

@@ -756,6 +756,7 @@ mod tests {
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -782,6 +783,7 @@ mod tests {
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -803,6 +805,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -888,6 +891,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 

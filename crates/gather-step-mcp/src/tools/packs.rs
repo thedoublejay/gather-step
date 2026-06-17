@@ -5177,6 +5177,7 @@ mod tests {
                 kind,
                 NodeKind::SharedSymbol | NodeKind::Event | NodeKind::Topic
             ),
+            ai_role: None,
         }
     }
 
@@ -5269,6 +5270,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         for node in [
             &current_file,
@@ -5460,6 +5462,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         let filter = serde_json::to_string(&["{ workflow: { $type: 'object' } }"])
             .expect("filters should serialize");

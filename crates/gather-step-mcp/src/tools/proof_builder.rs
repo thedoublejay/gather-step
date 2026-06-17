@@ -353,6 +353,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -369,6 +370,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -1499,6 +1501,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         let event_id = event_node.id;
 
@@ -1688,6 +1691,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
 
         // Cross-repo consumer file.

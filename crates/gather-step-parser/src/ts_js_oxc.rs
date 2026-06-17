@@ -1889,6 +1889,7 @@ fn push_imports(
             visibility: Some(Visibility::Public),
             span: Some(stmt_span.clone()),
             is_virtual: true,
+            ai_role: None,
         });
     }
     state.push_raw_edge(EdgeData {
@@ -1919,6 +1920,7 @@ fn push_imports(
             visibility: None,
             span: Some(stmt_span.clone()),
             is_virtual: false,
+            ai_role: None,
         };
         state.push_raw_node(import_node.clone());
         state.push_raw_edge(EdgeData {

@@ -260,6 +260,7 @@ fn parse_file_core(
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         };
         let module_external_id = format!("module::{repo}::{file_path}");
         let module_node = NodeData {
@@ -277,6 +278,7 @@ fn parse_file_core(
             visibility: Some(Visibility::Public),
             span: file_node.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
 
         let mut state = ParseState::new(
@@ -442,6 +444,7 @@ fn parse_file_core(
             column_len: 0,
         }),
         is_virtual: false,
+        ai_role: None,
     };
     let module_external_id = format!("module::{repo}::{file_path}");
     let module_node = NodeData {
@@ -459,6 +462,7 @@ fn parse_file_core(
         visibility: Some(Visibility::Public),
         span: file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
 
     let mut state = ParseState::new(
@@ -901,6 +905,7 @@ impl<'a> ParseState<'a> {
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         };
         let module_external_id = format!("module::test::{path_str}");
         let module_node = NodeData {
@@ -918,6 +923,7 @@ impl<'a> ParseState<'a> {
             visibility: Some(Visibility::Public),
             span: file_node.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
         let path_aliases = Self::empty_aliases_for_test();
         Self::new(
@@ -1070,6 +1076,7 @@ impl<'a> ParseState<'a> {
             visibility,
             span,
             is_virtual: false,
+            ai_role: None,
         };
         self.nodes.push(node.clone());
         self.edges.push(EdgeData {
@@ -1168,6 +1175,7 @@ impl<'a> ParseState<'a> {
             visibility: None,
             span: decorator.span.clone().or_else(|| owner.span.clone()),
             is_virtual: false,
+            ai_role: None,
         };
         self.nodes.push(decorator_node.clone());
         self.edges.push(EdgeData {
@@ -1226,6 +1234,7 @@ impl<'a> ParseState<'a> {
                     visibility: Some(Visibility::Public),
                     span: Some(span_from(statement)),
                     is_virtual: true,
+                    ai_role: None,
                 });
             }
             self.edges.push(EdgeData {
@@ -1253,6 +1262,7 @@ impl<'a> ParseState<'a> {
                     visibility: None,
                     span: Some(span_from(statement)),
                     is_virtual: false,
+                    ai_role: None,
                 };
                 self.nodes.push(import_node.clone());
                 self.edges.push(EdgeData {
@@ -3656,6 +3666,7 @@ fn semantic_import_edge(
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
     let edge = EdgeData {
         source: parsed.file_node.id,
@@ -3702,6 +3713,7 @@ fn external_file_node_from_resolved_path(repo_root: &Path, resolved: &Path) -> O
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     })
 }
 
@@ -4005,6 +4017,7 @@ fn semantic_type_node_from_binding(
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     })
 }
 

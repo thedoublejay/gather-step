@@ -1909,6 +1909,7 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
     let repo_node = NodeData {
         id: node_id(repo, "__repo__", NodeKind::Repo, repo),
@@ -1922,6 +1923,7 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
 
     let extraction =
@@ -2370,6 +2372,7 @@ fn deployment_output_to_batch(
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
     let repo_node = NodeData {
         id: node_id(repo, "__repo__", NodeKind::Repo, repo),
@@ -2383,6 +2386,7 @@ fn deployment_output_to_batch(
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
 
     let mut nodes = vec![file_node.clone(), repo_node.clone()];
@@ -2398,6 +2402,7 @@ fn deployment_output_to_batch(
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }));
 
     let mut edges = vec![EdgeData {

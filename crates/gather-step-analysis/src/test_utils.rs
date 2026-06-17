@@ -52,6 +52,7 @@ pub(crate) fn file_node(repo: &str, file_path: &str) -> NodeData {
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     }
 }
 
@@ -74,5 +75,6 @@ pub(crate) fn symbol_node(repo: &str, file_path: &str, name: &str, ordinal: u16)
             column_len: 4,
         }),
         is_virtual: false,
+        ai_role: None,
     }
 }

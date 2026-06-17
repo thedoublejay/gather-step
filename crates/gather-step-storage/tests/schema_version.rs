@@ -73,7 +73,7 @@ fn metadata_store_rejects_future_user_version_with_mismatch_error() {
 }
 
 #[test]
-fn fresh_schema_stamps_graph_version_zero() {
+fn fresh_schema_stamps_current_graph_version() {
     let graph_path = temp_db_path("fresh-graph-schema");
     let _cleanup = Cleanup(graph_path.clone());
 
@@ -90,7 +90,8 @@ fn fresh_schema_stamps_graph_version_zero() {
         .expect("The graph schema version should read.")
         .expect("The graph schema version should be stamped.")
         .value();
-    assert_eq!(version, 0);
+    // Tracks GRAPH_SCHEMA_VERSION; bumped to 1 when NodeData gained `ai_role`.
+    assert_eq!(version, 1);
 }
 
 /// Open-time enforcement: a graph store stamped with a future schema

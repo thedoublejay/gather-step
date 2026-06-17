@@ -1291,6 +1291,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -1312,6 +1313,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -1619,6 +1621,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let owner = function_node("src/controller.ts", "createOrder");
 
@@ -2052,6 +2055,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let distractor = NodeData {
             id: node_id(
@@ -2070,6 +2074,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let owner = function_node("src/controller.ts", "createOrder");
 

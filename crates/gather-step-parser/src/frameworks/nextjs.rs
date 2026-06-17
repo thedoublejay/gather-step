@@ -45,6 +45,7 @@ fn add_route_node(parsed: &ParsedFile, file_path: &str, augmentation: &mut Nextj
         visibility: None,
         span: parsed.file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
     augmentation.nodes.push(route_node.clone());
 
@@ -94,6 +95,7 @@ fn add_layout_node(parsed: &ParsedFile, file_path: &str, augmentation: &mut Next
         visibility: None,
         span: parsed.file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
     augmentation.nodes.push(layout_node.clone());
     augmentation.edges.push(EdgeData {
@@ -128,6 +130,7 @@ fn add_middleware_node(
         visibility: None,
         span: parsed.file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
     augmentation.nodes.push(middleware_node.clone());
     augmentation.edges.push(EdgeData {
@@ -206,6 +209,7 @@ fn add_boundary_nodes(
             visibility: None,
             span: parsed.file_node.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
         augmentation.nodes.push(node.clone());
         augmentation.edges.push(EdgeData {
@@ -261,6 +265,7 @@ fn add_metadata_nodes(
         visibility: None,
         span: parsed.file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
     augmentation.nodes.push(node.clone());
     augmentation.edges.push(EdgeData {
@@ -297,6 +302,7 @@ fn add_server_action_nodes(
         visibility: None,
         span: parsed.file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
     augmentation.nodes.push(node.clone());
     augmentation.edges.push(EdgeData {

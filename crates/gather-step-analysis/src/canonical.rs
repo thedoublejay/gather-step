@@ -226,6 +226,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -258,6 +259,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         let stream = NodeData {
             id: gather_step_core::ref_node_id(NodeKind::Stream, "__stream__kinesis__orders"),
@@ -271,6 +273,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
 
         assert_eq!(
@@ -334,6 +337,7 @@ mod tests {
                 visibility: None,
                 span: None,
                 is_virtual: true,
+                ai_role: None,
             }
         }
 
@@ -381,6 +385,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -402,6 +407,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -418,6 +424,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 

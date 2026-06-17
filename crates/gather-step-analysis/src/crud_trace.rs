@@ -424,6 +424,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 

@@ -393,6 +393,7 @@ fn virtual_node_from_call(
         visibility: None,
         span: call.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 

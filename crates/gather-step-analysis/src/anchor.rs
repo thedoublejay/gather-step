@@ -285,6 +285,7 @@ mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 

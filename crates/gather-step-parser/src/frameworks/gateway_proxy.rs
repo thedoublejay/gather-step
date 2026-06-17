@@ -86,6 +86,7 @@ fn make_route_node(qn: &str, method: &str, path: &str, repo: &str, file_path: &s
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 

@@ -260,6 +260,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -276,6 +277,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -292,6 +294,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -508,6 +511,7 @@ mod tests {
                 visibility: None,
                 span: None,
                 is_virtual: false,
+                ai_role: None,
             };
             let consumer = NodeData {
                 id: node_id(
@@ -526,6 +530,7 @@ mod tests {
                 visibility: Some(Visibility::Public),
                 span: None,
                 is_virtual: false,
+                ai_role: None,
             };
             edges_vec.push(EdgeData {
                 source: consumer.id,

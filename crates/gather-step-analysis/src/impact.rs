@@ -836,6 +836,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: matches!(kind, NodeKind::SharedSymbol),
+            ai_role: None,
         }
     }
 

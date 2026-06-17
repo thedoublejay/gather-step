@@ -161,6 +161,9 @@ struct StoredNode {
     visibility: Option<gather_step_core::Visibility>,
     span: Option<gather_step_core::SourceSpan>,
     is_virtual: bool,
+    /// Optional AI role facet (v5). Stored inline — values are short and
+    /// `None` for nearly all nodes, so bitcode encodes the common case in ~1 byte.
+    ai_role: Option<String>,
 }
 
 struct NodeIndexTables<'txn> {
@@ -261,7 +264,7 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 /// v3.1 is a fresh generated-state release. There are no production users for
 /// older graph store layouts, so the physical schema baseline starts at zero
 /// and does not carry migration or upgrade branches.
-pub const GRAPH_SCHEMA_VERSION: u32 = 0;
+pub const GRAPH_SCHEMA_VERSION: u32 = 1;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -1897,6 +1900,7 @@ impl GraphStoreDb {
             visibility: canonical_node.visibility,
             span: canonical_node.span,
             is_virtual: canonical_node.is_virtual,
+            ai_role: canonical_node.ai_role,
         })
     }
 
@@ -1928,6 +1932,7 @@ impl GraphStoreDb {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: node.ai_role.clone(),
         }
     }
 
@@ -2046,6 +2051,7 @@ impl GraphStoreDb {
             visibility: node.visibility,
             span: node.span,
             is_virtual: node.is_virtual,
+            ai_role: node.ai_role,
         })
     }
 
@@ -2075,6 +2081,7 @@ impl GraphStoreDb {
             visibility: node.visibility,
             span: node.span,
             is_virtual: node.is_virtual,
+            ai_role: node.ai_role,
         })
     }
 
@@ -3816,6 +3823,7 @@ mod tests {
                 column_len: 8,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -3843,6 +3851,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -3864,6 +3873,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -3879,6 +3889,22 @@ mod tests {
             .expect("node should exist");
 
         assert_eq!(loaded, function);
+    }
+
+    #[test]
+    fn node_ai_role_facet_survives_round_trip() {
+        let store = test_store("ai-role-roundtrip");
+        let mut agent = node("service-a", "src/agent.py", NodeKind::Function, "build_graph", 0);
+        agent.ai_role = Some("agent".to_owned());
+
+        store.insert_node(&agent).expect("node should insert");
+        let loaded = store
+            .get_node(agent.id)
+            .expect("node fetch should succeed")
+            .expect("node should exist");
+
+        assert_eq!(loaded.ai_role.as_deref(), Some("agent"));
+        assert_eq!(loaded, agent);
     }
 
     #[test]
@@ -3923,7 +3949,7 @@ mod tests {
     }
 
     #[test]
-    fn open_stamps_fresh_schema_version_zero() {
+    fn open_stamps_current_graph_schema_version() {
         let graph_path = temp_db_path("fresh-graph-schema");
         let store = GraphStoreDb::open(&graph_path).expect("fresh graph db should open");
         drop(store);
@@ -3938,7 +3964,7 @@ mod tests {
             .expect("schema version should read")
             .expect("schema version should be stamped")
             .value();
-        assert_eq!(version, 0);
+        assert_eq!(version, super::GRAPH_SCHEMA_VERSION);
         drop(schema);
         drop(read_txn);
         drop(db);
@@ -4518,6 +4544,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
 
         let calls = edge(source.id, target.id, file.id);
@@ -4575,6 +4602,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         let author_new = NodeData {
             id: gather_step_core::ref_node_id(NodeKind::Author, "bob@example.com"),
@@ -4588,6 +4616,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
 
         let calls = edge(source.id, target.id, file.id);
@@ -5087,6 +5116,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 
@@ -5105,6 +5135,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 

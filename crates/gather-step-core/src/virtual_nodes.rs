@@ -228,6 +228,7 @@ pub fn virtual_node(
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 

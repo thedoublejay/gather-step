@@ -296,6 +296,7 @@ fn add_migration_collection_edge(
         visibility: None,
         span,
         is_virtual: true,
+        ai_role: None,
     };
     let metadata = EdgeMetadata {
         drift_kind: migration_filters_metadata(&migration.filter_literals),
@@ -517,6 +518,7 @@ fn virtual_node_from_call(
         visibility: None,
         span: call_site.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 

@@ -225,6 +225,7 @@ fn virtual_node(
         visibility: None,
         span: parsed.file_node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 
