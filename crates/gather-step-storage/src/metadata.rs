@@ -9,7 +9,8 @@ use std::{
 use rustc_hash::FxHashMap;
 
 use gather_step_core::{
-    NodeId, NodeKind, PathId, PayloadContractRecord, PayloadInferenceKind, PayloadSide,
+    AiContractInferenceKind, AiContractRecord, NodeId, NodeKind, PathId, PayloadContractRecord,
+    PayloadInferenceKind, PayloadSide,
 };
 use gather_step_parser::resolve::ResolutionInput;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -496,6 +497,31 @@ CREATE INDEX IF NOT EXISTS idx_payload_contracts_source_type_confidence
     ON payload_contracts(source_type_name, confidence DESC, repo, file_path);
 CREATE INDEX IF NOT EXISTS idx_payload_contracts_symbol_confidence
     ON payload_contracts(source_symbol_node_id, confidence DESC, repo, file_path);
+
+CREATE TABLE IF NOT EXISTS ai_contracts (
+    ai_contract_node_id      BLOB PRIMARY KEY,
+    contract_target_node_id  BLOB NOT NULL,
+    contract_target_kind     INTEGER NOT NULL,
+    contract_target_qn       TEXT,
+    repo                     TEXT NOT NULL,
+    file_path                BLOB NOT NULL,
+    source_symbol_node_id    BLOB NOT NULL,
+    line_start               INTEGER,
+    confidence               INTEGER NOT NULL,
+    inference_kind           TEXT NOT NULL,
+    source_type_name         TEXT,
+    contract_json            BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_contracts_target
+    ON ai_contracts(contract_target_node_id, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_contracts_target_qn
+    ON ai_contracts(contract_target_kind, contract_target_qn, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_contracts_symbol
+    ON ai_contracts(source_symbol_node_id);
+CREATE INDEX IF NOT EXISTS idx_ai_contracts_repo_file
+    ON ai_contracts(repo, file_path);
+CREATE INDEX IF NOT EXISTS idx_ai_contracts_source_type_confidence
+    ON ai_contracts(source_type_name, confidence DESC, repo, file_path);
 ";
 
 const UPSERT_FILE_STATE_SQL: &str = r"
@@ -752,6 +778,16 @@ pub trait MetadataStore {
         &self,
         query: PayloadContractQuery,
     ) -> Result<Vec<PayloadContractStoreRecord>, MetadataStoreError>;
+    fn replace_ai_contracts_for_files(
+        &self,
+        repo: &str,
+        file_paths: &[String],
+        records: &[AiContractStoreRecord],
+    ) -> Result<(), MetadataStoreError>;
+    fn ai_contracts_for_query(
+        &self,
+        query: AiContractQuery,
+    ) -> Result<Vec<AiContractStoreRecord>, MetadataStoreError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -909,6 +945,22 @@ pub struct PayloadContractQuery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiContractStoreRecord {
+    pub record: AiContractRecord,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiContractQuery {
+    pub contract_target_node_id: Option<NodeId>,
+    pub contract_target_kind: Option<NodeKind>,
+    pub contract_target_qualified_name: Option<String>,
+    pub min_confidence: Option<u16>,
+    pub repo: Option<String>,
+    pub source_symbol_node_id: Option<NodeId>,
+    pub source_type_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextPackRecord {
     pub pack_key: String,
     pub mode: String,
@@ -967,9 +1019,10 @@ pub enum MetadataStoreError {
 
 /// Current metadata schema version.
 ///
-/// v3.1 is a fresh generated-state release. `SQLite` metadata starts at user
-/// version zero and does not carry migration or upgrade branches.
-pub const METADATA_SCHEMA_VERSION: i64 = 0;
+/// Bumped to 1 in v5 when the `ai_contracts` table was added. `SQLite`
+/// metadata carries no migration branches; a version mismatch forces a clean
+/// reindex (the same contract as the graph store).
+pub const METADATA_SCHEMA_VERSION: i64 = 1;
 
 impl MetadataStoreDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetadataStoreError> {
@@ -1235,6 +1288,53 @@ impl MetadataStoreDb {
                     })?
                 },
                 source_type_name: row.get(11)?,
+                contract,
+            },
+        })
+    }
+
+    fn ai_record_from_row(
+        row: &rusqlite::Row<'_>,
+    ) -> Result<AiContractStoreRecord, rusqlite::Error> {
+        let ai_contract_node_id = decode_node_id_blob(&row.get::<_, Vec<u8>>(0)?)?;
+        let contract_target_node_id = decode_node_id_blob(&row.get::<_, Vec<u8>>(1)?)?;
+        let contract_target_kind = decode_node_kind(row.get::<_, i64>(2)?)?;
+        let source_symbol_node_id = decode_node_id_blob(&row.get::<_, Vec<u8>>(6)?)?;
+        let contract_json = row.get::<_, Vec<u8>>(11)?;
+        let contract = serde_json::from_slice(&contract_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                contract_json.len(),
+                rusqlite::types::Type::Blob,
+                Box::new(error),
+            )
+        })?;
+
+        let file_path_bytes: Vec<u8> = row.get(5)?;
+        Ok(AiContractStoreRecord {
+            record: AiContractRecord {
+                ai_contract_node_id,
+                contract_target_node_id,
+                contract_target_kind,
+                contract_target_qualified_name: row.get(3)?,
+                repo: row.get(4)?,
+                file_path: std::str::from_utf8(&file_path_bytes).map_or_else(
+                    |_| String::from_utf8_lossy(&file_path_bytes).into_owned(),
+                    String::from,
+                ),
+                source_symbol_node_id,
+                line_start: row.get(7)?,
+                confidence: row.get(8)?,
+                inference_kind: {
+                    let raw: String = row.get(9)?;
+                    AiContractInferenceKind::from_sql_str(&raw).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            raw.len(),
+                            rusqlite::types::Type::Text,
+                            format!("unknown ai inference kind: {raw}").into(),
+                        )
+                    })?
+                },
+                source_type_name: row.get(10)?,
                 contract,
             },
         })
@@ -1522,6 +1622,9 @@ impl MetadataStoreDb {
             let mut del_payload = tx.prepare_cached(
                 "DELETE FROM payload_contracts WHERE repo = ?1 AND file_path = ?2",
             )?;
+            let mut del_ai = tx.prepare_cached(
+                "DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2",
+            )?;
             let mut del_state = tx.prepare_cached(
                 "DELETE FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
             )?;
@@ -1535,6 +1638,7 @@ impl MetadataStoreDb {
                 del_unresolved.execute(params![repo, path_id])?;
                 del_unresolved_keys.execute(params![repo, path_id])?;
                 del_payload.execute(params![repo, path_id])?;
+                del_ai.execute(params![repo, path_id])?;
                 del_state.execute(params![repo, path_id])?;
                 del_deps_src.execute(params![repo, path_id])?;
                 del_deps_tgt.execute(params![repo, path_id])?;
@@ -1558,10 +1662,14 @@ impl MetadataStoreDb {
             let mut del_payload = tx.prepare_cached(
                 "DELETE FROM payload_contracts WHERE repo = ?1 AND file_path = ?2",
             )?;
+            let mut del_ai = tx.prepare_cached(
+                "DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2",
+            )?;
             for path_id in file_path_ids {
                 del_unresolved.execute(params![repo, path_id])?;
                 del_unresolved_keys.execute(params![repo, path_id])?;
                 del_payload.execute(params![repo, path_id])?;
+                del_ai.execute(params![repo, path_id])?;
             }
             Ok(())
         })
@@ -3329,6 +3437,129 @@ impl MetadataStore for MetadataStoreDb {
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    fn replace_ai_contracts_for_files(
+        &self,
+        repo: &str,
+        file_paths: &[String],
+        records: &[AiContractStoreRecord],
+    ) -> Result<(), MetadataStoreError> {
+        self.with_write_txn(|tx| {
+            for file_path in file_paths {
+                tx.execute(
+                    "DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2",
+                    params![repo, file_path.as_bytes()],
+                )?;
+            }
+
+            for record in records {
+                let contract_json = serde_json::to_vec(&record.record.contract)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                let inference_kind = record.record.inference_kind.as_sql_str();
+                tx.execute(
+                    r"
+                    INSERT INTO ai_contracts(
+                        ai_contract_node_id,
+                        contract_target_node_id,
+                        contract_target_kind,
+                        contract_target_qn,
+                        repo,
+                        file_path,
+                        source_symbol_node_id,
+                        line_start,
+                        confidence,
+                        inference_kind,
+                        source_type_name,
+                        contract_json
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    ",
+                    params![
+                        record.record.ai_contract_node_id.as_bytes().to_vec(),
+                        record.record.contract_target_node_id.as_bytes().to_vec(),
+                        record.record.contract_target_kind as i64,
+                        record.record.contract_target_qualified_name,
+                        record.record.repo,
+                        record.record.file_path.as_bytes(),
+                        record.record.source_symbol_node_id.as_bytes().to_vec(),
+                        record.record.line_start,
+                        record.record.confidence,
+                        inference_kind,
+                        record.record.source_type_name,
+                        contract_json,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn ai_contracts_for_query(
+        &self,
+        query: AiContractQuery,
+    ) -> Result<Vec<AiContractStoreRecord>, MetadataStoreError> {
+        let connection = self.read_connection()?;
+        let mut sql = String::from(
+            r"
+            SELECT
+                ai_contract_node_id,
+                contract_target_node_id,
+                contract_target_kind,
+                contract_target_qn,
+                repo,
+                file_path,
+                source_symbol_node_id,
+                line_start,
+                confidence,
+                inference_kind,
+                source_type_name,
+                contract_json
+            FROM ai_contracts
+            WHERE 1 = 1
+            ",
+        );
+        let mut params_buf: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(target) = query.contract_target_node_id {
+            sql.push_str(" AND contract_target_node_id = ? ");
+            params_buf.push(rusqlite::types::Value::Blob(target.as_bytes().to_vec()));
+        }
+        if let Some(target_kind) = query.contract_target_kind {
+            sql.push_str(" AND contract_target_kind = ? ");
+            params_buf.push(rusqlite::types::Value::Integer(i64::from(
+                target_kind as u8,
+            )));
+        }
+        if let Some(target_qn) = query.contract_target_qualified_name {
+            sql.push_str(" AND contract_target_qn = ? ");
+            params_buf.push(rusqlite::types::Value::Text(target_qn));
+        }
+        if let Some(source_symbol_id) = query.source_symbol_node_id {
+            sql.push_str(" AND source_symbol_node_id = ? ");
+            params_buf.push(rusqlite::types::Value::Blob(
+                source_symbol_id.as_bytes().to_vec(),
+            ));
+        }
+        if let Some(repo) = query.repo {
+            sql.push_str(" AND repo = ? ");
+            params_buf.push(rusqlite::types::Value::Text(repo));
+        }
+        if let Some(min_confidence) = query.min_confidence {
+            sql.push_str(" AND confidence >= ? ");
+            params_buf.push(rusqlite::types::Value::Integer(i64::from(min_confidence)));
+        }
+        if let Some(source_type_name) = query.source_type_name {
+            sql.push_str(" AND source_type_name = ? ");
+            params_buf.push(rusqlite::types::Value::Text(source_type_name));
+        }
+        sql.push_str(" ORDER BY confidence DESC, repo ASC, file_path ASC");
+
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(params_buf),
+            Self::ai_record_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 fn decode_node_id_blob(bytes: &[u8]) -> Result<NodeId, rusqlite::Error> {
@@ -3418,20 +3649,22 @@ mod tests {
     use rusqlite::params;
 
     use gather_step_core::{
+        AiContractDoc, AiContractField, AiContractInferenceKind, AiContractRecord,
         PayloadContractDoc, PayloadContractRecord, PayloadField, PayloadInferenceKind, PayloadSide,
         ref_node_id,
     };
 
     use super::{
-        CONTEXT_PACK_RETENTION_SECONDS, CoChangePairRecord, CommitFileChangeKind,
-        CommitFileDeltaRecord, CommitRecord, ContextPackRecord, FileAnalytics, FileIndexState,
-        MetadataStore, MetadataStoreDb, MetadataStoreError, PayloadContractQuery,
+        AiContractQuery, AiContractStoreRecord, CONTEXT_PACK_RETENTION_SECONDS, CoChangePairRecord,
+        CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord, ContextPackRecord, FileAnalytics,
+        FileIndexState, MetadataStore, MetadataStoreDb, MetadataStoreError, PayloadContractQuery,
         PayloadContractStoreRecord, SQLITE_PAGE_SIZE_BYTES,
     };
 
     static NEXT_TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
 
     const EXPECTED_TABLES: &[&str] = &[
+        "ai_contracts",
         "answer_cache",
         "authors",
         "co_change_pairs",
@@ -4143,6 +4376,72 @@ mod tests {
             ..PayloadContractQuery::default()
         })?;
         assert_eq!(loaded, vec![record]);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_contracts_round_trip_through_metadata_store() -> Result<(), MetadataStoreError> {
+        let (_db_path, store) = open_store("ai-contracts")?;
+        let target_id = ref_node_id(
+            gather_step_core::NodeKind::LlmModel,
+            "__llm__openai__gpt-4.1-mini",
+        );
+        let symbol_id =
+            ref_node_id(gather_step_core::NodeKind::Function, "symbol::compareAlerts");
+        let contract_id =
+            ref_node_id(gather_step_core::NodeKind::AiContract, "__ai_contract__sample");
+        let record = AiContractStoreRecord {
+            record: AiContractRecord {
+                ai_contract_node_id: contract_id,
+                contract_target_node_id: target_id,
+                contract_target_kind: gather_step_core::NodeKind::LlmModel,
+                contract_target_qualified_name: Some("__llm__openai__gpt-4.1-mini".to_owned()),
+                repo: "chronology".to_owned(),
+                file_path: "src/agent.ts".to_owned(),
+                source_symbol_node_id: symbol_id,
+                line_start: Some(42),
+                inference_kind: AiContractInferenceKind::LiteralSchema,
+                confidence: 850,
+                source_type_name: Some("AlertComparisonOutputSchema".to_owned()),
+                contract: AiContractDoc {
+                    provider: Some("openai".to_owned()),
+                    model: Some("gpt-4.1-mini".to_owned()),
+                    temperature: Some("0".to_owned()),
+                    structured: true,
+                    schema_format: "zod".to_owned(),
+                    inference_kind: AiContractInferenceKind::LiteralSchema,
+                    confidence: 850,
+                    fields: vec![AiContractField {
+                        name: "is_related".to_owned(),
+                        type_name: "boolean".to_owned(),
+                        optional: false,
+                        confidence: 900,
+                    }],
+                    prompt_keys: vec!["alert-chronology".to_owned()],
+                    source_type_name: Some("AlertComparisonOutputSchema".to_owned()),
+                },
+            },
+        };
+
+        store.replace_ai_contracts_for_files(
+            "chronology",
+            &["src/agent.ts".to_owned()],
+            std::slice::from_ref(&record),
+        )?;
+
+        let loaded = store.ai_contracts_for_query(AiContractQuery {
+            contract_target_node_id: Some(target_id),
+            ..AiContractQuery::default()
+        })?;
+        assert_eq!(loaded, vec![record]);
+
+        // Re-running the same file replaces rather than accumulating.
+        store.replace_ai_contracts_for_files("chronology", &["src/agent.ts".to_owned()], &[])?;
+        let after = store.ai_contracts_for_query(AiContractQuery {
+            contract_target_node_id: Some(target_id),
+            ..AiContractQuery::default()
+        })?;
+        assert!(after.is_empty());
         Ok(())
     }
 

@@ -39,7 +39,7 @@ impl Drop for Cleanup {
 }
 
 #[test]
-fn fresh_schema_stamps_metadata_user_version_zero() {
+fn fresh_schema_stamps_current_metadata_user_version() {
     let fresh_path = temp_db_path("fresh-schema-version");
     let _cleanup = Cleanup(fresh_path.clone());
 
@@ -49,7 +49,8 @@ fn fresh_schema_stamps_metadata_user_version_zero() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("The user_version pragma should read.");
-    assert_eq!(version, 0);
+    // Tracks METADATA_SCHEMA_VERSION; bumped to 1 when the ai_contracts table landed.
+    assert_eq!(version, 1);
 }
 
 #[test]
