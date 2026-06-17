@@ -325,6 +325,13 @@ impl EdgeKind {
                 | Self::BuiltBy
                 | Self::UsesBroker
                 | Self::UsesDatabase
+                // AI cross-repo convergence edges (same class as ConsumesApiFrom /
+                // UsesEventFrom). Intra-service AI edges (GraphTransitionsTo,
+                // InvokesLlm, BindsTool, …) are deliberately NOT bridges.
+                | Self::FetchesPromptFrom
+                | Self::Embeds
+                | Self::CallsMcpTool
+                | Self::RetrievesFrom
         )
     }
 
@@ -381,6 +388,20 @@ impl EdgeKind {
             Self::BuiltBy,
             Self::UsesBroker,
             Self::UsesDatabase,
+            Self::DefinesAgentNode,
+            Self::GraphTransitionsTo,
+            Self::ComposesAgent,
+            Self::SpawnsSubagent,
+            Self::BindsTool,
+            Self::InvokesLlm,
+            Self::ProducesAiContract,
+            Self::UsesPrompt,
+            Self::FetchesPromptFrom,
+            Self::RetrievesFrom,
+            Self::Embeds,
+            Self::IndexesVector,
+            Self::CallsMcpTool,
+            Self::ExposesMcpTool,
         ]
     }
 }
@@ -697,6 +718,48 @@ mod tests {
             assert_eq!(decoded, kind);
             assert!(NodeKind::all().contains(&kind), "{kind:?} missing from all()");
         }
+    }
+
+    #[test]
+    fn edge_kind_all_is_in_sync_with_try_from() {
+        // Guards the class of bug where a new variant is added to the enum +
+        // TryFrom but forgotten in all() (which drives count_edges_by_kind and
+        // fixture validation). all() must list exactly the decodable discriminants.
+        let mut listed: Vec<u8> = EdgeKind::all().iter().map(|k| k.as_u8()).collect();
+        listed.sort_unstable();
+        let mut decodable: Vec<u8> = (0..=u8::MAX)
+            .filter(|byte| EdgeKind::try_from(*byte).is_ok())
+            .collect();
+        decodable.sort_unstable();
+        assert_eq!(listed, decodable, "EdgeKind::all() is out of sync with TryFrom");
+    }
+
+    #[test]
+    fn node_kind_all_is_in_sync_with_try_from() {
+        let mut listed: Vec<u8> = NodeKind::all().iter().map(|k| k.as_u8()).collect();
+        listed.sort_unstable();
+        let mut decodable: Vec<u8> = (0..=u8::MAX)
+            .filter(|byte| NodeKind::try_from(*byte).is_ok())
+            .collect();
+        decodable.sort_unstable();
+        assert_eq!(listed, decodable, "NodeKind::all() is out of sync with TryFrom");
+    }
+
+    #[test]
+    fn ai_cross_repo_edges_are_semantic_bridges() {
+        // The AI cross-repo convergence edges are structurally the same class as
+        // ConsumesApiFrom/UsesEventFrom and must be classified as bridges.
+        for kind in [
+            EdgeKind::FetchesPromptFrom,
+            EdgeKind::Embeds,
+            EdgeKind::CallsMcpTool,
+            EdgeKind::RetrievesFrom,
+        ] {
+            assert!(kind.is_semantic_bridge(), "{kind:?} should be a semantic bridge");
+        }
+        // Intra-service AI edges are NOT cross-repo bridges.
+        assert!(!EdgeKind::GraphTransitionsTo.is_semantic_bridge());
+        assert!(!EdgeKind::InvokesLlm.is_semantic_bridge());
     }
 
     #[test]
