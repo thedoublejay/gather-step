@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod ai_contract;
 pub mod config;
 pub mod graph;
 pub mod high_contract;
@@ -20,6 +21,10 @@ pub use graph::{
     Visibility, node_id, ref_node_id,
 };
 pub use path_id::{PathId, normalize_path_separators};
+pub use ai_contract::{
+    AiConfidenceBand, AiContractDoc, AiContractField, AiContractInferenceKind, AiContractRecord,
+    ai_confidence_band, ai_contract_external_id, ai_contract_node_id,
+};
 pub use payload::{
     DriftKind, PayloadConfidenceBand, PayloadContractDoc, PayloadContractRecord, PayloadField,
     PayloadInferenceKind, PayloadSide, payload_contract_external_id, payload_contract_node_id,
