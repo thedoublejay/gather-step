@@ -53,6 +53,16 @@ pub enum NodeKind {
     WorkflowJob = 30,
     Broker = 31,
     Database = 32,
+    // AI-flow kinds (v5). Tier-1 only: constructs that back a cross-repo
+    // convergence virtual node or are a first-class rendering/contract target.
+    // LlmCall/Tool/Agent/AgentNode/Embedder/McpClient are `ai_role` facets, not kinds.
+    AgentGraph = 33,
+    Prompt = 34,
+    AiContract = 35,
+    VectorIndex = 36,
+    McpServer = 37,
+    McpTool = 38,
+    LlmModel = 39,
 }
 
 #[derive(
@@ -129,6 +139,37 @@ pub enum EdgeKind {
     BuiltBy = 103,
     UsesBroker = 104,
     UsesDatabase = 105,
+    // AI-flow edges (v5). New range 110+ (existing discriminants are sparse,
+    // grouped by semantic range; 110+ is the next free range, not "next int").
+    /// An agent graph defines an internal node (faceted function).
+    DefinesAgentNode = 110,
+    /// A graph node transitions to another node. Conditional-vs-fixed routing
+    /// is carried in edge metadata via a typed accessor, not `drift_kind`.
+    GraphTransitionsTo = 111,
+    /// An agent graph / agent composes another agent.
+    ComposesAgent = 112,
+    /// An agent spawns a sub-agent at runtime (e.g. `spawn_subagent`).
+    SpawnsSubagent = 113,
+    /// An agent or graph node binds a tool the LLM may call.
+    BindsTool = 114,
+    /// A call site invokes an LLM; target is the converged `LlmModel` node.
+    InvokesLlm = 115,
+    /// A call site produces a structured-output `AiContract`.
+    ProducesAiContract = 116,
+    /// A symbol uses a managed `Prompt` artifact.
+    UsesPrompt = 117,
+    /// Cross-repo: a consumer fetches a prompt from prompt-manager by `keyName`.
+    FetchesPromptFrom = 118,
+    /// A tool or graph node retrieves from a `VectorIndex`.
+    RetrievesFrom = 119,
+    /// A symbol embeds text via an embedding endpoint (cross-repo to vectorizer).
+    Embeds = 120,
+    /// A collection is indexed into a `VectorIndex`.
+    IndexesVector = 121,
+    /// An MCP client calls a tool on the converged `McpTool` node.
+    CallsMcpTool = 122,
+    /// An MCP server exposes a tool (converged `McpTool` node).
+    ExposesMcpTool = 123,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -170,7 +211,14 @@ impl NodeKind {
             | Self::ConfigMap
             | Self::WorkflowJob
             | Self::Broker
-            | Self::Database => true,
+            | Self::Database
+            | Self::AgentGraph
+            | Self::Prompt
+            | Self::AiContract
+            | Self::VectorIndex
+            | Self::McpServer
+            | Self::McpTool
+            | Self::LlmModel => true,
             Self::Import
             | Self::Decorator
             | Self::Commit
@@ -218,6 +266,13 @@ impl NodeKind {
             Self::WorkflowJob,
             Self::Broker,
             Self::Database,
+            Self::AgentGraph,
+            Self::Prompt,
+            Self::AiContract,
+            Self::VectorIndex,
+            Self::McpServer,
+            Self::McpTool,
+            Self::LlmModel,
         ]
     }
 }
@@ -368,6 +423,13 @@ impl TryFrom<u8> for NodeKind {
             30 => Ok(Self::WorkflowJob),
             31 => Ok(Self::Broker),
             32 => Ok(Self::Database),
+            33 => Ok(Self::AgentGraph),
+            34 => Ok(Self::Prompt),
+            35 => Ok(Self::AiContract),
+            36 => Ok(Self::VectorIndex),
+            37 => Ok(Self::McpServer),
+            38 => Ok(Self::McpTool),
+            39 => Ok(Self::LlmModel),
             _ => Err(DiscriminantError {
                 kind: "NodeKind",
                 value,
@@ -432,6 +494,20 @@ impl TryFrom<u8> for EdgeKind {
             103 => Ok(Self::BuiltBy),
             104 => Ok(Self::UsesBroker),
             105 => Ok(Self::UsesDatabase),
+            110 => Ok(Self::DefinesAgentNode),
+            111 => Ok(Self::GraphTransitionsTo),
+            112 => Ok(Self::ComposesAgent),
+            113 => Ok(Self::SpawnsSubagent),
+            114 => Ok(Self::BindsTool),
+            115 => Ok(Self::InvokesLlm),
+            116 => Ok(Self::ProducesAiContract),
+            117 => Ok(Self::UsesPrompt),
+            118 => Ok(Self::FetchesPromptFrom),
+            119 => Ok(Self::RetrievesFrom),
+            120 => Ok(Self::Embeds),
+            121 => Ok(Self::IndexesVector),
+            122 => Ok(Self::CallsMcpTool),
+            123 => Ok(Self::ExposesMcpTool),
             _ => Err(DiscriminantError {
                 kind: "EdgeKind",
                 value,
@@ -606,6 +682,48 @@ mod tests {
     }
 
     #[test]
+    fn new_ai_node_kinds_round_trip_and_are_listed() {
+        for kind in [
+            NodeKind::AgentGraph,
+            NodeKind::Prompt,
+            NodeKind::AiContract,
+            NodeKind::VectorIndex,
+            NodeKind::McpServer,
+            NodeKind::McpTool,
+            NodeKind::LlmModel,
+        ] {
+            let decoded = NodeKind::try_from(kind.as_u8())
+                .unwrap_or_else(|_| panic!("{kind:?} should decode"));
+            assert_eq!(decoded, kind);
+            assert!(NodeKind::all().contains(&kind), "{kind:?} missing from all()");
+        }
+    }
+
+    #[test]
+    fn new_ai_edge_kinds_round_trip_through_u8() {
+        for kind in [
+            EdgeKind::DefinesAgentNode,
+            EdgeKind::GraphTransitionsTo,
+            EdgeKind::ComposesAgent,
+            EdgeKind::SpawnsSubagent,
+            EdgeKind::BindsTool,
+            EdgeKind::InvokesLlm,
+            EdgeKind::ProducesAiContract,
+            EdgeKind::UsesPrompt,
+            EdgeKind::FetchesPromptFrom,
+            EdgeKind::RetrievesFrom,
+            EdgeKind::Embeds,
+            EdgeKind::IndexesVector,
+            EdgeKind::CallsMcpTool,
+            EdgeKind::ExposesMcpTool,
+        ] {
+            let decoded = EdgeKind::try_from(kind.as_u8())
+                .unwrap_or_else(|_| panic!("{kind:?} should decode"));
+            assert_eq!(decoded, kind);
+        }
+    }
+
+    #[test]
     fn search_indexable_policy_excludes_structural_and_temporal_kinds() {
         assert!(NodeKind::Function.is_search_indexable());
         assert!(NodeKind::Event.is_search_indexable());
@@ -621,7 +739,7 @@ mod tests {
 
     #[test]
     fn node_kind_invalid_u8_rejects() {
-        for value in [33_u8, 50, 100, 255] {
+        for value in [40_u8, 50, 100, 255] {
             assert!(NodeKind::try_from(value).is_err(), "{value} should reject");
         }
     }
