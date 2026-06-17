@@ -32,9 +32,10 @@ pub use resolver::{ResolverStrategy, strategy_weight};
 pub use schema::{EdgeKind, NodeKind, PlanningProof, ProofHop, ProofKind, proof_sort_key};
 pub use virtual_nodes::{
     VIRTUAL_NODE_REPO, VirtualNodeKind, broker_qn, canonical_route_path, canonical_topology_part,
-    canonical_topology_part_or, config_map_qn, database_qn, deployment_qn, env_var_qn,
-    parse_shared_symbol_qn, queue_qn, route_qn, secret_qn, shared_package_root, shared_symbol_qn,
-    shared_symbol_qn_unversioned, topic_qn, virtual_node, virtual_node_id,
+    canonical_topology_part_or, config_map_qn, database_qn, deployment_qn, env_var_qn, llm_model_qn,
+    mcp_tool_qn, parse_shared_symbol_qn, prompt_qn, queue_qn, route_qn, secret_qn,
+    shared_package_root, shared_symbol_qn, shared_symbol_qn_unversioned, topic_qn, vector_index_qn,
+    virtual_node, virtual_node_id,
 };
 pub use workspace::{
     WorkspaceIndexDelegate, WorkspaceIndexError, WorkspaceRepoResult, WorkspaceStats,
