@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod test_utils;
 
+pub mod agent_topology;
 pub mod anchor;
 pub mod canonical;
 pub mod contract_drift;
@@ -27,6 +28,9 @@ pub mod shared_component_usage;
 pub mod shared_contract;
 pub mod transport;
 
+pub use agent_topology::{
+    AgentTopologyError, AgentTrace, AgentTraceEdge, AgentTraceNode, trace_agent,
+};
 pub use canonical::{Canonical, TopicKind, canonical_for_node};
 pub use contract_drift::{
     BreakingChangeCandidate, ContractDrift, ContractDriftAnalysisError, DriftField, PayloadSchema,
