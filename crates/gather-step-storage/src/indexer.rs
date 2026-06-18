@@ -2812,6 +2812,69 @@ export async function compareItems(a: string, b: string) {
     }
 
     #[test]
+    fn indexes_typescript_ai_graph_constructs_into_graph_store() {
+        let repo_root = TestDir::new("ai-graph-repo");
+        let storage_root = TestDir::new("ai-graph-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("package.json"),
+            r#"{ "name": "ai-service", "dependencies": { "@langchain/langgraph": "^0.2.0" } }"#,
+        )
+        .expect("package.json fixture should write");
+        fs::write(
+            repo_root.path().join("src/pipeline.ts"),
+            r#"
+import { StateGraph } from "@langchain/langgraph";
+import { DynamicStructuredTool } from "@langchain/core/tools";
+import { AdminPrompt } from "@org/prompts";
+
+export function build(state: any, collection: any, vector: number[]) {
+    const searchTool = new DynamicStructuredTool({ name: "search_docs", func: async () => "" });
+    const prompt = new AdminPrompt({ keyName: "doc.classify" });
+    collection.aggregate([{ $vectorSearch: { index: "embedding_index", path: "v", queryVector: vector } }]);
+    const graph = new StateGraph(state).addNode("intent", a).addNode("respond", b);
+    graph.addEdge("intent", "respond");
+    return { searchTool, prompt, graph };
+}
+"#,
+        )
+        .expect("pipeline fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("ai-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let graph = indexer.storage().graph();
+        for (kind, external_id) in [
+            (NodeKind::AgentGraph, "__agent_graph__src/pipeline.ts"),
+            (
+                NodeKind::VectorIndex,
+                "__vindex__embedding_index__vector_index",
+            ),
+            (NodeKind::Prompt, "__prompt__managed__doc.classify"),
+        ] {
+            let nodes = graph.nodes_by_type(kind).expect("nodes should load");
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| node.external_id.as_deref() == Some(external_id)),
+                "{kind:?} node {external_id} should be persisted via index_repo"
+            );
+        }
+        let function_nodes = graph
+            .nodes_by_type(NodeKind::Function)
+            .expect("function nodes should load");
+        assert!(
+            function_nodes
+                .iter()
+                .any(|node| node.ai_role.as_deref() == Some("agent_node")),
+            "agent_node-faceted node should be persisted"
+        );
+    }
+
+    #[test]
     fn indexes_deployment_topology_artifacts() {
         let repo_root = TestDir::new("deployment-topology-repo");
         let storage_root = TestDir::new("deployment-topology-storage");

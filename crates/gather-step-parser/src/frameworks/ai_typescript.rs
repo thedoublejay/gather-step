@@ -14,7 +14,7 @@ use gather_step_core::{
     ref_node_id,
 };
 
-use crate::frameworks::nestjs::extract_object_key_value;
+use crate::frameworks::nestjs::{extract_call_argument, extract_object_key_value};
 use crate::tree_sitter::{EnrichedCallSite, ParsedFile};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -33,8 +33,269 @@ pub fn augment(parsed: &ParsedFile) -> AiTypescriptAugmentation {
         if let Some(schema) = structured_output_schema(call_site) {
             emit_ai_contract(parsed, call_site, &schema, &mut augmentation);
         }
+        emit_agent_graph(parsed, call_site, &mut augmentation);
+        emit_tool(parsed, call_site, &mut augmentation);
+        emit_vector_search(parsed, call_site, &mut augmentation);
+        emit_managed_prompt(parsed, call_site, &mut augmentation);
     }
     augmentation
+}
+
+/// `new AdminPrompt({ keyName, … })` / `new ContextualPrompt({ keyName, … })` →
+/// a `Prompt` node keyed by `keyName` + a `UsesPrompt` edge from the enclosing
+/// symbol. `AdminPrompt`/`ContextualPrompt` are managed-prompt types; the
+/// `keyName` field is the cross-repo prompt identity (the source segment of
+/// `prompt_qn` is aligned with the consumer side in the Phase 3 resolver).
+fn emit_managed_prompt(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    if !matches!(
+        call_site.callee_name.as_str(),
+        "AdminPrompt" | "ContextualPrompt"
+    ) {
+        return;
+    }
+    let Some(key_name) = call_site
+        .raw_arguments
+        .as_deref()
+        .and_then(|raw| extract_call_argument(raw, 0))
+        .and_then(|options| extract_object_key_value(options, "keyName"))
+        .and_then(|value| string_literal(value.trim()))
+    else {
+        return;
+    };
+    let qualified_name = gather_step_core::prompt_qn("managed", &key_name);
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::Prompt,
+        &qualified_name,
+        &key_name,
+        None,
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::UsesPrompt,
+    ));
+}
+
+/// `MongoDB` Atlas `$vectorSearch` aggregation stage → a converged `VectorIndex`
+/// node (keyed by the Atlas search-index name) + a `RetrievesFrom` edge from the
+/// querying symbol. The index name is the first literal `index` value inside the
+/// `$vectorSearch` stage.
+fn emit_vector_search(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    if call_site.callee_name != "aggregate" {
+        return;
+    }
+    let Some(raw) = call_site.raw_arguments.as_deref() else {
+        return;
+    };
+    let Some(index) = vector_search_index(raw) else {
+        return;
+    };
+    let qualified_name = gather_step_core::vector_index_qn(&index, "vector_index");
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::VectorIndex,
+        &qualified_name,
+        &index,
+        None,
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::RetrievesFrom,
+    ));
+}
+
+/// First literal `index` value inside a `$vectorSearch` aggregation stage.
+fn vector_search_index(raw: &str) -> Option<String> {
+    let stage = raw.get(raw.find("$vectorSearch")?..)?;
+    let after_key = stage.get(stage.find("index")? + "index".len()..)?;
+    let value = after_key.trim_start().strip_prefix(':')?.trim_start();
+    string_literal(leading_quoted_token(value))
+}
+
+/// The leading quoted-string token of `s` (`"…"`/`'…'`), or `s` unchanged.
+fn leading_quoted_token(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let Some(&quote) = bytes.first() else {
+        return s;
+    };
+    if (quote == b'"' || quote == b'\'')
+        && let Some(end) = s[1..].find(quote as char)
+    {
+        return &s[..end + 2];
+    }
+    s
+}
+
+fn tool_qn(file_path: &str, name: &str) -> String {
+    format!("__tool__{file_path}__{name}")
+}
+
+/// `new DynamicStructuredTool({ name, … })` / `tool(fn, { name, … })` → a faceted
+/// `Tool` node (`ai_role="tool"`) keyed by tool name + a `BindsTool` edge from
+/// the enclosing symbol. Requires a literal `name`.
+fn emit_tool(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    let options_arg = match call_site.callee_name.as_str() {
+        "DynamicStructuredTool" => 0,
+        "tool" => 1,
+        _ => return,
+    };
+    let Some(raw) = call_site.raw_arguments.as_deref() else {
+        return;
+    };
+    let Some(name) = extract_call_argument(raw, options_arg)
+        .and_then(|options| extract_object_key_value(options, "name"))
+        .and_then(|value| string_literal(value.trim()))
+    else {
+        return;
+    };
+    let qualified_name = tool_qn(parsed.file_node.file_path.as_str(), &name);
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::Function,
+        &qualified_name,
+        &name,
+        Some("tool"),
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::BindsTool,
+    ));
+}
+
+fn agent_graph_qn(file_path: &str) -> String {
+    format!("__agent_graph__{file_path}")
+}
+
+fn agent_node_qn(file_path: &str, name: &str) -> String {
+    format!("__agent_node__{file_path}__{name}")
+}
+
+/// `LangGraph` `StateGraph` wiring → `AgentGraph` + faceted `AgentNode`s +
+/// `GraphTransitionsTo`. Node identity is scoped by file (one graph per file),
+/// since associating `.addNode`/`.addEdge` with a specific graph instance needs
+/// receiver tracking (R2); only string-literal node names/edges are captured.
+fn emit_agent_graph(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    let file_path = parsed.file_node.file_path.as_str();
+    match call_site.callee_name.as_str() {
+        "StateGraph" => {
+            let qualified_name = agent_graph_qn(file_path);
+            augmentation.nodes.push(virtual_ai_node(
+                parsed,
+                call_site,
+                NodeKind::AgentGraph,
+                &qualified_name,
+                "graph",
+                None,
+            ));
+        }
+        "addNode" => {
+            let Some(name) = call_site.literal_argument.as_deref() else {
+                return;
+            };
+            if name.is_empty() {
+                return;
+            }
+            let node_qn = agent_node_qn(file_path, name);
+            let node = virtual_ai_node(
+                parsed,
+                call_site,
+                NodeKind::Function,
+                &node_qn,
+                name,
+                Some("agent_node"),
+            );
+            let node_id = node.id;
+            augmentation.nodes.push(node);
+            augmentation.edges.push(ai_edge(
+                parsed,
+                ref_node_id(NodeKind::AgentGraph, &agent_graph_qn(file_path)),
+                node_id,
+                EdgeKind::DefinesAgentNode,
+            ));
+        }
+        "addEdge" => {
+            let Some(raw) = call_site.raw_arguments.as_deref() else {
+                return;
+            };
+            let from = extract_call_argument(raw, 0).and_then(|arg| string_literal(arg.trim()));
+            let to = extract_call_argument(raw, 1).and_then(|arg| string_literal(arg.trim()));
+            if let (Some(from), Some(to)) = (from, to) {
+                augmentation.edges.push(ai_edge(
+                    parsed,
+                    ref_node_id(NodeKind::Function, &agent_node_qn(file_path, &from)),
+                    ref_node_id(NodeKind::Function, &agent_node_qn(file_path, &to)),
+                    EdgeKind::GraphTransitionsTo,
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn virtual_ai_node(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    kind: NodeKind,
+    qualified_name: &str,
+    name: &str,
+    ai_role: Option<&str>,
+) -> NodeData {
+    NodeData {
+        id: ref_node_id(kind, qualified_name),
+        kind,
+        repo: parsed.file_node.repo.clone(),
+        file_path: parsed.file_node.file_path.clone(),
+        name: name.to_owned(),
+        qualified_name: Some(qualified_name.to_owned()),
+        external_id: Some(qualified_name.to_owned()),
+        signature: None,
+        visibility: None,
+        span: call_site.span.clone(),
+        is_virtual: true,
+        ai_role: ai_role.map(str::to_owned),
+    }
+}
+
+fn ai_edge(parsed: &ParsedFile, source: NodeId, target: NodeId, kind: EdgeKind) -> EdgeData {
+    EdgeData {
+        source,
+        target,
+        kind,
+        metadata: EdgeMetadata::default(),
+        owner_file: parsed.file_node.id,
+        is_cross_file: false,
+    }
 }
 
 /// Schema label of a `…withStructuredOutput(<schema>)` call: the referenced
@@ -397,6 +658,176 @@ export async function compareItems(a: string, b: string) {
             vec!["ItemComparisonOutputSchema".to_owned()]
         );
         assert_eq!(edge_count(&parsed, EdgeKind::ProducesAiContract), 1);
+    }
+
+    fn nodes_with_role<'a>(
+        parsed: &'a crate::tree_sitter::ParsedFile,
+        role: &str,
+    ) -> Vec<&'a gather_step_core::NodeData> {
+        parsed
+            .nodes
+            .iter()
+            .filter(|node| node.ai_role.as_deref() == Some(role))
+            .collect()
+    }
+
+    #[test]
+    fn state_graph_emits_agent_graph_nodes_and_transitions() {
+        let dir = TestDir::new("graph");
+        let parsed = parse(
+            &dir,
+            "pipeline.ts",
+            r#"
+import { StateGraph } from "@langchain/langgraph";
+
+export function buildGraph(state: any) {
+    const graph = new StateGraph(state)
+        .addNode("intent", classifyIntent)
+        .addNode("retrieve", retrieveDocs)
+        .addNode("respond", generateResponse);
+    graph.addEdge("intent", "retrieve");
+    graph.addEdge("retrieve", "respond");
+    return graph.compile();
+}
+"#,
+        );
+
+        let graphs = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::AgentGraph)
+            .count();
+        assert_eq!(graphs, 1, "one AgentGraph node");
+
+        let mut agent_nodes = nodes_with_role(&parsed, "agent_node")
+            .iter()
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>();
+        agent_nodes.sort();
+        agent_nodes.dedup();
+        assert_eq!(
+            agent_nodes,
+            vec![
+                "intent".to_owned(),
+                "respond".to_owned(),
+                "retrieve".to_owned()
+            ]
+        );
+
+        assert_eq!(
+            edge_count(&parsed, EdgeKind::GraphTransitionsTo),
+            2,
+            "intent->retrieve and retrieve->respond"
+        );
+    }
+
+    #[test]
+    fn managed_prompt_construction_emits_prompt_node_and_uses_edge() {
+        let dir = TestDir::new("prompt");
+        let parsed = parse(
+            &dir,
+            "prompts.ts",
+            r#"
+import { AdminPrompt } from "@org/prompts";
+
+export function classifyPrompt() {
+    return new AdminPrompt({ keyName: "doc.classify", version: 3 });
+}
+"#,
+        );
+
+        let prompts = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Prompt)
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(prompts, vec!["doc.classify".to_owned()]);
+        assert_eq!(edge_count(&parsed, EdgeKind::UsesPrompt), 1);
+    }
+
+    #[test]
+    fn vector_search_emits_vector_index_and_retrieves_edge() {
+        let dir = TestDir::new("vector");
+        let parsed = parse(
+            &dir,
+            "rag.ts",
+            r#"
+export async function retrieve(collection: any, queryVector: number[]) {
+    return collection.aggregate([
+        {
+            $vectorSearch: {
+                index: "embedding_index",
+                path: "embedding",
+                queryVector: queryVector,
+                numCandidates: 100,
+                limit: 5,
+            },
+        },
+    ]);
+}
+"#,
+        );
+
+        let indexes = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::VectorIndex)
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(indexes, vec!["embedding_index".to_owned()]);
+        assert_eq!(edge_count(&parsed, EdgeKind::RetrievesFrom), 1);
+    }
+
+    #[test]
+    fn dynamic_structured_tool_emits_tool_facet_and_binds_edge() {
+        let dir = TestDir::new("tool");
+        let parsed = parse(
+            &dir,
+            "tools.ts",
+            r#"
+import { DynamicStructuredTool } from "@langchain/core/tools";
+
+export function makeSearchTool() {
+    return new DynamicStructuredTool({
+        name: "search_docs",
+        description: "search the corpus",
+        func: async () => "",
+    });
+}
+"#,
+        );
+
+        let tools = nodes_with_role(&parsed, "tool")
+            .iter()
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(tools, vec!["search_docs".to_owned()]);
+        assert_eq!(edge_count(&parsed, EdgeKind::BindsTool), 1);
+    }
+
+    #[test]
+    fn state_graph_skips_dynamic_edge_endpoints() {
+        let dir = TestDir::new("graph-dynamic");
+        let parsed = parse(
+            &dir,
+            "pipeline.ts",
+            r#"
+import { StateGraph, START } from "@langchain/langgraph";
+
+export function buildGraph(state: any) {
+    const graph = new StateGraph(state).addNode("agent", agentStep);
+    graph.addEdge(START, "agent");
+    return graph;
+}
+"#,
+        );
+
+        assert_eq!(
+            edge_count(&parsed, EdgeKind::GraphTransitionsTo),
+            0,
+            "START is not a string literal"
+        );
     }
 
     #[test]
