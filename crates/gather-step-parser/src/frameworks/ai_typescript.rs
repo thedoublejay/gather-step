@@ -236,7 +236,7 @@ fn emit_agent_graph(
         "addNode" => {
             // Gate on arg 0 specifically being a string literal (mirror addEdge);
             // `literal_argument` is the first literal in *any* arg, which would
-            // mis-read `addNode(dynamicName, "label")` as a node named "label".
+            // wrongly read `addNode(dynamicName, "label")` as a node named "label".
             let Some(name) = call_site
                 .raw_arguments
                 .as_deref()
