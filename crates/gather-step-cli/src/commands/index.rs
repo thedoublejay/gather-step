@@ -1499,6 +1499,7 @@ fn framework_label(framework: Framework) -> String {
         Framework::Zustand => "zustand",
         Framework::LaunchDarkly => "launchdarkly",
         Framework::FastApi => "fastapi",
+        Framework::AiTypescript => "ai_typescript",
         Framework::FrontendHooks => "frontend_hooks",
     }
     .to_owned()
