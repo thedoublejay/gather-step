@@ -9,7 +9,8 @@
 //! (the project's confidence-banding goal).
 
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, llm_model_qn, ref_node_id,
+    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, ai_contract_external_id,
+    ai_contract_node_id, llm_model_qn, ref_node_id,
 };
 
 use crate::frameworks::nestjs::extract_object_key_value;
@@ -28,8 +29,82 @@ pub fn augment(parsed: &ParsedFile) -> AiTypescriptAugmentation {
         if let Some((provider, model)) = chat_model_factory(call_site) {
             emit_llm_model(parsed, call_site, &provider, &model, &mut augmentation);
         }
+        if let Some(schema) = structured_output_schema(call_site) {
+            emit_ai_contract(parsed, call_site, &schema, &mut augmentation);
+        }
     }
     augmentation
+}
+
+/// Schema label of a `…withStructuredOutput(<schema>)` call: the referenced
+/// schema identifier, or `"inline"` for an inline schema definition (e.g.
+/// `z.object({…})`). Inline field extraction is a follow-up; resolving a
+/// *named* schema's field shape needs RHS-binding (R2), so a referenced schema
+/// is captured by name only here.
+fn structured_output_schema(call_site: &EnrichedCallSite) -> Option<String> {
+    if call_site.callee_name != "withStructuredOutput" {
+        return None;
+    }
+    let raw = call_site.raw_arguments.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.contains(['(', '{']) {
+        return Some("inline".to_owned());
+    }
+    Some(raw.to_owned())
+}
+
+fn emit_ai_contract(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    schema_label: &str,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    let source = call_site.owner_id;
+    // No model/schema-definition resolution in R1 (needs receiver/RHS binding),
+    // so the contract is keyed to the producing symbol; the schema name carries
+    // the identity a reviewer reads.
+    let target = resolve_named_node(parsed, schema_label).unwrap_or(source);
+    let external_id = ai_contract_external_id(
+        &parsed.file_node.repo,
+        &parsed.file_node.file_path,
+        target,
+        source,
+    );
+    let node = NodeData {
+        id: ai_contract_node_id(&external_id),
+        kind: NodeKind::AiContract,
+        repo: parsed.file_node.repo.clone(),
+        file_path: parsed.file_node.file_path.clone(),
+        name: schema_label.to_owned(),
+        qualified_name: Some(external_id.clone()),
+        external_id: Some(external_id),
+        signature: None,
+        visibility: None,
+        span: call_site.span.clone(),
+        is_virtual: true,
+        ai_role: None,
+    };
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(EdgeData {
+        source,
+        target: node_id,
+        kind: EdgeKind::ProducesAiContract,
+        metadata: EdgeMetadata::default(),
+        owner_file: parsed.file_node.id,
+        is_cross_file: false,
+    });
+}
+
+/// Node id of an in-file symbol whose name matches `name`, if one exists.
+fn resolve_named_node(parsed: &ParsedFile, name: &str) -> Option<NodeId> {
+    parsed
+        .nodes
+        .iter()
+        .find(|node| node.name == name)
+        .map(|node| node.id)
 }
 
 /// `(provider, model)` of a `…createChatModel({ provider, model, … })` factory
@@ -201,6 +276,42 @@ export async function compareItems(a: string, b: string) {
             vec!["__llm__openai__gpt-4.1-mini".to_owned()]
         );
         assert_eq!(edge_count(&parsed, EdgeKind::InvokesLlm), 1);
+    }
+
+    fn ai_contract_names(parsed: &crate::tree_sitter::ParsedFile) -> Vec<String> {
+        let mut names = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::AiContract)
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn with_structured_output_emits_ai_contract_and_produces_edge() {
+        let dir = TestDir::new("structured");
+        let parsed = parse(
+            &dir,
+            "agent.ts",
+            r#"
+import { LLMFactory } from "./model-factory";
+import { ItemComparisonOutputSchema } from "./schema";
+
+export async function compareItems(a: string, b: string) {
+    const model = LLMFactory.createChatModel({ provider: "OPENAI", model: "gpt-4.1-mini", temperature: 0 });
+    const structured = model.withStructuredOutput(ItemComparisonOutputSchema);
+    return structured.invoke({ a, b });
+}
+"#,
+        );
+
+        assert_eq!(
+            ai_contract_names(&parsed),
+            vec!["ItemComparisonOutputSchema".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::ProducesAiContract), 1);
     }
 
     #[test]
