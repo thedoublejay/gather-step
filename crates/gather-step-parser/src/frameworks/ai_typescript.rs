@@ -9,8 +9,9 @@
 //! (the project's confidence-banding goal).
 
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, ai_contract_external_id,
-    ai_contract_node_id, llm_model_qn, ref_node_id,
+    AiContractDoc, AiContractInferenceKind, AiContractRecord, EdgeData, EdgeKind, EdgeMetadata,
+    NodeData, NodeId, NodeKind, ai_contract_external_id, ai_contract_node_id, llm_model_qn,
+    ref_node_id,
 };
 
 use crate::frameworks::nestjs::extract_object_key_value;
@@ -55,31 +56,68 @@ fn structured_output_schema(call_site: &EnrichedCallSite) -> Option<String> {
     Some(raw.to_owned())
 }
 
-fn emit_ai_contract(
+/// Persistable structured-output contract records for this file, derived from
+/// the same `withStructuredOutput` detection that emits the graph nodes — so a
+/// contract's node id matches its stored record. Mirrors `infer_payload_contracts`.
+#[must_use]
+pub fn infer_ai_contracts(parsed: &ParsedFile) -> Vec<AiContractRecord> {
+    parsed
+        .call_sites
+        .iter()
+        .filter_map(|call_site| {
+            let schema = structured_output_schema(call_site)?;
+            Some(structured_output_record(parsed, call_site, &schema))
+        })
+        .collect()
+}
+
+struct ContractIdentity {
+    external_id: String,
+    target: NodeId,
+    target_kind: NodeKind,
+    source: NodeId,
+}
+
+/// Shared identity for a structured-output contract. No model/schema-definition
+/// resolution in R1 (needs receiver/RHS binding), so the contract is keyed to
+/// the producing symbol; the schema name carries the identity a reviewer reads.
+fn contract_identity(
     parsed: &ParsedFile,
     call_site: &EnrichedCallSite,
     schema_label: &str,
-    augmentation: &mut AiTypescriptAugmentation,
-) {
+) -> ContractIdentity {
     let source = call_site.owner_id;
-    // No model/schema-definition resolution in R1 (needs receiver/RHS binding),
-    // so the contract is keyed to the producing symbol; the schema name carries
-    // the identity a reviewer reads.
-    let target = resolve_named_node(parsed, schema_label).unwrap_or(source);
+    let (target, target_kind) =
+        resolve_named_node(parsed, schema_label).unwrap_or((source, NodeKind::Function));
     let external_id = ai_contract_external_id(
         &parsed.file_node.repo,
         &parsed.file_node.file_path,
         target,
         source,
     );
+    ContractIdentity {
+        external_id,
+        target,
+        target_kind,
+        source,
+    }
+}
+
+fn emit_ai_contract(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    schema_label: &str,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    let identity = contract_identity(parsed, call_site, schema_label);
     let node = NodeData {
-        id: ai_contract_node_id(&external_id),
+        id: ai_contract_node_id(&identity.external_id),
         kind: NodeKind::AiContract,
         repo: parsed.file_node.repo.clone(),
         file_path: parsed.file_node.file_path.clone(),
         name: schema_label.to_owned(),
-        qualified_name: Some(external_id.clone()),
-        external_id: Some(external_id),
+        qualified_name: Some(identity.external_id.clone()),
+        external_id: Some(identity.external_id),
         signature: None,
         visibility: None,
         span: call_site.span.clone(),
@@ -89,7 +127,7 @@ fn emit_ai_contract(
     let node_id = node.id;
     augmentation.nodes.push(node);
     augmentation.edges.push(EdgeData {
-        source,
+        source: identity.source,
         target: node_id,
         kind: EdgeKind::ProducesAiContract,
         metadata: EdgeMetadata::default(),
@@ -98,13 +136,60 @@ fn emit_ai_contract(
     });
 }
 
-/// Node id of an in-file symbol whose name matches `name`, if one exists.
-fn resolve_named_node(parsed: &ParsedFile, name: &str) -> Option<NodeId> {
+fn structured_output_record(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    schema_label: &str,
+) -> AiContractRecord {
+    let identity = contract_identity(parsed, call_site, schema_label);
+    // R1 captures contract identity/shape-provenance, not field shape: a named
+    // schema's fields need RHS-binding (R2), and inline-schema field extraction
+    // is a follow-up — so fields stay empty and confidence is banded accordingly.
+    let inference_kind = if schema_label == "inline" {
+        AiContractInferenceKind::LiteralSchema
+    } else {
+        AiContractInferenceKind::ReferencedSchema
+    };
+    let confidence = match inference_kind {
+        AiContractInferenceKind::LiteralSchema => 850,
+        AiContractInferenceKind::ReferencedSchema => 700,
+        AiContractInferenceKind::UsageInferred => 500,
+    };
+    let source_type_name = (schema_label != "inline").then(|| schema_label.to_owned());
+    AiContractRecord {
+        ai_contract_node_id: ai_contract_node_id(&identity.external_id),
+        contract_target_node_id: identity.target,
+        contract_target_kind: identity.target_kind,
+        contract_target_qualified_name: None,
+        repo: parsed.file_node.repo.clone(),
+        file_path: parsed.file_node.file_path.clone(),
+        source_symbol_node_id: identity.source,
+        line_start: None,
+        inference_kind,
+        confidence,
+        source_type_name: source_type_name.clone(),
+        contract: AiContractDoc {
+            provider: None,
+            model: None,
+            temperature: None,
+            structured: true,
+            schema_format: "zod".to_owned(),
+            inference_kind,
+            confidence,
+            fields: Vec::new(),
+            prompt_keys: Vec::new(),
+            source_type_name,
+        },
+    }
+}
+
+/// `(id, kind)` of an in-file symbol whose name matches `name`, if one exists.
+fn resolve_named_node(parsed: &ParsedFile, name: &str) -> Option<(NodeId, NodeKind)> {
     parsed
         .nodes
         .iter()
         .find(|node| node.name == name)
-        .map(|node| node.id)
+        .map(|node| (node.id, node.kind))
 }
 
 /// `(provider, model)` of a `…createChatModel({ provider, model, … })` factory
@@ -312,6 +397,38 @@ export async function compareItems(a: string, b: string) {
             vec!["ItemComparisonOutputSchema".to_owned()]
         );
         assert_eq!(edge_count(&parsed, EdgeKind::ProducesAiContract), 1);
+    }
+
+    #[test]
+    fn infer_ai_contracts_yields_a_referenced_schema_record() {
+        use gather_step_core::AiContractInferenceKind;
+
+        let dir = TestDir::new("infer");
+        let parsed = parse(
+            &dir,
+            "agent.ts",
+            r#"
+import { ItemComparisonOutputSchema } from "./schema";
+
+export async function compareItems(model: any) {
+    return model.withStructuredOutput(ItemComparisonOutputSchema);
+}
+"#,
+        );
+
+        let contracts = super::infer_ai_contracts(&parsed);
+        assert_eq!(contracts.len(), 1);
+        let contract = &contracts[0];
+        assert_eq!(
+            contract.source_type_name.as_deref(),
+            Some("ItemComparisonOutputSchema")
+        );
+        assert_eq!(
+            contract.inference_kind,
+            AiContractInferenceKind::ReferencedSchema
+        );
+        assert!(contract.contract.fields.is_empty());
+        assert!(contract.contract.structured);
     }
 
     #[test]
