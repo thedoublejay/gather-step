@@ -119,7 +119,6 @@ fn summarize(parsed: &ParsedFile) -> ParsedSummary {
             external_id: node.external_id.clone(),
             signature: node.signature.clone(),
             is_virtual: node.is_virtual,
-            ai_role: None,
         })
         .collect();
     nodes.sort();
