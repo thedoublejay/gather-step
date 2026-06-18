@@ -54,10 +54,10 @@ pub enum ResolverStrategy {
     SecondPass,
     // --- AI-flow resolvers (v5) ---
     /// Cross-repo prompt edge resolved by matching a literal `keyName` against
-    /// a prompt-vault `AdminPrompt`.
+    /// a managed prompt record.
     PromptKeyName,
-    /// Cross-repo embedding edge resolved by matching a vectorizer HTTP path.
-    VectorizerHttp,
+    /// Cross-repo embedding edge resolved by matching an embedding-service HTTP path.
+    EmbeddingHttp,
     /// MCP edge resolved by matching a client tool name to a server's exposed tool.
     McpBinding,
     /// Intra-repo agent-graph edge resolved from a node-name reference in
@@ -89,7 +89,7 @@ impl ResolverStrategy {
             Self::FirstPass => "first-pass",
             Self::SecondPass => "second-pass",
             Self::PromptKeyName => "prompt_key_name",
-            Self::VectorizerHttp => "vectorizer_http",
+            Self::EmbeddingHttp => "embedding_http",
             Self::McpBinding => "mcp_binding",
             Self::LangGraphEdge => "langgraph_edge",
         }
@@ -127,7 +127,7 @@ impl ResolverStrategy {
             "first-pass" => Self::FirstPass,
             "second-pass" => Self::SecondPass,
             "prompt_key_name" => Self::PromptKeyName,
-            "vectorizer_http" => Self::VectorizerHttp,
+            "embedding_http" => Self::EmbeddingHttp,
             "mcp_binding" => Self::McpBinding,
             "langgraph_edge" => Self::LangGraphEdge,
             _ => return None,
@@ -158,7 +158,7 @@ impl ResolverStrategy {
             // AI resolvers: literal cross-repo key/path matches rank in the
             // medium band; LangGraph node-name resolution slightly below.
             Self::PromptKeyName => 68,
-            Self::VectorizerHttp => 66,
+            Self::EmbeddingHttp => 66,
             Self::McpBinding => 63,
             Self::LangGraphEdge => 58,
             Self::Fallback => 10,
@@ -197,7 +197,7 @@ mod tests {
             ResolverStrategy::FirstPass,
             ResolverStrategy::SecondPass,
             ResolverStrategy::PromptKeyName,
-            ResolverStrategy::VectorizerHttp,
+            ResolverStrategy::EmbeddingHttp,
             ResolverStrategy::McpBinding,
             ResolverStrategy::LangGraphEdge,
         ];

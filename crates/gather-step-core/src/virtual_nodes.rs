@@ -506,21 +506,21 @@ mod tests {
         // Namespaced like every other converged id (__topic__kafka__…), so the
         // prompt key cannot collide across sources.
         assert_eq!(
-            prompt_qn("prompt-manager", "alert-classification"),
-            "__prompt__prompt-manager__alert-classification"
+            prompt_qn("prompt-service", "doc-classification"),
+            "__prompt__prompt-service__doc-classification"
         );
         // A key containing the `__` delimiter must collapse, not mangle the split.
         assert_eq!(
-            prompt_qn("promptmanager", "alert__classification"),
-            "__prompt__promptmanager__alert_classification"
+            prompt_qn("promptservice", "doc__classification"),
+            "__prompt__promptservice__doc_classification"
         );
         assert_eq!(
-            vector_index_qn("reggenius__regulation_chunks", "vector_index"),
-            "__vindex__reggenius_regulation_chunks__vector_index"
+            vector_index_qn("corpus__document_chunks", "vector_index"),
+            "__vindex__corpus_document_chunks__vector_index"
         );
         assert_eq!(
-            mcp_tool_qn("reg-knowledge-base", "search_wiki"),
-            "__mcp__reg-knowledge-base__search_wiki"
+            mcp_tool_qn("knowledge-base", "search_wiki"),
+            "__mcp__knowledge-base__search_wiki"
         );
         assert_eq!(
             llm_model_qn("Azure OpenAI", "gpt-4.1-mini"),

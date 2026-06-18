@@ -145,21 +145,21 @@ mod tests {
     use crate::{NodeKind, node_id};
 
     fn sample_record() -> AiContractRecord {
-        let target = node_id("chronology", "src/agent.ts", NodeKind::LlmModel, "__llm__openai__gpt-4.1-mini");
-        let source = node_id("chronology", "src/agent.ts", NodeKind::Function, "compareAlerts");
-        let external_id = ai_contract_external_id("chronology", "src/agent.ts", target, source);
+        let target = node_id("events", "src/agent.ts", NodeKind::LlmModel, "__llm__openai__gpt-4.1-mini");
+        let source = node_id("events", "src/agent.ts", NodeKind::Function, "compareItems");
+        let external_id = ai_contract_external_id("events", "src/agent.ts", target, source);
         AiContractRecord {
             ai_contract_node_id: ai_contract_node_id(&external_id),
             contract_target_node_id: target,
             contract_target_kind: NodeKind::LlmModel,
             contract_target_qualified_name: Some("__llm__openai__gpt-4.1-mini".to_owned()),
-            repo: "chronology".to_owned(),
+            repo: "events".to_owned(),
             file_path: "src/agent.ts".to_owned(),
             source_symbol_node_id: source,
             line_start: Some(42),
             inference_kind: AiContractInferenceKind::LiteralSchema,
             confidence: 850,
-            source_type_name: Some("AlertComparisonOutputSchema".to_owned()),
+            source_type_name: Some("ItemComparisonOutputSchema".to_owned()),
             contract: AiContractDoc {
                 provider: Some("openai".to_owned()),
                 model: Some("gpt-4.1-mini".to_owned()),
@@ -182,8 +182,8 @@ mod tests {
                         confidence: 900,
                     },
                 ],
-                prompt_keys: vec!["alert-chronology".to_owned()],
-                source_type_name: Some("AlertComparisonOutputSchema".to_owned()),
+                prompt_keys: vec!["doc-summary".to_owned()],
+                source_type_name: Some("ItemComparisonOutputSchema".to_owned()),
             },
         }
     }

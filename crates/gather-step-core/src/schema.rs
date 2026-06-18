@@ -158,11 +158,11 @@ pub enum EdgeKind {
     ProducesAiContract = 116,
     /// A symbol uses a managed `Prompt` artifact.
     UsesPrompt = 117,
-    /// Cross-repo: a consumer fetches a prompt from prompt-manager by `keyName`.
+    /// Cross-repo: a consumer fetches a prompt from a prompt service by `keyName`.
     FetchesPromptFrom = 118,
     /// A tool or graph node retrieves from a `VectorIndex`.
     RetrievesFrom = 119,
-    /// A symbol embeds text via an embedding endpoint (cross-repo to vectorizer).
+    /// A symbol embeds text via an embedding endpoint (cross-repo to an embedding service).
     Embeds = 120,
     /// A collection is indexed into a `VectorIndex`.
     IndexesVector = 121,

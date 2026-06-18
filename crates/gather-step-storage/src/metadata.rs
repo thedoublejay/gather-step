@@ -4387,7 +4387,7 @@ mod tests {
             "__llm__openai__gpt-4.1-mini",
         );
         let symbol_id =
-            ref_node_id(gather_step_core::NodeKind::Function, "symbol::compareAlerts");
+            ref_node_id(gather_step_core::NodeKind::Function, "symbol::compareItems");
         let contract_id =
             ref_node_id(gather_step_core::NodeKind::AiContract, "__ai_contract__sample");
         let record = AiContractStoreRecord {
@@ -4396,13 +4396,13 @@ mod tests {
                 contract_target_node_id: target_id,
                 contract_target_kind: gather_step_core::NodeKind::LlmModel,
                 contract_target_qualified_name: Some("__llm__openai__gpt-4.1-mini".to_owned()),
-                repo: "chronology".to_owned(),
+                repo: "events".to_owned(),
                 file_path: "src/agent.ts".to_owned(),
                 source_symbol_node_id: symbol_id,
                 line_start: Some(42),
                 inference_kind: AiContractInferenceKind::LiteralSchema,
                 confidence: 850,
-                source_type_name: Some("AlertComparisonOutputSchema".to_owned()),
+                source_type_name: Some("ItemComparisonOutputSchema".to_owned()),
                 contract: AiContractDoc {
                     provider: Some("openai".to_owned()),
                     model: Some("gpt-4.1-mini".to_owned()),
@@ -4417,14 +4417,14 @@ mod tests {
                         optional: false,
                         confidence: 900,
                     }],
-                    prompt_keys: vec!["alert-chronology".to_owned()],
-                    source_type_name: Some("AlertComparisonOutputSchema".to_owned()),
+                    prompt_keys: vec!["doc-summary".to_owned()],
+                    source_type_name: Some("ItemComparisonOutputSchema".to_owned()),
                 },
             },
         };
 
         store.replace_ai_contracts_for_files(
-            "chronology",
+            "events",
             &["src/agent.ts".to_owned()],
             std::slice::from_ref(&record),
         )?;
@@ -4436,7 +4436,7 @@ mod tests {
         assert_eq!(loaded, vec![record]);
 
         // Re-running the same file replaces rather than accumulating.
-        store.replace_ai_contracts_for_files("chronology", &["src/agent.ts".to_owned()], &[])?;
+        store.replace_ai_contracts_for_files("events", &["src/agent.ts".to_owned()], &[])?;
         let after = store.ai_contracts_for_query(AiContractQuery {
             contract_target_node_id: Some(target_id),
             ..AiContractQuery::default()
