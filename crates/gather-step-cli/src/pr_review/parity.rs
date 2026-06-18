@@ -375,9 +375,9 @@ mod tests {
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
     use crate::pr_review::delta_report::{
-        CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, DeploymentDeltas,
-        EventDeltas, PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata, RiskSeverity,
-        RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
+        AiContractDeltas, CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport,
+        DeploymentDeltas, EventDeltas, PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata,
+        RiskSeverity, RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
     };
     use crate::pr_review::{
         extract::routes::extract_route_deltas, overlay::store::DiffOverlayStore,
@@ -418,6 +418,7 @@ mod tests {
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),
+            ai_contracts: AiContractDeltas::default(),
             events: EventDeltas::default(),
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),

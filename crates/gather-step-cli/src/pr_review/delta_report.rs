@@ -41,7 +41,7 @@ fn serialize_path_forward_slash<S: Serializer>(
 /// <https://braingent.dev>). Bump this when the report shape changes; callers
 /// must reference it instead of hard-coding the literal so the JSON, Markdown,
 /// frontmatter, and tests stay aligned.
-pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 3;
 
 /// Top-level output struct for `gather-step pr-review`.
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +67,8 @@ pub struct DeltaReport {
     pub routes: RouteDeltas,
     pub symbols: SymbolDeltas,
     pub payload_contracts: PayloadContractDeltas,
+    /// AI (structured-output) contract deltas (Phase 4).
+    pub ai_contracts: AiContractDeltas,
     pub events: EventDeltas,
     pub removed_surface_risks: Vec<RemovedSurfaceRisk>,
 
@@ -289,6 +291,84 @@ pub struct PayloadFieldTypeChange {
     pub name: String,
     pub before_type: Option<String>,
     pub after_type: Option<String>,
+}
+
+// ─── AI-contract deltas (Phase 4) ─────────────────────────────────────────────
+
+/// Added / removed / changed AI (structured-output) contracts — the LLM-call
+/// analogue of [`PayloadContractDeltas`].
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct AiContractDeltas {
+    pub added: Vec<AiContractDelta>,
+    pub removed: Vec<AiContractDelta>,
+    pub changed: Vec<AiContractDeltaChange>,
+    /// `true` when the engine cannot compute these deltas (e.g., overlay engine
+    /// without a metadata-store overlay).
+    #[serde(default)]
+    pub unavailable: bool,
+}
+
+/// One AI contract as observed in a single index snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct AiContractDelta {
+    pub repo: String,
+    pub file: String,
+    /// The target model's qualified name (`__llm__<provider>__<model>`).
+    pub target_qualified_name: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub temperature: Option<String>,
+    /// Provenance of the schema shape: `literal_schema` / `referenced_schema` /
+    /// `usage_inferred`.
+    pub inference_kind: String,
+    /// AI confidence band: `strong` / `medium` / `weak`.
+    pub confidence_band: String,
+    pub source_type_name: Option<String>,
+    pub fields: Vec<AiContractFieldSummary>,
+}
+
+/// Compact AI-contract field descriptor used in the PR-review report.
+#[derive(Debug, Clone, Serialize)]
+pub struct AiContractFieldSummary {
+    pub name: String,
+    pub type_name: Option<String>,
+    pub optional: bool,
+}
+
+/// Same `(repo, file, source_symbol)` call site in both snapshots but the schema
+/// fields or an AI facet differs.
+#[derive(Debug, Clone, Serialize)]
+pub struct AiContractDeltaChange {
+    pub repo: String,
+    pub file: String,
+    pub target_qualified_name: String,
+    pub fields_added: Vec<AiContractFieldSummary>,
+    pub fields_removed: Vec<AiContractFieldSummary>,
+    /// Field names that flipped from `optional = true` to `optional = false`.
+    pub fields_optional_to_required: Vec<String>,
+    /// Field names that flipped from `optional = false` to `optional = true`.
+    pub fields_required_to_optional: Vec<String>,
+    pub fields_type_changed: Vec<AiContractFieldTypeChange>,
+    /// AI-facet `(before, after)` changes (`provider` / `model` /
+    /// `temperature` / `inference_kind` / `source_type_name` / `schema_format`).
+    pub facets_changed: Vec<AiFacetChange>,
+}
+
+/// A single AI-contract field whose declared type changed.
+#[derive(Debug, Clone, Serialize)]
+pub struct AiContractFieldTypeChange {
+    pub name: String,
+    pub before_type: Option<String>,
+    pub after_type: Option<String>,
+}
+
+/// A single AI facet (`provider`, `model`, `temperature`, …) whose value
+/// changed between baseline and review.
+#[derive(Debug, Clone, Serialize)]
+pub struct AiFacetChange {
+    pub facet: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
 }
 
 // ─── Event deltas (Phase 2 Task 5) ────────────────────────────────────────────
@@ -1628,6 +1708,19 @@ impl DeltaReport {
             render_contract_changed_section(&mut buf, &self.payload_contracts.changed);
         }
 
+        // ── AI-contract deltas ────────────────────────────────────────────────
+        if self.ai_contracts.unavailable {
+            render_unavailable_section(&mut buf, "AI contracts", "overlay");
+        } else {
+            render_ai_contract_section(&mut buf, "New AI contracts", &self.ai_contracts.added);
+            render_ai_contract_section(
+                &mut buf,
+                "Removed AI contracts",
+                &self.ai_contracts.removed,
+            );
+            render_ai_contract_changed_section(&mut buf, &self.ai_contracts.changed);
+        }
+
         // ── Event deltas ──────────────────────────────────────────────────────
         if self.events.unavailable {
             render_unavailable_section(&mut buf, "Events", "overlay");
@@ -1859,6 +1952,76 @@ fn render_contract_changed_section(buf: &mut String, changes: &[PayloadContractD
                 imp.consumer_repos.len(),
                 if imp.truncated { " _(truncated)_" } else { "" }
             );
+        }
+        buf.push('\n');
+    }
+}
+
+fn render_ai_contract_section(buf: &mut String, heading: &str, contracts: &[AiContractDelta]) {
+    let _ = writeln!(buf, "\n## {heading}\n");
+    if contracts.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    buf.push_str("| Repo | File | Model | Temp | Confidence | Fields |\n");
+    buf.push_str("|------|------|-------|------|------------|--------|\n");
+    for c in contracts {
+        let fields: Vec<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+        let _ = writeln!(
+            buf,
+            "| {} | {} | `{}` | {} | {} | {} |",
+            c.repo,
+            c.file,
+            c.target_qualified_name,
+            c.temperature.as_deref().unwrap_or("-"),
+            c.confidence_band,
+            fields.join(", ")
+        );
+    }
+}
+
+fn render_ai_contract_changed_section(buf: &mut String, changes: &[AiContractDeltaChange]) {
+    let _ = writeln!(buf, "\n## Changed AI contracts\n");
+    if changes.is_empty() {
+        buf.push_str("_no changes_\n");
+        return;
+    }
+    for c in changes {
+        let _ = writeln!(buf, "### `{}` — {}\n", c.target_qualified_name, c.repo);
+        if !c.fields_added.is_empty() {
+            let names: Vec<&str> = c.fields_added.iter().map(|f| f.name.as_str()).collect();
+            let _ = writeln!(buf, "- **Fields added:** {}", names.join(", "));
+        }
+        if !c.fields_removed.is_empty() {
+            let names: Vec<&str> = c.fields_removed.iter().map(|f| f.name.as_str()).collect();
+            let _ = writeln!(buf, "- **Fields removed:** {}", names.join(", "));
+        }
+        if !c.fields_optional_to_required.is_empty() {
+            let _ = writeln!(
+                buf,
+                "- **Now required:** {}",
+                c.fields_optional_to_required.join(", ")
+            );
+        }
+        if !c.fields_required_to_optional.is_empty() {
+            let _ = writeln!(
+                buf,
+                "- **Now optional:** {}",
+                c.fields_required_to_optional.join(", ")
+            );
+        }
+        if !c.fields_type_changed.is_empty() {
+            let _ = writeln!(buf, "- **Type changes:**");
+            for tc in &c.fields_type_changed {
+                let before = tc.before_type.as_deref().unwrap_or("unknown");
+                let after = tc.after_type.as_deref().unwrap_or("unknown");
+                let _ = writeln!(buf, "  - `{}`: `{}` → `{}`", tc.name, before, after);
+            }
+        }
+        for fc in &c.facets_changed {
+            let before = fc.before.as_deref().unwrap_or("none");
+            let after = fc.after.as_deref().unwrap_or("none");
+            let _ = writeln!(buf, "- **{}:** `{}` → `{}`", fc.facet, before, after);
         }
         buf.push('\n');
     }
@@ -2461,6 +2624,7 @@ mod tests {
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),
+            ai_contracts: AiContractDeltas::default(),
             events: EventDeltas::default(),
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),
@@ -2488,6 +2652,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "ai_contracts",
                 "changed_files",
                 "changed_files_by_repo",
                 "changed_files_truncated",
@@ -2530,25 +2695,26 @@ mod tests {
         );
     }
 
-    /// Hard-pin the wire-version literal `2`. This catches an accidental bump
+    /// Hard-pin the wire-version literal `3`. This catches an accidental bump
     /// of `DELTA_REPORT_SCHEMA_VERSION` that the surrounding tests would
     /// otherwise tautologically pass — every renderer, MCP consumer, and the
     /// website docs all key off this literal.
     #[test]
-    fn schema_version_wire_literal_is_two() {
+    fn schema_version_wire_literal_is_three() {
         assert_eq!(
             super::DELTA_REPORT_SCHEMA_VERSION,
-            2,
-            "the public DeltaReport schema_version is 2 (per-repo changed-file \
-             grouping); a bump must be intentional and accompanied by a CHANGELOG \
-             entry and docs/website update."
+            3,
+            "the public DeltaReport schema_version is 3 (added the `ai_contracts` \
+             AI structured-output delta section, Phase 4); a bump must be \
+             intentional and accompanied by a CHANGELOG entry and docs/website \
+             update."
         );
-        let report = make_empty_report(2);
+        let report = make_empty_report(3);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(
             json["schema_version"],
-            serde_json::Value::Number(2.into()),
-            "DeltaReport JSON must serialize `schema_version` as the literal `2`"
+            serde_json::Value::Number(3.into()),
+            "DeltaReport JSON must serialize `schema_version` as the literal `3`"
         );
     }
 
@@ -2987,6 +3153,30 @@ mod tests {
                 }],
                 unavailable: false,
             },
+            ai_contracts: AiContractDeltas {
+                added: vec![],
+                removed: vec![],
+                changed: vec![AiContractDeltaChange {
+                    repo: "events".to_owned(),
+                    file: "src/agent.ts".to_owned(),
+                    target_qualified_name: "__llm__openai__gpt-4.1-mini".to_owned(),
+                    fields_added: vec![AiContractFieldSummary {
+                        name: "reason".to_owned(),
+                        type_name: Some("string".to_owned()),
+                        optional: false,
+                    }],
+                    fields_removed: vec![],
+                    fields_optional_to_required: vec![],
+                    fields_required_to_optional: vec![],
+                    fields_type_changed: vec![],
+                    facets_changed: vec![AiFacetChange {
+                        facet: "temperature".to_owned(),
+                        before: Some("0".to_owned()),
+                        after: Some("0.2".to_owned()),
+                    }],
+                }],
+                unavailable: false,
+            },
             events: EventDeltas {
                 added: vec![EventDelta {
                     event_kind: "topic".to_owned(),
@@ -3111,6 +3301,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "ai_contracts",
                 "changed_files",
                 "changed_files_by_repo",
                 "changed_files_truncated",
@@ -3214,6 +3405,9 @@ mod tests {
                 "## New payload contracts",
                 "## Removed payload contracts",
                 "## Changed payload contracts",
+                "## New AI contracts",
+                "## Removed AI contracts",
+                "## Changed AI contracts",
                 "## Events: new producers/consumers",
                 "## Events: removed producers/consumers",
                 "## Events: changed producers/consumers",
