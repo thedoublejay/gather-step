@@ -1949,6 +1949,16 @@ impl GraphStoreDb {
                     | NodeKind::SharedSymbol
                     | NodeKind::Repo
                     | NodeKind::Service
+                    // AI cross-repo convergence kinds (v5): keyed by content-based
+                    // qns (llm_model_qn / prompt_qn / vector_index_qn / mcp_tool_qn)
+                    // so two repos referencing the same model/prompt/index/tool must
+                    // canonicalize to one shared-ownership node, not flip by index
+                    // order. AgentGraph/AiContract are repo-local and excluded.
+                    | NodeKind::LlmModel
+                    | NodeKind::Prompt
+                    | NodeKind::VectorIndex
+                    | NodeKind::McpServer
+                    | NodeKind::McpTool
             )
     }
 
@@ -4776,6 +4786,40 @@ mod tests {
         assert_eq!(loaded.file_path, "__topic__kafka__order.created");
         assert_eq!(loaded.name, "__topic__kafka__order.created");
         assert!(loaded.span.is_none());
+    }
+
+    #[test]
+    fn ai_convergence_nodes_are_canonicalized_across_repos() {
+        let store = test_store("ai-node-canonical");
+        let qn = gather_step_core::llm_model_qn("openai", "gpt-4.1-mini");
+        let make = |repo: &str, file: &str| NodeData {
+            id: gather_step_core::ref_node_id(NodeKind::LlmModel, &qn),
+            kind: NodeKind::LlmModel,
+            repo: repo.to_owned(),
+            file_path: file.to_owned(),
+            name: "gpt-4.1-mini".to_owned(),
+            qualified_name: Some(qn.clone()),
+            external_id: Some(qn.clone()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+        let first = make("chronology", "src/a.ts");
+        let second = make("label-review", "src/b.ts");
+        store.insert_node(&first).expect("first should insert");
+        store.insert_node(&second).expect("second should insert");
+
+        let loaded = store
+            .get_node(first.id)
+            .expect("lookup should succeed")
+            .expect("node should exist");
+        assert_eq!(
+            loaded.repo, "__virtual__",
+            "a model shared across repos must canonicalize to shared ownership"
+        );
+        assert_eq!(loaded.file_path, qn);
     }
 
     #[test]

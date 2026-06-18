@@ -114,6 +114,11 @@ pub fn ai_contract_external_id(
     target_id: NodeId,
     source_symbol_id: NodeId,
 ) -> String {
+    // Canonicalize the free-text segments so a repo/path containing the `__`
+    // delimiter collapses rather than mis-splitting the id (parity with the
+    // `*_qn` helpers in `virtual_nodes`). Hex segments are delimiter-safe.
+    let repo = crate::virtual_nodes::canonical_topology_part_or(repo, "unknown_repo");
+    let file_path = crate::virtual_nodes::canonical_topology_part_or(file_path, "unknown_file");
     format!(
         "__ai_contract__{repo}__{file_path}__{}__{}",
         hex_encode(&target_id.as_bytes()),

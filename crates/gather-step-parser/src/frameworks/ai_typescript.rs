@@ -123,11 +123,25 @@ fn emit_vector_search(
 }
 
 /// First literal `index` value inside a `$vectorSearch` aggregation stage.
+/// Anchors on an `index` key (boundary before, `:` after) so a value/identifier
+/// that merely contains `index` (e.g. `"reindexed"`) is not mistaken for the key.
 fn vector_search_index(raw: &str) -> Option<String> {
     let stage = raw.get(raw.find("$vectorSearch")?..)?;
-    let after_key = stage.get(stage.find("index")? + "index".len()..)?;
-    let value = after_key.trim_start().strip_prefix(':')?.trim_start();
-    string_literal(leading_quoted_token(value))
+    let mut from = 0;
+    while let Some(rel) = stage[from..].find("index") {
+        let pos = from + rel;
+        let boundary_before = pos == 0
+            || matches!(
+                stage.as_bytes()[pos - 1],
+                b'{' | b',' | b' ' | b'\n' | b'\t' | b'"' | b'\''
+            );
+        let after = stage[pos + "index".len()..].trim_start();
+        if boundary_before && let Some(value) = after.strip_prefix(':') {
+            return string_literal(leading_quoted_token(value.trim_start()));
+        }
+        from = pos + "index".len();
+    }
+    None
 }
 
 /// The leading quoted-string token of `s` (`"…"`/`'…'`), or `s` unchanged.
@@ -220,19 +234,27 @@ fn emit_agent_graph(
             ));
         }
         "addNode" => {
-            let Some(name) = call_site.literal_argument.as_deref() else {
+            // Gate on arg 0 specifically being a string literal (mirror addEdge);
+            // `literal_argument` is the first literal in *any* arg, which would
+            // mis-read `addNode(dynamicName, "label")` as a node named "label".
+            let Some(name) = call_site
+                .raw_arguments
+                .as_deref()
+                .and_then(|raw| extract_call_argument(raw, 0))
+                .and_then(|arg| string_literal(arg.trim()))
+            else {
                 return;
             };
             if name.is_empty() {
                 return;
             }
-            let node_qn = agent_node_qn(file_path, name);
+            let node_qn = agent_node_qn(file_path, &name);
             let node = virtual_ai_node(
                 parsed,
                 call_site,
                 NodeKind::Function,
                 &node_qn,
-                name,
+                &name,
                 Some("agent_node"),
             );
             let node_id = node.id;
@@ -307,14 +329,17 @@ fn structured_output_schema(call_site: &EnrichedCallSite) -> Option<String> {
     if call_site.callee_name != "withStructuredOutput" {
         return None;
     }
-    let raw = call_site.raw_arguments.as_deref()?.trim();
-    if raw.is_empty() {
+    // Parse the schema (arg 0) only — `withStructuredOutput(Schema, { name })`
+    // must not be read as inline because of the options object's braces.
+    let raw = call_site.raw_arguments.as_deref()?;
+    let arg0 = extract_call_argument(raw, 0)?.trim();
+    if arg0.is_empty() {
         return None;
     }
-    if raw.contains(['(', '{']) {
+    if arg0.contains(['(', '{']) {
         return Some("inline".to_owned());
     }
-    Some(raw.to_owned())
+    Some(arg0.to_owned())
 }
 
 /// Persistable structured-output contract records for this file, derived from
@@ -348,8 +373,19 @@ fn contract_identity(
     schema_label: &str,
 ) -> ContractIdentity {
     let source = call_site.owner_id;
-    let (target, target_kind) =
-        resolve_named_node(parsed, schema_label).unwrap_or((source, NodeKind::Function));
+    // No in-file schema symbol (imported / inline) → synthesize a stable,
+    // collision-free target from the schema label + call-site line so two
+    // contracts in one owner do not share an id.
+    let (target, target_kind) = if let Some(resolved) = resolve_named_node(parsed, schema_label) {
+        resolved
+    } else {
+        let line = call_site.span.as_ref().map_or(0, |span| span.line_start);
+        let synthetic = format!(
+            "__ai_schema__{}__{schema_label}__{line}",
+            parsed.file_node.file_path
+        );
+        (ref_node_id(NodeKind::Type, &synthetic), NodeKind::Type)
+    };
     let external_id = ai_contract_external_id(
         &parsed.file_node.repo,
         &parsed.file_node.file_path,
@@ -804,6 +840,49 @@ export function makeSearchTool() {
             .collect::<Vec<_>>();
         assert_eq!(tools, vec!["search_docs".to_owned()]);
         assert_eq!(edge_count(&parsed, EdgeKind::BindsTool), 1);
+    }
+
+    #[test]
+    fn with_structured_output_reads_schema_arg_not_options_object() {
+        let dir = TestDir::new("structured-multiarg");
+        let parsed = parse(
+            &dir,
+            "agent.ts",
+            r#"
+import { OrderSchema } from "./schema";
+
+export function build(model: any) {
+    return model.withStructuredOutput(OrderSchema, { name: "order" });
+}
+"#,
+        );
+
+        // arg 0 is a referenced identifier; the options object's braces must not
+        // make this read as "inline".
+        assert_eq!(ai_contract_names(&parsed), vec!["OrderSchema".to_owned()]);
+    }
+
+    #[test]
+    fn add_node_skips_non_literal_name() {
+        let dir = TestDir::new("graph-addnode-dynamic");
+        let parsed = parse(
+            &dir,
+            "pipeline.ts",
+            r#"
+import { StateGraph } from "@langchain/langgraph";
+
+export function build(state: any) {
+    const graph = new StateGraph(state);
+    graph.addNode(dynamicName, "display label");
+    return graph;
+}
+"#,
+        );
+
+        assert!(
+            nodes_with_role(&parsed, "agent_node").is_empty(),
+            "addNode with a non-literal first arg must not fabricate a node"
+        );
     }
 
     #[test]

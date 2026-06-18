@@ -2039,6 +2039,35 @@ fn visit_python(
                 )
             });
         }
+        "assignment" => {
+            // Module-level `NAME = "literal"` → a resolvable string constant
+            // (e.g. a Kafka topic constant). Guarded to module scope so
+            // function-local / class-attribute assignments don't shadow it.
+            if owner_qname.is_none()
+                && parent_class.is_none()
+                && let Some(left) = node.child_by_field_name("left")
+                && left.kind() == "identifier"
+                && let Some(right) = node.child_by_field_name("right")
+                && right.kind() == "string"
+            {
+                let name = node_text(left, state.source).trim().to_owned();
+                let value = sanitize_string_literal(node_text(right, state.source));
+                if !name.is_empty() && !value.is_empty() && !value.contains('{') {
+                    state.record_constant_string(name, value);
+                }
+            }
+            recurse_children(node, |child| {
+                visit_python(
+                    child,
+                    state,
+                    parent_class,
+                    owner,
+                    owner_qname,
+                    class_decorators,
+                    depth + 1,
+                )
+            });
+        }
         _ => recurse_children(node, |child| {
             visit_python(
                 child,

@@ -407,6 +407,30 @@ def handler(res, socket, log):
     }
 
     #[test]
+    fn module_level_constant_topic_resolves() {
+        let dir = TestDir::new("const-topic");
+        let parsed = parse(
+            &dir,
+            "producer.py",
+            r#"
+from aiokafka import AIOKafkaProducer
+
+DOCUMENT_TOPIC = "document-indexed"
+
+
+async def publish(producer, value):
+    await producer.send_and_wait(DOCUMENT_TOPIC, value)
+"#,
+        );
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec!["__event__kafka__document-indexed".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+    }
+
+    #[test]
     fn dynamic_topics_are_skipped() {
         let dir = TestDir::new("dynamic");
         let parsed = parse(

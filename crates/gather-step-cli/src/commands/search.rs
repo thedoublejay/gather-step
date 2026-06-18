@@ -194,6 +194,13 @@ fn parse_kind(value: &str) -> Option<NodeKind> {
         "repo" => Some(NodeKind::Repo),
         "convention" => Some(NodeKind::Convention),
         "service" => Some(NodeKind::Service),
+        "agentgraph" | "agent_graph" | "agent-graph" => Some(NodeKind::AgentGraph),
+        "prompt" => Some(NodeKind::Prompt),
+        "aicontract" | "ai_contract" | "ai-contract" => Some(NodeKind::AiContract),
+        "vectorindex" | "vector_index" | "vector-index" => Some(NodeKind::VectorIndex),
+        "mcpserver" | "mcp_server" | "mcp-server" => Some(NodeKind::McpServer),
+        "mcptool" | "mcp_tool" | "mcp-tool" => Some(NodeKind::McpTool),
+        "llmmodel" | "llm_model" | "llm-model" => Some(NodeKind::LlmModel),
         _ => None,
     }
 }
