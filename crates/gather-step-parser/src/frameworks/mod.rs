@@ -1,6 +1,7 @@
 pub mod azure;
 pub mod detect;
 pub mod drizzle;
+pub mod fastapi;
 pub mod frontend_hooks;
 pub mod frontend_react;
 pub mod frontend_router;
