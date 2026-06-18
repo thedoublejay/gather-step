@@ -1,3 +1,4 @@
+pub mod ai_typescript;
 pub mod azure;
 pub mod detect;
 pub mod drizzle;

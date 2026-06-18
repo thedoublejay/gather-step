@@ -4202,6 +4202,7 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Zustand => &[PackId::Zustand],
         Framework::LaunchDarkly => &[PackId::LaunchDarkly],
         Framework::FastApi => &[PackId::Fastapi],
+        Framework::AiTypescript => &[PackId::AiTypescript],
         Framework::FrontendHooks => &[PackId::FrontendHooks],
     }
 }

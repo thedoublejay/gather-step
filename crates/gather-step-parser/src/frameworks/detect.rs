@@ -32,6 +32,8 @@ pub enum Framework {
     LaunchDarkly,
     /// Detection-only Python web API pack.
     FastApi,
+    /// LangChain-style TypeScript/JavaScript AI pack (v5).
+    AiTypescript,
     /// Always-active pack for detecting cross-package frontend hook boundary
     /// edges.  Does not require a per-repo detection predicate.
     FrontendHooks,
@@ -143,6 +145,9 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     }
     if has_any_python_dependency(repo_root, &["fastapi"]) {
         frameworks.insert(Framework::FastApi);
+    }
+    if is_ai_typescript(repo_root) {
+        frameworks.insert(Framework::AiTypescript);
     }
     // FrontendHooks detection is always active for any repo: cross-package hook
     // imports can appear in any TypeScript/JavaScript codebase regardless of
@@ -299,6 +304,21 @@ pub fn is_launchdarkly(repo_root: &Path) -> bool {
 #[must_use]
 pub fn is_fastapi(repo_root: &Path) -> bool {
     has_any_python_dependency(repo_root, &["fastapi"])
+}
+
+/// Returns `true` when a LangChain-style AI dependency is present in the Node
+/// manifest, marking the repo as an AI TypeScript/JavaScript service.
+#[must_use]
+pub fn is_ai_typescript(repo_root: &Path) -> bool {
+    has_any_dependency(
+        repo_root,
+        &[
+            "@langchain/core",
+            "langchain",
+            "@langchain/openai",
+            "@langchain/langgraph",
+        ],
+    )
 }
 
 /// Returns `true` when the repo has a `src/serviceConfigs` directory, which
