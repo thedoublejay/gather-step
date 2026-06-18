@@ -14,6 +14,7 @@ pub mod nestjs;
 pub mod nextjs;
 pub mod prisma;
 pub mod profile;
+pub mod python_kafka;
 pub mod registry;
 pub mod storybook;
 pub mod tailwind;

@@ -27,7 +27,8 @@ use gather_step_core::{EdgeData, NodeData};
 use crate::{
     frameworks::{
         azure, detect, drizzle, fastapi, frontend_hooks, frontend_react, frontend_router,
-        gateway_proxy, mongoose, nestjs, nextjs, prisma, storybook, tailwind, typeorm,
+        gateway_proxy, mongoose, nestjs, nextjs, prisma, python_kafka, storybook, tailwind,
+        typeorm,
     },
     traverse::Language,
     tree_sitter::ParsedFile,
@@ -418,11 +419,13 @@ impl PackRegistry {
                 }
             }
             AugGroup::Fastapi => {
-                let aug = fastapi::augment(parsed);
-                AugmentationOutput {
-                    nodes: aug.nodes,
-                    edges: aug.edges,
-                }
+                let routes = fastapi::augment(parsed);
+                let kafka = python_kafka::augment(parsed);
+                let mut nodes = routes.nodes;
+                nodes.extend(kafka.nodes);
+                let mut edges = routes.edges;
+                edges.extend(kafka.edges);
+                AugmentationOutput { nodes, edges }
             }
             AugGroup::SharedLib => {
                 let aug = azure::augment_shared_lib(parsed);
