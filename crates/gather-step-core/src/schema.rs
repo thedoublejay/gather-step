@@ -716,7 +716,10 @@ mod tests {
             let decoded = NodeKind::try_from(kind.as_u8())
                 .unwrap_or_else(|_| panic!("{kind:?} should decode"));
             assert_eq!(decoded, kind);
-            assert!(NodeKind::all().contains(&kind), "{kind:?} missing from all()");
+            assert!(
+                NodeKind::all().contains(&kind),
+                "{kind:?} missing from all()"
+            );
         }
     }
 
@@ -731,7 +734,10 @@ mod tests {
             .filter(|byte| EdgeKind::try_from(*byte).is_ok())
             .collect();
         decodable.sort_unstable();
-        assert_eq!(listed, decodable, "EdgeKind::all() is out of sync with TryFrom");
+        assert_eq!(
+            listed, decodable,
+            "EdgeKind::all() is out of sync with TryFrom"
+        );
     }
 
     #[test]
@@ -742,7 +748,10 @@ mod tests {
             .filter(|byte| NodeKind::try_from(*byte).is_ok())
             .collect();
         decodable.sort_unstable();
-        assert_eq!(listed, decodable, "NodeKind::all() is out of sync with TryFrom");
+        assert_eq!(
+            listed, decodable,
+            "NodeKind::all() is out of sync with TryFrom"
+        );
     }
 
     #[test]
@@ -755,7 +764,10 @@ mod tests {
             EdgeKind::CallsMcpTool,
             EdgeKind::RetrievesFrom,
         ] {
-            assert!(kind.is_semantic_bridge(), "{kind:?} should be a semantic bridge");
+            assert!(
+                kind.is_semantic_bridge(),
+                "{kind:?} should be a semantic bridge"
+            );
         }
         // Intra-service AI edges are NOT cross-repo bridges.
         assert!(!EdgeKind::GraphTransitionsTo.is_semantic_bridge());

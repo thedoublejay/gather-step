@@ -1622,9 +1622,8 @@ impl MetadataStoreDb {
             let mut del_payload = tx.prepare_cached(
                 "DELETE FROM payload_contracts WHERE repo = ?1 AND file_path = ?2",
             )?;
-            let mut del_ai = tx.prepare_cached(
-                "DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2",
-            )?;
+            let mut del_ai =
+                tx.prepare_cached("DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2")?;
             let mut del_state = tx.prepare_cached(
                 "DELETE FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
             )?;
@@ -1662,9 +1661,8 @@ impl MetadataStoreDb {
             let mut del_payload = tx.prepare_cached(
                 "DELETE FROM payload_contracts WHERE repo = ?1 AND file_path = ?2",
             )?;
-            let mut del_ai = tx.prepare_cached(
-                "DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2",
-            )?;
+            let mut del_ai =
+                tx.prepare_cached("DELETE FROM ai_contracts WHERE repo = ?1 AND file_path = ?2")?;
             for path_id in file_path_ids {
                 del_unresolved.execute(params![repo, path_id])?;
                 del_unresolved_keys.execute(params![repo, path_id])?;
@@ -3656,9 +3654,9 @@ mod tests {
 
     use super::{
         AiContractQuery, AiContractStoreRecord, CONTEXT_PACK_RETENTION_SECONDS, CoChangePairRecord,
-        CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord, ContextPackRecord, FileAnalytics,
-        FileIndexState, MetadataStore, MetadataStoreDb, MetadataStoreError, PayloadContractQuery,
-        PayloadContractStoreRecord, SQLITE_PAGE_SIZE_BYTES,
+        CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord, ContextPackRecord,
+        FileAnalytics, FileIndexState, MetadataStore, MetadataStoreDb, MetadataStoreError,
+        PayloadContractQuery, PayloadContractStoreRecord, SQLITE_PAGE_SIZE_BYTES,
     };
 
     static NEXT_TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
@@ -4386,10 +4384,11 @@ mod tests {
             gather_step_core::NodeKind::LlmModel,
             "__llm__openai__gpt-4.1-mini",
         );
-        let symbol_id =
-            ref_node_id(gather_step_core::NodeKind::Function, "symbol::compareItems");
-        let contract_id =
-            ref_node_id(gather_step_core::NodeKind::AiContract, "__ai_contract__sample");
+        let symbol_id = ref_node_id(gather_step_core::NodeKind::Function, "symbol::compareItems");
+        let contract_id = ref_node_id(
+            gather_step_core::NodeKind::AiContract,
+            "__ai_contract__sample",
+        );
         let record = AiContractStoreRecord {
             record: AiContractRecord {
                 ai_contract_node_id: contract_id,

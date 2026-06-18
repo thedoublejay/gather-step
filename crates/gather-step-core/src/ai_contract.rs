@@ -145,7 +145,12 @@ mod tests {
     use crate::{NodeKind, node_id};
 
     fn sample_record() -> AiContractRecord {
-        let target = node_id("events", "src/agent.ts", NodeKind::LlmModel, "__llm__openai__gpt-4.1-mini");
+        let target = node_id(
+            "events",
+            "src/agent.ts",
+            NodeKind::LlmModel,
+            "__llm__openai__gpt-4.1-mini",
+        );
         let source = node_id("events", "src/agent.ts", NodeKind::Function, "compareItems");
         let external_id = ai_contract_external_id("events", "src/agent.ts", target, source);
         AiContractRecord {

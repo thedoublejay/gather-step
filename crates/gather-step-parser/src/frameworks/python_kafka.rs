@@ -70,7 +70,10 @@ fn consumer_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<Str
     if call_site.callee_name == "AIOKafkaConsumer" {
         return constructor_topics(parsed, call_site);
     }
-    let hint = call_site.callee_qualified_hint.as_deref().unwrap_or_default();
+    let hint = call_site
+        .callee_qualified_hint
+        .as_deref()
+        .unwrap_or_default();
     let (receiver, operation) = hint.rsplit_once('.').unwrap_or(("", hint));
     if operation == "subscribe" && receiver_names_kafka(receiver, "consumer") {
         return subscribe_topics(parsed, call_site);

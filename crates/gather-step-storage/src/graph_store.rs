@@ -3894,7 +3894,13 @@ mod tests {
     #[test]
     fn node_ai_role_facet_survives_round_trip() {
         let store = test_store("ai-role-roundtrip");
-        let mut agent = node("service-a", "src/agent.py", NodeKind::Function, "build_graph", 0);
+        let mut agent = node(
+            "service-a",
+            "src/agent.py",
+            NodeKind::Function,
+            "build_graph",
+            0,
+        );
         agent.ai_role = Some("agent".to_owned());
 
         store.insert_node(&agent).expect("node should insert");
