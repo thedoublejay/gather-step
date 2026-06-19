@@ -11,6 +11,8 @@ pub enum McpServerError {
     #[error(transparent)]
     EventTopology(#[from] gather_step_analysis::EventTopologyError),
     #[error(transparent)]
+    AgentTopology(#[from] gather_step_analysis::AgentTopologyError),
+    #[error(transparent)]
     ContractDrift(#[from] gather_step_analysis::ContractDriftAnalysisError),
     #[error(transparent)]
     CrudTrace(#[from] gather_step_analysis::CrudTraceError),

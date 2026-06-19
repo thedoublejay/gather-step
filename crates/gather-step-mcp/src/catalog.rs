@@ -44,6 +44,10 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
         "trace_route",
         "Trace an HTTP or RPC route from entry to handler",
     ),
+    (
+        "trace_agent",
+        "Trace an AI agent's forward flow (graph, LLM calls, tools, prompts, RAG, MCP)",
+    ),
     ("crud_trace", "Trace CRUD-style request paths"),
     ("event_blast_radius", "Inspect downstream event impact"),
     (

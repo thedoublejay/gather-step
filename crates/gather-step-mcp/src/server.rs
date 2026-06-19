@@ -43,10 +43,11 @@ use crate::{
         },
         events::{
             EventBlastRadiusRequest, EventBlastRadiusResponse, ListOrphanTopicsRequest,
-            ListOrphanTopicsResponse, TraceEventRequest, TraceEventResponse, TraceRouteRequest,
-            TraceRouteResponse, event_blast_radius_tool as run_event_blast_radius,
-            list_orphan_topics_tool as run_list_orphan_topics, trace_event_tool as run_trace_event,
-            trace_route_tool as run_trace_route,
+            ListOrphanTopicsResponse, TraceAgentRequest, TraceAgentResponse, TraceEventRequest,
+            TraceEventResponse, TraceRouteRequest, TraceRouteResponse,
+            event_blast_radius_tool as run_event_blast_radius,
+            list_orphan_topics_tool as run_list_orphan_topics, trace_agent_tool as run_trace_agent,
+            trace_event_tool as run_trace_event, trace_route_tool as run_trace_route,
         },
         orientation::{GraphSchemaResponse, ListReposResponse, get_graph_schema, list_repos},
         packs::{
@@ -377,6 +378,25 @@ impl GatherStepMcpServer {
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("trace_event", &args, move || {
             run_trace_event(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "trace_agent",
+        description = "Trace an AI agent's forward flow (agent graph, nodes, LLM calls, tools, prompts, vector indexes, MCP tools) from a target node.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn trace_agent_tool(
+        &self,
+        Parameters(request): Parameters<TraceAgentRequest>,
+    ) -> Result<Json<TraceAgentResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("trace_agent", &args, move || {
+            run_trace_agent(&ctx, request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })
