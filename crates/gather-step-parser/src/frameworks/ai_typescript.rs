@@ -176,7 +176,7 @@ fn emit_mcp_server(
     ));
 }
 
-/// MongoDB Atlas `collection.createSearchIndex({ name, definition })` for a
+/// `MongoDB` Atlas `collection.createSearchIndex({ name, definition })` for a
 /// vector index → an `IndexesVector` edge to the SAME converged `VectorIndex`
 /// node the `$vectorSearch` read side resolves to, so the write and read sides
 /// of one index meet. Gated on the args mentioning a vector type so a plain
@@ -1444,11 +1444,11 @@ export async function ensureIndex(collection: any) {
         let parsed = parse(
             &dir,
             "vectorizer.ts",
-            r#"
+            r"
 export async function vectorize(http: any, content: string) {
     return http.axiosRef.post(`${process.env.VECTORIZER_URL}/api/v1/vectorize`, { content });
 }
-"#,
+",
         );
 
         assert_eq!(
@@ -1464,11 +1464,11 @@ export async function vectorize(http: any, content: string) {
         let parsed = parse(
             &dir,
             "orders.ts",
-            r#"
+            r"
 export async function create(http: any, order: any) {
     return http.axiosRef.post(`${base}/api/v1/orders`, order);
 }
-"#,
+",
         );
 
         assert_eq!(edge_count(&parsed, EdgeKind::Embeds), 0);
