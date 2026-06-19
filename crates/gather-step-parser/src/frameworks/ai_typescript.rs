@@ -320,26 +320,46 @@ fn ai_edge(parsed: &ParsedFile, source: NodeId, target: NodeId, kind: EdgeKind) 
     }
 }
 
-/// Schema label of a `…withStructuredOutput(<schema>)` call: the referenced
-/// schema identifier, or `"inline"` for an inline schema definition (e.g.
-/// `z.object({…})`). Inline field extraction is a follow-up; resolving a
-/// *named* schema's field shape needs RHS-binding (R2), so a referenced schema
-/// is captured by name only here.
+/// Schema label of a structured-output call: the referenced schema identifier,
+/// or `"inline"` for an inline schema definition (e.g. `z.object({…})`). Covers
+/// two idioms — `LangChain` `…withStructuredOutput(<schema>)` and a
+/// `{ responseSchema: <schema> }` options object (the Gemini `@google/genai`
+/// convention, used via project wrappers like `generateStructured(...)`).
+/// Inline field extraction is a follow-up; a *named* schema's field shape needs
+/// RHS-binding (R2), so a referenced schema is captured by name only here.
 fn structured_output_schema(call_site: &EnrichedCallSite) -> Option<String> {
-    if call_site.callee_name != "withStructuredOutput" {
-        return None;
-    }
-    // Parse the schema (arg 0) only — `withStructuredOutput(Schema, { name })`
-    // must not be read as inline because of the options object's braces.
     let raw = call_site.raw_arguments.as_deref()?;
-    let arg0 = extract_call_argument(raw, 0)?.trim();
-    if arg0.is_empty() {
+    // LangChain: `withStructuredOutput(Schema, { ... })` — arg 0 only, so a
+    // trailing options object's braces don't make it read as inline.
+    if call_site.callee_name == "withStructuredOutput" {
+        return schema_label(extract_call_argument(raw, 0)?);
+    }
+    // Gemini-style: any wrapper call passing `{ responseSchema: <schema> }`.
+    schema_label(&response_schema_argument(raw)?)
+}
+
+/// Normalize a schema argument to its label: `"inline"` for a definition
+/// expression, otherwise the referenced identifier. `None` if empty.
+fn schema_label(argument: &str) -> Option<String> {
+    let argument = argument.trim();
+    if argument.is_empty() {
         return None;
     }
-    if arg0.contains(['(', '{']) {
+    if argument.contains(['(', '{']) {
         return Some("inline".to_owned());
     }
-    Some(arg0.to_owned())
+    Some(argument.to_owned())
+}
+
+/// The `responseSchema` value from an options object in any leading argument,
+/// e.g. `generateStructured(messages, { responseSchema: OutputSchema })`.
+fn response_schema_argument(raw: &str) -> Option<String> {
+    (0..4)
+        .map_while(|index| extract_call_argument(raw, index))
+        .find_map(|argument| {
+            extract_object_key_value(argument, "responseSchema")
+                .map(|value| value.trim().to_owned())
+        })
 }
 
 /// Persistable structured-output contract records for this file, derived from
@@ -692,6 +712,34 @@ export async function compareItems(a: string, b: string) {
         assert_eq!(
             ai_contract_names(&parsed),
             vec!["ItemComparisonOutputSchema".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::ProducesAiContract), 1);
+    }
+
+    #[test]
+    fn response_schema_options_emit_ai_contract() {
+        let dir = TestDir::new("response-schema");
+        let parsed = parse(
+            &dir,
+            "agent.ts",
+            r#"
+import { DomainExpertLLMOutputSchema } from "./schemas";
+
+export async function run(llm: any, messages: any) {
+    return llm.generateStructured(messages, {
+        responseSchema: DomainExpertLLMOutputSchema,
+        responseMimeType: "application/json",
+    });
+}
+"#,
+        );
+
+        // The Gemini-style `{ responseSchema: <schema> }` options object is the
+        // dominant structured-output idiom in the RegASK AI repos, used via
+        // project wrappers (not LangChain withStructuredOutput).
+        assert_eq!(
+            ai_contract_names(&parsed),
+            vec!["DomainExpertLLMOutputSchema".to_owned()]
         );
         assert_eq!(edge_count(&parsed, EdgeKind::ProducesAiContract), 1);
     }
