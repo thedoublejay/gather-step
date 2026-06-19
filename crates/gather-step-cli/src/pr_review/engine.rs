@@ -54,6 +54,7 @@ pub enum UnsupportedSurface {
     Routes,
     Symbols,
     PayloadContracts,
+    AiContracts,
     Events,
     Decorators,
     ContractAlignments,
@@ -67,6 +68,7 @@ impl UnsupportedSurface {
             Self::Routes => "routes",
             Self::Symbols => "symbols",
             Self::PayloadContracts => "payload_contracts",
+            Self::AiContracts => "ai_contracts",
             Self::Events => "events",
             Self::Decorators => "decorators",
             Self::ContractAlignments => "contract_alignments",
@@ -220,6 +222,7 @@ impl ReviewEngineImpl for OverlayEngine {
             // search/metadata stores not yet wired to the overlay.
             unsupported_surfaces: vec![
                 UnsupportedSurface::PayloadContracts,
+                UnsupportedSurface::AiContracts,
                 UnsupportedSurface::Events,
                 UnsupportedSurface::Decorators,
                 UnsupportedSurface::ContractAlignments,
@@ -409,6 +412,10 @@ mod tests {
         assert!(
             surfaces.contains(&UnsupportedSurface::PayloadContracts),
             "overlay must mark PayloadContracts unsupported"
+        );
+        assert!(
+            surfaces.contains(&UnsupportedSurface::AiContracts),
+            "overlay must mark AiContracts unsupported"
         );
         assert!(
             surfaces.contains(&UnsupportedSurface::Events),

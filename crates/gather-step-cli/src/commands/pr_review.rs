@@ -1471,6 +1471,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let routes_unavailable = has_surface(UnsupportedSurface::Routes);
     let symbols_unavailable = has_surface(UnsupportedSurface::Symbols);
     let payload_contracts_unavailable = has_surface(UnsupportedSurface::PayloadContracts);
+    let ai_contracts_unavailable = has_surface(UnsupportedSurface::AiContracts);
     let events_unavailable = has_surface(UnsupportedSurface::Events);
     let decorators_unavailable = has_surface(UnsupportedSurface::Decorators);
     let contract_alignments_unavailable = has_surface(UnsupportedSurface::ContractAlignments);
@@ -1560,9 +1561,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                     }
                                 }
                             };
-                            // AI contracts share the metadata-store overlay
-                            // availability with payload contracts.
-                            let ai_contracts = if payload_contracts_unavailable {
+                            let ai_contracts = if ai_contracts_unavailable {
                                 AiContractDeltas {
                                     unavailable: true,
                                     ..AiContractDeltas::default()
@@ -1993,6 +1992,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         ("routes", route_deltas.unavailable),
         ("symbols", symbol_deltas.unavailable),
         ("payload_contracts", payload_contract_deltas.unavailable),
+        ("ai_contracts", ai_contract_deltas.unavailable),
         ("events", event_deltas.unavailable),
         ("decorators", decorator_deltas.unavailable),
         ("contract_alignments", contract_alignments.unavailable),

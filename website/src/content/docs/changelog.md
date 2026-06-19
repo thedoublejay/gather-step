@@ -5,6 +5,18 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## Unreleased
+
+AI flow awareness (v5) — surfacing.
+
+### Added
+
+- **`pr-review` AI-contract deltas** — the `DeltaReport` gains an `ai_contracts` section reporting added / removed / changed AI (structured-output) contracts, keyed by source symbol. It surfaces schema-field diffs and AI-facet changes (`provider`, `model`, `temperature`, `inference_kind`, `source_type_name`, `schema_format`), parallel to `payload_contracts`.
+
+### Changed
+
+- **`DeltaReport.schema_version` is now `3`** — adds the `ai_contracts` section. The `temp-index` engine populates it; the overlay engine marks it unsupported alongside the other metadata-store surfaces.
+
 ## v4.4.4 (2026-06-10)
 
 Release status: **prepared**.

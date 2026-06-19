@@ -110,6 +110,20 @@ pub fn trace_agent<S: GraphStore>(
         }
 
         for ai_edge in ai_out_edges(store, current)? {
+            let Some(next) = store.get_node(ai_edge.target)? else {
+                continue;
+            };
+
+            // Decide node inclusion BEFORE recording the edge so no edge ever
+            // references a node the cap dropped. A node is includable when it is
+            // already known (in `nodes`, or the root target) or there is room
+            // under the node cap.
+            let already_known = seen_nodes.contains(&next.id.as_bytes());
+            if !already_known && nodes.len() >= limit {
+                truncated = true;
+                continue;
+            }
+
             let edge_key = (
                 ai_edge.source.as_bytes(),
                 ai_edge.target.as_bytes(),
@@ -123,14 +137,7 @@ pub fn trace_agent<S: GraphStore>(
                 }
             }
 
-            let Some(next) = store.get_node(ai_edge.target)? else {
-                continue;
-            };
             if seen_nodes.insert(next.id.as_bytes()) {
-                if nodes.len() >= limit {
-                    truncated = true;
-                    continue;
-                }
                 nodes.push(AgentTraceNode {
                     node_id: next.id,
                     node_kind: next.kind,
@@ -224,6 +231,7 @@ mod tests {
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, node_id,
     };
     use gather_step_storage::{GraphStore, GraphStoreDb};
+    use rustc_hash::FxHashSet;
 
     use super::trace_agent;
 
@@ -475,6 +483,98 @@ mod tests {
             "depth-2 LlmModel must NOT be reached at max_depth 1"
         );
         assert!(trace.truncated, "deeper hops exist → truncated");
+    }
+
+    // Under a small node cap, no surfaced edge may reference a node that was
+    // dropped by the cap (review finding #4). Edges to the root target are fine
+    // because the consumer has it via `trace.target`.
+    #[test]
+    fn trace_agent_cap_never_leaves_dangling_edges() {
+        let temp = TempDb::new("cap");
+        let store = GraphStoreDb::open(temp.path()).expect("store should open");
+        let repo = "agent_repo";
+        let file = "src/agent.ts";
+
+        let src = file_node(repo, file);
+        let graph = ai_node(
+            repo,
+            file,
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+            None,
+            0,
+        );
+        let intent = ai_node(
+            repo,
+            file,
+            NodeKind::Function,
+            "intentNode",
+            Some("agent_node"),
+            1,
+        );
+        let respond = ai_node(
+            repo,
+            file,
+            NodeKind::Function,
+            "respondNode",
+            Some("agent_node"),
+            2,
+        );
+        let llm = ai_node(
+            repo,
+            file,
+            NodeKind::LlmModel,
+            "__llm__openai__gpt-4.1",
+            None,
+            3,
+        );
+        let contract = ai_node(
+            repo,
+            file,
+            NodeKind::AiContract,
+            "__ai_contract__x",
+            None,
+            4,
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    src.clone(),
+                    graph.clone(),
+                    intent.clone(),
+                    respond.clone(),
+                    llm.clone(),
+                    contract.clone(),
+                ],
+                &[
+                    edge(graph.id, intent.id, EdgeKind::DefinesAgentNode, src.id),
+                    edge(graph.id, respond.id, EdgeKind::DefinesAgentNode, src.id),
+                    edge(intent.id, respond.id, EdgeKind::GraphTransitionsTo, src.id),
+                    edge(intent.id, llm.id, EdgeKind::InvokesLlm, src.id),
+                    edge(
+                        respond.id,
+                        contract.id,
+                        EdgeKind::ProducesAiContract,
+                        src.id,
+                    ),
+                ],
+            )
+            .expect("insert");
+
+        let trace = trace_agent(&store, graph.id, 8, 2).expect("trace_agent");
+
+        assert!(trace.truncated, "node cap of 2 must truncate");
+        let present: FxHashSet<_> = trace.nodes.iter().map(|n| n.node_id.as_bytes()).collect();
+        for e in &trace.edges {
+            let resolvable = e.target.as_bytes() == graph.id.as_bytes()
+                || present.contains(&e.target.as_bytes());
+            assert!(
+                resolvable,
+                "edge target {:?} is neither the root nor a surfaced node",
+                e.target
+            );
+        }
     }
 
     // A target with no node in the graph yields an empty trace, not an error.

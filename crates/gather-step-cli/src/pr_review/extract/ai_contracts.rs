@@ -8,10 +8,10 @@
 //!
 //! `(repo, file_path, source_symbol_node_id)` — "the structured-output call site
 //! in a given symbol". Unlike payload contracts (keyed by target + side), an AI
-//! contract is keyed by its source symbol so that swapping the model or editing
-//! the schema both surface as a *change* on the same call site rather than a
-//! remove + add. Contracts without a `contract_target_qualified_name` are skipped
-//! (they have no stable target identity to report).
+//! contract is keyed by its source symbol so that swapping the schema or model
+//! both surface as a *change* on the same call site rather than a remove + add.
+//! The R1 producer leaves the model `contract_target_qualified_name` (and
+//! provider/model) unset, so the key must NOT depend on it.
 //!
 //! # Comparison
 //!
@@ -85,12 +85,14 @@ fn cmp_delta(a: &AiContractDelta, b: &AiContractDelta) -> std::cmp::Ordering {
     (
         a.repo.as_str(),
         a.file.as_str(),
-        a.target_qualified_name.as_str(),
+        a.source_type_name.as_deref().unwrap_or(""),
+        a.target_qualified_name.as_deref().unwrap_or(""),
     )
         .cmp(&(
             b.repo.as_str(),
             b.file.as_str(),
-            b.target_qualified_name.as_str(),
+            b.source_type_name.as_deref().unwrap_or(""),
+            b.target_qualified_name.as_deref().unwrap_or(""),
         ))
 }
 
@@ -98,12 +100,14 @@ fn cmp_change(a: &AiContractDeltaChange, b: &AiContractDeltaChange) -> std::cmp:
     (
         a.repo.as_str(),
         a.file.as_str(),
-        a.target_qualified_name.as_str(),
+        a.source_type_name.as_deref().unwrap_or(""),
+        a.target_qualified_name.as_deref().unwrap_or(""),
     )
         .cmp(&(
             b.repo.as_str(),
             b.file.as_str(),
-            b.target_qualified_name.as_str(),
+            b.source_type_name.as_deref().unwrap_or(""),
+            b.target_qualified_name.as_deref().unwrap_or(""),
         ))
 }
 
@@ -111,15 +115,14 @@ fn cmp_change(a: &AiContractDeltaChange, b: &AiContractDeltaChange) -> std::cmp:
 
 /// Fetch all AI contracts from the store and index them by diff key.
 ///
-/// Contracts without a `contract_target_qualified_name` are skipped because they
-/// have no stable target identity to report.
+/// Keyed by source symbol, not target: the R1 producer leaves
+/// `contract_target_qualified_name` (and provider/model) unset, so requiring a
+/// target would drop every real contract. One structured-output contract per
+/// source symbol is assumed; a second in the same symbol collapses (last wins).
 fn build_contract_map<M: MetadataStore>(store: &M) -> Result<ContractMap> {
     let records = store.ai_contracts_for_query(AiContractQuery::default())?;
     let mut map = ContractMap::default();
     for record in records {
-        if record.record.contract_target_qualified_name.is_none() {
-            continue;
-        }
         let key = (
             record.record.repo.clone(),
             record.record.file_path.clone(),
@@ -156,17 +159,13 @@ fn record_to_delta(record: &AiContractStoreRecord) -> AiContractDelta {
     AiContractDelta {
         repo: record.record.repo.clone(),
         file: record.record.file_path.clone(),
-        target_qualified_name: record
-            .record
-            .contract_target_qualified_name
-            .clone()
-            .unwrap_or_default(),
+        source_type_name: record.record.source_type_name.clone(),
+        target_qualified_name: record.record.contract_target_qualified_name.clone(),
         provider: doc.provider.clone(),
         model: doc.model.clone(),
         temperature: doc.temperature.clone(),
         inference_kind: record.record.inference_kind.as_sql_str().to_owned(),
         confidence_band: band_str(record.record.confidence).to_owned(),
-        source_type_name: record.record.source_type_name.clone(),
         fields: doc.fields.iter().map(field_summary).collect(),
     }
 }
@@ -283,11 +282,8 @@ fn diff_contract(
     Some(AiContractDeltaChange {
         repo: review.record.repo.clone(),
         file: review.record.file_path.clone(),
-        target_qualified_name: review
-            .record
-            .contract_target_qualified_name
-            .clone()
-            .unwrap_or_default(),
+        source_type_name: review.record.source_type_name.clone(),
+        target_qualified_name: review.record.contract_target_qualified_name.clone(),
         fields_added,
         fields_removed,
         fields_optional_to_required,
@@ -376,44 +372,54 @@ mod tests {
         }
     }
 
-    /// Build an AI contract whose target model is `__llm__<provider>__<model>`
-    /// and whose source symbol is `<repo>::<symbol>` (temperature fixed at `0`).
-    fn make_ai_contract(
+    /// Build a contract shaped exactly like the R1 TS producer
+    /// (`structured_output_record`): `contract_target_qualified_name`, `provider`,
+    /// `model`, and `temperature` are `None`; identity is the source symbol +
+    /// `source_type_name`. `fields` is empty in R1 — the `fields` param is for
+    /// forward-looking (R2 field-extraction) coverage of the diff machinery.
+    fn r1_contract(
         repo: &str,
         file: &str,
         symbol: &str,
-        provider: &str,
-        model: &str,
+        source_type: Option<&str>,
+        inference: AiContractInferenceKind,
         fields: Vec<AiContractField>,
     ) -> AiContractStoreRecord {
-        let target_qn = format!("__llm__{provider}__{model}");
-        let target = node_id(repo, file, NodeKind::LlmModel, &target_qn);
+        // The producer keys the synthetic target on the schema/line; mirror that
+        // so distinct schemas at one symbol get distinct contract node ids.
+        let target_seed = format!("__ai_target__{}", source_type.unwrap_or("inline"));
+        let target = node_id(repo, file, NodeKind::AiContract, &target_seed);
         let source = node_id(repo, file, NodeKind::Function, symbol);
         let external_id = ai_contract_external_id(repo, file, target, source);
+        let confidence = match inference {
+            AiContractInferenceKind::LiteralSchema => 850,
+            AiContractInferenceKind::ReferencedSchema => 700,
+            AiContractInferenceKind::UsageInferred => 500,
+        };
         AiContractStoreRecord {
             record: AiContractRecord {
                 ai_contract_node_id: ai_contract_node_id(&external_id),
                 contract_target_node_id: target,
-                contract_target_kind: NodeKind::LlmModel,
-                contract_target_qualified_name: Some(target_qn),
+                contract_target_kind: NodeKind::AiContract,
+                contract_target_qualified_name: None,
                 repo: repo.to_owned(),
                 file_path: file.to_owned(),
                 source_symbol_node_id: source,
-                line_start: Some(10),
-                inference_kind: AiContractInferenceKind::LiteralSchema,
-                confidence: 850,
-                source_type_name: Some("OutputSchema".to_owned()),
+                line_start: None,
+                inference_kind: inference,
+                confidence,
+                source_type_name: source_type.map(str::to_owned),
                 contract: AiContractDoc {
-                    provider: Some(provider.to_owned()),
-                    model: Some(model.to_owned()),
-                    temperature: Some("0".to_owned()),
+                    provider: None,
+                    model: None,
+                    temperature: None,
                     structured: true,
                     schema_format: "zod".to_owned(),
-                    inference_kind: AiContractInferenceKind::LiteralSchema,
-                    confidence: 850,
+                    inference_kind: inference,
+                    confidence,
                     fields,
                     prompt_keys: vec![],
-                    source_type_name: Some("OutputSchema".to_owned()),
+                    source_type_name: source_type.map(str::to_owned),
                 },
             },
         }
@@ -427,33 +433,41 @@ mod tests {
             .expect("insert should succeed");
     }
 
-    /// A contract present only in review must appear in `added`.
+    /// REGRESSION (review finding #1): a producer-shaped record has a `None`
+    /// target QN; it must still appear in `added` (an earlier build dropped it).
     #[test]
-    fn new_contract_appears_in_added_list() {
+    fn realistic_r1_contract_appears_in_added_list() {
         let (_b, baseline) = open_store("ai-added-baseline");
         let (_r, review) = open_store("ai-added-review");
 
         insert(
             &review,
-            make_ai_contract(
+            r1_contract(
                 "events",
                 "src/agent.ts",
                 "compareItems",
-                "openai",
-                "gpt-4.1-mini",
-                vec![field("is_related", "boolean", false)],
+                Some("ItemComparisonOutputSchema"),
+                AiContractInferenceKind::ReferencedSchema,
+                vec![],
             ),
         );
 
         let deltas = extract_ai_contract_deltas(&baseline, &review).expect("should succeed");
 
-        assert_eq!(deltas.added.len(), 1, "expected one added contract");
         assert_eq!(
-            deltas.added[0].target_qualified_name,
-            "__llm__openai__gpt-4.1-mini"
+            deltas.added.len(),
+            1,
+            "real R1 contract must not be dropped"
         );
-        assert_eq!(deltas.added[0].provider.as_deref(), Some("openai"));
-        assert_eq!(deltas.added[0].confidence_band, "strong");
+        assert_eq!(
+            deltas.added[0].source_type_name.as_deref(),
+            Some("ItemComparisonOutputSchema")
+        );
+        assert_eq!(
+            deltas.added[0].target_qualified_name, None,
+            "R1 records have no resolved model target"
+        );
+        assert_eq!(deltas.added[0].confidence_band, "medium");
         assert!(deltas.removed.is_empty(), "nothing removed");
         assert!(deltas.changed.is_empty(), "nothing changed");
     }
@@ -466,13 +480,13 @@ mod tests {
 
         insert(
             &baseline,
-            make_ai_contract(
+            r1_contract(
                 "events",
                 "src/agent.ts",
                 "compareItems",
-                "openai",
-                "gpt-4.1-mini",
-                vec![field("is_related", "boolean", false)],
+                Some("ItemComparisonOutputSchema"),
+                AiContractInferenceKind::ReferencedSchema,
+                vec![],
             ),
         );
 
@@ -483,8 +497,97 @@ mod tests {
         assert!(deltas.changed.is_empty(), "nothing changed");
     }
 
-    /// Same call site, review adds a schema field → `changed` with the new field
-    /// in `fields_added`. This is the core pr-review payoff (a Zod schema edit).
+    /// The realistic R1 change signal: the structured-output schema swaps at the
+    /// same call site → `changed` with a `source_type_name` facet change.
+    #[test]
+    fn source_type_change_appears_in_changed_list() {
+        let (_b, baseline) = open_store("ai-stype-baseline");
+        let (_r, review) = open_store("ai-stype-review");
+
+        insert(
+            &baseline,
+            r1_contract(
+                "events",
+                "src/agent.ts",
+                "compareItems",
+                Some("OldSchema"),
+                AiContractInferenceKind::ReferencedSchema,
+                vec![],
+            ),
+        );
+        insert(
+            &review,
+            r1_contract(
+                "events",
+                "src/agent.ts",
+                "compareItems",
+                Some("NewSchema"),
+                AiContractInferenceKind::ReferencedSchema,
+                vec![],
+            ),
+        );
+
+        let deltas = extract_ai_contract_deltas(&baseline, &review).expect("should succeed");
+
+        assert_eq!(deltas.changed.len(), 1, "expected one changed contract");
+        let c = &deltas.changed[0];
+        let stype = c
+            .facets_changed
+            .iter()
+            .find(|f| f.facet == "source_type_name")
+            .expect("source_type_name facet must be in facets_changed");
+        assert_eq!(stype.before.as_deref(), Some("OldSchema"));
+        assert_eq!(stype.after.as_deref(), Some("NewSchema"));
+        assert!(deltas.added.is_empty(), "nothing added");
+        assert!(deltas.removed.is_empty(), "nothing removed");
+    }
+
+    /// Inline schema becomes referenced (or vice versa) → `inference_kind` facet
+    /// change. Schemas keep the same name so identity stays stable.
+    #[test]
+    fn inference_kind_change_appears_in_changed_list() {
+        let (_b, baseline) = open_store("ai-infer-baseline");
+        let (_r, review) = open_store("ai-infer-review");
+
+        insert(
+            &baseline,
+            r1_contract(
+                "events",
+                "src/agent.ts",
+                "compareItems",
+                Some("OutputSchema"),
+                AiContractInferenceKind::LiteralSchema,
+                vec![],
+            ),
+        );
+        insert(
+            &review,
+            r1_contract(
+                "events",
+                "src/agent.ts",
+                "compareItems",
+                Some("OutputSchema"),
+                AiContractInferenceKind::ReferencedSchema,
+                vec![],
+            ),
+        );
+
+        let deltas = extract_ai_contract_deltas(&baseline, &review).expect("should succeed");
+
+        assert_eq!(deltas.changed.len(), 1, "expected one changed contract");
+        assert!(
+            deltas.changed[0]
+                .facets_changed
+                .iter()
+                .any(|f| f.facet == "inference_kind"),
+            "inference_kind change must surface; got {:?}",
+            deltas.changed[0].facets_changed
+        );
+    }
+
+    /// Forward-looking (R2 field extraction): when the producer eventually
+    /// populates schema fields, an added field surfaces in `fields_added`. R1
+    /// records have empty fields so this exercises the diff machinery only.
     #[test]
     fn schema_field_added_appears_in_changed_list() {
         let (_b, baseline) = open_store("ai-field-added-baseline");
@@ -492,23 +595,23 @@ mod tests {
 
         insert(
             &baseline,
-            make_ai_contract(
+            r1_contract(
                 "events",
                 "src/agent.ts",
                 "compareItems",
-                "openai",
-                "gpt-4.1-mini",
+                Some("OutputSchema"),
+                AiContractInferenceKind::LiteralSchema,
                 vec![field("is_related", "boolean", false)],
             ),
         );
         insert(
             &review,
-            make_ai_contract(
+            r1_contract(
                 "events",
                 "src/agent.ts",
                 "compareItems",
-                "openai",
-                "gpt-4.1-mini",
+                Some("OutputSchema"),
+                AiContractInferenceKind::LiteralSchema,
                 vec![
                     field("is_related", "boolean", false),
                     field("reason", "string", false),
@@ -522,57 +625,5 @@ mod tests {
         let c = &deltas.changed[0];
         assert_eq!(c.fields_added.len(), 1, "one field added");
         assert_eq!(c.fields_added[0].name, "reason");
-        assert!(c.facets_changed.is_empty(), "no facet changes");
-        assert!(deltas.added.is_empty(), "nothing added");
-        assert!(deltas.removed.is_empty(), "nothing removed");
-    }
-
-    /// Same call site, the model swaps → `changed` with a `model` facet change
-    /// (and a `provider`/target change), not a remove + add.
-    #[test]
-    fn model_swap_appears_as_facet_change() {
-        let (_b, baseline) = open_store("ai-model-swap-baseline");
-        let (_r, review) = open_store("ai-model-swap-review");
-
-        insert(
-            &baseline,
-            make_ai_contract(
-                "events",
-                "src/agent.ts",
-                "compareItems",
-                "openai",
-                "gpt-4.1-mini",
-                vec![field("is_related", "boolean", false)],
-            ),
-        );
-        insert(
-            &review,
-            make_ai_contract(
-                "events",
-                "src/agent.ts",
-                "compareItems",
-                "anthropic",
-                "claude-sonnet",
-                vec![field("is_related", "boolean", false)],
-            ),
-        );
-
-        let deltas = extract_ai_contract_deltas(&baseline, &review).expect("should succeed");
-
-        assert_eq!(
-            deltas.changed.len(),
-            1,
-            "model swap is a change, not add/remove"
-        );
-        let c = &deltas.changed[0];
-        let model_change = c
-            .facets_changed
-            .iter()
-            .find(|f| f.facet == "model")
-            .expect("model facet must be in facets_changed");
-        assert_eq!(model_change.before.as_deref(), Some("gpt-4.1-mini"));
-        assert_eq!(model_change.after.as_deref(), Some("claude-sonnet"));
-        assert!(deltas.added.is_empty(), "nothing added");
-        assert!(deltas.removed.is_empty(), "nothing removed");
     }
 }

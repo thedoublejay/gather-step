@@ -309,21 +309,33 @@ pub struct AiContractDeltas {
 }
 
 /// One AI contract as observed in a single index snapshot.
+///
+/// In R1 the producer populates `source_type_name`, `inference_kind`, and
+/// `confidence_band`; the model `target_qualified_name`, `provider`, `model`,
+/// `temperature`, and `fields` are R2 facets (usually absent today), so they are
+/// `Option`/empty and skipped from JSON when unset.
 #[derive(Debug, Clone, Serialize)]
 pub struct AiContractDelta {
     pub repo: String,
     pub file: String,
-    /// The target model's qualified name (`__llm__<provider>__<model>`).
-    pub target_qualified_name: String,
+    /// Schema / source-type name — the primary identity for a structured-output
+    /// contract. `None` for inline schemas.
+    pub source_type_name: Option<String>,
+    /// The target model's qualified name (`__llm__<provider>__<model>`) when
+    /// resolved (R2); usually `None` in R1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_qualified_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<String>,
     /// Provenance of the schema shape: `literal_schema` / `referenced_schema` /
     /// `usage_inferred`.
     pub inference_kind: String,
     /// AI confidence band: `strong` / `medium` / `weak`.
     pub confidence_band: String,
-    pub source_type_name: Option<String>,
     pub fields: Vec<AiContractFieldSummary>,
 }
 
@@ -341,7 +353,11 @@ pub struct AiContractFieldSummary {
 pub struct AiContractDeltaChange {
     pub repo: String,
     pub file: String,
-    pub target_qualified_name: String,
+    /// Schema / source-type name (review side) — the contract's identity.
+    pub source_type_name: Option<String>,
+    /// Target model qualified name when resolved (R2); usually `None` in R1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_qualified_name: Option<String>,
     pub fields_added: Vec<AiContractFieldSummary>,
     pub fields_removed: Vec<AiContractFieldSummary>,
     /// Field names that flipped from `optional = true` to `optional = false`.
@@ -1957,23 +1973,42 @@ fn render_contract_changed_section(buf: &mut String, changes: &[PayloadContractD
     }
 }
 
+/// Display identity for an AI contract: the schema name, else the resolved
+/// model, else a file-scoped "inline" label.
+fn ai_contract_label(
+    source_type_name: Option<&str>,
+    target_qn: Option<&str>,
+    file: &str,
+) -> String {
+    source_type_name.or(target_qn).map_or_else(
+        || format!("{file} (inline structured output)"),
+        str::to_owned,
+    )
+}
+
 fn render_ai_contract_section(buf: &mut String, heading: &str, contracts: &[AiContractDelta]) {
     let _ = writeln!(buf, "\n## {heading}\n");
     if contracts.is_empty() {
         buf.push_str("_no changes_\n");
         return;
     }
-    buf.push_str("| Repo | File | Model | Temp | Confidence | Fields |\n");
-    buf.push_str("|------|------|-------|------|------------|--------|\n");
+    buf.push_str("| Repo | File | Contract | Model | Provenance | Confidence | Fields |\n");
+    buf.push_str("|------|------|----------|-------|------------|------------|--------|\n");
     for c in contracts {
         let fields: Vec<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+        let label = ai_contract_label(
+            c.source_type_name.as_deref(),
+            c.target_qualified_name.as_deref(),
+            &c.file,
+        );
         let _ = writeln!(
             buf,
-            "| {} | {} | `{}` | {} | {} | {} |",
+            "| {} | {} | `{}` | {} | {} | {} | {} |",
             c.repo,
             c.file,
-            c.target_qualified_name,
-            c.temperature.as_deref().unwrap_or("-"),
+            label,
+            c.model.as_deref().unwrap_or("-"),
+            c.inference_kind,
             c.confidence_band,
             fields.join(", ")
         );
@@ -1987,7 +2022,12 @@ fn render_ai_contract_changed_section(buf: &mut String, changes: &[AiContractDel
         return;
     }
     for c in changes {
-        let _ = writeln!(buf, "### `{}` — {}\n", c.target_qualified_name, c.repo);
+        let label = ai_contract_label(
+            c.source_type_name.as_deref(),
+            c.target_qualified_name.as_deref(),
+            &c.file,
+        );
+        let _ = writeln!(buf, "### `{}` — {}\n", label, c.repo);
         if !c.fields_added.is_empty() {
             let names: Vec<&str> = c.fields_added.iter().map(|f| f.name.as_str()).collect();
             let _ = writeln!(buf, "- **Fields added:** {}", names.join(", "));
@@ -3159,7 +3199,8 @@ mod tests {
                 changed: vec![AiContractDeltaChange {
                     repo: "events".to_owned(),
                     file: "src/agent.ts".to_owned(),
-                    target_qualified_name: "__llm__openai__gpt-4.1-mini".to_owned(),
+                    source_type_name: Some("ItemComparisonOutputSchema".to_owned()),
+                    target_qualified_name: None,
                     fields_added: vec![AiContractFieldSummary {
                         name: "reason".to_owned(),
                         type_name: Some("string".to_owned()),
