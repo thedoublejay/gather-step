@@ -29,7 +29,8 @@ pub mod shared_contract;
 pub mod transport;
 
 pub use agent_topology::{
-    AgentTopologyError, AgentTrace, AgentTraceEdge, AgentTraceNode, trace_agent,
+    AgentTopologyError, AgentTrace, AgentTraceEdge, AgentTraceNode, resolve_agent_targets,
+    trace_agent,
 };
 pub use canonical::{Canonical, TopicKind, canonical_for_node};
 pub use contract_drift::{

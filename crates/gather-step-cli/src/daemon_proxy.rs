@@ -183,6 +183,7 @@ fn request_name(request: &DaemonRequest) -> &'static str {
         DaemonRequest::EventsTrace { .. } => "events_trace",
         DaemonRequest::EventsBlastRadius { .. } => "events_blast_radius",
         DaemonRequest::EventsOrphans { .. } => "events_orphans",
+        DaemonRequest::EventsAgentTrace { .. } => "events_agent_trace",
         DaemonRequest::Impact { .. } => "impact",
         DaemonRequest::Pack { .. } => "pack",
     }

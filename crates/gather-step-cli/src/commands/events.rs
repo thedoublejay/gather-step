@@ -1,9 +1,10 @@
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use gather_step_analysis::{
-    event_blast_radius, list_orphan_topics, rank_event_targets, resolve_event_targets, trace_event,
+    event_blast_radius, list_orphan_topics, rank_event_targets, resolve_agent_targets,
+    resolve_event_targets, trace_agent, trace_event,
 };
-use gather_step_core::NodeData;
+use gather_step_core::{NodeData, NodeId};
 use gather_step_storage::GraphStore;
 use gather_step_storage::StorageCoordinator;
 use serde::Serialize;
@@ -25,6 +26,17 @@ pub enum EventsCommand {
     Trace(TraceArgs),
     BlastRadius(BlastRadiusArgs),
     Orphans(OrphansArgs),
+    Agent(AgentTraceArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AgentTraceArgs {
+    #[arg(help = "Agent graph / model / prompt identifier (name or qualified name) to trace")]
+    pub target: String,
+    #[arg(long, default_value_t = 25, help = "Maximum nodes to return")]
+    pub limit: usize,
+    #[arg(long, default_value_t = 8, help = "AI-flow traversal depth")]
+    pub depth: usize,
 }
 
 #[derive(Debug, Args)]
@@ -93,6 +105,34 @@ struct BlastRadiusNodeOutput {
     cumulative_confidence: Option<u16>,
 }
 
+#[derive(Debug, Serialize)]
+struct AgentTraceOutput {
+    event: &'static str,
+    target: EventTargetOutput,
+    nodes: Vec<AgentTraceNodeOutput>,
+    edges: Vec<AgentTraceEdgeOutput>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTraceNodeOutput {
+    repo: String,
+    file_path: String,
+    line_number: Option<u32>,
+    name: String,
+    node_kind: String,
+    ai_role: Option<String>,
+    depth: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentTraceEdgeOutput {
+    source_id: String,
+    target_id: String,
+    edge_kind: String,
+    confidence: Option<u16>,
+}
+
 pub fn run(app: &AppContext, args: EventsArgs) -> Result<()> {
     let request = daemon_request(&args, app);
     daemon_proxy::run_read_only_command(app, &request, move |app| {
@@ -109,6 +149,7 @@ pub(crate) fn run_rendered(
         EventsCommand::Trace(args) => run_trace_rendered(app, ctx, &args),
         EventsCommand::BlastRadius(args) => run_blast_radius_rendered(app, ctx, &args),
         EventsCommand::Orphans(args) => run_orphans_rendered(app, ctx, &args),
+        EventsCommand::Agent(args) => run_agent_trace_rendered(app, ctx, &args),
     }
 }
 
@@ -127,6 +168,12 @@ fn daemon_request(args: &EventsArgs, app: &AppContext) -> DaemonRequest {
         },
         EventsCommand::Orphans(args) => DaemonRequest::EventsOrphans {
             limit: args.limit,
+            repo_filter: app.repo_filter.clone(),
+        },
+        EventsCommand::Agent(args) => DaemonRequest::EventsAgentTrace {
+            target: args.target.clone(),
+            limit: args.limit,
+            depth: args.depth,
             repo_filter: app.repo_filter.clone(),
         },
     }
@@ -296,6 +343,104 @@ pub(crate) fn execute_blast_radius(
                 alternate.name, alternate.repo, alternate.file_path
             ));
         }
+    }
+
+    Ok(RenderedCommand::success(json!(payload), lines))
+}
+
+fn node_id_hex(id: NodeId) -> String {
+    use std::fmt::Write as _;
+    id.as_bytes()
+        .iter()
+        .fold(String::with_capacity(32), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+fn run_agent_trace_rendered(
+    app: &AppContext,
+    ctx: &StorageContext,
+    args: &AgentTraceArgs,
+) -> Result<RenderedCommand> {
+    let storage = ctx.open_storage_coordinator()?;
+    execute_agent_trace(&storage, app.repo_filter.as_deref(), args)
+}
+
+pub(crate) fn execute_agent_trace(
+    storage: &StorageCoordinator,
+    repo_filter: Option<&str>,
+    args: &AgentTraceArgs,
+) -> Result<RenderedCommand> {
+    let candidates = resolve_agent_targets(storage.graph(), &args.target)?;
+    let target = candidates
+        .into_iter()
+        .find(|node| repo_filter.is_none_or(|repo| node.repo == repo));
+    let Some(target) = target else {
+        bail!("No matching AI target found for `{}`.", args.target);
+    };
+
+    let trace = trace_agent(storage.graph(), target.id, args.depth, args.limit)?;
+    let payload = AgentTraceOutput {
+        event: "events_agent_trace_completed",
+        target: EventTargetOutput {
+            repo: trace.target.repo.clone(),
+            file_path: trace.target.file_path.clone(),
+            name: trace.target.name.clone(),
+            node_kind: trace.target.kind.to_string(),
+        },
+        nodes: trace
+            .nodes
+            .into_iter()
+            .map(|node| AgentTraceNodeOutput {
+                repo: node.repo,
+                file_path: node.file_path,
+                line_number: node.line_number,
+                name: node.name,
+                node_kind: node.node_kind.to_string(),
+                ai_role: node.ai_role,
+                depth: node.depth,
+            })
+            .collect(),
+        edges: trace
+            .edges
+            .into_iter()
+            .map(|e| AgentTraceEdgeOutput {
+                source_id: node_id_hex(e.source),
+                target_id: node_id_hex(e.target),
+                edge_kind: e.edge_kind.to_string(),
+                confidence: e.confidence,
+            })
+            .collect(),
+        truncated: trace.truncated,
+    };
+
+    let mut lines = vec![format!(
+        "Agent trace from {} ({})",
+        payload.target.name, payload.target.node_kind
+    )];
+    if payload.nodes.is_empty() {
+        lines.push("  no reachable AI nodes".to_owned());
+    } else {
+        for node in &payload.nodes {
+            let role = node.ai_role.as_deref().unwrap_or("");
+            lines.push(format!(
+                "  depth={} {} [{}{}] {}:{}",
+                node.depth,
+                node.name,
+                node.node_kind,
+                if role.is_empty() {
+                    String::new()
+                } else {
+                    format!("/{role}")
+                },
+                node.repo,
+                node.file_path
+            ));
+        }
+    }
+    if payload.truncated {
+        lines.push("  (truncated)".to_owned());
     }
 
     Ok(RenderedCommand::success(json!(payload), lines))

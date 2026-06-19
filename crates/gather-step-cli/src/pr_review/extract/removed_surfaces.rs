@@ -24,6 +24,31 @@ use crate::pr_review::delta_report::{
     EventDelta, RemovedSurfaceConsumer, RemovedSurfaceRisk, RiskSeverity, RouteDelta, SymbolDelta,
 };
 
+/// AI surface node kinds checked for removal, paired with their risk-`kind`
+/// label. These are the real AI `NodeKind`s; faceted surfaces (a `Tool` /
+/// `AgentNode` is a `Function` with an `ai_role`) are covered by the
+/// symbol-delta `removed` list, not here.
+const AI_SURFACE_KINDS: &[(NodeKind, &str)] = &[
+    (NodeKind::Prompt, "ai_prompt"),
+    (NodeKind::VectorIndex, "ai_vector_index"),
+    (NodeKind::McpTool, "ai_mcp_tool"),
+    (NodeKind::McpServer, "ai_mcp_server"),
+    (NodeKind::LlmModel, "ai_llm_model"),
+    (NodeKind::AgentGraph, "ai_agent_graph"),
+];
+
+/// Incoming edge kinds that mark a consumer of an AI surface node.
+const AI_CONSUMER_EDGE_KINDS: &[EdgeKind] = &[
+    EdgeKind::UsesPrompt,
+    EdgeKind::FetchesPromptFrom,
+    EdgeKind::RetrievesFrom,
+    EdgeKind::IndexesVector,
+    EdgeKind::CallsMcpTool,
+    EdgeKind::ExposesMcpTool,
+    EdgeKind::ComposesAgent,
+    EdgeKind::InvokesLlm,
+];
+
 /// Extract removed-surface risks by scanning consumers of every removed surface
 /// in the baseline graph and checking whether those consumers are still present
 /// in the review graph.
@@ -165,6 +190,44 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
             surviving_consumers: consumers,
             severity,
         });
+    }
+
+    // ── Removed AI surfaces (v5 Phase 4) ──────────────────────────────────────
+    // Tools / prompts / vector indexes / MCP tools / agent graphs are real (often
+    // convergence-virtual) nodes. When one disappears in review but an agent that
+    // bound/used it survives, that binding now dangles — the AI analogue of a
+    // removed route with surviving callers.
+    for &(kind, label) in AI_SURFACE_KINDS {
+        for node in baseline.nodes_by_type(kind)? {
+            // Removed = present in baseline, absent in review.
+            if review.get_node(node.id)?.is_some() {
+                continue;
+            }
+            let consumers = surviving_consumers(baseline, review, node.id, AI_CONSUMER_EDGE_KINDS)?;
+            // Virtual AI nodes have no single owning repo, so (like events) any
+            // surviving consumer is treated as cross-repo → High.
+            let severity = if node.is_virtual {
+                if consumers.is_empty() {
+                    RiskSeverity::Low
+                } else {
+                    RiskSeverity::High
+                }
+            } else {
+                severity_for_consumers(&consumers, Some(&node.repo), true)
+            };
+            let identity = node
+                .qualified_name
+                .clone()
+                .or_else(|| node.external_id.clone())
+                .unwrap_or_else(|| node.name.clone());
+            risks.push(RemovedSurfaceRisk {
+                kind: label.to_owned(),
+                identity,
+                repo: (node.repo != "__virtual__").then(|| node.repo.clone()),
+                surviving_consumers: consumers,
+                severity,
+            });
+        }
     }
 
     // Sort: severity descending (High > Medium > Low), then kind, then identity.
@@ -426,6 +489,24 @@ mod tests {
         }
     }
 
+    fn prompt_virtual_node(key: &str) -> NodeData {
+        let qn = format!("__prompt__managed__{key}");
+        NodeData {
+            id: node_id("__virtual__", &qn, NodeKind::Prompt, &qn),
+            kind: NodeKind::Prompt,
+            repo: "__virtual__".to_owned(),
+            file_path: qn.clone(),
+            name: key.to_owned(),
+            qualified_name: Some(qn.clone()),
+            external_id: Some(qn),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        }
+    }
+
     // ── tests ─────────────────────────────────────────────────────────────────
 
     /// Removed route with a `ConsumesApiFrom` edge from a different repo → High.
@@ -535,6 +616,43 @@ mod tests {
         assert_eq!(risks[0].severity, RiskSeverity::High);
         assert_eq!(risks[0].kind, "event");
         assert!(!risks[0].surviving_consumers.is_empty());
+    }
+
+    /// A removed managed Prompt still used by a surviving (cross-repo) caller →
+    /// flagged as a High-risk removed AI surface.
+    #[test]
+    fn removed_ai_prompt_with_surviving_consumer_is_flagged() {
+        let (_td_b, baseline) = open_store("ai-prompt-baseline");
+        let (_td_r, review) = open_store("ai-prompt-review");
+
+        let prompt = prompt_virtual_node("doc-summary");
+        let caller_fn = function_node("reggenius", "src/usecase.ts", "sendMessage");
+        let owner = file_node("reggenius", "src/usecase.ts");
+        let use_edge = edge(&caller_fn, &prompt, EdgeKind::UsesPrompt, &owner);
+
+        baseline
+            .bulk_insert(&[prompt, caller_fn.clone(), owner], &[use_edge])
+            .expect("baseline insert");
+
+        // The caller that uses the prompt still exists in review; the prompt is gone.
+        let review_owner = file_node("reggenius", "src/usecase.ts");
+        review
+            .bulk_insert(&[caller_fn, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        let prompt_risk = risks
+            .iter()
+            .find(|r| r.kind == "ai_prompt")
+            .expect("an ai_prompt risk must be flagged");
+        assert_eq!(prompt_risk.identity, "__prompt__managed__doc-summary");
+        assert_eq!(prompt_risk.severity, RiskSeverity::High);
+        assert!(
+            !prompt_risk.surviving_consumers.is_empty(),
+            "the surviving caller must be listed"
+        );
     }
 
     /// Symbol A consumed by Symbol B (cross-repo), both removed → B does not count.

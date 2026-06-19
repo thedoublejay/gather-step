@@ -49,6 +49,12 @@ pub enum DaemonRequest {
         limit: usize,
         repo_filter: Option<String>,
     },
+    EventsAgentTrace {
+        target: String,
+        limit: usize,
+        depth: usize,
+        repo_filter: Option<String>,
+    },
     Impact {
         symbol: String,
         limit: usize,

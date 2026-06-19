@@ -177,6 +177,56 @@ pub fn trace_agent<S: GraphStore>(
     })
 }
 
+/// Node kinds that can be a `trace_agent` entry point. `AgentGraph` is the
+/// canonical start; the AI leaf kinds let a user trace from a specific model /
+/// tool / prompt / index / MCP node by name.
+const AI_TARGET_KINDS: [NodeKind; 6] = [
+    NodeKind::AgentGraph,
+    NodeKind::LlmModel,
+    NodeKind::Prompt,
+    NodeKind::VectorIndex,
+    NodeKind::McpServer,
+    NodeKind::McpTool,
+];
+
+/// Resolve a user-supplied `target` string to candidate AI nodes for tracing.
+///
+/// Matches an AI node whose `qualified_name`, `external_id`, or `name` equals
+/// `target`, falling back to a `qualified_name` suffix match (so a bare graph
+/// name resolves the `__agent_graph__<file>` qn). Exact matches rank before
+/// suffix matches; ties break deterministically by `(repo, file, qn)`.
+pub fn resolve_agent_targets<S: GraphStore>(
+    store: &S,
+    target: &str,
+) -> Result<Vec<NodeData>, AgentTopologyError> {
+    let mut exact: Vec<NodeData> = Vec::new();
+    let mut suffix: Vec<NodeData> = Vec::new();
+    for kind in AI_TARGET_KINDS {
+        for node in store.nodes_by_type(kind)? {
+            let qn = node.qualified_name.as_deref();
+            if qn == Some(target)
+                || node.external_id.as_deref() == Some(target)
+                || node.name == target
+            {
+                exact.push(node);
+            } else if qn.is_some_and(|q| q.ends_with(target)) {
+                suffix.push(node);
+            }
+        }
+    }
+    let sort_key = |n: &NodeData| {
+        (
+            n.repo.clone(),
+            n.file_path.clone(),
+            n.qualified_name.clone().unwrap_or_default(),
+        )
+    };
+    exact.sort_by_key(sort_key);
+    suffix.sort_by_key(sort_key);
+    exact.extend(suffix);
+    Ok(exact)
+}
+
 fn ai_out_edges<S: GraphStore>(
     store: &S,
     source: NodeId,
@@ -233,7 +283,7 @@ mod tests {
     use gather_step_storage::{GraphStore, GraphStoreDb};
     use rustc_hash::FxHashSet;
 
-    use super::trace_agent;
+    use super::{resolve_agent_targets, trace_agent};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -575,6 +625,49 @@ mod tests {
                 e.target
             );
         }
+    }
+
+    // The resolver matches an AgentGraph by exact qualified_name and by a bare
+    // name suffix, and ranks exact matches first.
+    #[test]
+    fn resolve_agent_targets_matches_qn_and_suffix() {
+        let temp = TempDb::new("resolve");
+        let store = GraphStoreDb::open(temp.path()).expect("store should open");
+        let repo = "agent_repo";
+        let file = "src/agent.ts";
+        let src = file_node(repo, file);
+        let graph = ai_node(
+            repo,
+            file,
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+            None,
+            0,
+        );
+        store
+            .bulk_insert(&[src, graph.clone()], &[])
+            .expect("insert");
+
+        // Exact qualified_name.
+        let by_qn = resolve_agent_targets(&store, "__agent_graph__agent").expect("resolve");
+        assert_eq!(by_qn.len(), 1);
+        assert_eq!(by_qn[0].id.as_bytes(), graph.id.as_bytes());
+
+        // Suffix (bare name).
+        let by_suffix = resolve_agent_targets(&store, "agent").expect("resolve");
+        assert!(
+            by_suffix
+                .iter()
+                .any(|n| n.id.as_bytes() == graph.id.as_bytes()),
+            "suffix match must find the graph"
+        );
+
+        // No match.
+        assert!(
+            resolve_agent_targets(&store, "nonexistent")
+                .expect("resolve")
+                .is_empty()
+        );
     }
 
     // A target with no node in the graph yields an empty trace, not an error.

@@ -17,7 +17,10 @@ use crate::{
         conventions,
         cross_repo_deps::{self, CrossRepoDepsArgs},
         doctor,
-        events::{self, BlastRadiusArgs, EventsArgs, EventsCommand, OrphansArgs, TraceArgs},
+        events::{
+            self, AgentTraceArgs, BlastRadiusArgs, EventsArgs, EventsCommand, OrphansArgs,
+            TraceArgs,
+        },
         impact::{self, ImpactArgs},
         pack::{self, PackArgs, PackModeArg},
         search::{self, SearchArgs},
@@ -244,6 +247,31 @@ pub fn dispatch_request_with_runtime(
                     &StorageContext::workspace_read_only(&app),
                     EventsArgs {
                         command: EventsCommand::Orphans(args),
+                    },
+                )
+            }
+        }
+        DaemonRequest::EventsAgentTrace {
+            target,
+            limit,
+            depth,
+            repo_filter,
+        } => {
+            let app = app_with_repo_filter(app, repo_filter);
+            let args = AgentTraceArgs {
+                target,
+                limit,
+                depth,
+            };
+            if let Some(runtime) = runtime {
+                let storage = runtime.storage();
+                events::execute_agent_trace(&storage, app.repo_filter.as_deref(), &args)
+            } else {
+                events::run_rendered(
+                    &app,
+                    &StorageContext::workspace_read_only(&app),
+                    EventsArgs {
+                        command: EventsCommand::Agent(args),
                     },
                 )
             }
