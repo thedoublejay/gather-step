@@ -317,6 +317,10 @@ pub fn is_ai_typescript(repo_root: &Path) -> bool {
             "langchain",
             "@langchain/openai",
             "@langchain/langgraph",
+            // MCP servers/clients may carry no LangChain dep but still expose
+            // the AI vocabulary (McpServer / Calls+ExposesMcpTool).
+            "@modelcontextprotocol/sdk",
+            "@nestjs-mcp/server",
         ],
     )
 }

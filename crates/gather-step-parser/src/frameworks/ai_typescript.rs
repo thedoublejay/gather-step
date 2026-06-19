@@ -38,6 +38,10 @@ pub fn augment(parsed: &ParsedFile) -> AiTypescriptAugmentation {
         emit_vector_search(parsed, call_site, &mut augmentation);
         emit_managed_prompt(parsed, call_site, &mut augmentation);
         emit_mcp_tool_call(parsed, call_site, &mut augmentation);
+        emit_mcp_tool_expose(parsed, call_site, &mut augmentation);
+        emit_mcp_server(parsed, call_site, &mut augmentation);
+        emit_indexes_vector(parsed, call_site, &mut augmentation);
+        emit_embeds(parsed, call_site, &mut augmentation);
     }
     augmentation
 }
@@ -94,6 +98,193 @@ fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     let body = name.strip_prefix("mcp__")?;
     let (server, tool) = body.split_once("__")?;
     (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
+}
+
+/// MCP server tool registration → an `ExposesMcpTool` edge to the converged
+/// `McpTool` node, the provider counterpart to `CallsMcpTool`. Covers the SDK
+/// method idioms `server.tool("mcp__<server>__<tool>", …)` /
+/// `server.registerTool("mcp__<server>__<tool>", …)` and the decorator factory
+/// `@Tool({ name: "mcp__<server>__<tool>" })`. Only a literal fully-qualified
+/// name converges (the server segment is required); a name built at runtime
+/// (e.g. `buildToolName('…')`) is skipped rather than fabricated.
+fn emit_mcp_tool_expose(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    let Some(raw) = call_site.raw_arguments.as_deref() else {
+        return;
+    };
+    let name = match call_site.callee_name.as_str() {
+        // SDK form: positional string name as arg 0. (LangChain `tool(fn, …)`
+        // passes a function here, not a string, so it falls through.)
+        "tool" | "registerTool" => {
+            extract_call_argument(raw, 0).and_then(|arg| string_literal(arg.trim()))
+        }
+        // Decorator factory `@Tool({ name })` — captured as a call expression.
+        "Tool" => extract_call_argument(raw, 0)
+            .and_then(|options| extract_object_key_value(options, "name"))
+            .and_then(|value| string_literal(value.trim())),
+        _ => return,
+    };
+    let Some((server, tool)) = name.as_deref().and_then(parse_mcp_tool_name) else {
+        return;
+    };
+    let qualified_name = mcp_tool_qn(server, tool);
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::McpTool,
+        &qualified_name,
+        &format!("{server}/{tool}"),
+        None,
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::ExposesMcpTool,
+    ));
+}
+
+fn mcp_server_qn(file_path: &str) -> String {
+    format!("__mcp_server__{file_path}")
+}
+
+/// `new McpServer(…)` → a per-file `McpServer` node. The server name is usually
+/// passed dynamically (`new McpServer(this.serverInfo, …)`), so the node is
+/// scoped by file rather than keyed by a (usually unavailable) literal name —
+/// mirrors the one-graph-per-file `AgentGraph` assumption.
+fn emit_mcp_server(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    if call_site.callee_name != "McpServer" {
+        return;
+    }
+    let qualified_name = mcp_server_qn(parsed.file_node.file_path.as_str());
+    augmentation.nodes.push(virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::McpServer,
+        &qualified_name,
+        "mcp_server",
+        None,
+    ));
+}
+
+/// MongoDB Atlas `collection.createSearchIndex({ name, definition })` for a
+/// vector index → an `IndexesVector` edge to the SAME converged `VectorIndex`
+/// node the `$vectorSearch` read side resolves to, so the write and read sides
+/// of one index meet. Gated on the args mentioning a vector type so a plain
+/// text search index is not mistaken for a vector index; requires a literal
+/// index `name`.
+fn emit_indexes_vector(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    if call_site.callee_name != "createSearchIndex" {
+        return;
+    }
+    let Some(raw) = call_site.raw_arguments.as_deref() else {
+        return;
+    };
+    if !raw.contains("vector") {
+        return;
+    }
+    let Some(name) = extract_call_argument(raw, 0)
+        .and_then(|options| extract_object_key_value(options, "name"))
+        .and_then(|value| string_literal(value.trim()))
+    else {
+        return;
+    };
+    let qualified_name = gather_step_core::vector_index_qn(&name, "vector_index");
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::VectorIndex,
+        &qualified_name,
+        &name,
+        None,
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::IndexesVector,
+    ));
+}
+
+/// An HTTP POST to an embedding-service endpoint (`…/embed`, `…/embeddings`,
+/// `…/vectorize`) → an `Embeds` edge to the provider's `Route` node, reusing
+/// the existing `route_qn` convergence id rather than a fabricated AI node. The
+/// URL must carry a literal path segment with an embedding token; a fully
+/// dynamic URL is skipped. Token matching is intentionally narrow.
+fn emit_embeds(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    if call_site.callee_name != "post" {
+        return;
+    }
+    let Some(path) = call_site
+        .raw_arguments
+        .as_deref()
+        .and_then(|raw| extract_call_argument(raw, 0))
+        .and_then(|url| embedding_endpoint_path(url.trim()))
+    else {
+        return;
+    };
+    let qualified_name = gather_step_core::route_qn("POST", &path);
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::Route,
+        &qualified_name,
+        &path,
+        None,
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::Embeds,
+    ));
+}
+
+/// The static path of an embedding-endpoint URL argument, if it carries one.
+/// Handles a plain string (`"/api/v1/vectorize"`) and a template whose static
+/// tail follows an interpolation (`` `${base}/api/v1/vectorize` ``). Returns
+/// `None` unless the tail is a path containing an embedding token.
+fn embedding_endpoint_path(url_arg: &str) -> Option<String> {
+    const TOKENS: [&str; 3] = ["/vectorize", "/embeddings", "/embed"];
+    let bytes = url_arg.as_bytes();
+    let inner = match (bytes.first(), bytes.last()) {
+        (Some(&open), Some(&close))
+            if open == close && matches!(open, b'"' | b'\'' | b'`') && bytes.len() >= 2 =>
+        {
+            &url_arg[1..url_arg.len() - 1]
+        }
+        _ => url_arg,
+    };
+    // For a template literal the static path tail follows the last `}`.
+    let tail = inner.rfind('}').map_or(inner, |idx| &inner[idx + 1..]);
+    if !tail.starts_with('/') || tail.contains(['$', '{']) {
+        return None;
+    }
+    TOKENS
+        .iter()
+        .any(|token| tail.contains(token))
+        .then(|| tail.to_owned())
 }
 
 /// `new AdminPrompt({ keyName, … })` / `new ContextualPrompt({ keyName, … })` →
@@ -1118,6 +1309,169 @@ export async function run(client: any) {
         // segment, so there is no cross-repo identity to converge on.
         assert!(mcp_tool_qns(&parsed).is_empty());
         assert_eq!(edge_count(&parsed, EdgeKind::CallsMcpTool), 0);
+    }
+
+    fn node_names_of_kind(parsed: &crate::tree_sitter::ParsedFile, kind: NodeKind) -> Vec<String> {
+        let mut names = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == kind)
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn register_tool_exposes_and_converges_with_consumer_call() {
+        let dir = TestDir::new("mcp-expose-converge");
+        let parsed = parse(
+            &dir,
+            "server.ts",
+            r#"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+export function register(server: McpServer, handler: any) {
+    server.registerTool("mcp__document__search_document_chunks", { title: "t" }, handler);
+}
+
+export async function consume(client: any) {
+    return client.callTool({ name: "mcp__document__search_document_chunks", arguments: {} });
+}
+"#,
+        );
+
+        // Both sides resolve to ONE converged McpTool node (provider + consumer).
+        assert_eq!(
+            mcp_tool_qns(&parsed),
+            vec!["__mcp__document__search_document_chunks".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::ExposesMcpTool), 1);
+        assert_eq!(edge_count(&parsed, EdgeKind::CallsMcpTool), 1);
+    }
+
+    #[test]
+    fn register_tool_skips_runtime_built_name() {
+        let dir = TestDir::new("mcp-expose-dynamic");
+        let parsed = parse(
+            &dir,
+            "server.ts",
+            r#"
+export function register(server: any, handler: any) {
+    server.registerTool(buildToolName("search_document_chunks"), { title: "t" }, handler);
+}
+"#,
+        );
+
+        // buildToolName(...) is not a literal mcp__server__tool, so it cannot
+        // converge and must not fabricate a node.
+        assert!(mcp_tool_qns(&parsed).is_empty());
+        assert_eq!(edge_count(&parsed, EdgeKind::ExposesMcpTool), 0);
+    }
+
+    #[test]
+    fn mcp_server_construction_emits_server_node() {
+        let dir = TestDir::new("mcp-server");
+        let parsed = parse(
+            &dir,
+            "transport.ts",
+            r#"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+export function build(serverInfo: any, options: any) {
+    return new McpServer(serverInfo, options);
+}
+"#,
+        );
+
+        assert_eq!(
+            parsed
+                .nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::McpServer)
+                .count(),
+            1,
+            "one McpServer node per file"
+        );
+    }
+
+    #[test]
+    fn create_search_index_emits_indexes_vector() {
+        let dir = TestDir::new("indexes-vector");
+        let parsed = parse(
+            &dir,
+            "index.ts",
+            r#"
+export async function ensureIndex(collection: any) {
+    return collection.createSearchIndex({
+        name: "embedding_index",
+        type: "vectorSearch",
+        definition: { fields: [{ type: "vector", path: "embedding", numDimensions: 1536 }] },
+    });
+}
+"#,
+        );
+
+        // Converges on the SAME vector_index_qn the $vectorSearch read side uses.
+        assert_eq!(
+            node_names_of_kind(&parsed, NodeKind::VectorIndex),
+            vec!["embedding_index".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::IndexesVector), 1);
+    }
+
+    #[test]
+    fn create_search_index_skips_non_vector_index() {
+        let dir = TestDir::new("indexes-text");
+        let parsed = parse(
+            &dir,
+            "index.ts",
+            r#"
+export async function ensureIndex(collection: any) {
+    return collection.createSearchIndex({ name: "title_text", definition: { mappings: {} } });
+}
+"#,
+        );
+
+        assert!(node_names_of_kind(&parsed, NodeKind::VectorIndex).is_empty());
+        assert_eq!(edge_count(&parsed, EdgeKind::IndexesVector), 0);
+    }
+
+    #[test]
+    fn post_to_embedding_endpoint_emits_embeds() {
+        let dir = TestDir::new("embeds");
+        let parsed = parse(
+            &dir,
+            "vectorizer.ts",
+            r#"
+export async function vectorize(http: any, content: string) {
+    return http.axiosRef.post(`${process.env.VECTORIZER_URL}/api/v1/vectorize`, { content });
+}
+"#,
+        );
+
+        assert_eq!(
+            node_names_of_kind(&parsed, NodeKind::Route),
+            vec!["/api/v1/vectorize".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Embeds), 1);
+    }
+
+    #[test]
+    fn post_to_non_embedding_endpoint_is_skipped() {
+        let dir = TestDir::new("embeds-skip");
+        let parsed = parse(
+            &dir,
+            "orders.ts",
+            r#"
+export async function create(http: any, order: any) {
+    return http.axiosRef.post(`${base}/api/v1/orders`, order);
+}
+"#,
+        );
+
+        assert_eq!(edge_count(&parsed, EdgeKind::Embeds), 0);
     }
 
     #[test]
