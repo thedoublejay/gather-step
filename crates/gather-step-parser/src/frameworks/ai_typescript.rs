@@ -11,7 +11,7 @@
 use gather_step_core::{
     AiContractDoc, AiContractInferenceKind, AiContractRecord, EdgeData, EdgeKind, EdgeMetadata,
     NodeData, NodeId, NodeKind, ai_contract_external_id, ai_contract_node_id, llm_model_qn,
-    ref_node_id,
+    mcp_tool_qn, ref_node_id,
 };
 
 use crate::frameworks::nestjs::{extract_call_argument, extract_object_key_value};
@@ -37,8 +37,63 @@ pub fn augment(parsed: &ParsedFile) -> AiTypescriptAugmentation {
         emit_tool(parsed, call_site, &mut augmentation);
         emit_vector_search(parsed, call_site, &mut augmentation);
         emit_managed_prompt(parsed, call_site, &mut augmentation);
+        emit_mcp_tool_call(parsed, call_site, &mut augmentation);
     }
     augmentation
+}
+
+/// `client.callTool({ name: "mcp__<server>__<tool>", … })` → a converged
+/// `McpTool` node (keyed by `(server, tool)`) + a `CallsMcpTool` edge from the
+/// calling symbol. The tool name must be a literal of the fully-qualified
+/// `mcp__server__tool` form; a dynamic name, or one without that shape, is
+/// skipped rather than fabricated, since the server segment is what makes the
+/// cross-repo convergence id resolvable against an exposing server.
+fn emit_mcp_tool_call(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    augmentation: &mut AiTypescriptAugmentation,
+) {
+    if call_site.callee_name != "callTool" {
+        return;
+    }
+    let Some(name) = call_site
+        .raw_arguments
+        .as_deref()
+        .and_then(|raw| extract_call_argument(raw, 0))
+        .and_then(|options| extract_object_key_value(options, "name"))
+        .and_then(|value| string_literal(value.trim()))
+    else {
+        return;
+    };
+    let Some((server, tool)) = parse_mcp_tool_name(&name) else {
+        return;
+    };
+    let qualified_name = mcp_tool_qn(server, tool);
+    let node = virtual_ai_node(
+        parsed,
+        call_site,
+        NodeKind::McpTool,
+        &qualified_name,
+        &format!("{server}/{tool}"),
+        None,
+    );
+    let node_id = node.id;
+    augmentation.nodes.push(node);
+    augmentation.edges.push(ai_edge(
+        parsed,
+        call_site.owner_id,
+        node_id,
+        EdgeKind::CallsMcpTool,
+    ));
+}
+
+/// `(server, tool)` parsed from a fully-qualified MCP tool name of the form
+/// `mcp__<server>__<tool>`. Returns `None` for any other shape so a non-MCP
+/// `callTool` or a bare tool name (no resolvable server) is not converged.
+fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let body = name.strip_prefix("mcp__")?;
+    let (server, tool) = body.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
 }
 
 /// `new AdminPrompt({ keyName, … })` / `new ContextualPrompt({ keyName, … })` →
@@ -734,9 +789,9 @@ export async function run(llm: any, messages: any) {
 "#,
         );
 
-        // The Gemini-style `{ responseSchema: <schema> }` options object is the
-        // dominant structured-output idiom in the RegASK AI repos, used via
-        // project wrappers (not LangChain withStructuredOutput).
+        // The Gemini-style `{ responseSchema: <schema> }` options object is a
+        // common structured-output idiom, used via project wrappers rather than
+        // LangChain's `withStructuredOutput`.
         assert_eq!(
             ai_contract_names(&parsed),
             vec!["DomainExpertLLMOutputSchema".to_owned()]
@@ -987,6 +1042,82 @@ export async function compareItems(model: any) {
         );
         assert!(contract.contract.fields.is_empty());
         assert!(contract.contract.structured);
+    }
+
+    fn mcp_tool_qns(parsed: &crate::tree_sitter::ParsedFile) -> Vec<String> {
+        let mut ids = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::McpTool)
+            .map(|node| node.external_id.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn call_tool_emits_converged_mcp_tool_and_calls_edge() {
+        let dir = TestDir::new("mcp-call");
+        let parsed = parse(
+            &dir,
+            "client.ts",
+            r#"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+export async function searchChunks(client: Client, query: string) {
+    return client.callTool({
+        name: "mcp__document__search_document_chunks",
+        arguments: { query },
+    });
+}
+"#,
+        );
+
+        assert_eq!(
+            mcp_tool_qns(&parsed),
+            vec!["__mcp__document__search_document_chunks".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::CallsMcpTool), 1);
+    }
+
+    #[test]
+    fn call_tool_skips_dynamic_tool_name() {
+        let dir = TestDir::new("mcp-call-dynamic");
+        let parsed = parse(
+            &dir,
+            "client.ts",
+            r"
+export async function run(client: any, toolName: string, args: any) {
+    return client.callTool({ name: toolName, arguments: args });
+}
+",
+        );
+
+        assert!(
+            mcp_tool_qns(&parsed).is_empty(),
+            "a dynamic tool name has no resolvable server and must not converge"
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::CallsMcpTool), 0);
+    }
+
+    #[test]
+    fn call_tool_skips_name_without_mcp_shape() {
+        let dir = TestDir::new("mcp-call-bare");
+        let parsed = parse(
+            &dir,
+            "client.ts",
+            r#"
+export async function run(client: any) {
+    return client.callTool({ name: "search", arguments: {} });
+}
+"#,
+        );
+
+        // A bare tool name (no `mcp__server__tool` shape) carries no server
+        // segment, so there is no cross-repo identity to converge on.
+        assert!(mcp_tool_qns(&parsed).is_empty());
+        assert_eq!(edge_count(&parsed, EdgeKind::CallsMcpTool), 0);
     }
 
     #[test]
