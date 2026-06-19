@@ -52,17 +52,6 @@ pub enum ResolverStrategy {
     FirstPass,
     /// Second-pass edge emitted after cross-repo resolution.
     SecondPass,
-    // --- AI-flow resolvers (v5) ---
-    /// Cross-repo prompt edge resolved by matching a literal `keyName` against
-    /// a managed prompt record.
-    PromptKeyName,
-    /// Cross-repo embedding edge resolved by matching an embedding-service HTTP path.
-    EmbeddingHttp,
-    /// MCP edge resolved by matching a client tool name to a server's exposed tool.
-    McpBinding,
-    /// Intra-repo agent-graph edge resolved from a node-name reference in
-    /// `add_edge`/conditional-mapping wiring.
-    LangGraphEdge,
 }
 
 impl ResolverStrategy {
@@ -88,10 +77,6 @@ impl ResolverStrategy {
             Self::FieldLocalAlias => "field_local_alias",
             Self::FirstPass => "first-pass",
             Self::SecondPass => "second-pass",
-            Self::PromptKeyName => "prompt_key_name",
-            Self::EmbeddingHttp => "embedding_http",
-            Self::McpBinding => "mcp_binding",
-            Self::LangGraphEdge => "langgraph_edge",
         }
     }
 
@@ -126,10 +111,6 @@ impl ResolverStrategy {
             "field_local_alias" => Self::FieldLocalAlias,
             "first-pass" => Self::FirstPass,
             "second-pass" => Self::SecondPass,
-            "prompt_key_name" => Self::PromptKeyName,
-            "embedding_http" => Self::EmbeddingHttp,
-            "mcp_binding" => Self::McpBinding,
-            "langgraph_edge" => Self::LangGraphEdge,
             _ => return None,
         })
     }
@@ -155,12 +136,6 @@ impl ResolverStrategy {
             Self::FuzzyName => 30,
             Self::FirstPass => 25,
             Self::SecondPass => 20,
-            // AI resolvers: literal cross-repo key/path matches rank in the
-            // medium band; LangGraph node-name resolution slightly below.
-            Self::PromptKeyName => 68,
-            Self::EmbeddingHttp => 66,
-            Self::McpBinding => 63,
-            Self::LangGraphEdge => 58,
             Self::Fallback => 10,
         }
     }
@@ -196,10 +171,6 @@ mod tests {
             ResolverStrategy::FieldLocalAlias,
             ResolverStrategy::FirstPass,
             ResolverStrategy::SecondPass,
-            ResolverStrategy::PromptKeyName,
-            ResolverStrategy::EmbeddingHttp,
-            ResolverStrategy::McpBinding,
-            ResolverStrategy::LangGraphEdge,
         ];
         for case in cases {
             assert_eq!(ResolverStrategy::from_str(case.as_str()), Some(case));
