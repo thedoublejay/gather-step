@@ -457,6 +457,17 @@ fn agent_node_qn(file_path: &str, name: &str) -> String {
     format!("__agent_node__{file_path}__{name}")
 }
 
+/// `LangGraph`'s reserved entry/exit markers. They appear as string literals in
+/// `addEdge("__start__", …)` / `addEdge(…, "__end__")` but are never declared
+/// via `addNode`, so a `GraphTransitionsTo` edge to/from one would reference a
+/// node that does not exist (a dangling edge). They denote graph entry/exit, not
+/// a node-to-node transition, so edges touching them are skipped. The imported
+/// `START`/`END` constants are already skipped upstream (they are not string
+/// literals); this guards the literal form.
+fn is_graph_sentinel(name: &str) -> bool {
+    matches!(name, "__start__" | "__end__")
+}
+
 /// `LangGraph` `StateGraph` wiring → `AgentGraph` + faceted `AgentNode`s +
 /// `GraphTransitionsTo`. Node identity is scoped by file (one graph per file),
 /// since associating `.addNode`/`.addEdge` with a specific graph instance needs
@@ -518,7 +529,10 @@ fn emit_agent_graph(
             };
             let from = extract_call_argument(raw, 0).and_then(|arg| string_literal(arg.trim()));
             let to = extract_call_argument(raw, 1).and_then(|arg| string_literal(arg.trim()));
-            if let (Some(from), Some(to)) = (from, to) {
+            if let (Some(from), Some(to)) = (from, to)
+                && !is_graph_sentinel(&from)
+                && !is_graph_sentinel(&to)
+            {
                 augmentation.edges.push(ai_edge(
                     parsed,
                     ref_node_id(NodeKind::Function, &agent_node_qn(file_path, &from)),
@@ -1176,6 +1190,56 @@ export function build(state: any) {
         assert!(
             nodes_with_role(&parsed, "agent_node").is_empty(),
             "addNode with a non-literal first arg must not fabricate a node"
+        );
+    }
+
+    #[test]
+    fn add_edge_skips_langgraph_start_end_sentinels() {
+        let dir = TestDir::new("graph-sentinels");
+        let parsed = parse(
+            &dir,
+            "agent.ts",
+            r#"
+import { StateGraph } from "@langchain/langgraph";
+
+export function build(state: any) {
+    return new StateGraph(state)
+        .addNode("callLlm1", step1)
+        .addNode("aggregator", agg)
+        .addEdge("__start__", "callLlm1")
+        .addEdge("callLlm1", "aggregator")
+        .addEdge("aggregator", "__end__")
+        .compile();
+}
+"#,
+        );
+
+        // Only callLlm1 -> aggregator is a real node-to-node transition; the
+        // "__start__"/"__end__" string-literal sentinels are never addNode'd, so
+        // emitting edges to them would dangle.
+        assert_eq!(
+            edge_count(&parsed, EdgeKind::GraphTransitionsTo),
+            1,
+            "only the callLlm1->aggregator edge is between declared nodes"
+        );
+        let sentinel_targets = [
+            gather_step_core::ref_node_id(
+                NodeKind::Function,
+                &super::agent_node_qn("agent.ts", "__start__"),
+            ),
+            gather_step_core::ref_node_id(
+                NodeKind::Function,
+                &super::agent_node_qn("agent.ts", "__end__"),
+            ),
+        ];
+        assert!(
+            parsed
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::GraphTransitionsTo)
+                .all(|edge| !sentinel_targets.contains(&edge.source)
+                    && !sentinel_targets.contains(&edge.target)),
+            "no GraphTransitionsTo edge may reference a __start__/__end__ sentinel node"
         );
     }
 
