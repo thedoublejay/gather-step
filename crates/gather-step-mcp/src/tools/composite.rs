@@ -18,7 +18,8 @@ use crate::{
         },
         crud_trace::{CrudTraceRequest, crud_trace_tool},
         events::{
-            event_blast_radius_tool, list_orphan_topics_tool, trace_event_tool, trace_route_tool,
+            event_blast_radius_tool, list_orphan_topics_tool, trace_agent_tool, trace_event_tool,
+            trace_route_tool,
         },
         orientation::{RepoSummary, list_repos},
         packs::{
@@ -472,6 +473,9 @@ fn execute_batch_op(ctx: &McpContext, op: BatchQueryOperation) -> BatchQueryResu
         }),
         "trace_route" => parse_and_run(op.arguments, |args| {
             trace_route_tool(ctx, args).and_then(to_value)
+        }),
+        "trace_agent" => parse_and_run(op.arguments, |args| {
+            trace_agent_tool(ctx, args).and_then(to_value)
         }),
         "crud_trace" => parse_and_run::<CrudTraceRequest, _>(op.arguments, |args| {
             crud_trace_tool(ctx, args).and_then(to_value)

@@ -38,6 +38,7 @@ fn add_migration_table_edge(
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     };
     let metadata = EdgeMetadata {
         drift_kind: migration_filters_metadata(&migration.filter_literals),

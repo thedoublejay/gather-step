@@ -724,6 +724,7 @@ fn virtual_node_from_call_site(
         visibility: None,
         span: call_site.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -749,6 +750,7 @@ fn virtual_node_from_binding(
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 

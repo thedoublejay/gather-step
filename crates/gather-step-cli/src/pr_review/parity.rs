@@ -93,6 +93,27 @@ pub fn compare_for_parity(temp_index: &DeltaReport, overlay: &DeltaReport) -> Pa
         );
     }
 
+    // ── AI contracts ──────────────────────────────────────────────────────────
+    if !overlay.ai_contracts.unavailable {
+        compare_ai_contract_lists(
+            "ai_contracts.added",
+            &temp_index.ai_contracts.added,
+            &overlay.ai_contracts.added,
+            &mut differences,
+        );
+        compare_ai_contract_lists(
+            "ai_contracts.removed",
+            &temp_index.ai_contracts.removed,
+            &overlay.ai_contracts.removed,
+            &mut differences,
+        );
+        compare_ai_contract_changed_lists(
+            &temp_index.ai_contracts.changed,
+            &overlay.ai_contracts.changed,
+            &mut differences,
+        );
+    }
+
     // ── Events ────────────────────────────────────────────────────────────────
     if !overlay.events.unavailable {
         compare_event_lists(
@@ -154,9 +175,62 @@ pub fn compare_for_parity(temp_index: &DeltaReport, overlay: &DeltaReport) -> Pa
 // ─── Per-surface comparison helpers ──────────────────────────────────────────
 
 use crate::pr_review::delta_report::{
-    ContractAlignmentFinding, DecoratorDelta, EventDelta, PayloadContractDelta, RemovedSurfaceRisk,
-    RouteDelta, RouteDeltaChange, SymbolDelta, SymbolDeltaChange,
+    AiContractDelta, AiContractDeltaChange, ContractAlignmentFinding, DecoratorDelta, EventDelta,
+    PayloadContractDelta, RemovedSurfaceRisk, RouteDelta, RouteDeltaChange, SymbolDelta,
+    SymbolDeltaChange,
 };
+
+/// Identity for an AI contract delta: `repo::file::<schema|model|inline>`.
+fn ai_contract_key(c: &AiContractDelta) -> String {
+    let label = c
+        .source_type_name
+        .as_deref()
+        .or(c.target_qualified_name.as_deref())
+        .unwrap_or("<inline>");
+    format!("{}::{}::{}", c.repo, c.file, label)
+}
+
+fn ai_contract_change_key(c: &AiContractDeltaChange) -> String {
+    let label = c
+        .source_type_name
+        .as_deref()
+        .or(c.target_qualified_name.as_deref())
+        .unwrap_or("<inline>");
+    format!("{}::{}::{}", c.repo, c.file, label)
+}
+
+fn compare_ai_contract_lists(
+    label: &str,
+    a: &[AiContractDelta],
+    b: &[AiContractDelta],
+    diffs: &mut Vec<String>,
+) {
+    let mut ak: Vec<String> = a.iter().map(ai_contract_key).collect();
+    let mut bk: Vec<String> = b.iter().map(ai_contract_key).collect();
+    ak.sort();
+    bk.sort();
+    if ak != bk {
+        diffs.push(format!(
+            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
+        ));
+    }
+}
+
+fn compare_ai_contract_changed_lists(
+    a: &[AiContractDeltaChange],
+    b: &[AiContractDeltaChange],
+    diffs: &mut Vec<String>,
+) {
+    let mut ak: Vec<String> = a.iter().map(ai_contract_change_key).collect();
+    let mut bk: Vec<String> = b.iter().map(ai_contract_change_key).collect();
+    ak.sort();
+    bk.sort();
+    if ak != bk {
+        diffs.push(format!(
+            "ai_contracts.changed: temp-index has {ak:?}, overlay has {bk:?}"
+        ));
+    }
+}
 
 fn route_key(r: &RouteDelta) -> String {
     format!("{} {}", r.method, r.path)
@@ -375,9 +449,9 @@ mod tests {
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
     use crate::pr_review::delta_report::{
-        CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport, DeploymentDeltas,
-        EventDeltas, PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata, RiskSeverity,
-        RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
+        AiContractDeltas, CleanupPolicy, ContractAlignments, DecoratorDeltas, DeltaReport,
+        DeploymentDeltas, EventDeltas, PayloadContractDeltas, RemovedSurfaceRisk, ReviewMetadata,
+        RiskSeverity, RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
     };
     use crate::pr_review::{
         extract::routes::extract_route_deltas, overlay::store::DiffOverlayStore,
@@ -418,6 +492,7 @@ mod tests {
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),
+            ai_contracts: AiContractDeltas::default(),
             events: EventDeltas::default(),
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),
@@ -486,6 +561,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -507,6 +583,7 @@ mod tests {
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 

@@ -25,7 +25,7 @@ use gather_step_parser::{
     CallSite, FileEntry as SourceFileEntry, FileStat, ManifestError, ParseError, ParsedFile,
     TraverseConfig, TraverseError, collect_repo_files, extract_package_manifest,
     frameworks::{Framework, detect_frameworks, local_config::LocalConfig},
-    infer_payload_contracts, parse_file_with_context, parse_file_with_packs,
+    infer_ai_contracts, infer_payload_contracts, parse_file_with_context, parse_file_with_packs,
     resolve::ResolutionInput,
     resolve_calls_with_unresolved,
     tsconfig::PathAliases,
@@ -38,13 +38,38 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
-    ChangedSet, FileBatch, GraphStore, GraphStoreDb, GraphStoreError, IncrementalError, RepoBatch,
-    RepoBatchHooks, StorageCoordinator, StorageCoordinatorError, StorageReconcileError,
-    WorkspaceStores, classify_changes, classify_selected_changes, compute_affected_set,
+    ChangedSet, FileBatch, GraphStore, GraphStoreDb, GraphStoreError, IncrementalError,
+    MetadataStore, RepoBatch, RepoBatchHooks, StorageCoordinator, StorageCoordinatorError,
+    StorageReconcileError, WorkspaceStores, classify_changes, classify_selected_changes,
+    compute_affected_set,
     incremental::{TrackedPath, snapshot_repo_files, snapshot_selected_repo_files},
-    metadata::{FileIndexState, MetadataStoreError, PayloadContractStoreRecord},
+    metadata::{
+        AiContractStoreRecord, FileIndexState, MetadataStoreDb, MetadataStoreError,
+        PayloadContractStoreRecord,
+    },
     reconcile_changed_files_with_mode,
 };
+
+/// Persist AI-contract records for the files they belong to, replacing any prior
+/// contracts for those files. Mirrors the `payload_records` write but runs as a
+/// standalone metadata transaction (AI contracts are not part of the combined
+/// `replace_index_metadata_for_files` writer).
+fn write_ai_contracts(
+    store: &MetadataStoreDb,
+    repo: &str,
+    ai_records: &[AiContractStoreRecord],
+) -> Result<(), MetadataStoreError> {
+    if ai_records.is_empty() {
+        return Ok(());
+    }
+    let mut file_paths: Vec<String> = ai_records
+        .iter()
+        .map(|record| record.record.file_path.clone())
+        .collect();
+    file_paths.sort();
+    file_paths.dedup();
+    store.replace_ai_contracts_for_files(repo, &file_paths, ai_records)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexingOptions {
@@ -364,6 +389,7 @@ pub struct RepoIndexPayload {
     pub deferred_cross_file_edges: Vec<EdgeData>,
     pub unresolved_inputs: Vec<gather_step_parser::resolve::ResolutionInput>,
     pub payload_records: Vec<PayloadContractStoreRecord>,
+    pub ai_records: Vec<AiContractStoreRecord>,
     pub file_states: Vec<FileIndexState>,
     /// Display strings for the indexed files.  Used by the reconcile path
     /// (graph-store lookups, dependency writes) which keys on the lossy
@@ -521,6 +547,7 @@ impl RepoIndexer {
                 deferred_cross_file_edges: Vec::new(),
                 unresolved_inputs: Vec::new(),
                 payload_records: Vec::new(),
+                ai_records: Vec::new(),
                 file_states: Vec::new(),
                 indexed_file_paths: Vec::new(),
                 indexed_path_ids: Vec::new(),
@@ -672,6 +699,7 @@ impl RepoIndexer {
             &payload.payload_records,
             &payload.file_states,
         )?;
+        write_ai_contracts(self.storage.metadata(), repo, &payload.ai_records)?;
 
         stats.files_parsed = stats
             .files_parsed
@@ -1162,6 +1190,7 @@ impl RepoIndexer {
         // Accumulated for the whole repo so the resolver can build its SymbolIndex across all files.
         let mut resolution_inputs = Vec::new();
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
+        let mut ai_records = Vec::<AiContractStoreRecord>::new();
         let mut files = Vec::new();
         // Keyed by `Arc<[u8]>` of PathId bytes so two byte-distinct non-UTF-8
         // filenames are never collapsed to the same map entry.
@@ -1214,6 +1243,11 @@ impl RepoIndexer {
                 let parsed = message?;
                 files_parsed += 1;
                 let inferred_payloads = infer_payload_contracts(&parsed);
+                ai_records.extend(
+                    infer_ai_contracts(&parsed)
+                        .into_iter()
+                        .map(|record| AiContractStoreRecord { record }),
+                );
 
                 let ParsedFile {
                     file,
@@ -1375,6 +1409,7 @@ impl RepoIndexer {
             deferred_cross_file_edges,
             unresolved_inputs: resolution.unresolved,
             payload_records,
+            ai_records,
             file_states,
             indexed_file_paths,
             indexed_path_ids,
@@ -1432,6 +1467,7 @@ impl RepoIndexer {
         let mut symbol_nodes: Vec<gather_step_core::NodeData> = Vec::new();
         let mut resolution_inputs: Vec<ResolutionInput> = Vec::new();
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
+        let mut ai_records = Vec::<AiContractStoreRecord>::new();
         // Slim per-file metadata retained for reconcile and the metadata store.
         let mut file_states: Vec<FileIndexState> = Vec::new();
         let mut indexed_file_paths: Vec<String> = Vec::new();
@@ -1555,6 +1591,11 @@ impl RepoIndexer {
                         let parsed = message?;
                         files_parsed += 1;
                         let inferred_payloads = infer_payload_contracts(&parsed);
+                        ai_records.extend(
+                            infer_ai_contracts(&parsed)
+                                .into_iter()
+                                .map(|record| AiContractStoreRecord { record }),
+                        );
 
                         let ParsedFile {
                             file,
@@ -1857,6 +1898,7 @@ impl RepoIndexer {
             &payload_records,
             &file_states,
         )?;
+        write_ai_contracts(self.storage.metadata(), repo, &ai_records)?;
         let metadata_elapsed = metadata_start.elapsed();
         info!(
             repo,
@@ -1909,6 +1951,7 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
     let repo_node = NodeData {
         id: node_id(repo, "__repo__", NodeKind::Repo, repo),
@@ -1922,6 +1965,7 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
 
     let extraction =
@@ -2370,6 +2414,7 @@ fn deployment_output_to_batch(
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
     let repo_node = NodeData {
         id: node_id(repo, "__repo__", NodeKind::Repo, repo),
@@ -2383,6 +2428,7 @@ fn deployment_output_to_batch(
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
 
     let mut nodes = vec![file_node.clone(), repo_node.clone()];
@@ -2398,6 +2444,7 @@ fn deployment_output_to_batch(
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }));
 
     let mut edges = vec![EdgeData {
@@ -2699,6 +2746,132 @@ export class EventController {
             .should_reindex("sample-service", "src/caller.ts", &caller_hash)
             .expect("metadata query should succeed");
         assert!(!should_reindex);
+    }
+
+    #[test]
+    fn indexes_typescript_ai_contracts_into_metadata_store() {
+        use crate::metadata::AiContractQuery;
+
+        let repo_root = TestDir::new("ai-repo");
+        let storage_root = TestDir::new("ai-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("package.json"),
+            r#"{ "name": "ai-service", "dependencies": { "@langchain/core": "^0.3.0" } }"#,
+        )
+        .expect("package.json fixture should write");
+        fs::write(
+            repo_root.path().join("src/agent.ts"),
+            r#"
+import { LLMFactory } from "./model-factory";
+import { ItemComparisonOutputSchema } from "./schema";
+
+export async function compareItems(a: string, b: string) {
+    const model = LLMFactory.createChatModel({ provider: "OPENAI", model: "gpt-4.1-mini", temperature: 0 });
+    return model.withStructuredOutput(ItemComparisonOutputSchema).invoke({ a, b });
+}
+"#,
+        )
+        .expect("agent fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("ai-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let contracts = indexer
+            .storage()
+            .metadata()
+            .ai_contracts_for_query(AiContractQuery {
+                repo: Some("ai-service".to_owned()),
+                ..AiContractQuery::default()
+            })
+            .expect("ai contract query should succeed");
+        assert_eq!(
+            contracts.len(),
+            1,
+            "one structured-output contract persisted"
+        );
+        assert_eq!(
+            contracts[0].record.source_type_name.as_deref(),
+            Some("ItemComparisonOutputSchema")
+        );
+
+        let llm_nodes = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::LlmModel)
+            .expect("llm model nodes should load");
+        assert!(
+            llm_nodes
+                .iter()
+                .any(|node| node.external_id.as_deref() == Some("__llm__openai__gpt-4.1-mini")),
+            "converged LlmModel node should be persisted"
+        );
+    }
+
+    #[test]
+    fn indexes_typescript_ai_graph_constructs_into_graph_store() {
+        let repo_root = TestDir::new("ai-graph-repo");
+        let storage_root = TestDir::new("ai-graph-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("package.json"),
+            r#"{ "name": "ai-service", "dependencies": { "@langchain/langgraph": "^0.2.0" } }"#,
+        )
+        .expect("package.json fixture should write");
+        fs::write(
+            repo_root.path().join("src/pipeline.ts"),
+            r#"
+import { StateGraph } from "@langchain/langgraph";
+import { DynamicStructuredTool } from "@langchain/core/tools";
+import { AdminPrompt } from "@org/prompts";
+
+export function build(state: any, collection: any, vector: number[]) {
+    const searchTool = new DynamicStructuredTool({ name: "search_docs", func: async () => "" });
+    const prompt = new AdminPrompt({ keyName: "doc.classify" });
+    collection.aggregate([{ $vectorSearch: { index: "embedding_index", path: "v", queryVector: vector } }]);
+    const graph = new StateGraph(state).addNode("intent", a).addNode("respond", b);
+    graph.addEdge("intent", "respond");
+    return { searchTool, prompt, graph };
+}
+"#,
+        )
+        .expect("pipeline fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("ai-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let graph = indexer.storage().graph();
+        for (kind, external_id) in [
+            (NodeKind::AgentGraph, "__agent_graph__src/pipeline.ts"),
+            (
+                NodeKind::VectorIndex,
+                "__vindex__embedding_index__vector_index",
+            ),
+            (NodeKind::Prompt, "__prompt__managed__doc.classify"),
+        ] {
+            let nodes = graph.nodes_by_type(kind).expect("nodes should load");
+            assert!(
+                nodes
+                    .iter()
+                    .any(|node| node.external_id.as_deref() == Some(external_id)),
+                "{kind:?} node {external_id} should be persisted via index_repo"
+            );
+        }
+        let function_nodes = graph
+            .nodes_by_type(NodeKind::Function)
+            .expect("function nodes should load");
+        assert!(
+            function_nodes
+                .iter()
+                .any(|node| node.ai_role.as_deref() == Some("agent_node")),
+            "agent_node-faceted node should be persisted"
+        );
     }
 
     #[test]

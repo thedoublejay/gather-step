@@ -45,14 +45,15 @@ use crate::{
         },
         changed::{PerRepoChanges, resolve_per_repo_changes},
         delta_report::{
-            CleanupPolicy, ContractAlignments, DELTA_REPORT_SCHEMA_VERSION, DecoratorDeltas,
-            DeltaReport, DeploymentDeltas, EventDeltas, GITHUB_COMMENT_LIMIT,
+            AiContractDeltas, CleanupPolicy, ContractAlignments, DELTA_REPORT_SCHEMA_VERSION,
+            DecoratorDeltas, DeltaReport, DeploymentDeltas, EventDeltas, GITHUB_COMMENT_LIMIT,
             PayloadContractDeltas, RepoChangedFiles, ReviewMetadata, RiskSeverity, RouteDeltas,
             SafetyMetadata, SymbolDeltas, build_suggested_followups,
             synthesize_review_pack_commands,
         },
         engine::{ReviewEngineImpl, TempIndexEngine, UnsupportedSurface},
         extract::{
+            ai_contracts::extract_ai_contract_deltas,
             contract_alignment::extract_contract_alignments,
             decorators::extract_decorator_deltas,
             deployment::extract_deployment_deltas,
@@ -1470,6 +1471,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     let routes_unavailable = has_surface(UnsupportedSurface::Routes);
     let symbols_unavailable = has_surface(UnsupportedSurface::Symbols);
     let payload_contracts_unavailable = has_surface(UnsupportedSurface::PayloadContracts);
+    let ai_contracts_unavailable = has_surface(UnsupportedSurface::AiContracts);
     let events_unavailable = has_surface(UnsupportedSurface::Events);
     let decorators_unavailable = has_surface(UnsupportedSurface::Decorators);
     let contract_alignments_unavailable = has_surface(UnsupportedSurface::ContractAlignments);
@@ -1479,6 +1481,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         route_deltas,
         symbol_deltas,
         payload_contract_deltas,
+        ai_contract_deltas,
         event_deltas,
         surface_risks,
         contract_alignments,
@@ -1555,6 +1558,27 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                              Emitting empty deltas."
                                         );
                                         PayloadContractDeltas::default()
+                                    }
+                                }
+                            };
+                            let ai_contracts = if ai_contracts_unavailable {
+                                AiContractDeltas {
+                                    unavailable: true,
+                                    ..AiContractDeltas::default()
+                                }
+                            } else {
+                                match extract_ai_contract_deltas(
+                                    baseline_coord.metadata(),
+                                    review_coord.metadata(),
+                                ) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "AI-contract delta extraction failed. \
+                                             Emitting empty deltas."
+                                        );
+                                        AiContractDeltas::default()
                                     }
                                 }
                             };
@@ -1876,6 +1900,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 routes,
                                 symbols,
                                 payload_contracts,
+                                ai_contracts,
                                 events,
                                 risks,
                                 contract_alignments,
@@ -1893,6 +1918,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                                 RouteDeltas::default(),
                                 SymbolDeltas::default(),
                                 PayloadContractDeltas::default(),
+                                AiContractDeltas::default(),
                                 EventDeltas::default(),
                                 vec![],
                                 ContractAlignments::default(),
@@ -1912,6 +1938,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         RouteDeltas::default(),
                         SymbolDeltas::default(),
                         PayloadContractDeltas::default(),
+                        AiContractDeltas::default(),
                         EventDeltas::default(),
                         vec![],
                         ContractAlignments::default(),
@@ -1930,6 +1957,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 RouteDeltas::default(),
                 SymbolDeltas::default(),
                 PayloadContractDeltas::default(),
+                AiContractDeltas::default(),
                 EventDeltas::default(),
                 vec![],
                 ContractAlignments::default(),
@@ -1964,6 +1992,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         ("routes", route_deltas.unavailable),
         ("symbols", symbol_deltas.unavailable),
         ("payload_contracts", payload_contract_deltas.unavailable),
+        ("ai_contracts", ai_contract_deltas.unavailable),
         ("events", event_deltas.unavailable),
         ("decorators", decorator_deltas.unavailable),
         ("contract_alignments", contract_alignments.unavailable),
@@ -2008,6 +2037,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         routes: route_deltas,
         symbols: symbol_deltas,
         payload_contracts: payload_contract_deltas,
+        ai_contracts: ai_contract_deltas,
         events: event_deltas,
         removed_surface_risks: surface_risks,
         contract_alignments,
@@ -5873,6 +5903,7 @@ indexing:
             routes: RouteDeltas::default(),
             symbols: SymbolDeltas::default(),
             payload_contracts: PayloadContractDeltas::default(),
+            ai_contracts: AiContractDeltas::default(),
             events: EventDeltas::default(),
             removed_surface_risks: vec![],
             contract_alignments: ContractAlignments::default(),

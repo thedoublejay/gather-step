@@ -232,6 +232,7 @@ mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -248,6 +249,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -598,6 +600,7 @@ mod tests {
                 visibility: None,
                 span: None,
                 is_virtual: false,
+                ai_role: None,
             };
             let consumer = NodeData {
                 id: node_id("repoA", &fp, NodeKind::Function, &format!("handler_{i}")),
@@ -616,6 +619,7 @@ mod tests {
                     column_len: 4,
                 }),
                 is_virtual: false,
+                ai_role: None,
             };
             all_edges.push(EdgeData {
                 source: consumer.id,
@@ -687,6 +691,7 @@ mod tests {
                 visibility: None,
                 span: None,
                 is_virtual: false,
+                ai_role: None,
             };
             let consumer = NodeData {
                 id: node_id("repoA", &fp, NodeKind::Function, &format!("handler_{i}")),
@@ -705,6 +710,7 @@ mod tests {
                     column_len: 4,
                 }),
                 is_virtual: false,
+                ai_role: None,
             };
             pairs.push((owner, consumer));
         }

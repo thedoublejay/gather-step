@@ -139,6 +139,12 @@ pub struct NodeData {
     pub visibility: Option<Visibility>,
     pub span: Option<SourceSpan>,
     pub is_virtual: bool,
+    /// Optional AI role facet (v5): carries Tier-2 AI classifications
+    /// (`"agent"`, `"agent_node"`, `"tool"`, `"mcp_client"`, `"skill"`, …)
+    /// for nodes that are otherwise ordinary functions/classes, so packs can
+    /// tag AI roles without minting a dedicated `NodeKind`. `None` for the
+    /// vast majority of nodes.
+    pub ai_role: Option<String>,
 }
 
 /// Per-edge annotation bag. All fields are optional to minimise the common
@@ -333,6 +339,7 @@ mod tests {
                     column_start + 9,
                 )),
                 is_virtual: false,
+                ai_role: None,
             }
         }
 
@@ -446,6 +453,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+            ai_role: None,
         };
 
         let encoded = bitcode::encode(&node);

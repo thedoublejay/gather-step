@@ -751,6 +751,13 @@ fn parse_node_kind(input: &str) -> Option<NodeKind> {
         "comment" => Some(NodeKind::Comment),
         "author" => Some(NodeKind::Author),
         "ticket" => Some(NodeKind::Ticket),
+        "agentgraph" | "agent_graph" => Some(NodeKind::AgentGraph),
+        "prompt" => Some(NodeKind::Prompt),
+        "aicontract" | "ai_contract" => Some(NodeKind::AiContract),
+        "vectorindex" | "vector_index" => Some(NodeKind::VectorIndex),
+        "mcpserver" | "mcp_server" => Some(NodeKind::McpServer),
+        "mcptool" | "mcp_tool" => Some(NodeKind::McpTool),
+        "llmmodel" | "llm_model" => Some(NodeKind::LlmModel),
         _ => None,
     }
 }

@@ -629,6 +629,7 @@ fn api_virtual_node(
         visibility: None,
         span: call.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 

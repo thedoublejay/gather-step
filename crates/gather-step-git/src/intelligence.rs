@@ -315,6 +315,7 @@ fn author_node(author_email: &str) -> NodeData {
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -639,6 +640,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -660,6 +662,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 

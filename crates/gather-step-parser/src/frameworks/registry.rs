@@ -26,8 +26,9 @@ use gather_step_core::{EdgeData, NodeData};
 
 use crate::{
     frameworks::{
-        azure, detect, drizzle, frontend_hooks, frontend_react, frontend_router, gateway_proxy,
-        mongoose, nestjs, nextjs, prisma, storybook, tailwind, typeorm,
+        ai_typescript, azure, detect, drizzle, fastapi, frontend_hooks, frontend_react,
+        frontend_router, gateway_proxy, mongoose, nestjs, nextjs, prisma, python_kafka, storybook,
+        tailwind, typeorm,
     },
     traverse::Language,
     tree_sitter::ParsedFile,
@@ -79,6 +80,8 @@ pub enum PackId {
     LaunchDarkly,
     /// Detection-only `FastAPI` Python API pack.
     Fastapi,
+    /// LangChain-style TypeScript/JavaScript AI extraction (v5).
+    AiTypescript,
     /// Shared-library / shared-lib contract detection.  This pack is always
     /// active for TypeScript/JavaScript files; it has no detection predicate.
     SharedLib,
@@ -111,6 +114,7 @@ pub(crate) enum AugGroup {
     Storybook,
     Azure,
     Fastapi,
+    AiTypescript,
     SharedLib,
     GatewayProxy,
     FrontendHooks,
@@ -121,9 +125,8 @@ impl PackId {
     #[must_use]
     pub(crate) const fn applies_to_language(self, language: Language) -> bool {
         match self {
-            // FastAPI is detection-only today. It does not run a per-file
-            // augmentation pass, so avoid building snapshots for it.
-            Self::Fastapi => false,
+            // FastAPI augments Python files (route extraction).
+            Self::Fastapi => matches!(language, Language::Python),
             Self::Nestjs
             | Self::Mongoose
             | Self::Nextjs
@@ -139,6 +142,7 @@ impl PackId {
             | Self::Redux
             | Self::Zustand
             | Self::LaunchDarkly
+            | Self::AiTypescript
             | Self::SharedLib
             | Self::GatewayProxy
             | Self::FrontendHooks => {
@@ -167,6 +171,7 @@ impl PackId {
             Self::Storybook => AugGroup::Storybook,
             Self::Azure | Self::LaunchDarkly => AugGroup::Azure,
             Self::Fastapi => AugGroup::Fastapi,
+            Self::AiTypescript => AugGroup::AiTypescript,
             Self::SharedLib => AugGroup::SharedLib,
             Self::GatewayProxy => AugGroup::GatewayProxy,
             Self::FrontendHooks => AugGroup::FrontendHooks,
@@ -277,6 +282,10 @@ impl PackRegistry {
                 PackEntry {
                     id: PackId::Fastapi,
                     detect: Some(detect::is_fastapi),
+                },
+                PackEntry {
+                    id: PackId::AiTypescript,
+                    detect: Some(detect::is_ai_typescript),
                 },
                 // SharedLib has no detection predicate — it is always active.
                 PackEntry {
@@ -418,7 +427,22 @@ impl PackRegistry {
                     edges: aug.edges,
                 }
             }
-            AugGroup::Fastapi => AugmentationOutput::default(),
+            AugGroup::Fastapi => {
+                let routes = fastapi::augment(parsed);
+                let kafka = python_kafka::augment(parsed);
+                let mut nodes = routes.nodes;
+                nodes.extend(kafka.nodes);
+                let mut edges = routes.edges;
+                edges.extend(kafka.edges);
+                AugmentationOutput { nodes, edges }
+            }
+            AugGroup::AiTypescript => {
+                let aug = ai_typescript::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
+            }
             AugGroup::SharedLib => {
                 let aug = azure::augment_shared_lib(parsed);
                 AugmentationOutput {
@@ -566,7 +590,8 @@ mod tests {
         }
         assert!(!PackId::Fastapi.applies_to_language(Language::TypeScript));
         assert!(!PackId::Fastapi.applies_to_language(Language::JavaScript));
-        assert!(!PackId::Fastapi.applies_to_language(Language::Python));
+        // FastAPI augments Python (route extraction) as of v5 Phase 1.
+        assert!(PackId::Fastapi.applies_to_language(Language::Python));
     }
 
     #[test]
@@ -655,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_registry_detects_fastapi_without_augmenting_python_files() {
+    fn builtin_registry_detects_fastapi_from_python_dependency() {
         let dir = TempDir::new("detect-fastapi");
         dir.write(
             "pyproject.toml",

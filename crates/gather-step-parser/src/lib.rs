@@ -16,6 +16,7 @@ pub mod workspace_manifest;
 #[cfg(feature = "test-support")]
 pub use ts_js_oxc::oxc_test_support;
 
+pub use frameworks::ai_typescript::infer_ai_contracts;
 pub use manifests::{
     ManifestDependency, ManifestError, ManifestExtraction, ParsedPackageManifest, VersionMismatch,
     detect_version_mismatches, extract_package_manifest, parse_package_manifest_str,

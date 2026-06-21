@@ -1017,6 +1017,7 @@ fn missing_virtual_node(id: NodeId, kind: NodeKind) -> NodeData {
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -1117,6 +1118,7 @@ pub(crate) mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -1138,6 +1140,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -1883,6 +1886,7 @@ pub(crate) mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         // Three consumers sharing identical repo / file_path / name so that
         // only `node_id` (derived from distinct qualified names) breaks the tie.
@@ -1908,6 +1912,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         };
         let consumer_b = NodeData {
             id: node_id(
@@ -1931,6 +1936,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         };
         let consumer_c = NodeData {
             id: node_id(
@@ -1954,6 +1960,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         };
 
         let topic_id = topic.id;
@@ -2054,6 +2061,7 @@ pub(crate) mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let consumer_a = NodeData {
             id: node_id(
@@ -2077,6 +2085,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         };
         let consumer_b = NodeData {
             id: node_id(
@@ -2100,6 +2109,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         };
         let consumer_c = NodeData {
             id: node_id(
@@ -2123,6 +2133,7 @@ pub(crate) mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         };
 
         // Insert in reversed order: c, b, a, topic, file_a.

@@ -116,6 +116,7 @@ fn add_hook_consumer_edges(parsed: &ParsedFile, aug: &mut FrontendHooksAugmentat
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
 
         let node_id = hook_node.id;

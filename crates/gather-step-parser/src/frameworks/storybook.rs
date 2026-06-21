@@ -206,6 +206,7 @@ fn add_msw_handler_nodes(parsed: &ParsedFile, aug: &mut StorybookAugmentation) {
             visibility: None,
             span: call_site.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
 
         aug.nodes.push(route_node.clone());
@@ -277,6 +278,7 @@ fn add_preview_provider_edges(parsed: &ParsedFile, aug: &mut StorybookAugmentati
             visibility: None,
             span: call_site.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
 
         aug.nodes.push(provider_node.clone());
@@ -320,6 +322,7 @@ fn add_preview_jsx_provider_edges(parsed: &ParsedFile, aug: &mut StorybookAugmen
             visibility: None,
             span: parsed.file_node.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
 
         aug.nodes.push(provider_node.clone());
@@ -372,6 +375,7 @@ fn virtual_service_node(parsed: &ParsedFile, qualified_name: &str, name: &str) -
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 

@@ -13,6 +13,7 @@ pub enum BudgetedTool {
     TraceImpact,
     TraceEvent,
     TraceRoute,
+    TraceAgent,
     EventBlastRadius,
     CrudTrace,
     Brief,
@@ -36,7 +37,9 @@ impl BudgetedTool {
             Self::Search | Self::TraceRoute => 12_000,
             Self::Traversal => 10_000,
             Self::TraceImpact | Self::TraceEvent => 14_000,
-            Self::EventBlastRadius | Self::CrudTrace | Self::ChangeImpact => 16_000,
+            Self::EventBlastRadius | Self::CrudTrace | Self::ChangeImpact | Self::TraceAgent => {
+                16_000
+            }
             Self::Brief | Self::Contract => 4_000,
             Self::SchemaSummary => 2_000,
             Self::LegacyRaw => 32_000,
@@ -51,7 +54,9 @@ impl BudgetedTool {
             Self::Search | Self::TraceRoute => 48_000,
             Self::Traversal => 40_000,
             Self::TraceImpact | Self::TraceEvent => 56_000,
-            Self::EventBlastRadius | Self::CrudTrace | Self::ChangeImpact => 64_000,
+            Self::EventBlastRadius | Self::CrudTrace | Self::ChangeImpact | Self::TraceAgent => {
+                64_000
+            }
             Self::Brief | Self::Contract => 16_000,
             Self::SchemaSummary => 8_000,
             Self::LegacyRaw => 128_000,

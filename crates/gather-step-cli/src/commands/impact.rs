@@ -2240,6 +2240,7 @@ mod tests {
             signature: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
             visibility: Some(Visibility::Private),
         }
     }
@@ -2256,6 +2257,7 @@ mod tests {
             signature: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
             visibility: Some(Visibility::Public),
         }
     }

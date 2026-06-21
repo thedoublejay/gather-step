@@ -665,6 +665,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         // Add a cross-repo consumer via UsesShared edge.
         let consumer_owner = NodeData {
@@ -679,6 +680,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let consumer = NodeData {
             id: make_node_id("frontend", "src/consumer.ts", NK::Function, "handleUpdate"),
@@ -692,6 +694,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let consume_edge = EdgeData {
             source: consumer.id,
@@ -785,6 +788,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         };
         let consumer_owner = NodeData {
             id: make_node_id("notifier", "src/handler.ts", NK::File, "src/handler.ts"),
@@ -798,6 +802,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let consumer = NodeData {
             id: make_node_id("notifier", "src/handler.ts", NK::Function, "onCancelled"),
@@ -811,6 +816,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: false,
+            ai_role: None,
         };
         let consume_edge = EdgeData {
             source: consumer.id,

@@ -111,6 +111,43 @@ pub fn database_qn(kind: &str, endpoint_or_name: &str) -> String {
     format!("__database__{kind}__{endpoint_or_name}")
 }
 
+/// Cross-repo convergence id for a managed prompt, keyed by `(source, key)`.
+/// Namespaced with `source` (e.g. `promptmanager`) so keys from different
+/// vaults cannot collide; both parts are canonicalized so a key containing the
+/// `__` delimiter collapses rather than mangling the split.
+#[must_use]
+pub fn prompt_qn(source: &str, key_name: &str) -> String {
+    let source = canonical_topology_part_or(source, "unknown_source");
+    let key_name = canonical_topology_part_or(key_name, "unknown_prompt");
+    format!("__prompt__{source}__{key_name}")
+}
+
+/// Cross-repo convergence id for a vector index, keyed by `(collection, index)`.
+#[must_use]
+pub fn vector_index_qn(collection: &str, index: &str) -> String {
+    let collection = canonical_topology_part_or(collection, "unknown_collection");
+    let index = canonical_topology_part_or(index, "unknown_index");
+    format!("__vindex__{collection}__{index}")
+}
+
+/// Cross-repo convergence id for an MCP tool, keyed by `(server, tool)` — the
+/// join point an MCP server exposes and an MCP client calls.
+#[must_use]
+pub fn mcp_tool_qn(server: &str, tool: &str) -> String {
+    let server = canonical_topology_part_or(server, "unknown_server");
+    let tool = canonical_topology_part_or(tool, "unknown_tool");
+    format!("__mcp__{server}__{tool}")
+}
+
+/// Cross-repo convergence id for an LLM model, keyed by `(provider, model)` —
+/// many call sites converge on one node so provider/model usage is one place.
+#[must_use]
+pub fn llm_model_qn(provider: &str, model: &str) -> String {
+    let provider = canonical_topology_part_or(provider, "unknown_provider");
+    let model = canonical_topology_part_or(model, "unknown_model");
+    format!("__llm__{provider}__{model}")
+}
+
 #[must_use]
 pub fn shared_symbol_qn(package: &str, version: &str, symbol: &str) -> String {
     let package = package.trim();
@@ -191,6 +228,7 @@ pub fn virtual_node(
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -335,9 +373,10 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, parse_shared_symbol_qn,
-        queue_qn, route_qn, secret_qn, shared_package_root, shared_symbol_qn,
-        shared_symbol_qn_unversioned, topic_qn, virtual_node, virtual_node_id,
+        broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, llm_model_qn,
+        mcp_tool_qn, parse_shared_symbol_qn, prompt_qn, queue_qn, route_qn, secret_qn,
+        shared_package_root, shared_symbol_qn, shared_symbol_qn_unversioned, topic_qn,
+        vector_index_qn, virtual_node, virtual_node_id,
     };
     use crate::NodeKind;
 
@@ -460,6 +499,46 @@ mod tests {
         assert_eq!(route_qn("GET", "/Orders/{ID}"), "__route__GET__/orders/:id");
         assert_eq!(route_qn("GET", "/orders/$id"), "__route__GET__/orders/:id");
         assert_eq!(route_qn("GET", "/orders/:Id"), "__route__GET__/orders/:id");
+    }
+
+    #[test]
+    fn ai_convergence_qns_are_namespaced_and_canonical() {
+        // Namespaced like every other converged id (__topic__kafka__…), so the
+        // prompt key cannot collide across sources.
+        assert_eq!(
+            prompt_qn("prompt-service", "doc-classification"),
+            "__prompt__prompt-service__doc-classification"
+        );
+        // A key containing the `__` delimiter must collapse, not mangle the split.
+        assert_eq!(
+            prompt_qn("promptservice", "doc__classification"),
+            "__prompt__promptservice__doc_classification"
+        );
+        assert_eq!(
+            vector_index_qn("corpus__document_chunks", "vector_index"),
+            "__vindex__corpus_document_chunks__vector_index"
+        );
+        assert_eq!(
+            mcp_tool_qn("knowledge-base", "search_wiki"),
+            "__mcp__knowledge-base__search_wiki"
+        );
+        assert_eq!(
+            llm_model_qn("Azure OpenAI", "gpt-4.1-mini"),
+            "__llm__azure_openai__gpt-4.1-mini"
+        );
+        // Empty inputs fall back rather than producing a bare delimiter.
+        assert_eq!(
+            llm_model_qn("", ""),
+            "__llm__unknown_provider__unknown_model"
+        );
+    }
+
+    #[test]
+    fn ai_convergence_ids_are_stable_across_repos() {
+        let qn = llm_model_qn("openai", "gpt-4.1-mini");
+        let caller_a = virtual_node_id(NodeKind::LlmModel, &qn);
+        let caller_b = virtual_node_id(NodeKind::LlmModel, &qn);
+        assert_eq!(caller_a, caller_b);
     }
 
     #[test]

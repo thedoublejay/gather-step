@@ -59,6 +59,7 @@ fn file_node(repo: &str, file_path: &str) -> NodeData {
             column_len: 0,
         }),
         is_virtual: false,
+        ai_role: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn function_node(repo: &str, file_path: &str, ordinal: u16) -> NodeData {
             column_len: 0,
         }),
         is_virtual: false,
+        ai_role: None,
     }
 }
 

@@ -462,6 +462,7 @@ fn add_topic_producer_edges(
             visibility: None,
             span: call_site.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
 
         augmentation.nodes.push(producer_node.clone());
@@ -515,6 +516,7 @@ fn add_topic_producer_edges(
                 visibility: None,
                 span: call_site.span.clone(),
                 is_virtual: true,
+                ai_role: None,
             };
             let fine_id = fine_node.id;
             augmentation.nodes.push(fine_node);
@@ -1199,6 +1201,7 @@ fn add_di_edges(
             visibility: None,
             span: symbol.node.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
         augmentation.nodes.push(dependency_node.clone());
         augmentation.edges.push(EdgeData {
@@ -1233,6 +1236,7 @@ fn add_entity_node(symbol: &SymbolCapture, augmentation: &mut NestjsAugmentation
         visibility: symbol.node.visibility.clone(),
         span: symbol.node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     };
     augmentation.nodes.push(entity.clone());
     augmentation.edges.push(EdgeData {
@@ -1359,6 +1363,7 @@ fn add_bull_queue_producer_edges(parsed: &ParsedFile, augmentation: &mut NestjsA
             visibility: None,
             span: call_site.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
 
         augmentation.nodes.push(queue_node.clone());
@@ -1391,6 +1396,7 @@ fn bull_queue_node(parsed: &ParsedFile, symbol: &SymbolCapture, queue_name: &str
         visibility: None,
         span: symbol.node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -2593,6 +2599,7 @@ fn virtual_node(
         visibility: None,
         span: symbol.node.span.clone(),
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -2670,6 +2677,7 @@ fn add_inject_edges(parsed: &ParsedFile, augmentation: &mut NestjsAugmentation) 
             visibility: None,
             span: call_site.span.clone(),
             is_virtual: true,
+            ai_role: None,
         };
         augmentation.nodes.push(dep_node.clone());
         augmentation.edges.push(EdgeData {

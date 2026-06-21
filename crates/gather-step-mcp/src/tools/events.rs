@@ -1,6 +1,6 @@
 use gather_step_analysis::{
     EventRole, RouteRole, canonical_event_target, event_blast_radius, list_orphan_topics,
-    resolve_event_targets, resolve_route_target,
+    resolve_agent_targets, resolve_event_targets, resolve_route_target, trace_agent,
 };
 use gather_step_core::{NodeId, NodeKind, WorkspaceRegistry};
 use rmcp::schemars;
@@ -21,6 +21,7 @@ use crate::{
 
 const DEFAULT_TOPOLOGY_LIMIT: usize = 25;
 const DEFAULT_BLAST_RADIUS_DEPTH: usize = 3;
+const DEFAULT_AGENT_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct TraceEventRequest {
@@ -125,6 +126,56 @@ pub struct BlastRadiusNodeItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct BlastRadiusEdgeItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u16>,
+    pub edge_kind: String,
+    pub source_id: String,
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TraceAgentRequest {
+    #[serde(default)]
+    pub budget_bytes: Option<usize>,
+    #[serde(default)]
+    pub depth: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TraceAgentResponse {
+    pub data: TraceAgentData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<TopologyMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct TraceAgentData {
+    pub edges: Vec<AgentEdgeItem>,
+    pub nodes: Vec<AgentNodeItem>,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AgentNodeItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_role: Option<String>,
+    pub depth: usize,
+    pub file_path: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<u32>,
+    pub repo: String,
+    pub symbol_id: String,
+    pub symbol_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AgentEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
     pub edge_kind: String,
@@ -448,6 +499,83 @@ pub fn event_blast_radius_tool(
     Ok(response)
 }
 
+pub fn trace_agent_tool(
+    ctx: &McpContext,
+    request: TraceAgentRequest,
+) -> Result<TraceAgentResponse, McpServerError> {
+    validate_input_length("target", &request.target)?;
+    let graph = ctx.graph();
+    let depth = request.depth.unwrap_or(DEFAULT_AGENT_DEPTH).min(16);
+    let limit = ctx
+        .config
+        .capped_limit(request.limit, DEFAULT_TOPOLOGY_LIMIT);
+    let target = resolve_single_agent_target(graph, &request.target)?;
+    let trace = trace_agent(graph, target.id, depth, limit)?;
+
+    let mut response = TraceAgentResponse {
+        data: TraceAgentData {
+            edges: trace
+                .edges
+                .into_iter()
+                .map(|edge| AgentEdgeItem {
+                    confidence: edge.confidence,
+                    edge_kind: edge_kind_label(edge.edge_kind).to_owned(),
+                    source_id: encode_node_id(edge.source),
+                    target_id: encode_node_id(edge.target),
+                })
+                .collect(),
+            nodes: trace
+                .nodes
+                .into_iter()
+                .map(|node| AgentNodeItem {
+                    ai_role: node.ai_role,
+                    depth: node.depth,
+                    file_path: node.file_path,
+                    kind: node_kind_label(node.node_kind).to_owned(),
+                    line_start: node.line_number,
+                    repo: node.repo,
+                    symbol_id: encode_node_id(node.node_id),
+                    symbol_name: node.name,
+                })
+                .collect(),
+            target: request.target,
+            target_id: Some(encode_node_id(trace.target.id)),
+        },
+        meta: Some(TopologyMeta {
+            response_schema_version: response_schema_version(),
+            budget: ResponseBudget::not_truncated(BudgetedTool::TraceAgent, 0, 0),
+            truncated: trace.truncated,
+        }),
+    };
+    sort_agent_nodes(&mut response.data.nodes);
+    sort_agent_edges(&mut response.data.edges);
+    let budget = apply_response_budget(
+        BudgetedTool::TraceAgent,
+        request.budget_bytes,
+        &mut response,
+        trim_trace_agent_response,
+    )?;
+    if let Some(meta) = &mut response.meta {
+        meta.budget = budget;
+        meta.truncated |= meta.budget.truncated;
+    }
+    Ok(response)
+}
+
+fn resolve_single_agent_target(
+    graph: &impl gather_step_storage::GraphStore,
+    target: &str,
+) -> Result<gather_step_core::NodeData, McpServerError> {
+    let matches = resolve_agent_targets(graph, target)?;
+    match matches.as_slice() {
+        [] => Err(McpServerError::NotFound(format!(
+            "AI target `{target}` was not found"
+        ))),
+        [node] => Ok(node.clone()),
+        [first, ..] => Ok(first.clone()),
+    }
+}
+
 fn resolve_single_event_target(
     graph: &impl gather_step_storage::GraphStore,
     target: &str,
@@ -689,6 +817,30 @@ fn trim_blast_radius_response(response: &mut EventBlastRadiusResponse) -> bool {
     response.data.edges.pop().is_some() || response.data.nodes.pop().is_some()
 }
 
+fn sort_agent_nodes(items: &mut [AgentNodeItem]) {
+    items.sort_by(|left, right| {
+        left.depth
+            .cmp(&right.depth)
+            .then(left.repo.cmp(&right.repo))
+            .then(left.file_path.cmp(&right.file_path))
+            .then(left.symbol_name.cmp(&right.symbol_name))
+            .then(left.symbol_id.cmp(&right.symbol_id))
+    });
+}
+
+fn sort_agent_edges(items: &mut [AgentEdgeItem]) {
+    items.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then(left.target_id.cmp(&right.target_id))
+            .then(left.edge_kind.cmp(&right.edge_kind))
+    });
+}
+
+fn trim_trace_agent_response(response: &mut TraceAgentResponse) -> bool {
+    response.data.edges.pop().is_some() || response.data.nodes.pop().is_some()
+}
+
 trait TopologyRole {
     fn label(&self) -> &'static str;
     fn evidence_kind(&self) -> EvidenceKind;
@@ -756,8 +908,9 @@ mod tests {
     };
 
     use super::{
-        EventBlastRadiusRequest, ListOrphanTopicsRequest, TraceEventRequest, TraceRouteRequest,
-        event_blast_radius_tool, list_orphan_topics_tool, trace_event_tool, trace_route_tool,
+        EventBlastRadiusRequest, ListOrphanTopicsRequest, TraceAgentRequest, TraceEventRequest,
+        TraceRouteRequest, event_blast_radius_tool, list_orphan_topics_tool, trace_agent_tool,
+        trace_event_tool, trace_route_tool,
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -799,6 +952,7 @@ mod tests {
             visibility: None,
             span: None,
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -820,6 +974,7 @@ mod tests {
                 column_len: 4,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -949,6 +1104,133 @@ mod tests {
             response.data.matches[0].consumers[0].evidence.source,
             EvidenceSource::TraceEvent
         );
+    }
+
+    fn ai_node(
+        repo: &str,
+        file_path: &str,
+        kind: NodeKind,
+        name: &str,
+        ai_role: Option<&str>,
+    ) -> NodeData {
+        NodeData {
+            id: node_id(repo, file_path, kind, name),
+            kind,
+            repo: repo.to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(name.to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+            ai_role: ai_role.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn trace_agent_tool_walks_ai_flow_from_graph() {
+        let temp = TempDir::new("trace-agent");
+        let graph_path = temp.path().join("graph.redb");
+        let registry_path = temp.path().join("registry.json");
+        let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
+
+        let repo = "reggenius";
+        let file_path = "src/agent.ts";
+        let src = file(repo, file_path);
+        let agent_graph = ai_node(
+            repo,
+            file_path,
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+            None,
+        );
+        let intent = ai_node(
+            repo,
+            file_path,
+            NodeKind::Function,
+            "intentNode",
+            Some("agent_node"),
+        );
+        let llm = ai_node(
+            repo,
+            file_path,
+            NodeKind::LlmModel,
+            "__llm__openai__gpt-4.1",
+            None,
+        );
+
+        graph
+            .bulk_insert(
+                &[
+                    src.clone(),
+                    agent_graph.clone(),
+                    intent.clone(),
+                    llm.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: agent_graph.id,
+                        target: intent.id,
+                        kind: EdgeKind::DefinesAgentNode,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: src.id,
+                        is_cross_file: false,
+                    },
+                    EdgeData {
+                        source: intent.id,
+                        target: llm.id,
+                        kind: EdgeKind::InvokesLlm,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: src.id,
+                        is_cross_file: false,
+                    },
+                ],
+            )
+            .expect("graph write should succeed");
+        drop(graph);
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                repo,
+                temp.path().join("repos/reggenius"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let response = trace_agent_tool(
+            &ctx,
+            TraceAgentRequest {
+                budget_bytes: None,
+                depth: None,
+                limit: None,
+                target: "__agent_graph__agent".to_owned(),
+            },
+        )
+        .expect("tool should succeed");
+
+        assert_eq!(
+            response.data.target_id,
+            Some(encode_node_id(agent_graph.id))
+        );
+        assert!(
+            response.data.nodes.iter().any(|n| n.kind == "llm_model"),
+            "the LlmModel must be reached; got {:?}",
+            response.data.nodes
+        );
+        assert!(
+            response
+                .data
+                .nodes
+                .iter()
+                .any(|n| n.ai_role.as_deref() == Some("agent_node")),
+            "the faceted agent node must be labelled"
+        );
+        assert!(!response.data.edges.is_empty(), "AI edges must be surfaced");
     }
 
     #[test]

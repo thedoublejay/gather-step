@@ -1,6 +1,8 @@
+pub mod ai_typescript;
 pub mod azure;
 pub mod detect;
 pub mod drizzle;
+pub mod fastapi;
 pub mod frontend_hooks;
 pub mod frontend_react;
 pub mod frontend_router;
@@ -13,6 +15,7 @@ pub mod nestjs;
 pub mod nextjs;
 pub mod prisma;
 pub mod profile;
+pub mod python_kafka;
 pub mod registry;
 pub mod storybook;
 pub mod tailwind;

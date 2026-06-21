@@ -78,6 +78,7 @@ fn file_node(repo: &str, path: &str) -> NodeData {
         visibility: Some(Visibility::Public),
         span: None,
         is_virtual: false,
+        ai_role: None,
     }
 }
 
@@ -95,6 +96,7 @@ fn sym_node(repo: &str, path: &str, name: &str) -> NodeData {
         visibility: Some(Visibility::Public),
         span: None,
         is_virtual: false,
+        ai_role: None,
     }
 }
 
@@ -119,6 +121,7 @@ fn canonical_event_node(event_qn: &str) -> NodeData {
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 

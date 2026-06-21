@@ -5,6 +5,32 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.0.0 (2026-06-21)
+
+**AI flow awareness.** gather-step now models LLM/agent/RAG/MCP code as first-class graph surfaces, alongside the existing routes, events, and data-shape layers. The release is **complementary**: every pre-v5 node and edge is preserved unchanged — verified by a full v4.4.4-vs-v5 reindex of a 31-repo workspace, where no node or edge kind decreased and all deltas were net-new AI/Python additions.
+
+### Added
+
+- **AI vocabulary** — new node kinds (`LlmModel`, `AiContract`, `AgentGraph`, `Prompt`, `VectorIndex`, `McpServer`, `McpTool`) and the edges that connect them, plus an `ai_role` facet on functions for agent-node / tool roles.
+- **TypeScript AI detection** — LLM factory calls → `LlmModel`; structured-output schemas (`withStructuredOutput` and `{ responseSchema }`) → persisted `AiContract` records; LangGraph `StateGraph` wiring → `AgentGraph` + agent nodes + transitions; tools → tool facets; Atlas `$vectorSearch` → `VectorIndex`; managed prompts → `Prompt`.
+- **Python packs** — FastAPI route detection (`Route` + `Serves`) and aiokafka/confluent producer & consumer detection (converging on the existing Kafka event vocabulary).
+- **Cross-repo AI seams** — consumer and provider sides converge on a shared node so an edge resolves across repos: MCP `callTool` / `registerTool` / `@Tool` (`CallsMcpTool` / `ExposesMcpTool`), Atlas `createSearchIndex` (`IndexesVector`, meeting the `$vectorSearch` read side), and embedding-endpoint POSTs (`Embeds`).
+- **`trace_agent`** — an AI-flow walker surfaced as a CLI command (`gather-step events agent <target>`) and an MCP tool, returning each reachable AI node with its role and depth.
+- **`pr-review` AI-contract deltas** — the `DeltaReport` gains an `ai_contracts` section reporting added / removed / changed structured-output contracts (keyed by source symbol), with schema-field diffs and AI-facet changes (`provider`, `model`, `temperature`, `inference_kind`, `source_type_name`, `schema_format`), parallel to `payload_contracts`. The removed-surface pass also flags removed AI surfaces with surviving consumers.
+
+### Changed
+
+- **`GRAPH_SCHEMA_VERSION` and `METADATA_SCHEMA_VERSION` bumped** — a full reindex is required; review artifacts are invalidated automatically.
+- **`DeltaReport.schema_version` is now `3`** — adds the `ai_contracts` section. The `temp-index` engine populates it; the overlay engine marks it unsupported alongside the other metadata-store surfaces.
+
+### Fixed
+
+- **No dangling agent-graph edges from LangGraph sentinels** — `addEdge("__start__", …)` / `addEdge(…, "__end__")` no longer emit a `GraphTransitionsTo` edge to the reserved `__start__` / `__end__` markers, which are never declared as nodes. Only transitions between declared agent nodes are recorded.
+
+### Release-wide
+
+- Bumped the app, Cargo workspace, internal crate dependency versions, landing-page release stamps and indexed-spec figures, and website package metadata to `5.0.0`.
+
 ## v4.4.4 (2026-06-10)
 
 Release status: **prepared**.

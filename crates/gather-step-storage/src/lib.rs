@@ -45,10 +45,10 @@ pub use indexer::{
     RepoIndexPayload, RepoIndexer, RepoIndexerError,
 };
 pub use metadata::{
-    CoChangePairRecord, CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord,
-    ContextPackRecord, ContextPackStats, FileAnalytics, FileIndexState, MetadataReadOnly,
-    MetadataStore, MetadataStoreDb, MetadataStoreError, PackCallLogEntry, PayloadContractQuery,
-    PayloadContractStoreRecord,
+    AiContractQuery, AiContractStoreRecord, CoChangePairRecord, CommitFileChangeKind,
+    CommitFileDeltaRecord, CommitRecord, ContextPackRecord, ContextPackStats, FileAnalytics,
+    FileIndexState, MetadataReadOnly, MetadataStore, MetadataStoreDb, MetadataStoreError,
+    PackCallLogEntry, PayloadContractQuery, PayloadContractStoreRecord,
 };
 pub use pack_store::{PackBlob, PackStore};
 pub use reconcile::{
@@ -756,6 +756,7 @@ mod tests {
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -782,6 +783,7 @@ mod tests {
                 column_len: 0,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -803,6 +805,7 @@ mod tests {
                 column_len: 1,
             }),
             is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -888,6 +891,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     }
 

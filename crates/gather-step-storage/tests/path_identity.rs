@@ -138,6 +138,7 @@ fn reconcile_writes_same_repo_dependency_targets_with_path_id_bytes() {
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
     let helper_file = NodeData {
         id: node_id(REPO, &helper_display, NodeKind::File, &helper_display),
@@ -151,6 +152,7 @@ fn reconcile_writes_same_repo_dependency_targets_with_path_id_bytes() {
         visibility: None,
         span: None,
         is_virtual: false,
+        ai_role: None,
     };
 
     coord
@@ -463,6 +465,7 @@ fn storage_non_utf8_file_path_survives_blob_round_trip() {
             column_len: 0,
         }),
         is_virtual: false,
+        ai_role: None,
     };
 
     coord
@@ -533,6 +536,7 @@ fn storage_non_utf8_file_path_reindex_batch_uses_lossless_path_bytes() {
             column_len: 0,
         }),
         is_virtual: false,
+        ai_role: None,
     };
 
     let batch = RepoBatch {

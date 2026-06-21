@@ -77,6 +77,7 @@ fn file_node(repo: &str, path: &str) -> NodeData {
         visibility: Some(Visibility::Public),
         span: None,
         is_virtual: false,
+        ai_role: None,
     }
 }
 
@@ -93,6 +94,7 @@ fn sym_node(repo: &str, path: &str, kind: NodeKind, name: &str) -> NodeData {
         visibility: Some(Visibility::Public),
         span: None,
         is_virtual: false,
+        ai_role: None,
     }
 }
 
@@ -116,6 +118,7 @@ fn hook_virtual_node(package: &str, hook_name: &str, consumer_file: &NodeData) -
         visibility: None,
         span: None,
         is_virtual: true,
+        ai_role: None,
     }
 }
 
@@ -210,6 +213,7 @@ fn cross_repo_hook_import_produces_consumes_hook_from_edge() {
             visibility: None,
             span: None,
             is_virtual: true,
+            ai_role: None,
         }
     };
 

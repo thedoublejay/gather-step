@@ -310,6 +310,7 @@ fn payload_contract_node(
             column_len: 0,
         }),
         is_virtual: true,
+        ai_role: None,
     }
 }
 

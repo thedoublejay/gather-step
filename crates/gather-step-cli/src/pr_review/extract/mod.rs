@@ -9,6 +9,7 @@
 //! Phase 3 Tasks 3+4 add `contract_alignment` and `decorators`.
 //! Phase 7 adds `deployment`.
 
+pub mod ai_contracts;
 pub mod contract_alignment;
 pub mod decorators;
 pub mod deployment;

@@ -170,7 +170,7 @@ Used automatically when the user asks to review a pull request, do a structural 
 | `no_baseline_check` | bool | no | Suppress the warning emitted when the workspace HEAD does not match `base`. |
 | `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
 
-**Returns.** A JSON `DeltaReport` (`schema_version: 1`) with these top-level sections:
+**Returns.** A JSON `DeltaReport` (`schema_version: 3`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
 - `safety` — review storage path, run id, cleanup policy, cache key, config hash.
@@ -179,6 +179,7 @@ Used automatically when the user asks to review a pull request, do a structural 
 - `routes` — added / removed / changed HTTP routes by `(method, canonical_path)`. Carry handler info via `Serves` edges and downstream impact summaries.
 - `symbols` — added / removed / changed exported symbols by `(repo, qualified_name)`. Detects `signature_changed` and `visibility_changed` flags. Removed and changed surfaces carry impact summaries.
 - `payload_contracts` — field-level diffs (added / removed / type-changed / `optional`-required flips). Removed and changed contracts can carry impact summaries.
+- `ai_contracts` — added / removed / changed AI (structured-output) contracts, keyed by source symbol. Surfaces schema-field diffs plus AI-facet changes (`provider`, `model`, `temperature`, `inference_kind`, `source_type_name`, `schema_format`).
 - `events` — producer/consumer set diffs across `Topic`, `Queue`, `Subject`, `Stream`, and `Event` virtual nodes.
 - `decorators` — added / removed / changed permission, audit, and authorization decorators.
 - `contract_alignments` — cross-repo clusters of related payload contracts with confidence scores.
