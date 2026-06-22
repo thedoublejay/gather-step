@@ -31,7 +31,7 @@ pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Ownership metadata stamped into a lock file once the OS lock is acquired.
 ///
-/// Written as JSON. Legacy 0-byte locks and any unparseable content are
+/// Written as JSON. Legacy 0-byte locks and any unparsable content are
 /// treated as "unknown owner" — see [`read_owner`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockOwner {
@@ -232,7 +232,7 @@ pub fn acquire(
     Ok(LockGuard { file })
 }
 
-/// Read the owner metadata from a lock file. Empty/legacy/unparseable files
+/// Read the owner metadata from a lock file. Empty/legacy/unparsable files
 /// yield `None` ("unknown owner") without erroring.
 #[must_use]
 pub fn read_owner(lock_path: &Path) -> Option<LockOwner> {

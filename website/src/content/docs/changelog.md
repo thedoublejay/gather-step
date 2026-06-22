@@ -12,7 +12,7 @@ This changelog lists significant user-visible changes. The latest release is sho
 ### Added
 
 - **Bounded lock acquisition** — index/reindex now wait at most `--lock-timeout` seconds (default 300) for a contended lock, then report it as held with an actionable message (repo, owner pid, age, and the exact recovery command) and exit non-zero, instead of hanging indefinitely. `--lock-timeout 0` restores the wait-forever behaviour.
-- **Lock owner metadata** — lock files now record the owning `pid`, hostname, start time, and gather-step version. Legacy 0-byte and unparseable lock files are tolerated as "unknown owner".
+- **Lock owner metadata** — lock files now record the owning `pid`, hostname, start time, and gather-step version. Legacy 0-byte and unparsable lock files are tolerated as "unknown owner".
 - **`--force-unlock`** — report a contended lock immediately instead of waiting, with recovery instructions. A held lock is never broken automatically: advisory locks cannot be safely reclaimed from outside (a dead owner's lock is already released by the kernel), so the flag surfaces the holder and the manual-recovery command rather than racing it.
 - **Liveness-aware reporting** — the owning process is probed (same-host only, to stay safe on shared filesystems) so messages distinguish a live concurrent index from a dead owner.
 - **`status` / `doctor` "Locks" summary** — both commands now list held locks with age and owner-alive state, so a stuck lock is visible at a glance.
