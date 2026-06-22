@@ -78,8 +78,14 @@ fn acquire_reclaims_free_lock_file_with_stale_metadata() {
     )
     .unwrap();
 
-    let guard = lock::acquire(&path, "repo-d", Some(Duration::from_millis(80)), false, None)
-        .expect("a free, stale lock file is reclaimed");
+    let guard = lock::acquire(
+        &path,
+        "repo-d",
+        Some(Duration::from_millis(80)),
+        false,
+        None,
+    )
+    .expect("a free, stale lock file is reclaimed");
     let owner = lock::read_owner(&path).expect("metadata refreshed");
     assert_eq!(owner.pid, std::process::id());
     drop(guard);
