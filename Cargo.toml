@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "5.0.0"
+version = "5.2.0"
 authors = ["JJ Adonis"]
 edition = "2024"
 rust-version = "1.96"
@@ -24,15 +24,15 @@ homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step = { path = "crates/gather-step-cli", version = "5.0.0" }
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "5.0.0" }
-gather-step-core = { path = "crates/gather-step-core", version = "5.0.0" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "5.0.0" }
-gather-step-git = { path = "crates/gather-step-git", version = "5.0.0" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "5.0.0" }
-gather-step-output = { path = "crates/gather-step-output", version = "5.0.0" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "5.0.0" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "5.0.0" }
+gather-step = { path = "crates/gather-step-cli", version = "5.2.0" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "5.2.0" }
+gather-step-core = { path = "crates/gather-step-core", version = "5.2.0" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "5.2.0" }
+gather-step-git = { path = "crates/gather-step-git", version = "5.2.0" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "5.2.0" }
+gather-step-output = { path = "crates/gather-step-output", version = "5.2.0" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "5.2.0" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "5.2.0" }
 
 tree-sitter = "=0.26.9"
 tree-sitter-typescript = "0.23.2"
@@ -73,7 +73,7 @@ parking_lot = "=0.12.5"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = "0.7.18"
 notify = "=9.0.0-rc.4"
-gix = { version = "0.84", default-features = true }
+gix = { version = "0.85", default-features = true }
 regex = "1.12.4"
 rustix = { version = "1.1", features = ["process", "system"] }
 simdutf8 = "=0.1.5"
@@ -81,9 +81,9 @@ similar = "3.1.1"
 lru = "=0.18.0"
 quick_cache = "0.6.23"
 smallvec = { version = "=1.15.1", features = ["serde"] }
-camino = "1.2.2"
+camino = "1.2.3"
 aho-corasick = "1.1.4"
-memchr = "2.8.1"
+memchr = "2.8.2"
 libc = "0.2"
 dhat = "=0.3.3"
 regex-automata = { version = "0.4.14", default-features = false, features = ["std", "syntax", "meta", "nfa", "dfa", "hybrid", "perf", "unicode"] }
@@ -93,7 +93,7 @@ rkyv = { version = "0.8.16", features = ["alloc", "bytecheck"] }
 version = "0.18.0"
 
 [workspace.dependencies.insta]
-version = "1.47.2"
+version = "1.48.0"
 features = ["yaml"]
 
 [workspace.dependencies.pretty_assertions]
