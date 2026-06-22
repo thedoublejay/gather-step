@@ -14,3 +14,4 @@ pub mod projection_impact;
 pub mod proof_builder;
 pub mod repo_intelligence;
 pub mod search;
+pub mod who_consumes;

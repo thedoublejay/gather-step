@@ -179,6 +179,7 @@ fn request_name(request: &DaemonRequest) -> &'static str {
         DaemonRequest::Doctor { .. } => "doctor",
         DaemonRequest::Conventions { .. } => "conventions",
         DaemonRequest::CrossRepoDeps { .. } => "cross_repo_deps",
+        DaemonRequest::WhoConsumes { .. } => "who_consumes",
         DaemonRequest::StorageReport => "storage_report",
         DaemonRequest::EventsTrace { .. } => "events_trace",
         DaemonRequest::EventsBlastRadius { .. } => "events_blast_radius",

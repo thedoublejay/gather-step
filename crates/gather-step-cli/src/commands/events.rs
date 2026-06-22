@@ -373,11 +373,25 @@ pub(crate) fn execute_agent_trace(
     args: &AgentTraceArgs,
 ) -> Result<RenderedCommand> {
     let candidates = resolve_agent_targets(storage.graph(), &args.target)?;
-    let target = candidates
+    let mut filtered: Vec<NodeData> = candidates
         .into_iter()
-        .find(|node| repo_filter.is_none_or(|repo| node.repo == repo));
-    let Some(target) = target else {
-        bail!("No matching AI target found for `{}`.", args.target);
+        .filter(|node| repo_filter.is_none_or(|repo| node.repo == repo))
+        .collect();
+    let target = match filtered.len() {
+        0 => bail!("No matching AI target found for `{}`.", args.target),
+        1 => filtered.remove(0),
+        _ => {
+            let choices = filtered
+                .iter()
+                .map(|node| format!("{}:{} ({})", node.repo, node.file_path, node.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "AI target `{}` is ambiguous; refine with --repo or use a fully-qualified name: {}",
+                args.target,
+                choices
+            );
+        }
     };
 
     let trace = trace_agent(storage.graph(), target.id, args.depth, args.limit)?;
@@ -561,9 +575,9 @@ mod tests {
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, node_id, topic_qn,
         virtual_node,
     };
-    use gather_step_storage::{GraphStore, GraphStoreDb};
+    use gather_step_storage::{GraphStore, GraphStoreDb, StorageCoordinator};
 
-    use super::select_event_target;
+    use super::{AgentTraceArgs, execute_agent_trace, select_event_target};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -736,5 +750,127 @@ mod tests {
             is_virtual: false,
             ai_role: None,
         }
+    }
+
+    struct TempWorkspace {
+        path: PathBuf,
+    }
+
+    impl TempWorkspace {
+        fn new(name: &str) -> Self {
+            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gather-step-events-cli-ws-{name}-{}-{id}",
+                process::id()
+            ));
+            fs::create_dir_all(&path).expect("temp workspace dir should create");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn ai_node(repo: &str, file_path: &str, kind: NodeKind, name: &str) -> NodeData {
+        NodeData {
+            id: node_id(repo, file_path, kind, name),
+            kind,
+            repo: repo.to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(name.to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        }
+    }
+
+    #[test]
+    fn execute_agent_trace_rejects_ambiguous_targets_across_repos() {
+        let ws = TempWorkspace::new("agent-ambig");
+        let storage = StorageCoordinator::open(ws.path()).expect("storage coordinator should open");
+
+        let agent_a = ai_node(
+            "repo_alpha",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+        );
+        let agent_b = ai_node(
+            "repo_beta",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+        );
+        storage
+            .graph()
+            .bulk_insert(&[agent_a, agent_b], &[])
+            .expect("graph write should succeed");
+
+        let args = AgentTraceArgs {
+            target: "__agent_graph__agent".to_owned(),
+            limit: 25,
+            depth: 8,
+        };
+        let err = execute_agent_trace(&storage, None, &args)
+            .expect_err("ambiguous agent target should fail");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "expected ambiguity error, got: {msg}"
+        );
+        assert!(
+            msg.contains("repo_alpha"),
+            "error should name repo_alpha: {msg}"
+        );
+        assert!(
+            msg.contains("repo_beta"),
+            "error should name repo_beta: {msg}"
+        );
+    }
+
+    #[test]
+    fn execute_agent_trace_resolves_when_repo_filter_disambiguates() {
+        let ws = TempWorkspace::new("agent-disambig");
+        let storage = StorageCoordinator::open(ws.path()).expect("storage coordinator should open");
+
+        let agent_a = ai_node(
+            "repo_alpha",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+        );
+        let agent_b = ai_node(
+            "repo_beta",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+        );
+        storage
+            .graph()
+            .bulk_insert(&[agent_a, agent_b], &[])
+            .expect("graph write should succeed");
+
+        let args = AgentTraceArgs {
+            target: "__agent_graph__agent".to_owned(),
+            limit: 25,
+            depth: 8,
+        };
+        let result = execute_agent_trace(&storage, Some("repo_alpha"), &args);
+        assert!(
+            result.is_ok(),
+            "repo-filtered trace should succeed: {result:?}"
+        );
     }
 }

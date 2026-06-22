@@ -63,6 +63,8 @@ pub enum NodeKind {
     McpServer = 37,
     McpTool = 38,
     LlmModel = 39,
+    /// Virtual node representing a value mirrored verbatim across repo boundaries.
+    ValueMirror = 40,
 }
 
 #[derive(
@@ -127,6 +129,13 @@ pub enum EdgeKind {
     /// A migration symbol changes documents in a virtual database collection
     /// node such as `__migration_collection__alerts`.
     MigratesCollection = 87,
+    /// A mirror endpoint links a call site to the `__value__` virtual node for
+    /// a value carried verbatim across repo boundaries.
+    MirrorsValueFrom = 88,
+    /// A guard endpoint (switch/if branch keyed on an enum value) links to the
+    /// `__value__` virtual node. Distinguishes a guard surface from an array
+    /// `MirrorsValueFrom` mirror; carries `EdgeMetadata.guard_has_default`.
+    GuardsEnumValue = 89,
     ReadsField = 90,
     WritesField = 91,
     DerivesFieldFrom = 92,
@@ -218,7 +227,8 @@ impl NodeKind {
             | Self::VectorIndex
             | Self::McpServer
             | Self::McpTool
-            | Self::LlmModel => true,
+            | Self::LlmModel
+            | Self::ValueMirror => true,
             Self::Import
             | Self::Decorator
             | Self::Commit
@@ -273,6 +283,7 @@ impl NodeKind {
             Self::McpServer,
             Self::McpTool,
             Self::LlmModel,
+            Self::ValueMirror,
         ]
     }
 }
@@ -376,6 +387,8 @@ impl EdgeKind {
             Self::DriftsFrom,
             Self::ContractOn,
             Self::MigratesCollection,
+            Self::MirrorsValueFrom,
+            Self::GuardsEnumValue,
             Self::ReadsField,
             Self::WritesField,
             Self::DerivesFieldFrom,
@@ -451,6 +464,7 @@ impl TryFrom<u8> for NodeKind {
             37 => Ok(Self::McpServer),
             38 => Ok(Self::McpTool),
             39 => Ok(Self::LlmModel),
+            40 => Ok(Self::ValueMirror),
             _ => Err(DiscriminantError {
                 kind: "NodeKind",
                 value,
@@ -503,6 +517,8 @@ impl TryFrom<u8> for EdgeKind {
             85 => Ok(Self::DriftsFrom),
             86 => Ok(Self::ContractOn),
             87 => Ok(Self::MigratesCollection),
+            88 => Ok(Self::MirrorsValueFrom),
+            89 => Ok(Self::GuardsEnumValue),
             90 => Ok(Self::ReadsField),
             91 => Ok(Self::WritesField),
             92 => Ok(Self::DerivesFieldFrom),
@@ -814,14 +830,14 @@ mod tests {
 
     #[test]
     fn node_kind_invalid_u8_rejects() {
-        for value in [40_u8, 50, 100, 255] {
+        for value in [41_u8, 50, 100, 255] {
             assert!(NodeKind::try_from(value).is_err(), "{value} should reject");
         }
     }
 
     #[test]
     fn edge_kind_invalid_u8_rejects() {
-        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 88, 89, 106, 255] {
+        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 96, 106, 255] {
             assert!(EdgeKind::try_from(value).is_err(), "{value} should reject");
         }
     }

@@ -133,6 +133,8 @@ fn make_edge(source: NodeId, target: NodeId, kind: EdgeKind, owner: NodeId) -> E
             timestamp_unix: None,
             drift_kind: None,
             resolver: Some("frontend_hook_import".to_owned()),
+            guard_has_default: None,
+            enum_qn: None,
         },
         owner_file: owner,
         is_cross_file: true,

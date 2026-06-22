@@ -19,3 +19,4 @@ pub mod payload_contracts;
 pub mod removed_surfaces;
 pub mod routes;
 pub mod symbols;
+pub mod value_mirror;

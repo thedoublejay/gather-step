@@ -595,7 +595,7 @@ mod tests {
                     "changed": [{
                         "repo": id,
                         "file": "src/payload.ts",
-                        "target_qualified_name": "UpdateLabelProject",
+                        "target_qualified_name": "UpdateOrder",
                         "side": side,
                         "fields_added": [],
                         "fields_removed": [{ "name": "name", "type_name": "string", "optional": false }],

@@ -163,6 +163,8 @@ pub fn resolve_calls_with_unresolved<'a>(
                                 timestamp_unix: None,
                                 drift_kind: None,
                                 resolver: Some(strategy.as_str().to_owned()),
+                                guard_has_default: None,
+                                enum_qn: None,
                             },
                             owner_file: file.file_node,
                             is_cross_file: target.file_path

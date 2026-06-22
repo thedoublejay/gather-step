@@ -90,6 +90,7 @@ fn single_file_batch(repo: &str, file_path: &str, hash: &[u8]) -> RepoBatch {
             path_id_bytes: vec![],
             nodes: vec![node],
             edges: vec![],
+            value_mirror_candidates: vec![],
             content_hash: hash.to_vec(),
             size_bytes: 0,
             mtime_ns: 0,

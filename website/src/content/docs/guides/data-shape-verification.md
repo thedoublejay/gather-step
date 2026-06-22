@@ -104,7 +104,7 @@ filter scopes by `workflow`, planning and change-impact surfaces add
 probe.
 
 Generated commands use `db.getCollection(<json-escaped name>)`, so collection
-names such as `audit-log` and `foo.bar` remain safe to paste into the Mongo
+names such as `service-log` and `foo.bar` remain safe to paste into the Mongo
 shell. Gather Step prints the command only; it does not open a database
 connection.
 

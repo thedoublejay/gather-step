@@ -33,6 +33,10 @@ pub enum DaemonRequest {
         repo: Option<String>,
         repo_filter: Option<String>,
     },
+    WhoConsumes {
+        symbol: String,
+        repo_filter: Option<String>,
+    },
     StorageReport,
     EventsTrace {
         subject: String,

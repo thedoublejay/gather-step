@@ -407,7 +407,7 @@ mod tests {
             make_record(
                 "backend",
                 "src/dto.ts",
-                "UpdateLabelProjectDto",
+                "UpdateOrderDto",
                 PayloadSide::Producer,
                 fields.clone(),
             ),
@@ -417,7 +417,7 @@ mod tests {
             make_record(
                 "frontend",
                 "src/payload.ts",
-                "UpdateLabelProjectPayload",
+                "UpdateOrderPayload",
                 PayloadSide::Consumer,
                 fields,
             ),

@@ -51,6 +51,8 @@ struct StoredEdgeMetadata {
     timestamp_unix: Option<i64>,
     drift_kind: Option<StoredDriftKind>,
     resolver: Option<StoredResolver>,
+    guard_has_default: Option<bool>,
+    enum_qn: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
@@ -84,6 +86,8 @@ impl StoredEdgeMetadata {
                 .resolver
                 .as_deref()
                 .map(StoredResolver::from_public),
+            guard_has_default: metadata.guard_has_default,
+            enum_qn: metadata.enum_qn.clone(),
         }
     }
 
@@ -94,6 +98,8 @@ impl StoredEdgeMetadata {
             timestamp_unix: self.timestamp_unix,
             drift_kind: self.drift_kind.map(StoredDriftKind::into_public),
             resolver: self.resolver.map(StoredResolver::into_public),
+            guard_has_default: self.guard_has_default,
+            enum_qn: self.enum_qn,
         }
     }
 }
@@ -264,7 +270,12 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 /// v3.1 is a fresh generated-state release. There are no production users for
 /// older graph store layouts, so the physical schema baseline starts at zero
 /// and does not carry migration or upgrade branches.
-pub const GRAPH_SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped 1→2 (v5.1, Task 11): `StoredEdgeMetadata` gained `guard_has_default`,
+/// changing the bitcode edge layout. Reindex required. v5.1 Task 17 adds
+/// `StoredEdgeMetadata.enum_qn` on the same unreleased v2 layout — its reindex
+/// folds into Task 11's, so no further bump is warranted.
+pub const GRAPH_SCHEMA_VERSION: u32 = 2;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -346,6 +357,10 @@ impl GraphCsrSnapshot {
 
     pub fn edges(&self) -> &[EdgeData] {
         &self.edges
+    }
+
+    pub fn node_by_id(&self, id: NodeId) -> Option<&NodeData> {
+        self.node_positions.get(&id).map(|&pos| &self.nodes[pos])
     }
 
     pub fn outgoing_edges(&self, node_id: NodeId) -> impl Iterator<Item = &EdgeData> {
@@ -450,6 +465,38 @@ pub struct GraphTableFootprint {
     pub tree_height: u32,
 }
 
+/// A short-lived read view over a [`GraphStore`] that bounds point lookups to a
+/// single consistent read transaction.
+///
+/// Use this for bounded traversals (e.g. depth-limited BFS) that touch only a
+/// handful of nodes: it amortizes the per-lookup transaction-open cost without
+/// materializing the whole graph the way [`GraphStore::csr_snapshot`] does.
+/// The underlying transaction is owned by the session and never exposed.
+pub trait GraphReadSession {
+    /// Look up a node by id within this session's read view.
+    fn node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError>;
+    /// Return the outgoing edges of `source` within this session's read view.
+    fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+}
+
+/// Fallback read session that delegates each lookup to the store's own
+/// per-call accessors. Used by stores (overlays, in-memory test doubles) that
+/// have no single-transaction fast path; behavior matches calling `get_node` /
+/// `get_outgoing` directly.
+struct DelegatingReadSession<'a, S: GraphStore + ?Sized> {
+    store: &'a S,
+}
+
+impl<S: GraphStore + ?Sized> GraphReadSession for DelegatingReadSession<'_, S> {
+    fn node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError> {
+        self.store.get_node(id)
+    }
+
+    fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
+        self.store.get_outgoing(source)
+    }
+}
+
 pub trait GraphStore {
     fn insert_node(&self, node: &NodeData) -> Result<(), GraphStoreError>;
     fn get_node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError>;
@@ -474,6 +521,16 @@ pub trait GraphStore {
         }
 
         Ok(GraphCsrSnapshot::from_parts(nodes, edges))
+    }
+    /// Open a bounded read session for point lookups (see [`GraphReadSession`]).
+    ///
+    /// The default delegates each lookup to the store's per-call accessors;
+    /// [`GraphStoreDb`] overrides this to share one read transaction.
+    fn read_session(&self) -> Result<Box<dyn GraphReadSession + '_>, GraphStoreError>
+    where
+        Self: Sized,
+    {
+        Ok(Box::new(DelegatingReadSession { store: self }))
     }
     fn delete_edges_for_owner(&self, owner_file: NodeId) -> Result<(), GraphStoreError>;
     fn delete_edges_for_owner_by_kind(
@@ -3322,9 +3379,32 @@ fn graph_table_footprint(
     }
 }
 
+/// Single-transaction read session for [`GraphStoreDb`]. Holds one redb read
+/// transaction (a cheap MVCC snapshot) and serves point lookups through the
+/// txn-scoped helpers, so a bounded traversal pays one transaction open instead
+/// of one per hop. The transaction stays private to this type.
+struct DbReadSession {
+    read_txn: redb::ReadTransaction,
+}
+
+impl GraphReadSession for DbReadSession {
+    fn node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError> {
+        GraphStoreDb::get_node_in_read_txn(&self.read_txn, id)
+    }
+
+    fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
+        GraphStoreDb::get_outgoing_in_read_txn(&self.read_txn, source)
+    }
+}
+
 impl GraphStore for GraphStoreDb {
     fn insert_node(&self, node: &NodeData) -> Result<(), GraphStoreError> {
         self.with_write_txn(|write_txn| Self::insert_node_in_txn(write_txn, node))
+    }
+
+    fn read_session(&self) -> Result<Box<dyn GraphReadSession + '_>, GraphStoreError> {
+        let read_txn = self.begin_read_txn()?;
+        Ok(Box::new(DbReadSession { read_txn }))
     }
 
     fn get_node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError> {
@@ -4091,6 +4171,38 @@ mod tests {
     }
 
     #[test]
+    fn read_session_point_lookups_match_per_call_accessors() {
+        let store = test_store("read-session");
+        let file = node("service-a", "src/foo.ts", NodeKind::File, "src/foo.ts", 0);
+        let a = node("service-a", "src/foo.ts", NodeKind::Function, "a", 0);
+        let b = node("service-a", "src/foo.ts", NodeKind::Function, "b", 1);
+        let c = node("service-a", "src/foo.ts", NodeKind::Function, "c", 2);
+        let a_to_b = edge(a.id, b.id, file.id);
+        let a_to_c = edge(a.id, c.id, file.id);
+        let missing = node_id("service-a", "src/foo.ts", NodeKind::Function, "absent");
+
+        store
+            .bulk_insert(&[file, a.clone(), b.clone(), c.clone()], &[a_to_b, a_to_c])
+            .expect("batch should insert");
+
+        let session = store.read_session().expect("session should open");
+
+        assert_eq!(
+            session.node(a.id).expect("session node lookup"),
+            store.get_node(a.id).expect("store node lookup"),
+        );
+        assert_eq!(session.node(missing).expect("session node lookup"), None);
+        assert_eq!(
+            session.outgoing(a.id).expect("session outgoing"),
+            store.get_outgoing(a.id).expect("store outgoing"),
+        );
+        assert_eq!(
+            session.outgoing(b.id).expect("session outgoing"),
+            store.get_outgoing(b.id).expect("store outgoing"),
+        );
+    }
+
+    #[test]
     fn looks_up_nodes_by_file() {
         let store = test_store("nodes-by-file");
         let file = node("service-a", "src/foo.ts", NodeKind::File, "src/foo.ts", 0);
@@ -4209,6 +4321,8 @@ mod tests {
                 timestamp_unix: Some(1_700_000_000),
                 drift_kind: None,
                 resolver: Some(ResolverStrategy::FirstPass.as_str().to_owned()),
+                guard_has_default: None,
+                enum_qn: None,
             },
             owner_file: file.id,
             is_cross_file: false,
@@ -4220,6 +4334,8 @@ mod tests {
                 timestamp_unix: Some(1_700_000_100),
                 drift_kind: Some("rescored".to_owned()),
                 resolver: Some(ResolverStrategy::SecondPass.as_str().to_owned()),
+                guard_has_default: None,
+                enum_qn: None,
             },
             ..original.clone()
         };
@@ -4244,6 +4360,8 @@ mod tests {
             timestamp_unix: Some(1_700_000_123),
             drift_kind: Some(format!("{MIGRATION_FILTERS_METADATA_PREFIX}[\"tenantId\"]")),
             resolver: Some(ResolverStrategy::ImportMap.as_str().to_owned()),
+            guard_has_default: None,
+            enum_qn: None,
         };
 
         let stored = StoredEdgeMetadata::from_public(&metadata);
@@ -4807,7 +4925,7 @@ mod tests {
             ai_role: None,
         };
         let first = make("chronology", "src/a.ts");
-        let second = make("label-review", "src/b.ts");
+        let second = make("service-ui", "src/b.ts");
         store.insert_node(&first).expect("first should insert");
         store.insert_node(&second).expect("second should insert");
 

@@ -91,8 +91,10 @@ fn fresh_schema_stamps_current_graph_version() {
         .expect("The graph schema version should read.")
         .expect("The graph schema version should be stamped.")
         .value();
-    // Tracks GRAPH_SCHEMA_VERSION; bumped to 1 when NodeData gained `ai_role`.
-    assert_eq!(version, 1);
+    // Tracks GRAPH_SCHEMA_VERSION; bumped to 1 when NodeData gained `ai_role`,
+    // then to 2 (v5.1) when StoredEdgeMetadata gained `guard_has_default` and
+    // `enum_qn`.
+    assert_eq!(version, 2);
 }
 
 /// Open-time enforcement: a graph store stamped with a future schema

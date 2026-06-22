@@ -32,8 +32,8 @@ pub use footprint::{
     StorageFootprintReport, storage_footprint_report, storage_footprint_report_with_open_graph,
 };
 pub use graph_store::{
-    EdgeCountSummary, GraphCsrSnapshot, GraphStore, GraphStoreDb, GraphStoreError,
-    GraphTableFootprint,
+    EdgeCountSummary, GraphCsrSnapshot, GraphReadSession, GraphStore, GraphStoreDb,
+    GraphStoreError, GraphTableFootprint,
 };
 pub use incremental::{
     ChangedSet, IncrementalError, IncrementalFileEntry, RepoSnapshot, TrackedPath,
@@ -101,6 +101,9 @@ pub struct FileBatch {
     pub path_id_bytes: Vec<u8>,
     pub nodes: Vec<NodeData>,
     pub edges: Vec<EdgeData>,
+    /// Value-mirror candidates captured by the TS/JS parser (v5.1). Converged
+    /// into `ValueMirror` virtual nodes + `MirrorsValueFrom` edges by Task 4.
+    pub value_mirror_candidates: Vec<gather_step_parser::ValueMirrorCandidate>,
     pub content_hash: Vec<u8>,
     pub size_bytes: i64,
     pub mtime_ns: i64,
@@ -839,6 +842,7 @@ mod tests {
                 path_id_bytes: vec![],
                 nodes,
                 edges,
+                value_mirror_candidates: vec![],
                 content_hash: hash.to_vec(),
                 size_bytes: 0,
                 mtime_ns: 0,
@@ -867,6 +871,7 @@ mod tests {
                     defines_edge(file.id, function.id),
                     defines_edge(file.id, import_id),
                 ],
+                value_mirror_candidates: vec![],
                 content_hash: hash.to_vec(),
                 size_bytes: 0,
                 mtime_ns: 0,
@@ -921,6 +926,7 @@ mod tests {
                         is_cross_file: true,
                     },
                 ],
+                value_mirror_candidates: vec![],
                 content_hash: hash.to_vec(),
                 size_bytes: 0,
                 mtime_ns: 0,

@@ -23,6 +23,7 @@ pub mod storage_report;
 pub mod trace;
 pub mod tui;
 pub mod watch;
+pub mod who_consumes;
 
 use std::process::ExitCode;
 
@@ -70,6 +71,10 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     (
         "cross-repo-deps",
         "Inspect cross-repo dependency edges per configured repo",
+    ),
+    (
+        "who-consumes",
+        "Find which repos consume what a symbol's file produces",
     ),
     (
         "projection-impact",
@@ -164,6 +169,8 @@ pub enum Command {
     Impact(impact::ImpactArgs),
     #[command(name = "cross-repo-deps", visible_alias = "cross_repo_deps")]
     CrossRepoDeps(cross_repo_deps::CrossRepoDepsArgs),
+    #[command(name = "who-consumes", visible_alias = "who_consumes")]
+    WhoConsumes(who_consumes::WhoConsumesArgs),
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
     DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
     #[command(name = "qa-evidence")]
@@ -241,6 +248,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Generate(command)) => success(generate::run(&app, command)),
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
         Some(Command::CrossRepoDeps(args)) => success(cross_repo_deps::run(&app, &args)),
+        Some(Command::WhoConsumes(args)) => success(who_consumes::run(&app, &args)),
         Some(Command::ProjectionImpact(args)) => success(projection_impact::run(&app, args)),
         Some(Command::DeploymentTopology(args)) => success(deployment_topology::run(&app, args)),
         Some(Command::QaEvidence(args)) => success(qa_evidence::run(&app, &args)),

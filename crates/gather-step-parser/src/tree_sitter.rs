@@ -79,6 +79,7 @@ pub struct ParsedFile {
     pub call_sites: Vec<EnrichedCallSite>,
     pub import_bindings: Vec<ImportBinding>,
     pub constant_strings: FxHashMap<String, String>,
+    pub value_mirror_candidates: Vec<crate::ts_js_oxc::ValueMirrorCandidate>,
     pub parse_ms: i64,
 }
 
@@ -346,6 +347,7 @@ fn parse_file_core(
                     call_sites: state.call_sites.clone(),
                     import_bindings: state.import_bindings.clone(),
                     constant_strings: state.constant_strings.clone(),
+                    value_mirror_candidates: state.value_mirror_candidates.clone(),
                     parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
                 }
             };
@@ -401,6 +403,7 @@ fn parse_file_core(
             call_sites: state.call_sites,
             import_bindings: state.import_bindings,
             constant_strings: state.constant_strings,
+            value_mirror_candidates: state.value_mirror_candidates,
             parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
         };
         if run_augmentations {
@@ -514,6 +517,7 @@ fn parse_file_core(
                 call_sites: state.call_sites.clone(),
                 import_bindings: state.import_bindings.clone(),
                 constant_strings: state.constant_strings.clone(),
+                value_mirror_candidates: state.value_mirror_candidates.clone(),
                 parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
             }
         };
@@ -582,6 +586,7 @@ fn parse_file_core(
         call_sites: state.call_sites,
         import_bindings: state.import_bindings,
         constant_strings: state.constant_strings,
+        value_mirror_candidates: state.value_mirror_candidates,
         parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
     if run_augmentations {
@@ -809,6 +814,7 @@ pub(crate) struct ParseState<'a> {
     import_bindings: Vec<ImportBinding>,
     module_cache: FxHashMap<String, gather_step_core::NodeId>,
     constant_strings: FxHashMap<String, String>,
+    value_mirror_candidates: Vec<crate::ts_js_oxc::ValueMirrorCandidate>,
     function_ordinal: u16,
     class_ordinal: u16,
     type_ordinal: u16,
@@ -861,6 +867,7 @@ impl<'a> ParseState<'a> {
             import_bindings: Vec::new(),
             module_cache: FxHashMap::default(),
             constant_strings: FxHashMap::default(),
+            value_mirror_candidates: Vec::new(),
             function_ordinal: 0,
             class_ordinal: 0,
             type_ordinal: 0,
@@ -1336,6 +1343,18 @@ impl<'a> ParseState<'a> {
 
     pub(crate) fn constant_strings_mut(&mut self) -> &mut FxHashMap<String, String> {
         &mut self.constant_strings
+    }
+
+    pub(crate) fn push_value_mirror_candidate(
+        &mut self,
+        candidate: crate::ts_js_oxc::ValueMirrorCandidate,
+    ) {
+        self.value_mirror_candidates.push(candidate);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn value_mirror_candidates(&self) -> &[crate::ts_js_oxc::ValueMirrorCandidate] {
+        &self.value_mirror_candidates
     }
 
     pub(crate) fn file_node_id(&self) -> gather_step_core::NodeId {
@@ -1965,7 +1984,13 @@ fn visit_python(
                 collect_constructor_dependencies(node, state.source),
             );
             state.set_symbol_implemented_interfaces(class_node.id, implemented_interfaces);
-            state.set_symbol_base_classes(class_node.id, base_classes);
+            state.set_symbol_base_classes(class_node.id, base_classes.clone());
+            // Enum subclass: emit authoritative EnumMemberDef candidates.
+            if base_classes.iter().any(|b| b == "Enum")
+                && let Some(body) = find_child_by_kind(node, "block")
+            {
+                capture_python_enum_members(body, qualified_name.as_str(), class_node.id, state);
+            }
             recurse_children(node, |child| {
                 visit_python(
                     child,
@@ -2048,14 +2073,53 @@ fn visit_python(
                 && let Some(left) = node.child_by_field_name("left")
                 && left.kind() == "identifier"
                 && let Some(right) = node.child_by_field_name("right")
-                && right.kind() == "string"
             {
-                let name = node_text(left, state.source).trim().to_owned();
-                let value = sanitize_string_literal(node_text(right, state.source));
-                if !name.is_empty() && !value.is_empty() && !value.contains('{') {
-                    state.record_constant_string(name, value);
+                if right.kind() == "string" {
+                    let name = node_text(left, state.source).trim().to_owned();
+                    let value = sanitize_string_literal(node_text(right, state.source));
+                    if !name.is_empty() && !value.is_empty() && !value.contains('{') {
+                        state.record_constant_string(name, value);
+                    }
+                } else if right.kind() == "list" || right.kind() == "tuple" {
+                    // `NAME = ["str1", "str2", ...]` → non-authoritative Literal mirrors
+                    let owner_id = owner.unwrap_or_else(|| state.file_node_id());
+                    capture_python_string_list(right, owner_id, state);
+                } else if right.kind() == "subscript" {
+                    // `Status = Literal["a", "b"]` → authoritative Literal mirrors
+                    let owner_id = owner.unwrap_or_else(|| state.file_node_id());
+                    capture_python_literal_type(right, owner_id, state);
                 }
             }
+            recurse_children(node, |child| {
+                visit_python(
+                    child,
+                    state,
+                    parent_class,
+                    owner,
+                    owner_qname,
+                    class_decorators,
+                    depth + 1,
+                )
+            });
+        }
+        "match_statement" => {
+            let owner_id = owner.unwrap_or_else(|| state.file_node_id());
+            capture_python_match_guards(node, owner_id, state);
+            recurse_children(node, |child| {
+                visit_python(
+                    child,
+                    state,
+                    parent_class,
+                    owner,
+                    owner_qname,
+                    class_decorators,
+                    depth + 1,
+                )
+            });
+        }
+        "comparison_operator" => {
+            let owner_id = owner.unwrap_or_else(|| state.file_node_id());
+            capture_python_comparison_guard(node, owner_id, state);
             recurse_children(node, |child| {
                 visit_python(
                     child,
@@ -2295,6 +2359,282 @@ fn collect_python_base_classes(node: Node<'_>, source: &str) -> Vec<String> {
     }
 
     bases
+}
+
+/// Emit authoritative `EnumMemberDef` candidates for each string-valued member
+/// of a Python `Enum` subclass body.  `class_id` is used as `owner_node_id`.
+fn capture_python_enum_members(
+    class_body: Node<'_>,
+    enum_qn: &str,
+    class_id: gather_step_core::NodeId,
+    state: &mut ParseState<'_>,
+) {
+    use crate::ts_js_oxc::{
+        ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface, is_specific_value_mirror,
+    };
+
+    let mut cursor = class_body.walk();
+    for stmt in class_body.named_children(&mut cursor) {
+        // class body statements are wrapped in expression_statement
+        let assignment = if stmt.kind() == "expression_statement" {
+            stmt.named_child(0).filter(|n| n.kind() == "assignment")
+        } else if stmt.kind() == "assignment" {
+            Some(stmt)
+        } else {
+            None
+        };
+        let Some(assign) = assignment else { continue };
+        let Some(left) = assign.child_by_field_name("left") else {
+            continue;
+        };
+        let Some(right) = assign.child_by_field_name("right") else {
+            continue;
+        };
+        if left.kind() != "identifier" || right.kind() != "string" {
+            continue;
+        }
+        let member = node_text(left, state.source).trim().to_owned();
+        let value = sanitize_string_literal(node_text(right, state.source));
+        if member.is_empty() || value.is_empty() || !is_specific_value_mirror(&value) {
+            continue;
+        }
+        let line = u32::try_from(right.start_position().row + 1).unwrap_or(u32::MAX);
+        let candidate = ValueMirrorCandidate {
+            value,
+            kind: ValueMirrorKind::EnumMemberDef {
+                enum_qn: enum_qn.to_owned(),
+                member,
+            },
+            repo: state.repo().to_owned(),
+            file_path: state.file_path().to_owned(),
+            line,
+            authoritative: true,
+            owner_node_id: class_id,
+            file_node_id: state.file_node_id(),
+            surface: ValueMirrorSurface::Array,
+        };
+        state.push_value_mirror_candidate(candidate);
+    }
+}
+
+fn capture_python_string_list(
+    list_node: Node<'_>,
+    owner_id: gather_step_core::NodeId,
+    state: &mut ParseState<'_>,
+) {
+    use crate::ts_js_oxc::{
+        VALUE_MIRROR_PER_ARRAY_CAP, ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface,
+        is_specific_value_mirror,
+    };
+
+    let mut cursor = list_node.walk();
+    let elements: Vec<Node<'_>> = list_node.named_children(&mut cursor).collect();
+    if elements.len() < 2 {
+        return;
+    }
+    if !elements.iter().all(|n| n.kind() == "string") {
+        return;
+    }
+    for elem in elements.into_iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
+        let value = sanitize_string_literal(node_text(elem, state.source));
+        if value.is_empty() || !is_specific_value_mirror(&value) {
+            continue;
+        }
+        let line = u32::try_from(elem.start_position().row + 1).unwrap_or(u32::MAX);
+        let candidate = ValueMirrorCandidate {
+            value,
+            kind: ValueMirrorKind::Literal,
+            repo: state.repo().to_owned(),
+            file_path: state.file_path().to_owned(),
+            line,
+            authoritative: false,
+            owner_node_id: owner_id,
+            file_node_id: state.file_node_id(),
+            surface: ValueMirrorSurface::Array,
+        };
+        state.push_value_mirror_candidate(candidate);
+    }
+}
+
+/// Emit authoritative `Literal` candidates for a `subscript` node whose `value`
+/// child is `Literal` or `typing.Literal`.
+fn capture_python_literal_type(
+    subscript_node: Node<'_>,
+    owner_id: gather_step_core::NodeId,
+    state: &mut ParseState<'_>,
+) {
+    use crate::ts_js_oxc::{
+        VALUE_MIRROR_PER_ARRAY_CAP, ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface,
+        is_specific_value_mirror,
+    };
+
+    let Some(value_child) = subscript_node.child_by_field_name("value") else {
+        return;
+    };
+    let head_text = node_text(value_child, state.source).trim().to_owned();
+    if head_text != "Literal" && head_text != "typing.Literal" {
+        return;
+    }
+
+    // Collect all named children with field name "subscript" that are strings.
+    let mut cursor = subscript_node.walk();
+    let args: Vec<Node<'_>> = subscript_node
+        .children_by_field_name("subscript", &mut cursor)
+        .filter(|n| n.kind() == "string")
+        .collect();
+    if args.is_empty() {
+        return;
+    }
+    for arg in args.into_iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
+        let value = sanitize_string_literal(node_text(arg, state.source));
+        if value.is_empty() || !is_specific_value_mirror(&value) {
+            continue;
+        }
+        let line = u32::try_from(arg.start_position().row + 1).unwrap_or(u32::MAX);
+        let candidate = ValueMirrorCandidate {
+            value,
+            kind: ValueMirrorKind::Literal,
+            repo: state.repo().to_owned(),
+            file_path: state.file_path().to_owned(),
+            line,
+            authoritative: true,
+            owner_node_id: owner_id,
+            file_node_id: state.file_node_id(),
+            surface: ValueMirrorSurface::Array,
+        };
+        state.push_value_mirror_candidate(candidate);
+    }
+}
+
+/// Extract `(enum_name, member)` from a Python `Enum.MEMBER` reference, whether
+/// it appears as a `dotted_name` (in a `case_pattern`) or an `attribute` (in a
+/// comparison). Only the two-segment `Enum.MEMBER` shape qualifies; deeper
+/// chains (`a.b.c`) are rejected so we don't misattribute module-qualified refs.
+fn python_enum_member_ref(node: Node<'_>, source: &str) -> Option<(String, String)> {
+    let (object, attr) = match node.kind() {
+        // `attribute` exposes `object` / `attribute` fields.
+        "attribute" => (
+            node.child_by_field_name("object")?,
+            node.child_by_field_name("attribute")?,
+        ),
+        // `dotted_name` is a flat list of `identifier` / `.`; no field names.
+        "dotted_name" => {
+            let mut cursor = node.walk();
+            let idents: Vec<Node<'_>> = node
+                .children(&mut cursor)
+                .filter(|c| c.kind() == "identifier")
+                .collect();
+            let [enum_node, member_node] = idents.as_slice() else {
+                return None;
+            };
+            (*enum_node, *member_node)
+        }
+        _ => return None,
+    };
+    if object.kind() != "identifier" || attr.kind() != "identifier" {
+        return None;
+    }
+    let enum_name = node_text(object, source).trim().to_owned();
+    let member = node_text(attr, source).trim().to_owned();
+    if enum_name.is_empty() || member.is_empty() {
+        return None;
+    }
+    Some((enum_name, member))
+}
+
+/// Push a non-authoritative `Guard`-surfaced `EnumMemberRef` candidate. The bare
+/// enum name is the `enum_qn` and the member name is the `value`; Task 4 resolves
+/// it to the enum's string value at convergence.
+fn push_python_enum_guard_candidate(
+    enum_qn: String,
+    member: String,
+    line: u32,
+    has_default: bool,
+    owner_id: gather_step_core::NodeId,
+    state: &mut ParseState<'_>,
+) {
+    use crate::ts_js_oxc::{ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface};
+
+    let candidate = ValueMirrorCandidate {
+        value: member,
+        kind: ValueMirrorKind::EnumMemberRef { enum_qn },
+        repo: state.repo().to_owned(),
+        file_path: state.file_path().to_owned(),
+        line,
+        authoritative: false,
+        owner_node_id: owner_id,
+        file_node_id: state.file_node_id(),
+        surface: ValueMirrorSurface::Guard { has_default },
+    };
+    state.push_value_mirror_candidate(candidate);
+}
+
+/// Emit `Guard` `EnumMemberRef` candidates for a Python 3.10 `match` whose
+/// `case` patterns reference enum members. A wildcard `case _:` sets
+/// `has_default: true` for every emitted candidate. Only emits when at least
+/// one case pattern is an enum-member ref (literal/other matches are skipped).
+fn capture_python_match_guards(
+    match_node: Node<'_>,
+    owner_id: gather_step_core::NodeId,
+    state: &mut ParseState<'_>,
+) {
+    let Some(body) = find_child_by_kind(match_node, "block") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let cases: Vec<Node<'_>> = body
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "case_clause")
+        .collect();
+
+    let mut has_default = false;
+    let mut refs: Vec<(String, String, u32)> = Vec::new();
+    for case in &cases {
+        let Some(pattern) = find_child_by_kind(*case, "case_pattern") else {
+            continue;
+        };
+        // Wildcard `case _:` -> the pattern wraps a bare `_` node.
+        if find_child_by_kind(pattern, "_").is_some() {
+            has_default = true;
+            continue;
+        }
+        let Some(inner) = pattern.named_child(0) else {
+            continue;
+        };
+        if let Some((enum_name, member)) = python_enum_member_ref(inner, state.source) {
+            let line = u32::try_from(inner.start_position().row + 1).unwrap_or(u32::MAX);
+            refs.push((enum_name, member, line));
+        }
+    }
+
+    if refs.is_empty() {
+        return;
+    }
+    for (enum_name, member, line) in refs {
+        push_python_enum_guard_candidate(enum_name, member, line, has_default, owner_id, state);
+    }
+}
+
+/// Emit `Guard` `EnumMemberRef` candidates for a Python `==`/`!=` comparison
+/// against an enum member (`status == Status.ACTIVE`). Conservatively records
+/// `has_default: false` (a trailing `else` need not be attributed).
+fn capture_python_comparison_guard(
+    comparison: Node<'_>,
+    owner_id: gather_step_core::NodeId,
+    state: &mut ParseState<'_>,
+) {
+    let mut cursor = comparison.walk();
+    let children: Vec<Node<'_>> = comparison.children(&mut cursor).collect();
+    let is_equality = children.iter().any(|c| matches!(c.kind(), "==" | "!="));
+    if !is_equality {
+        return;
+    }
+    for operand in children.iter().filter(|c| c.is_named()) {
+        if let Some((enum_name, member)) = python_enum_member_ref(*operand, state.source) {
+            let line = u32::try_from(operand.start_position().row + 1).unwrap_or(u32::MAX);
+            push_python_enum_guard_candidate(enum_name, member, line, false, owner_id, state);
+        }
+    }
 }
 
 fn clean_python_type_annotation(raw: &str) -> String {
@@ -5229,6 +5569,266 @@ export const listItems = async () => {
                 .iter()
                 .any(|symbol| symbol.node.name == "Example"
                     && symbol.constructor_dependencies == vec!["repo"])
+        );
+    }
+
+    #[test]
+    fn python_value_mirror_enum_and_list() {
+        use crate::ts_js_oxc::ValueMirrorKind;
+
+        let temp_dir = TestDir::new("py-value-mirror");
+        let src = "from enum import Enum\n\
+                   class Category(str, Enum):\n    \
+                   SHIPPED = \"orders.statusCheck.triggered\"\n\
+                   CREDIT_AGENT_CONFIGS = [\"credit.agent.default\", \"credit.agent.premium\"]\n";
+        fs::write(temp_dir.path().join("categories.py"), src).expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "categories.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("python fixture should parse");
+
+        let candidates = &parsed.value_mirror_candidates;
+
+        // Authoritative EnumMemberDef for Category.SHIPPED
+        assert!(
+            candidates.iter().any(|c| {
+                c.authoritative
+                    && c.value == "orders.statusCheck.triggered"
+                    && matches!(
+                        &c.kind,
+                        ValueMirrorKind::EnumMemberDef { enum_qn, member }
+                            if enum_qn == "Category" && member == "SHIPPED"
+                    )
+            }),
+            "expected authoritative EnumMemberDef for Category.SHIPPED; got {candidates:?}"
+        );
+
+        // Non-authoritative Literal candidates for the list elements
+        assert!(
+            candidates.iter().any(|c| !c.authoritative
+                && c.value == "credit.agent.default"
+                && matches!(c.kind, ValueMirrorKind::Literal)),
+            "expected non-authoritative Literal for credit.agent.default; got {candidates:?}"
+        );
+        assert!(
+            candidates.iter().any(|c| !c.authoritative
+                && c.value == "credit.agent.premium"
+                && matches!(c.kind, ValueMirrorKind::Literal)),
+            "expected non-authoritative Literal for credit.agent.premium; got {candidates:?}"
+        );
+
+        // Noise guard: short strings must be filtered out
+        let noise: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.value == "a" || c.value == "b")
+            .collect();
+        assert!(
+            noise.is_empty(),
+            "short noise strings should be filtered; got {noise:?}"
+        );
+
+        // Single-element list must NOT be captured (< 2 elements floor)
+        let single: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.value == "one.topic")
+            .collect();
+        assert!(
+            single.is_empty(),
+            "single-element list should not be captured; got {single:?}"
+        );
+    }
+
+    #[test]
+    fn python_value_mirror_literal_type() {
+        use crate::ts_js_oxc::ValueMirrorKind;
+
+        let temp_dir = TestDir::new("py-literal-type");
+        // `Status = Literal["active", "cancelled"]`     — bare Literal
+        // `Mode = typing.Literal["read", "write"]`      — qualified
+        // `Status2 = Literal["x"]`                      — non-specific, filtered
+        // single-element list must not be captured
+        let src = "from typing import Literal\n\
+                   Status = Literal[\"active.status\", \"cancelled.status\"]\n\
+                   Mode = typing.Literal[\"read.mode\", \"write.mode\"]\n\
+                   Status2 = Literal[\"x\"]\n\
+                   SINGLE = [\"one.topic\"]\n";
+        fs::write(temp_dir.path().join("statuses.py"), src).expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "statuses.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("python fixture should parse");
+
+        let candidates = &parsed.value_mirror_candidates;
+
+        // Bare Literal — authoritative
+        assert!(
+            candidates.iter().any(|c| c.authoritative
+                && c.value == "active.status"
+                && matches!(c.kind, ValueMirrorKind::Literal)),
+            "expected authoritative Literal for active.status; got {candidates:?}"
+        );
+        assert!(
+            candidates.iter().any(|c| c.authoritative
+                && c.value == "cancelled.status"
+                && matches!(c.kind, ValueMirrorKind::Literal)),
+            "expected authoritative Literal for cancelled.status; got {candidates:?}"
+        );
+
+        // Qualified typing.Literal — authoritative
+        assert!(
+            candidates.iter().any(|c| c.authoritative
+                && c.value == "read.mode"
+                && matches!(c.kind, ValueMirrorKind::Literal)),
+            "expected authoritative Literal for read.mode; got {candidates:?}"
+        );
+        assert!(
+            candidates.iter().any(|c| c.authoritative
+                && c.value == "write.mode"
+                && matches!(c.kind, ValueMirrorKind::Literal)),
+            "expected authoritative Literal for write.mode; got {candidates:?}"
+        );
+
+        // Non-specific value "x" must be filtered
+        let noise: Vec<_> = candidates.iter().filter(|c| c.value == "x").collect();
+        assert!(
+            noise.is_empty(),
+            "non-specific Literal member should be filtered; got {noise:?}"
+        );
+
+        // Single-element list must NOT be captured
+        let single: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.value == "one.topic")
+            .collect();
+        assert!(
+            single.is_empty(),
+            "single-element list should not be captured; got {single:?}"
+        );
+    }
+
+    #[test]
+    fn python_value_mirror_enum_guard_surfaces() {
+        use crate::ts_js_oxc::{ValueMirrorKind, ValueMirrorSurface};
+
+        let temp_dir = TestDir::new("py-enum-guard");
+        // match WITHOUT wildcard -> Guard{has_default:false} for Status.ACTIVE/DONE
+        // match WITH `case _` -> Guard{has_default:true}
+        // if/elif `== / !=` comparison chain -> Guard{has_default:false}
+        // noise: match/if over string & number must NOT yield guard candidates
+        let src = r#"from enum import Enum
+
+class Status(Enum):
+    ACTIVE = "status.active"
+    DONE = "status.done"
+    PENDING = "status.pending"
+
+def route(status):
+    match status:
+        case Status.ACTIVE:
+            return 1
+        case Status.DONE:
+            return 2
+
+def route_default(status):
+    match status:
+        case Status.PENDING:
+            return 1
+        case _:
+            return 0
+
+def check(status):
+    if status == Status.ACTIVE:
+        return 1
+    elif status != Status.DONE:
+        return 2
+
+def noisy(s, n):
+    match s:
+        case "literal.value":
+            return 1
+    if n == 7:
+        return 2
+"#;
+        fs::write(temp_dir.path().join("routes.py"), src).expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "routes.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("python fixture should parse");
+
+        let candidates = &parsed.value_mirror_candidates;
+
+        let guard_ref = |value: &str, has_default: bool| {
+            candidates.iter().any(|c| {
+                !c.authoritative
+                    && c.value == value
+                    && matches!(
+                        &c.kind,
+                        ValueMirrorKind::EnumMemberRef { enum_qn } if enum_qn == "Status"
+                    )
+                    && matches!(c.surface, ValueMirrorSurface::Guard { has_default: d } if d == has_default)
+            })
+        };
+
+        // match without wildcard -> has_default:false
+        assert!(
+            guard_ref("ACTIVE", false),
+            "expected Guard{{has_default:false}} EnumMemberRef for ACTIVE; got {candidates:?}"
+        );
+        assert!(
+            guard_ref("DONE", false),
+            "expected Guard{{has_default:false}} EnumMemberRef for DONE; got {candidates:?}"
+        );
+
+        // match WITH `case _` -> has_default:true for PENDING
+        assert!(
+            guard_ref("PENDING", true),
+            "expected Guard{{has_default:true}} EnumMemberRef for PENDING; got {candidates:?}"
+        );
+
+        // if/elif comparison chain -> has_default:false (ACTIVE via ==, DONE via !=)
+        // ACTIVE also appears in the wildcard-free match (false) so this is satisfied,
+        // and DONE appears via != with has_default:false.
+        assert!(
+            guard_ref("DONE", false),
+            "expected Guard{{has_default:false}} EnumMemberRef for DONE from comparison; got {candidates:?}"
+        );
+
+        // Noise guard: match over a string literal / if over a number must not
+        // produce any Guard-surfaced candidate.
+        let guard_count = candidates
+            .iter()
+            .filter(|c| matches!(c.surface, ValueMirrorSurface::Guard { .. }))
+            .count();
+        assert_eq!(
+            guard_count, 5,
+            "expected exactly 5 guard candidates (ACTIVE+DONE in match; PENDING in default match; ACTIVE==+DONE!= in if); got {guard_count}: {candidates:?}"
         );
     }
 

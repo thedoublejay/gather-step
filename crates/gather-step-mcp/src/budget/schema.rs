@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::writer::BudgetedTool;
 
-pub const RESPONSE_SCHEMA_VERSION: u8 = 1;
+pub const RESPONSE_SCHEMA_VERSION: u8 = 2;
 
 #[must_use]
 pub const fn response_schema_version() -> u8 {
@@ -17,8 +17,8 @@ mod tests {
 
     #[test]
     fn response_schema_version_is_pinned() {
-        assert_eq!(RESPONSE_SCHEMA_VERSION, 1);
-        assert_eq!(response_schema_version(), 1);
+        assert_eq!(RESPONSE_SCHEMA_VERSION, 2);
+        assert_eq!(response_schema_version(), 2);
     }
 }
 

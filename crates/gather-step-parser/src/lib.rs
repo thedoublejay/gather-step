@@ -11,6 +11,7 @@ pub mod traverse;
 pub mod tree_sitter;
 pub(crate) mod ts_js_oxc;
 pub mod tsconfig;
+pub mod value_mirror;
 pub mod workspace_manifest;
 
 #[cfg(feature = "test-support")]
@@ -33,4 +34,10 @@ pub use traverse::{
 pub use tree_sitter::{
     ParseError, ParsedFile, SymbolCapture, parse_file, parse_file_with_context,
     parse_file_with_frameworks, parse_file_with_packs,
+};
+pub use ts_js_oxc::{
+    ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface, is_specific_value_mirror,
+};
+pub use value_mirror::{
+    ValueMirrorConvergence, converge_value_mirrors, emit_value_mirrors_per_repo,
 };

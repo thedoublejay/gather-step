@@ -7,6 +7,8 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::cross_repo_participation::cross_repo_participation_by_file;
+
 #[derive(Debug, Error)]
 pub enum DeadCodeError {
     #[error(transparent)]
@@ -114,6 +116,16 @@ pub fn find_dead_code_with_manifest<S: GraphStore>(
         ) {
             root_files.insert(node.file_path.clone());
         }
+    }
+
+    // Files whose produced surface a *foreign* repo consumes are roots: they
+    // are live even when no local root reaches them. The consuming edge lands
+    // on a virtual transport node that storage canonicalizes into the
+    // `__virtual__` repo, so it never appears in this repo's `nodes_by_repo`
+    // set and the intra-repo BFS below can't see it. Reuse Task 6's O(files)
+    // participation map instead of a per-node incoming-edge scan.
+    for file_path in cross_repo_participation_by_file(store, repo)?.into_keys() {
+        root_files.insert(file_path);
     }
 
     // Build a node-id index from the nodes we already loaded so edge target
@@ -419,7 +431,9 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id};
+    use gather_step_core::{
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id, virtual_node,
+    };
     use gather_step_parser::ParsedPackageManifest;
     use gather_step_storage::{GraphStore, GraphStoreDb};
     use pretty_assertions::assert_eq;
@@ -501,6 +515,188 @@ mod tests {
         assert_eq!(report.findings[0].package_name, None);
         assert_eq!(report.findings[0].symbol_name, None);
         assert_eq!(report.findings[0].confidence, ConfidenceBand::High);
+    }
+
+    #[test]
+    fn cross_repo_consumed_file_is_not_flagged_dead() {
+        let temp_db = TempDb::new("xrepo-consumed-root");
+        let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
+
+        // service-b serves a route that a foreign repo (service-a) consumes.
+        // The handler references a contract file; neither file is reachable
+        // from a local path root, and the Route node is canonicalized into the
+        // `__virtual__` repo so it never appears in `nodes_by_repo`.
+        let handler_file = file_node("service-b", "src/handlers/credit.ts");
+        let handler_sym = symbol_node(
+            "service-b",
+            "src/handlers/credit.ts",
+            NodeKind::Function,
+            "getCredits",
+        );
+        let contract_file = file_node("service-b", "src/contracts/credit.ts");
+        let contract_sym = symbol_node(
+            "service-b",
+            "src/contracts/credit.ts",
+            NodeKind::Type,
+            "CreditDto",
+        );
+        let route = virtual_node(
+            NodeKind::Route,
+            "service-b",
+            "src/handlers/credit.ts",
+            "GET /credits",
+            "__route__GET__/credits",
+        );
+        let caller_file = file_node("service-a", "src/client.ts");
+        let caller_sym = symbol_node(
+            "service-a",
+            "src/client.ts",
+            NodeKind::Function,
+            "callCredits",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    handler_file.clone(),
+                    handler_sym.clone(),
+                    contract_file.clone(),
+                    contract_sym.clone(),
+                    route.clone(),
+                    caller_file.clone(),
+                    caller_sym.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: handler_sym.id,
+                        target: contract_sym.id,
+                        kind: EdgeKind::References,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: handler_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: handler_sym.id,
+                        target: route.id,
+                        kind: EdgeKind::Serves,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: handler_file.id,
+                        is_cross_file: false,
+                    },
+                    EdgeData {
+                        source: caller_sym.id,
+                        target: route.id,
+                        kind: EdgeKind::ConsumesApiFrom,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: caller_file.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("graph write");
+
+        let report = find_dead_code(&store, "service-b").expect("report");
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.file_path == "src/handlers/credit.ts"),
+            "the route-serving handler consumed cross-repo must not be flagged dead, got: {:?}",
+            report.findings
+        );
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.file_path == "src/contracts/credit.ts"),
+            "a file transitively feeding a cross-repo-consumed producer must not be flagged dead, \
+             got: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn genuine_orphan_is_still_flagged_with_cross_repo_root_seeding() {
+        let temp_db = TempDb::new("orphan-with-xrepo");
+        let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
+
+        // A live route-serving handler consumed cross-repo coexists with a
+        // genuine orphan that has no references and no foreign consumer. The
+        // cross-repo root seeding must not mask the orphan.
+        let handler_file = file_node("service-b", "src/handlers/credit.ts");
+        let handler_sym = symbol_node(
+            "service-b",
+            "src/handlers/credit.ts",
+            NodeKind::Function,
+            "getCredits",
+        );
+        let route = virtual_node(
+            NodeKind::Route,
+            "service-b",
+            "src/handlers/credit.ts",
+            "GET /credits",
+            "__route__GET__/credits",
+        );
+        let caller_file = file_node("service-a", "src/client.ts");
+        let caller_sym = symbol_node(
+            "service-a",
+            "src/client.ts",
+            NodeKind::Function,
+            "callCredits",
+        );
+        let orphan_file = file_node("service-b", "src/orphan.ts");
+        let orphan_sym = symbol_node("service-b", "src/orphan.ts", NodeKind::Function, "orphan");
+
+        store
+            .bulk_insert(
+                &[
+                    handler_file.clone(),
+                    handler_sym.clone(),
+                    route.clone(),
+                    caller_file.clone(),
+                    caller_sym.clone(),
+                    orphan_file.clone(),
+                    orphan_sym.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: handler_sym.id,
+                        target: route.id,
+                        kind: EdgeKind::Serves,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: handler_file.id,
+                        is_cross_file: false,
+                    },
+                    EdgeData {
+                        source: caller_sym.id,
+                        target: route.id,
+                        kind: EdgeKind::ConsumesApiFrom,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: caller_file.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("graph write");
+
+        let report = find_dead_code(&store, "service-b").expect("report");
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.file_path == "src/orphan.ts"
+                    && finding.detector_basis == DetectorBasis::GraphFileReachability
+            }),
+            "a genuine orphan with no refs and no cross-repo consumer must still be flagged, \
+             got: {:?}",
+            report.findings
+        );
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.file_path == "src/handlers/credit.ts"),
+            "the cross-repo-consumed handler must stay live, got: {:?}",
+            report.findings
+        );
     }
 
     #[test]

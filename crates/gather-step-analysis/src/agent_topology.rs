@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
@@ -78,13 +78,20 @@ pub struct AgentTrace {
 /// Returns an empty trace (with a placeholder target) when `target` is absent
 /// from the graph. `truncated` is set when the node/edge cap is hit, or when
 /// deeper AI hops exist beyond `max_depth`.
+///
+/// Opens a single bounded read session at the start of the trace; all BFS hops
+/// reuse that session's read transaction and do point lookups instead of
+/// opening a new redb read transaction per hop or materializing the whole
+/// graph via a CSR snapshot.
 pub fn trace_agent<S: GraphStore>(
     store: &S,
     target: NodeId,
     max_depth: usize,
     limit: usize,
 ) -> Result<AgentTrace, AgentTopologyError> {
-    let Some(target_node) = store.get_node(target)? else {
+    let session = store.read_session()?;
+
+    let Some(target_node) = session.node(target)? else {
         return Ok(AgentTrace {
             target: missing_agent_node(target),
             nodes: Vec::new(),
@@ -103,14 +110,14 @@ pub fn trace_agent<S: GraphStore>(
 
     while let Some((current, depth)) = queue.pop_front() {
         if depth >= max_depth {
-            if has_ai_out_edge(store, current)? {
+            if session_has_ai_out_edge(session.as_ref(), current)? {
                 truncated = true;
             }
             continue;
         }
 
-        for ai_edge in ai_out_edges(store, current)? {
-            let Some(next) = store.get_node(ai_edge.target)? else {
+        for ai_edge in session_ai_out_edges(session.as_ref(), current)? {
+            let Some(next) = session.node(ai_edge.target)? else {
                 continue;
             };
 
@@ -130,7 +137,7 @@ pub fn trace_agent<S: GraphStore>(
                 ai_edge.edge_kind.as_u8(),
             );
             if seen_edges.insert(edge_key) {
-                edges.push(ai_edge.clone());
+                edges.push(ai_edge);
                 if edges.len() >= edge_limit {
                     truncated = true;
                     break;
@@ -227,12 +234,12 @@ pub fn resolve_agent_targets<S: GraphStore>(
     Ok(exact)
 }
 
-fn ai_out_edges<S: GraphStore>(
-    store: &S,
+fn session_ai_out_edges(
+    session: &dyn GraphReadSession,
     source: NodeId,
 ) -> Result<Vec<AgentTraceEdge>, AgentTopologyError> {
-    Ok(store
-        .get_outgoing(source)?
+    Ok(session
+        .outgoing(source)?
         .into_iter()
         .filter(|edge| AI_EDGE_KINDS.contains(&edge.kind))
         .map(|edge| AgentTraceEdge {
@@ -244,9 +251,12 @@ fn ai_out_edges<S: GraphStore>(
         .collect())
 }
 
-fn has_ai_out_edge<S: GraphStore>(store: &S, source: NodeId) -> Result<bool, AgentTopologyError> {
-    Ok(store
-        .get_outgoing(source)?
+fn session_has_ai_out_edge(
+    session: &dyn GraphReadSession,
+    source: NodeId,
+) -> Result<bool, AgentTopologyError> {
+    Ok(session
+        .outgoing(source)?
         .iter()
         .any(|edge| AI_EDGE_KINDS.contains(&edge.kind)))
 }

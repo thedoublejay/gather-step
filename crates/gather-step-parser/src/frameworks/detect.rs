@@ -310,18 +310,28 @@ pub fn is_fastapi(repo_root: &Path) -> bool {
 /// manifest, marking the repo as an AI TypeScript/JavaScript service.
 #[must_use]
 pub fn is_ai_typescript(repo_root: &Path) -> bool {
-    has_any_dependency(
-        repo_root,
+    let Some(manifest) = read_manifest_json(repo_root) else {
+        return false;
+    };
+    // Exact-match list: "langchain" bare must stay exact to avoid matching
+    // unrelated packages like "my-langchain-helper".
+    if has_dependency_in_manifest(
+        Some(&manifest),
         &[
             "@langchain/core",
             "langchain",
             "@langchain/openai",
             "@langchain/langgraph",
-            // MCP servers/clients may carry no LangChain dep but still expose
-            // the AI vocabulary (McpServer / Calls+ExposesMcpTool).
             "@modelcontextprotocol/sdk",
             "@nestjs-mcp/server",
         ],
+    ) {
+        return true;
+    }
+    // Prefix-match: any sibling in the scoped families also marks the repo.
+    has_dependency_with_prefix(
+        Some(&manifest),
+        &["@langchain/", "@modelcontextprotocol/", "@nestjs-mcp/"],
     )
 }
 
@@ -352,6 +362,27 @@ fn has_dependency_in_manifest(manifest: Option<&serde_json::Value>, packages: &[
         if let Some(deps) = manifest.get(section).and_then(|value| value.as_object()) {
             for package in packages {
                 if deps.contains_key(*package) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn has_dependency_with_prefix(manifest: Option<&serde_json::Value>, prefixes: &[&str]) -> bool {
+    let Some(manifest) = manifest else {
+        return false;
+    };
+    for section in [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(deps) = manifest.get(section).and_then(|value| value.as_object()) {
+            for key in deps.keys() {
+                if prefixes.iter().any(|p| key.starts_with(p)) {
                     return true;
                 }
             }
@@ -509,8 +540,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        Framework, detect_frameworks, is_drizzle, is_fastapi, is_mongoose, is_nestjs, is_nextjs,
-        is_prisma, is_react, is_tailwind, is_typeorm,
+        Framework, detect_frameworks, is_ai_typescript, is_drizzle, is_fastapi, is_mongoose,
+        is_nestjs, is_nextjs, is_prisma, is_react, is_tailwind, is_typeorm,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -814,5 +845,62 @@ dependencies = [
         assert!(detected.contains(&Framework::FrontendHooks));
         // NestJs + Mongoose + FrontendHooks (always-on).
         assert_eq!(detected.len(), 3);
+    }
+
+    // --- is_ai_typescript prefix-match tests ---
+
+    #[test]
+    fn is_ai_typescript_detects_langchain_core_exact() {
+        // Existing exact entry must still match.
+        let dir = TempDir::new("ai-ts-langchain-core");
+        dir.write(
+            "package.json",
+            r#"{ "dependencies": { "@langchain/core": "^0.3.0" } }"#,
+        );
+        assert!(is_ai_typescript(&dir.path));
+    }
+
+    #[test]
+    fn is_ai_typescript_detects_langchain_anthropic_by_prefix() {
+        // @langchain/anthropic is not in the exact list — must match via prefix.
+        let dir = TempDir::new("ai-ts-langchain-anthropic");
+        dir.write(
+            "package.json",
+            r#"{ "dependencies": { "@langchain/anthropic": "^0.3.0" } }"#,
+        );
+        assert!(is_ai_typescript(&dir.path));
+    }
+
+    #[test]
+    fn is_ai_typescript_detects_mcp_sibling_by_prefix() {
+        // @modelcontextprotocol/server-everything is not the exact /sdk entry.
+        let dir = TempDir::new("ai-ts-mcp-sibling");
+        dir.write(
+            "package.json",
+            r#"{ "dependencies": { "@modelcontextprotocol/server-everything": "^1.0.0" } }"#,
+        );
+        assert!(is_ai_typescript(&dir.path));
+    }
+
+    #[test]
+    fn is_ai_typescript_returns_false_for_substring_match_only() {
+        // "my-langchain-helper" contains "langchain" but does not start with
+        // "@langchain/" — must not trigger a false positive.
+        let dir = TempDir::new("ai-ts-substring");
+        dir.write(
+            "package.json",
+            r#"{ "dependencies": { "my-langchain-helper": "^1.0.0" } }"#,
+        );
+        assert!(!is_ai_typescript(&dir.path));
+    }
+
+    #[test]
+    fn is_ai_typescript_returns_false_for_unrelated_repo() {
+        let dir = TempDir::new("ai-ts-unrelated");
+        dir.write(
+            "package.json",
+            r#"{ "dependencies": { "react": "^18.0.0" } }"#,
+        );
+        assert!(!is_ai_typescript(&dir.path));
     }
 }

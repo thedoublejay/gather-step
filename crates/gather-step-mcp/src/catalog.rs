@@ -57,6 +57,10 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
     // Contracts & cross-repo
     ("cross_repo_deps", "Inspect cross-repo dependency edges"),
     (
+        "who_consumes",
+        "Find which repos consume what a symbol's file produces",
+    ),
+    (
         "get_shared_type_usage",
         "Find all usages of a shared contract type",
     ),

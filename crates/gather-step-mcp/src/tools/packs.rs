@@ -231,7 +231,7 @@ const PASS_TWO_GAP_DIMENSIONS: [&str; 8] = [
     "Atomicity: do multi-document or multi-step writes need a transaction or idempotency guard?",
     "Index-per-field: does any new query/filter field need an index? Confirm coverage.",
     "Event contract: grep producers and consumers of any touched event/topic for set-difference drift.",
-    "Audit category: does this mutating path need an audit-log entry with the correct category?",
+    "Audit category: does this mutating path need an service-log entry with the correct category?",
     "Notification: should this change emit or suppress a user/system notification?",
 ];
 
@@ -5348,16 +5348,16 @@ mod tests {
     #[test]
     fn migration_probe_commands_use_safe_collection_accessors() {
         assert_eq!(
-            super::mongo_type_probe_command("audit-log", "workflow"),
-            "db.getCollection(\"audit-log\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
+            super::mongo_type_probe_command("service-log", "workflow"),
+            "db.getCollection(\"service-log\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
         );
         assert_eq!(
             super::mongo_type_probe_command("foo.bar", "workflow"),
             "db.getCollection(\"foo.bar\").aggregate([{ $group: { _id: { $type: '$workflow' }, count: { $sum: 1 } } }, { $sort: { count: -1 } }])"
         );
         assert!(
-            super::migration_verification_hint("audit-log")
-                .contains("db.getCollection(\"audit-log\").aggregate")
+            super::migration_verification_hint("service-log")
+                .contains("db.getCollection(\"service-log\").aggregate")
         );
     }
 
@@ -6111,6 +6111,8 @@ mod tests {
     #[test]
     fn hook_queries_penalize_virtual_hook_markers() {
         let virtual_hook = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "__hook__@app/hooks::useAuthentication".to_owned(),
             kind: "unknown".to_owned(),
@@ -6122,6 +6124,8 @@ mod tests {
             symbol_name: "useAuthentication".to_owned(),
         };
         let real_hook = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "app/src/v2/app/hooks/useAuthentication.ts".to_owned(),
             kind: "function".to_owned(),
@@ -6160,6 +6164,8 @@ mod tests {
     #[test]
     fn query_alignment_bonus_prefers_repo_and_path_matches() {
         let aligned = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/frontend/auth/use_session.ts".to_owned(),
             kind: "function".to_owned(),
@@ -6171,6 +6177,8 @@ mod tests {
             symbol_name: "useSession".to_owned(),
         };
         let local = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/backend/local/session_cache.rs".to_owned(),
             kind: "function".to_owned(),
@@ -6191,6 +6199,8 @@ mod tests {
     #[test]
     fn global_ranked_resolution_is_limited_to_definition_shaped_queries() {
         let shared = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/order.ts".to_owned(),
             kind: "shared_symbol".to_owned(),
@@ -6202,6 +6212,8 @@ mod tests {
             symbol_name: "CreateOrderInput".to_owned(),
         };
         let helper = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/helper.ts".to_owned(),
             kind: "function".to_owned(),
@@ -6230,6 +6242,8 @@ mod tests {
     #[test]
     fn strict_symbol_match_ignores_noisy_search_exact_flags() {
         let target = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/kafka/types/document-event.type.ts".to_owned(),
             kind: "type".to_owned(),
@@ -6241,6 +6255,8 @@ mod tests {
             symbol_name: "DocumentReportGenerationQueuedEvent".to_owned(),
         };
         let noisy = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/general-report-generation.service.ts".to_owned(),
             kind: "function".to_owned(),
@@ -6265,6 +6281,8 @@ mod tests {
     #[test]
     fn low_packability_exact_alternates_are_kept_for_strict_symbol_winners() {
         let function = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/useAuthentication.ts".to_owned(),
             kind: "function".to_owned(),
@@ -6276,6 +6294,8 @@ mod tests {
             symbol_name: "useAuthentication".to_owned(),
         };
         let module = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "src/useAuthentication.ts".to_owned(),
             kind: "module".to_owned(),

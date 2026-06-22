@@ -173,6 +173,15 @@ pub struct EdgeMetadata {
     pub timestamp_unix: Option<i64>,
     pub drift_kind: Option<String>,
     pub resolver: Option<String>,
+    /// Guard-surface exemption flag for `GuardsEnumValue` edges: `Some(true)`
+    /// when the guard has a default/fallthrough branch, `Some(false)` otherwise.
+    /// `None` for all non-guard edges.
+    pub guard_has_default: Option<bool>,
+    /// Owning enum's bare name for enum-ref value-mirror edges (v5.1, Task 17):
+    /// the `enum_qn` of the authoritative `Defines` edge (enum → value) and of
+    /// enum-member-ref `MirrorsValueFrom`/`GuardsEnumValue` edges. `None` for
+    /// Mode-A literal mirror edges, which keep value-only matching.
+    pub enum_qn: Option<String>,
 }
 
 pub const MIGRATION_FILTERS_METADATA_PREFIX: &str = "migration_filters:";
@@ -474,6 +483,8 @@ mod tests {
                 timestamp_unix: Some(1_713_000_000),
                 drift_kind: None,
                 resolver: Some(crate::ResolverStrategy::ImportMap.as_str().to_owned()),
+                guard_has_default: None,
+                enum_qn: None,
             },
             owner_file: NodeId([3; 16]),
             is_cross_file: true,
