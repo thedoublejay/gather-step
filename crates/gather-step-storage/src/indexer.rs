@@ -1,11 +1,10 @@
 use std::{
     collections::BTreeSet,
     fs,
-    fs::OpenOptions,
     path::{Component, Path, PathBuf},
     sync::Arc,
     thread,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -76,6 +75,11 @@ pub struct IndexingOptions {
     pub traverse: TraverseConfig,
     pub batch_size: usize,
     pub deployment: DeploymentIndexingOptions,
+    /// Cap on how long a contended repo lock is waited on before reporting it
+    /// as held rather than hanging. `None` waits indefinitely (legacy).
+    pub lock_timeout: Option<Duration>,
+    /// Force-remove a stale lock file before acquiring (explicit recovery).
+    pub force_unlock: bool,
 }
 
 impl Default for IndexingOptions {
@@ -84,6 +88,8 @@ impl Default for IndexingOptions {
             traverse: TraverseConfig::default(),
             batch_size: 500,
             deployment: DeploymentIndexingOptions::default(),
+            lock_timeout: Some(crate::lock::DEFAULT_LOCK_TIMEOUT),
+            force_unlock: false,
         }
     }
 }
@@ -312,6 +318,8 @@ pub enum RepoIndexerError {
     IncrementalWorkerPanicked,
     #[error("indexing cancelled")]
     Cancelled,
+    #[error("{}", .0.user_message())]
+    LockHeld(crate::lock::LockHeld),
 }
 
 enum WriteMessage {
@@ -405,16 +413,6 @@ pub struct RepoIndexPayload {
     pub is_cold_index: bool,
     pub stats: IndexingStats,
     pub synthetic_file_count: usize,
-}
-
-struct RepoIndexLockGuard {
-    file: std::fs::File,
-}
-
-impl Drop for RepoIndexLockGuard {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
 }
 
 impl RepoIndexer {
@@ -1116,49 +1114,32 @@ impl RepoIndexer {
     /// waiting so that `watch --cancel` and `serve --shutdown` are not blocked
     /// indefinitely when another process holds the lock.
     ///
-    /// Uses `try_lock()` + exponential back-off starting at 10 ms and doubling
-    /// on each retry up to a 500 ms ceiling.  Returns
-    /// [`RepoIndexerError::Cancelled`] as soon as the token is set.
+    /// Delegates to [`crate::lock::acquire`], which bounds the wait by
+    /// [`IndexingOptions::lock_timeout`] (reporting a held lock with owner
+    /// details rather than hanging) and honours
+    /// [`IndexingOptions::force_unlock`].
     fn acquire_repo_lock(
         &self,
         repo: &str,
         cancel: Option<&CancellationToken>,
-    ) -> Result<RepoIndexLockGuard, RepoIndexerError> {
-        const BACKOFF_INITIAL_MS: u64 = 10;
-        const BACKOFF_MAX_MS: u64 = 500;
-
-        let lock_dir = self.storage.root().join("locks");
-        fs::create_dir_all(&lock_dir)?;
-        let lock_name = format!("{}.lock", blake3::hash(repo.as_bytes()).to_hex());
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_dir.join(lock_name))?;
-        let wait_started = Instant::now();
-        let mut backoff_ms = BACKOFF_INITIAL_MS;
-        loop {
-            if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Err(RepoIndexerError::Cancelled);
-            }
-            match file.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    // Lock is held by another process — wait with back-off.
-                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
-                }
-                Err(std::fs::TryLockError::Error(error)) => {
-                    return Err(RepoIndexerError::Io(error));
-                }
-            }
+    ) -> Result<crate::lock::LockGuard, RepoIndexerError> {
+        let lock_path = self
+            .storage
+            .root()
+            .join("locks")
+            .join(crate::lock::lock_file_name(repo));
+        match crate::lock::acquire(
+            &lock_path,
+            repo,
+            self.options.lock_timeout,
+            self.options.force_unlock,
+            cancel,
+        ) {
+            Ok(guard) => Ok(guard),
+            Err(crate::lock::LockError::Cancelled) => Err(RepoIndexerError::Cancelled),
+            Err(crate::lock::LockError::Io(error)) => Err(RepoIndexerError::Io(error)),
+            Err(crate::lock::LockError::Held(held)) => Err(RepoIndexerError::LockHeld(held)),
         }
-        let wait_ms = wait_started.elapsed().as_millis();
-        if wait_ms > 0 {
-            info!(repo, wait_ms, "Acquired repo index lock after waiting.");
-        }
-        Ok(RepoIndexLockGuard { file })
     }
 
     fn prepare_repo_files(

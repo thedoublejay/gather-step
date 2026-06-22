@@ -31,6 +31,7 @@ tokio-util.workspace = true
 notify.workspace = true
 ignore.workspace = true
 libc.workspace = true
+rustix.workspace = true
 parking_lot.workspace = true
 smallvec.workspace = true
 

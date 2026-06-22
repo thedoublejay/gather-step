@@ -15,6 +15,7 @@ pub mod fs_mode;
 pub mod graph_store;
 pub mod incremental;
 pub mod indexer;
+pub mod lock;
 pub mod metadata;
 pub mod pack_store;
 pub mod reconcile;

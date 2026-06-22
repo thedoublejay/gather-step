@@ -4,7 +4,7 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -42,6 +42,10 @@ use crate::{
 };
 
 #[derive(Debug, Args, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "clap argument struct; each bool is an independent CLI --flag"
+)]
 pub struct IndexArgs {
     #[arg(long, help = "Path to the workspace config file")]
     pub config: Option<PathBuf>,
@@ -72,6 +76,17 @@ pub struct IndexArgs {
     pub auto_recover: bool,
     #[arg(long, help = "Enter watch mode after indexing completes")]
     pub watch: bool,
+    #[arg(
+        long,
+        help = "Force-remove a stale index lock before indexing (explicit recovery for a stuck lock)."
+    )]
+    pub force_unlock: bool,
+    #[arg(
+        long,
+        value_name = "SECS",
+        help = "Max seconds to wait for a contended index lock before reporting it as held (0 = wait indefinitely; default 300)."
+    )]
+    pub lock_timeout: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -431,11 +446,16 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     };
     let workspace_timestamp = current_unix_timestamp_string();
 
+    let mut indexing_options = IndexingOptions::from_config(&config);
+    indexing_options.force_unlock = args.force_unlock;
+    if let Some(secs) = args.lock_timeout {
+        indexing_options.lock_timeout = (secs > 0).then(|| Duration::from_secs(secs));
+    }
     let indexer = open_indexer_with_optional_recovery(
         &storage_root,
         &registry_path,
         auto_recover,
-        IndexingOptions::from_config(&config),
+        indexing_options,
         &output,
     )?;
     let mut registry = RegistryStore::open(&registry_path)

@@ -1359,6 +1359,7 @@ dependencies = [
  "rkyv",
  "rusqlite",
  "rustc-hash 2.1.2",
+ "rustix",
  "serde",
  "serde_json",
  "smallvec",

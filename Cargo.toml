@@ -75,6 +75,7 @@ tokio-util = "0.7.18"
 notify = "=9.0.0-rc.4"
 gix = { version = "0.84", default-features = true }
 regex = "1.12.4"
+rustix = { version = "1.1", features = ["process", "system"] }
 simdutf8 = "=0.1.5"
 similar = "3.1.1"
 lru = "=0.18.0"
