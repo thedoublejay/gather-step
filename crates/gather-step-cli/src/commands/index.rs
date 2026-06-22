@@ -78,7 +78,7 @@ pub struct IndexArgs {
     pub watch: bool,
     #[arg(
         long,
-        help = "Force-remove a stale index lock before indexing (explicit recovery for a stuck lock)."
+        help = "Do not wait for a contended index lock: report it immediately with recovery instructions. A held lock is never broken automatically — advisory locks cannot be reclaimed safely from outside; clear a confirmed-dead owner's lock per the printed instructions."
     )]
     pub force_unlock: bool,
     #[arg(

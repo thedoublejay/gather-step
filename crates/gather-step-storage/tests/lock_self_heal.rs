@@ -52,15 +52,37 @@ fn contended_lock_times_out_and_reports_live_owner() {
 }
 
 #[test]
-fn force_unlock_breaks_through_held_lock() {
+fn force_unlock_does_not_steal_a_live_lock() {
+    // A lock held by a live owner must NOT be bypassed even with force_unlock:
+    // stealing it would let two indexers run concurrently and corrupt state.
     let tmp = tempfile::tempdir().unwrap();
     let path = lock_path(tmp.path(), "repo-c");
 
     let _held = lock::acquire(&path, "repo-c", None, false, None).expect("first acquire");
 
-    let reclaimed = lock::acquire(&path, "repo-c", Some(Duration::from_millis(50)), true, None)
-        .expect("force-unlock acquires a fresh lock");
-    drop(reclaimed);
+    let err = lock::acquire(&path, "repo-c", Some(Duration::from_millis(80)), true, None)
+        .expect_err("force-unlock must not steal a live lock");
+    assert!(matches!(err, LockError::Held(_)), "got {err:?}");
+}
+
+#[test]
+fn acquire_reclaims_free_lock_file_with_stale_metadata() {
+    // A leftover lock file from a dead process is not OS-held (the kernel
+    // releases advisory locks on exit), so acquire reuses it and overwrites the
+    // stale owner metadata — dead-owner self-heal, no force needed.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = lock_path(tmp.path(), "repo-d");
+    fs::write(
+        &path,
+        br#"{"pid":999999,"hostname":"old-host","started_at_unix":1,"version":"0.0.0"}"#,
+    )
+    .unwrap();
+
+    let guard = lock::acquire(&path, "repo-d", Some(Duration::from_millis(80)), false, None)
+        .expect("a free, stale lock file is reclaimed");
+    let owner = lock::read_owner(&path).expect("metadata refreshed");
+    assert_eq!(owner.pid, std::process::id());
+    drop(guard);
 }
 
 #[test]
@@ -133,7 +155,24 @@ fn scan_locks_resolves_repo_name_from_registry_list() {
     let report = reports
         .iter()
         .find(|r| r.repo.as_deref() == Some("web-api-gateway"))
-        .expect("lock resolved to its repo name");
+        .expect("a held lock is resolved to its repo name");
     assert!(report.owner.is_some());
     assert_eq!(report.owner_alive, Some(true));
+}
+
+#[test]
+fn scan_locks_skips_released_lock_files() {
+    // A dropped guard releases the OS lock but leaves the file behind. A stale,
+    // unheld lock file must NOT be reported as an active lock.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = lock_path(tmp.path(), "repo-e");
+    let guard = lock::acquire(&path, "repo-e", None, false, None).expect("acquire");
+    drop(guard);
+    assert!(path.exists(), "the lock file remains after the guard drops");
+
+    let reports = lock::scan_locks(tmp.path(), &["repo-e".to_string()]);
+    assert!(
+        reports.iter().all(|r| r.repo.as_deref() != Some("repo-e")),
+        "a released lock must not be reported as held: {reports:?}"
+    );
 }

@@ -251,7 +251,7 @@ pub(crate) fn execute(
         })
         .collect();
 
-    let locks = collect_locks(storage, registry);
+    let locks = collect_locks(storage_root, registry);
 
     let payload = StatusOutput {
         event: "status_completed",
@@ -360,8 +360,8 @@ fn format_semantic_summary(health: &SemanticHealthReport) -> String {
     )
 }
 
-fn collect_locks(storage: &StorageCoordinator, registry: &RegistryStore) -> Vec<LockOutput> {
-    let locks_dir = storage.root().join("locks");
+fn collect_locks(storage_root: &std::path::Path, registry: &RegistryStore) -> Vec<LockOutput> {
+    let locks_dir = gather_step_storage::lock::lock_dir(storage_root);
     let repo_names: Vec<String> = registry.registry().repos.keys().cloned().collect();
     gather_step_storage::lock::scan_locks(&locks_dir, &repo_names)
         .into_iter()

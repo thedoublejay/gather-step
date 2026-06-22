@@ -1123,11 +1123,8 @@ impl RepoIndexer {
         repo: &str,
         cancel: Option<&CancellationToken>,
     ) -> Result<crate::lock::LockGuard, RepoIndexerError> {
-        let lock_path = self
-            .storage
-            .root()
-            .join("locks")
-            .join(crate::lock::lock_file_name(repo));
+        let lock_path =
+            crate::lock::lock_dir(self.storage.root()).join(crate::lock::lock_file_name(repo));
         match crate::lock::acquire(
             &lock_path,
             repo,

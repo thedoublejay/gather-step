@@ -10,13 +10,13 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 const BACKOFF_INITIAL_MS: u64 = 10;
 const BACKOFF_MAX_MS: u64 = 500;
@@ -148,6 +148,14 @@ pub struct LockReport {
     pub owner_alive: Option<bool>,
 }
 
+/// The single source of truth for the per-workspace lock directory:
+/// `<storage_root>/locks`. All producers and scanners must derive the directory
+/// here so indexing and `status`/`doctor` never diverge on where locks live.
+#[must_use]
+pub fn lock_dir(storage_root: &Path) -> PathBuf {
+    storage_root.join("locks")
+}
+
 /// The lock file name for a repo: `<blake3(repo)>.lock`.
 #[must_use]
 pub fn lock_file_name(repo: &str) -> String {
@@ -158,9 +166,10 @@ pub fn lock_file_name(repo: &str) -> String {
 ///
 /// Waits with exponential back-off (10–500 ms). With `timeout` set, a lock
 /// still held when the deadline passes returns [`LockError::Held`] rather than
-/// hanging. `force_unlock` removes any existing lock file first — explicit,
-/// user-driven recovery for a genuinely stuck lock. On success the owner
-/// metadata is stamped into the file.
+/// hanging. `force_unlock` reports a held lock immediately instead of waiting; it
+/// never breaks a live lock (advisory flock cannot be safely reclaimed from the
+/// outside — a dead owner's lock is already released by the kernel). On success
+/// the owner metadata is stamped into the file.
 pub fn acquire(
     lock_path: &Path,
     repo: &str,
@@ -171,21 +180,8 @@ pub fn acquire(
     if let Some(dir) = lock_path.parent() {
         fs::create_dir_all(dir).map_err(LockError::Io)?;
     }
-    if force_unlock {
-        match fs::remove_file(lock_path) {
-            Ok(()) => warn!(repo, "Force-unlock: removed existing index lock file."),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(LockError::Io(error)),
-        }
-    }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_path)
-        .map_err(LockError::Io)?;
+    let mut file = open_lock_file(lock_path)?;
 
     let wait_started = Instant::now();
     let mut backoff_ms = BACKOFF_INITIAL_MS;
@@ -196,9 +192,16 @@ pub fn acquire(
         match file.try_lock() {
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) => {
-                if let Some(timeout) = timeout
-                    && wait_started.elapsed() >= timeout
-                {
+                // A live process holds the lock. Advisory flock is released by the
+                // kernel when its owner dies, so `WouldBlock` always means a genuine
+                // live holder — never a dead owner's leftover. We must not break it
+                // from the outside: unlinking the file only forks a second inode and
+                // admits concurrent writers. `force_unlock` therefore reports the
+                // held lock immediately (with manual-recovery instructions) rather
+                // than waiting; otherwise we wait until the timeout.
+                let deadline_passed =
+                    timeout.is_some_and(|timeout| wait_started.elapsed() >= timeout);
+                if force_unlock || deadline_passed {
                     let owner = read_owner(lock_path);
                     let owner_alive = owner.as_ref().and_then(LockOwner::liveness);
                     return Err(LockError::Held(LockHeld {
@@ -215,6 +218,14 @@ pub fn acquire(
         }
     }
 
+    let waited = wait_started.elapsed();
+    if waited >= Duration::from_millis(BACKOFF_INITIAL_MS) {
+        info!(
+            repo,
+            wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+            "Acquired repo index lock after waiting."
+        );
+    }
     if let Err(error) = stamp_owner(&mut file) {
         warn!(repo, %error, "Failed to write index lock owner metadata; continuing.");
     }
@@ -232,8 +243,37 @@ pub fn read_owner(lock_path: &Path) -> Option<LockOwner> {
     serde_json::from_slice::<LockOwner>(&bytes).ok()
 }
 
-/// Scan a lock directory and report every `*.lock` file's state, resolving
-/// repo names by hashing each entry in `repos` and matching the file stem.
+fn open_lock_file(lock_path: &Path) -> Result<File, LockError> {
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(LockError::Io)
+}
+
+/// Whether `lock_path` is currently held by some process. A nonblocking
+/// `try_lock` that succeeds proves the file is a stale, unheld leftover (we
+/// release it immediately); `WouldBlock` means a holder has it.
+fn lock_is_held(lock_path: &Path) -> bool {
+    match OpenOptions::new().read(true).write(true).open(lock_path) {
+        Ok(file) => match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(std::fs::TryLockError::WouldBlock) => true,
+            Err(std::fs::TryLockError::Error(_)) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Scan a lock directory and report the `*.lock` files that are **currently
+/// held**, resolving repo names by hashing each entry in `repos` and matching
+/// the file stem. Stale, released leftover files are skipped (a dropped guard
+/// unlocks but does not unlink), so a released lock is never shown as active.
 #[must_use]
 pub fn scan_locks(lock_dir: &Path, repos: &[String]) -> Vec<LockReport> {
     let by_hash: rustc_hash::FxHashMap<String, String> = repos
@@ -256,6 +296,9 @@ pub fn scan_locks(lock_dir: &Path, repos: &[String]) -> Vec<LockReport> {
         if path.extension().and_then(|ext| ext.to_str()) != Some("lock") {
             continue;
         }
+        if !lock_is_held(&path) {
+            continue;
+        }
         let hash = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -274,6 +317,10 @@ pub fn scan_locks(lock_dir: &Path, repos: &[String]) -> Vec<LockReport> {
     reports
 }
 
+// Written in place into the already-locked fd, not via a temp file + rename: a
+// rename would swap the inode out from under the lock holder (the flock binds to
+// the inode), forking a second lockable file. A concurrent reader hitting the
+// brief write window falls back to "unknown owner" — benign and diagnostic-only.
 fn stamp_owner(file: &mut File) -> std::io::Result<()> {
     let json = serde_json::to_vec(&LockOwner::current())?;
     file.set_len(0)?;

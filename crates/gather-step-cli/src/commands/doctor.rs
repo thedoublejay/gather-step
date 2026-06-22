@@ -464,7 +464,7 @@ fn semantic_issues(health: &SemanticHealthReport) -> Vec<String> {
 }
 
 fn collect_locks(storage: &StorageCoordinator, registry: &RegistryStore) -> Vec<LockOutput> {
-    let locks_dir = storage.root().join("locks");
+    let locks_dir = gather_step_storage::lock::lock_dir(storage.root());
     let repo_names: Vec<String> = registry.registry().repos.keys().cloned().collect();
     gather_step_storage::lock::scan_locks(&locks_dir, &repo_names)
         .into_iter()
