@@ -6,12 +6,13 @@
 //!
 //! # Diff key
 //!
-//! `(repo, file_path, source_symbol_node_id)` — "the structured-output call site
-//! in a given symbol". Unlike payload contracts (keyed by target + side), an AI
-//! contract is keyed by its source symbol so that swapping the schema or model
-//! both surface as a *change* on the same call site rather than a remove + add.
-//! The R1 producer leaves the model `contract_target_qualified_name` (and
-//! provider/model) unset, so the key must NOT depend on it.
+//! `ai_contract_node_id` — unique per call site, minted by the producer from
+//! `(repo, file, target_node_id, source_symbol_node_id)`. This means multiple
+//! `withStructuredOutput` / structured-output calls inside the same function each
+//! get their own entry. An earlier keying scheme used `source_symbol_node_id`
+//! alone, which collapsed all contracts in the same function to a single map
+//! entry (last-wins), silently dropping deltas for every call site past the
+//! first.
 //!
 //! # Comparison
 //!
@@ -30,9 +31,12 @@ use crate::pr_review::delta_report::{
     AiContractFieldTypeChange, AiFacetChange,
 };
 
-/// `(repo, file_path, source_symbol_node_id)` diff key — see the module-level
-/// note on why AI contracts key by source symbol rather than target + side.
-type ContractKey = (String, String, NodeId);
+/// `ai_contract_node_id` diff key — globally unique per call site because the
+/// producer mints it from `(repo, file, target_node_id, source_symbol_node_id)`.
+/// Keying by source symbol alone collapsed multiple structured-output calls in
+/// the same function to a single map entry (last wins), silently dropping
+/// added/removed/changed deltas for all but the surviving record.
+type ContractKey = NodeId;
 
 type ContractMap = FxHashMap<ContractKey, AiContractStoreRecord>;
 
@@ -87,12 +91,14 @@ fn cmp_delta(a: &AiContractDelta, b: &AiContractDelta) -> std::cmp::Ordering {
         a.file.as_str(),
         a.source_type_name.as_deref().unwrap_or(""),
         a.target_qualified_name.as_deref().unwrap_or(""),
+        a.inference_kind.as_str(),
     )
         .cmp(&(
             b.repo.as_str(),
             b.file.as_str(),
             b.source_type_name.as_deref().unwrap_or(""),
             b.target_qualified_name.as_deref().unwrap_or(""),
+            b.inference_kind.as_str(),
         ))
 }
 
@@ -115,21 +121,13 @@ fn cmp_change(a: &AiContractDeltaChange, b: &AiContractDeltaChange) -> std::cmp:
 
 /// Fetch all AI contracts from the store and index them by diff key.
 ///
-/// Keyed by source symbol, not target: the R1 producer leaves
-/// `contract_target_qualified_name` (and provider/model) unset, so requiring a
-/// target would drop every real contract. One structured-output contract per
-/// source symbol is assumed; a second in the same symbol collapses (last wins).
+/// Keyed by `ai_contract_node_id` — unique per call site — so multiple
+/// structured-output calls inside the same function each get their own entry.
 fn build_contract_map<M: MetadataStore>(store: &M) -> Result<ContractMap> {
     let records = store.ai_contracts_for_query(AiContractQuery::default())?;
     let mut map = ContractMap::default();
     for record in records {
-        let key = (
-            record.record.repo.clone(),
-            record.record.file_path.clone(),
-            record.record.source_symbol_node_id,
-        );
-        // Last record for this key wins (deduplication).
-        map.insert(key, record);
+        map.insert(record.record.ai_contract_node_id, record);
     }
     Ok(map)
 }
@@ -433,6 +431,21 @@ mod tests {
             .expect("insert should succeed");
     }
 
+    /// Insert multiple contracts from the same repo+file in a single write so
+    /// the replace-for-files operation does not evict earlier records.
+    fn insert_batch(store: &MetadataStoreDb, records: &[AiContractStoreRecord]) {
+        assert!(!records.is_empty());
+        let repo = records[0].record.repo.clone();
+        let file = records[0].record.file_path.clone();
+        assert!(
+            records.iter().all(|r| r.record.file_path == file),
+            "insert_batch: all records must share the same file (DELETE keys on file path)"
+        );
+        store
+            .replace_ai_contracts_for_files(&repo, &[file], records)
+            .expect("insert_batch should succeed");
+    }
+
     /// REGRESSION (review finding #1): a producer-shaped record has a `None`
     /// target QN; it must still appear in `added` (an earlier build dropped it).
     #[test]
@@ -497,10 +510,12 @@ mod tests {
         assert!(deltas.changed.is_empty(), "nothing changed");
     }
 
-    /// The realistic R1 change signal: the structured-output schema swaps at the
-    /// same call site → `changed` with a `source_type_name` facet change.
+    /// When the structured-output schema is swapped at a call site (`OldSchema` →
+    /// `NewSchema`) the two records have different `ai_contract_node_id` values
+    /// because the producer keys the id on the schema label/target. The result is
+    /// one removed (`OldSchema`) and one added (`NewSchema`), not a single `changed`.
     #[test]
-    fn source_type_change_appears_in_changed_list() {
+    fn source_type_swap_appears_as_removed_and_added() {
         let (_b, baseline) = open_store("ai-stype-baseline");
         let (_r, review) = open_store("ai-stype-review");
 
@@ -529,17 +544,17 @@ mod tests {
 
         let deltas = extract_ai_contract_deltas(&baseline, &review).expect("should succeed");
 
-        assert_eq!(deltas.changed.len(), 1, "expected one changed contract");
-        let c = &deltas.changed[0];
-        let stype = c
-            .facets_changed
-            .iter()
-            .find(|f| f.facet == "source_type_name")
-            .expect("source_type_name facet must be in facets_changed");
-        assert_eq!(stype.before.as_deref(), Some("OldSchema"));
-        assert_eq!(stype.after.as_deref(), Some("NewSchema"));
-        assert!(deltas.added.is_empty(), "nothing added");
-        assert!(deltas.removed.is_empty(), "nothing removed");
+        assert_eq!(deltas.removed.len(), 1, "OldSchema must appear as removed");
+        assert_eq!(
+            deltas.removed[0].source_type_name.as_deref(),
+            Some("OldSchema")
+        );
+        assert_eq!(deltas.added.len(), 1, "NewSchema must appear as added");
+        assert_eq!(
+            deltas.added[0].source_type_name.as_deref(),
+            Some("NewSchema")
+        );
+        assert!(deltas.changed.is_empty(), "nothing changed");
     }
 
     /// Inline schema becomes referenced (or vice versa) → `inference_kind` facet
@@ -583,6 +598,75 @@ mod tests {
             "inference_kind change must surface; got {:?}",
             deltas.changed[0].facets_changed
         );
+    }
+
+    /// REGRESSION: when one function contains two structured-output calls the
+    /// delta map must report both contracts. Previously, keying by
+    /// `source_symbol_node_id` caused the second record to overwrite the first
+    /// so one contract was silently dropped.
+    #[test]
+    fn two_contracts_in_same_symbol_both_appear_in_delta() {
+        let (_b, baseline) = open_store("ai-two-contracts-baseline");
+        let (_r, review) = open_store("ai-two-contracts-review");
+
+        // One function ("processData") with two distinct structured-output calls.
+        // Both are present in baseline; one is added in review (review has an
+        // extra third call) and one is removed (baseline has a unique contract).
+        // Simpler: baseline has SchemaA only; review has SchemaA + SchemaB.
+        // Expected: SchemaB surfaces as `added`, nothing in removed/changed.
+        insert(
+            &baseline,
+            r1_contract(
+                "events",
+                "src/processor.ts",
+                "processData",
+                Some("SchemaA"),
+                AiContractInferenceKind::LiteralSchema,
+                vec![],
+            ),
+        );
+        // Use insert_batch so both review records survive: replace_ai_contracts_for_files
+        // issues a DELETE for the file before inserting, so two separate `insert` calls
+        // would leave only the last one.
+        let review_records = vec![
+            r1_contract(
+                "events",
+                "src/processor.ts",
+                "processData",
+                Some("SchemaA"),
+                AiContractInferenceKind::LiteralSchema,
+                vec![],
+            ),
+            r1_contract(
+                "events",
+                "src/processor.ts",
+                "processData",
+                Some("SchemaB"),
+                AiContractInferenceKind::LiteralSchema,
+                vec![],
+            ),
+        ];
+        insert_batch(&review, &review_records);
+
+        let deltas = extract_ai_contract_deltas(&baseline, &review).expect("should succeed");
+
+        assert_eq!(
+            deltas.added.len(),
+            1,
+            "SchemaB contract must appear as added; got added={:?}",
+            deltas
+                .added
+                .iter()
+                .map(|d| d.source_type_name.as_deref())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            deltas.added[0].source_type_name.as_deref(),
+            Some("SchemaB"),
+            "the added contract must be SchemaB"
+        );
+        assert!(deltas.removed.is_empty(), "nothing should be removed");
+        assert!(deltas.changed.is_empty(), "nothing should be changed");
     }
 
     /// Forward-looking (R2 field extraction): when the producer eventually

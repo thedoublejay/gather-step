@@ -35,6 +35,7 @@ use crate::{
             SearchRequest, SearchResultItem, SymbolResponseData, TraversalNode, TraversalRequest,
             get_callees, get_callers, get_symbol, search_symbols,
         },
+        who_consumes::who_consumes_tool,
     },
 };
 
@@ -464,6 +465,9 @@ fn execute_batch_op(ctx: &McpContext, op: BatchQueryOperation) -> BatchQueryResu
         }),
         "cross_repo_deps" => parse_and_run(op.arguments, |args| {
             cross_repo_deps_tool(ctx, args).and_then(to_value)
+        }),
+        "who_consumes" => parse_and_run(op.arguments, |args| {
+            who_consumes_tool(ctx, args).and_then(to_value)
         }),
         "get_shared_type_usage" => parse_and_run(op.arguments, |args| {
             crate::tools::cross_repo::get_shared_type_usage_tool(ctx, args).and_then(to_value)

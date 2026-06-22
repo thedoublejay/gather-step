@@ -9,6 +9,7 @@ pub mod canonical;
 pub mod contract_drift;
 pub mod conventions;
 pub mod cross_repo;
+pub mod cross_repo_participation;
 pub mod crud_trace;
 pub mod cycles;
 pub mod dead_code;
@@ -27,6 +28,7 @@ pub mod semantic_health;
 pub mod shared_component_usage;
 pub mod shared_contract;
 pub mod transport;
+pub mod value_mirror;
 
 pub use agent_topology::{
     AgentTopologyError, AgentTrace, AgentTraceEdge, AgentTraceNode, resolve_agent_targets,
@@ -42,6 +44,7 @@ pub use cross_repo::{
     CrossRepoDependencies, CrossRepoError, CrossRepoHop, TraceDirection, cross_repo_deps,
     trace_across_repos,
 };
+pub use cross_repo_participation::{CrossRepoConsumerLookup, cross_repo_participation_by_file};
 pub use crud_trace::{
     CrudTrace, CrudTraceEntry, CrudTraceError, CrudTraceRole, trace_crud_route, trace_crud_symbol,
 };
@@ -95,3 +98,4 @@ pub use shared_contract::{
     guard_class_name_for_anchor, looks_like_guard_entrypoint, peer_matches_guard_class_name,
     shared_contract_candidate_ids,
 };
+pub use value_mirror::{ValueMirrorConvergence, converge_value_mirrors};

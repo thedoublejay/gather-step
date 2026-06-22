@@ -71,6 +71,7 @@ pub fn augment(parsed: &ParsedFile) -> NestjsAugmentation {
     }
 
     add_topic_producer_edges(parsed, source_content, &mut augmentation);
+    add_decorator_mediated_producer_edges(parsed, &mut augmentation);
     add_bull_queue_producer_edges(parsed, &mut augmentation);
     add_inject_edges(parsed, &mut augmentation);
     add_guard_callsite_edges(parsed, &mut augmentation);
@@ -2581,6 +2582,84 @@ fn resolve_argument(parsed: &ParsedFile, value: &str) -> String {
         .unwrap_or_else(|| sanitize_topic_name(value))
 }
 
+/// Recognize decorator-mediated event producers (structural, path A).
+///
+/// When a custom decorator's *definition* publishes to a statically-resolvable
+/// literal topic `T`, every method that `@`-decorates with it is itself a
+/// producer of `T`. We emit `Publishes` + `ProducesEventFor` from the decorated
+/// method to the shared `__event__kafka__T` virtual node — the same vocabulary
+/// the direct producer/consumer passes use — so the decorated method converges
+/// with a consumer of `T` (in this or another repo) through the canonical node
+/// id, restoring the producer breadcrumb that would otherwise show
+/// `producers=0` for `T`.
+///
+/// The rule is signature-based, not name-based: any in-file symbol whose body
+/// contains a recognized messaging publish to a literal topic makes its *name*
+/// a publisher-decorator. An `@Injectable`-style decorator (or any decorator
+/// whose definition does not publish) is never treated as a publisher.
+///
+/// Limitation: a decorator imported from an external package whose definition
+/// is not indexed as source cannot be resolved structurally — the publish call
+/// lives in a body we never parse. Resolving those requires a declared
+/// `(decorator → topic)` mapping fallback (path B), tracked as an R2 follow-up
+/// and out of scope here. The same applies to cross-file decorator definitions:
+/// this pass only joins a decorator defined and used within one parsed file.
+fn add_decorator_mediated_producer_edges(
+    parsed: &ParsedFile,
+    augmentation: &mut NestjsAugmentation,
+) {
+    // Map a publisher-decorator name → the literal topics its body publishes.
+    // Keyed by the defining symbol's name, which is what a `@Name` usage refers
+    // to. A symbol may publish to more than one topic.
+    let mut publisher_decorators: rustc_hash::FxHashMap<&str, Vec<String>> =
+        rustc_hash::FxHashMap::default();
+    for symbol in &parsed.symbols {
+        let topics: Vec<String> = parsed
+            .call_sites
+            .iter()
+            .filter(|call_site| call_site.owner_id == symbol.node.id)
+            .filter(|call_site| producer_messaging_operation(call_site).is_some())
+            .filter_map(|call_site| resolve_producer_topic_name(parsed, call_site))
+            .collect();
+        if !topics.is_empty() {
+            let entry = publisher_decorators
+                .entry(symbol.node.name.as_str())
+                .or_default();
+            for topic in topics {
+                if !entry.contains(&topic) {
+                    entry.push(topic);
+                }
+            }
+        }
+    }
+    if publisher_decorators.is_empty() {
+        return;
+    }
+
+    for symbol in &parsed.symbols {
+        for decorator in symbol.decorators.iter().chain(&symbol.class_decorators) {
+            let Some(topics) = publisher_decorators.get(decorator.name.as_str()) else {
+                continue;
+            };
+            for topic in topics {
+                let qualified_name = format!("__event__kafka__{topic}");
+                let virt_node = virtual_node(NodeKind::Event, &qualified_name, topic, symbol);
+                augmentation.nodes.push(virt_node.clone());
+                for kind in [EdgeKind::Publishes, EdgeKind::ProducesEventFor] {
+                    augmentation.edges.push(EdgeData {
+                        source: symbol.node.id,
+                        target: virt_node.id,
+                        kind,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: symbol.file_node,
+                        is_cross_file: false,
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn virtual_node(
     kind: NodeKind,
     qualified_name: &str,
@@ -4500,6 +4579,128 @@ export class Svc {
                 .nodes
                 .iter()
                 .filter(|n| matches!(n.kind, NodeKind::Topic))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn producer_edge_count_from(
+        parsed: &crate::ParsedFile,
+        source: gather_step_core::NodeId,
+        kind: gather_step_core::EdgeKind,
+        event_qn: &str,
+    ) -> usize {
+        let target = gather_step_core::ref_node_id(NodeKind::Event, event_qn);
+        parsed
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == kind && edge.target == target && edge.source == source)
+            .count()
+    }
+
+    #[test]
+    fn decorator_whose_definition_publishes_makes_decorated_method_a_producer() {
+        let parsed = parse_nestjs_fixture(
+            r#"
+            export function AuditLog() {
+                return function (target, key, descriptor) {
+                    this.bus.emit('service-log-events', { action: key });
+                };
+            }
+
+            export class ReportService {
+                @AuditLog()
+                generateReport() {
+                    return 1;
+                }
+            }
+            "#,
+        );
+
+        let event_qn = "__event__kafka__service-log-events";
+        // The decorated method (not just the decorator definition) must be a
+        // producer of the topic — this is the orphan-restoring breadcrumb.
+        let method_id = parsed
+            .symbols
+            .iter()
+            .find(|s| s.node.name == "generateReport")
+            .expect("generateReport symbol must exist")
+            .node
+            .id;
+        assert_eq!(
+            producer_edge_count_from(
+                &parsed,
+                method_id,
+                gather_step_core::EdgeKind::Publishes,
+                event_qn,
+            ),
+            1,
+            "decorated method must publish to the decorator's topic exactly once; edges: {:#?}",
+            parsed
+                .edges
+                .iter()
+                .filter(|e| matches!(
+                    e.kind,
+                    gather_step_core::EdgeKind::Publishes
+                        | gather_step_core::EdgeKind::ProducesEventFor
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            producer_edge_count_from(
+                &parsed,
+                method_id,
+                gather_step_core::EdgeKind::ProducesEventFor,
+                event_qn,
+            ),
+            1,
+            "decorated method must produce-for the decorator's topic exactly once"
+        );
+    }
+
+    #[test]
+    fn non_publishing_and_unrelated_decorators_produce_no_producer_edge() {
+        let parsed = parse_nestjs_fixture(
+            r#"
+            export function Injectable() {
+                return function (target) {
+                    return target;
+                };
+            }
+
+            export class PlainService {
+                @Injectable()
+                handle() {
+                    return 1;
+                }
+
+                undecorated() {
+                    return 2;
+                }
+            }
+            "#,
+        );
+
+        assert_eq!(
+            parsed
+                .edges
+                .iter()
+                .filter(|e| matches!(
+                    e.kind,
+                    gather_step_core::EdgeKind::Publishes
+                        | gather_step_core::EdgeKind::ProducesEventFor
+                ))
+                .count(),
+            0,
+            "a non-publishing decorator (`@Injectable`) and an undecorated method \
+             must not produce any producer edge; edges: {:#?}",
+            parsed
+                .edges
+                .iter()
+                .filter(|e| matches!(
+                    e.kind,
+                    gather_step_core::EdgeKind::Publishes
+                        | gather_step_core::EdgeKind::ProducesEventFor
+                ))
                 .collect::<Vec<_>>()
         );
     }

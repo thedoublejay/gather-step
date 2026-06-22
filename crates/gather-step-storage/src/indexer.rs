@@ -316,6 +316,7 @@ pub enum RepoIndexerError {
 
 enum WriteMessage {
     Batch(RepoBatch),
+    CrossFileNodeBatch(Vec<NodeData>),
     CrossFileEdgeBatch(Vec<EdgeData>),
 }
 
@@ -1257,6 +1258,7 @@ impl RepoIndexer {
                     symbols,
                     call_sites,
                     import_bindings,
+                    value_mirror_candidates,
                     parse_ms,
                     ..
                 } = parsed;
@@ -1331,6 +1333,7 @@ impl RepoIndexer {
                     path_id_bytes,
                     nodes: nodes.into_iter().chain(payload_nodes).collect(),
                     edges: edges.into_iter().chain(payload_edges).collect(),
+                    value_mirror_candidates,
                     content_hash: file.content_hash.to_vec(),
                     size_bytes: file_stat.size_bytes,
                     mtime_ns: file_stat.mtime_ns,
@@ -1466,6 +1469,10 @@ impl RepoIndexer {
         let mut files_parsed = 0_usize;
         let mut symbol_nodes: Vec<gather_step_core::NodeData> = Vec::new();
         let mut resolution_inputs: Vec<ResolutionInput> = Vec::new();
+        // Accumulated across all files for per-repo value-mirror emission
+        // (pass 2): holds this repo's candidates so Mode-B enum refs resolve
+        // intra-repo and every group emits a shared `__value__` node + edge.
+        let mut value_mirror_candidates: Vec<gather_step_parser::ValueMirrorCandidate> = Vec::new();
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
         // Slim per-file metadata retained for reconcile and the metadata store.
@@ -1518,6 +1525,16 @@ impl RepoIndexer {
                                 stats.files_parsed += result.files_indexed;
                                 stats.nodes_created += result.nodes_written;
                                 stats.edges_created += result.edges_written;
+                            }
+                            WriteMessage::CrossFileNodeBatch(nodes) => {
+                                let node_count = nodes.len();
+                                storage.graph().with_write_txn(|write_txn| {
+                                    for node in &nodes {
+                                        GraphStoreDb::insert_node_in_txn(write_txn, node)?;
+                                    }
+                                    Ok(())
+                                })?;
+                                stats.nodes_created += node_count;
                             }
                             WriteMessage::CrossFileEdgeBatch(edges) => {
                                 let edge_count = edges.len();
@@ -1605,6 +1622,7 @@ impl RepoIndexer {
                             symbols,
                             call_sites,
                             import_bindings,
+                            value_mirror_candidates: file_value_mirror_candidates,
                             parse_ms,
                             ..
                         } = parsed;
@@ -1672,6 +1690,12 @@ impl RepoIndexer {
                         let all_edges: Vec<gather_step_core::EdgeData> =
                             edges.into_iter().chain(payload_edges).collect();
 
+                        // Accumulate value-mirror candidates for pass-2
+                        // convergence; the per-file copy still rides along in
+                        // the FileBatch for the Pass-1 streaming write.
+                        value_mirror_candidates
+                            .extend(file_value_mirror_candidates.iter().cloned());
+
                         // Retain slim metadata for the FileIndexState.
                         file_states.push(FileIndexState {
                             repo: repo.to_owned(),
@@ -1697,6 +1721,7 @@ impl RepoIndexer {
                             path_id_bytes,
                             nodes: all_nodes,
                             edges: all_edges,
+                            value_mirror_candidates: file_value_mirror_candidates,
                             content_hash: file.content_hash.to_vec(),
                             size_bytes: file_stat.size_bytes,
                             mtime_ns: file_stat.mtime_ns,
@@ -1820,6 +1845,23 @@ impl RepoIndexer {
                     unresolved_files,
                     "stage timing: call resolution (pass 2) complete",
                 );
+
+                // Emit value mirrors per-repo into shared `__value__` virtual
+                // nodes + Defines/MirrorsValueFrom edges (keyed on a shared
+                // deterministic id so repos converge structurally in the graph
+                // store — like Kafka topics). Indexing is per-repo, so the
+                // gated `converge_value_mirrors` would emit nothing here; the
+                // ≥2-repo precision call moves to query/pr-review time. Mode-B
+                // enum refs resolve intra-repo only. Nodes are sent before
+                // edges so the `__value__` node exists when its edge inserts.
+                let convergence =
+                    gather_step_parser::emit_value_mirrors_per_repo(&value_mirror_candidates);
+                if !convergence.nodes.is_empty() {
+                    let _ = write_sender.send(WriteMessage::CrossFileNodeBatch(convergence.nodes));
+                }
+                if !convergence.edges.is_empty() {
+                    let _ = write_sender.send(WriteMessage::CrossFileEdgeBatch(convergence.edges));
+                }
 
                 // Collect all resolved edges into one batch; cross-file and
                 // intra-file are both written via the CrossFileEdgeBatch path
@@ -2000,6 +2042,7 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
         path_id_bytes: vec![], // package.json is always ASCII — fallback is correct
         nodes,
         edges,
+        value_mirror_candidates: vec![],
         content_hash: blake3::hash(raw.as_bytes()).as_bytes().to_vec(),
         size_bytes: manifest_meta
             .as_ref()
@@ -2475,6 +2518,7 @@ fn deployment_output_to_batch(
             .to_vec(),
         nodes,
         edges,
+        value_mirror_candidates: vec![],
         content_hash: blake3::hash(raw).as_bytes().to_vec(),
         size_bytes: file_stat.size_bytes,
         mtime_ns: file_stat.mtime_ns,

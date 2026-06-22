@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, VecDeque};
 
+use gather_step_analysis::CrossRepoConsumerLookup;
 use gather_step_analysis::anchor::rank_anchors;
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::{GraphStore, SearchFilters, SearchStore};
@@ -55,11 +56,18 @@ pub struct TraversalRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SearchResultItem {
+    /// Foreign repos that consume something this hit's file produces (directly
+    /// or via a transport boundary). Same-repo consumers are excluded.
+    #[serde(default)]
+    pub consumer_repos: Vec<String>,
     pub exact_match: bool,
     pub file_path: String,
     pub kind: String,
     pub language: String,
     pub line_start: Option<u32>,
+    /// `true` when `consumer_repos` is non-empty.
+    #[serde(default)]
+    pub participates: bool,
     pub repo: String,
     pub score: f32,
     pub symbol_id: String,
@@ -216,11 +224,13 @@ pub fn search_symbols(
             let node = node?;
             let line_start = node.span.map(|s| s.line_start);
             Some(Ok(SearchResultItem {
+                consumer_repos: Vec::new(),
                 exact_match: hit.exact_match,
                 file_path: node.file_path,
                 kind: node_kind_label(hit.node_kind).to_owned(),
                 language: hit.lang,
                 line_start,
+                participates: false,
                 repo: node.repo,
                 score: hit.adjusted_score,
                 symbol_id: encode_node_id(hit.node_id),
@@ -228,6 +238,7 @@ pub fn search_symbols(
             }))
         })
         .collect::<Result<Vec<_>, McpServerError>>()?;
+    annotate_cross_repo(graph, &mut items);
     items.sort_by(search_item_cmp);
 
     // Apply anchor ranking: re-sort items by anchor score descending so that
@@ -710,6 +721,23 @@ fn anchor_rerank(ctx: &McpContext, mut items: Vec<SearchResultItem>) -> Vec<Sear
     items
 }
 
+/// Annotate each result with the foreign repos that consume what its file
+/// produces, calling the Task-6 participation primitive **once per distinct
+/// hit repo** (memoized) rather than once per hit.
+///
+/// Best-effort: a graph error while computing a repo's projection leaves the
+/// affected items with an empty (non-participating) annotation rather than
+/// failing the search.
+fn annotate_cross_repo(graph: &impl GraphStore, items: &mut [SearchResultItem]) {
+    let mut lookup = CrossRepoConsumerLookup::new();
+    for item in items.iter_mut() {
+        if let Ok(consumer_repos) = lookup.consumer_repos(graph, &item.repo, &item.file_path) {
+            item.participates = !consumer_repos.is_empty();
+            item.consumer_repos = consumer_repos;
+        }
+    }
+}
+
 fn search_item_cmp(left: &SearchResultItem, right: &SearchResultItem) -> std::cmp::Ordering {
     right
         .exact_match
@@ -850,8 +878,189 @@ mod tests {
     }
 
     #[test]
+    fn search_surfaces_cross_repo_consumers() {
+        use std::{env, fs};
+
+        use gather_step_core::{
+            EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, SourceSpan, Visibility, node_id,
+            virtual_node,
+        };
+        use gather_step_storage::{GraphStore, StorageCoordinator};
+
+        use crate::{McpServerConfig, config::McpContext};
+
+        use super::{SearchRequest, search_symbols};
+
+        fn file(repo: &str, file_path: &str) -> NodeData {
+            NodeData {
+                id: node_id(repo, file_path, NodeKind::File, file_path),
+                kind: NodeKind::File,
+                repo: repo.to_owned(),
+                file_path: file_path.to_owned(),
+                name: file_path.to_owned(),
+                qualified_name: Some(format!("{repo}::{file_path}")),
+                external_id: None,
+                signature: None,
+                visibility: None,
+                span: None,
+                is_virtual: false,
+                ai_role: None,
+            }
+        }
+        fn symbol(repo: &str, file_path: &str, name: &str) -> NodeData {
+            NodeData {
+                id: node_id(repo, file_path, NodeKind::Function, name),
+                kind: NodeKind::Function,
+                repo: repo.to_owned(),
+                file_path: file_path.to_owned(),
+                name: name.to_owned(),
+                qualified_name: Some(format!("{repo}::{name}")),
+                external_id: None,
+                signature: None,
+                visibility: Some(Visibility::Public),
+                span: Some(SourceSpan {
+                    line_start: 1,
+                    line_len: 1,
+                    column_start: 0,
+                    column_len: 0,
+                }),
+                is_virtual: false,
+                ai_role: None,
+            }
+        }
+        fn defines(owner: NodeId, target: NodeId) -> EdgeData {
+            EdgeData {
+                source: owner,
+                target,
+                kind: EdgeKind::Defines,
+                metadata: EdgeMetadata::default(),
+                owner_file: owner,
+                is_cross_file: false,
+            }
+        }
+        fn edge(owner: NodeId, source: NodeId, target: NodeId, kind: EdgeKind) -> EdgeData {
+            EdgeData {
+                source,
+                target,
+                kind,
+                metadata: EdgeMetadata::default(),
+                owner_file: owner,
+                is_cross_file: true,
+            }
+        }
+
+        let storage_root = env::temp_dir().join(format!(
+            "gather-step-mcp-xrepo-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&storage_root).expect("storage dir");
+
+        let config_file = file("service-api", "src/config/credit.ts");
+        let config_sym = symbol(
+            "service-api",
+            "src/config/credit.ts",
+            "CREDIT_AGENT_CONFIGS",
+        );
+        let handler_file = file("service-api", "src/handlers/credit.ts");
+        let handler_sym = symbol("service-api", "src/handlers/credit.ts", "getCredits");
+        let caller_file = file("service-ui", "src/caller.ts");
+        let caller_sym = symbol("service-ui", "src/caller.ts", "callCredits");
+        let route = virtual_node(
+            NodeKind::Route,
+            "service-api",
+            "src/handlers/credit.ts",
+            "GET /credits",
+            "__route__GET__/credits",
+        );
+
+        {
+            let storage = StorageCoordinator::open(&storage_root).expect("coordinator opens");
+            storage
+                .graph()
+                .bulk_insert(
+                    &[
+                        config_file.clone(),
+                        config_sym.clone(),
+                        handler_file.clone(),
+                        handler_sym.clone(),
+                        caller_file.clone(),
+                        caller_sym.clone(),
+                        route.clone(),
+                    ],
+                    &[
+                        defines(config_file.id, config_sym.id),
+                        defines(handler_file.id, handler_sym.id),
+                        defines(caller_file.id, caller_sym.id),
+                        edge(
+                            handler_file.id,
+                            handler_sym.id,
+                            config_sym.id,
+                            EdgeKind::References,
+                        ),
+                        edge(handler_file.id, handler_sym.id, route.id, EdgeKind::Serves),
+                        edge(
+                            caller_file.id,
+                            caller_sym.id,
+                            route.id,
+                            EdgeKind::ConsumesApiFrom,
+                        ),
+                    ],
+                )
+                .expect("fixture insert");
+            storage.reconcile_search("service-api");
+            storage.reconcile_search("service-ui");
+        }
+
+        let registry_path = storage_root.join("registry.json");
+        let graph_path = storage_root.join("graph.redb");
+        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+
+        let response = search_symbols(
+            &ctx,
+            SearchRequest {
+                budget_bytes: None,
+                cursor: None,
+                kind: None,
+                language: None,
+                limit: Some(10),
+                query: "CREDIT_AGENT_CONFIGS".to_owned(),
+                repo: None,
+            },
+        )
+        .expect("search should succeed");
+
+        let config_item = response
+            .data
+            .results
+            .iter()
+            .find(|item| item.file_path == "src/config/credit.ts")
+            .unwrap_or_else(|| panic!("config hit must be present: {:?}", response.data.results));
+        assert!(
+            config_item
+                .consumer_repos
+                .iter()
+                .any(|repo| repo == "service-ui"),
+            "config hit must carry service-ui consumer: {:?}",
+            config_item.consumer_repos
+        );
+        assert!(
+            config_item.participates,
+            "config hit must be marked as participating"
+        );
+
+        let _ = fs::remove_dir_all(&storage_root);
+    }
+
+    #[test]
     fn search_item_cmp_prefers_exact_then_score_then_location() {
         let left = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: false,
             file_path: "b.ts".to_owned(),
             kind: "function".to_owned(),
@@ -863,6 +1072,8 @@ mod tests {
             symbol_name: "alpha".to_owned(),
         };
         let right = SearchResultItem {
+            consumer_repos: Vec::new(),
+            participates: false,
             exact_match: true,
             file_path: "a.ts".to_owned(),
             kind: "function".to_owned(),

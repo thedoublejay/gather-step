@@ -26,6 +26,7 @@ use crate::{
         search::{self, SearchArgs},
         status, storage_report,
         trace::{self, CrudArgs, TraceCommand},
+        who_consumes::{self, WhoConsumesArgs},
     },
     daemon_protocol::{DaemonPidFile, DaemonRequest, DaemonResponse},
     storage_context::StorageContext,
@@ -177,6 +178,21 @@ pub fn dispatch_request_with_runtime(
                     &app,
                     &StorageContext::workspace_read_only(&app),
                     &CrossRepoDepsArgs { repo },
+                )
+            }
+        }
+        DaemonRequest::WhoConsumes {
+            symbol,
+            repo_filter,
+        } => {
+            let app = app_with_repo_filter(app, repo_filter);
+            if let Some(runtime) = runtime {
+                who_consumes::execute(runtime.mcp.as_ref(), &symbol, app.repo_filter.as_deref())
+            } else {
+                who_consumes::run_rendered(
+                    &app,
+                    &StorageContext::workspace_read_only(&app),
+                    &WhoConsumesArgs { symbol },
                 )
             }
         }

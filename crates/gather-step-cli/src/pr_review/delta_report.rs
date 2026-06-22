@@ -41,7 +41,7 @@ fn serialize_path_forward_slash<S: Serializer>(
 /// <https://braingent.dev>). Bump this when the report shape changes; callers
 /// must reference it instead of hard-coding the literal so the JSON, Markdown,
 /// frontmatter, and tests stay aligned.
-pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 3;
+pub const DELTA_REPORT_SCHEMA_VERSION: u32 = 4;
 
 /// Top-level output struct for `gather-step pr-review`.
 #[derive(Debug, Clone, Serialize)]
@@ -439,14 +439,21 @@ pub struct EventDeltaChange {
 /// surviving consumers in the graph.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemovedSurfaceRisk {
-    /// `"route"` | `"shared_symbol"` | `"event"`
+    /// `"route"` | `"shared_symbol"` | `"event"` | `"value_mirror"` |
+    /// `"value_mirror_incomplete"` | `"enum_guard_incomplete"`.
     pub kind: String,
-    /// route: `"GET /orders/:id"`; symbol: `qualified_name`; event: `"<kind>:<name>"`
+    /// route: `"GET /orders/:id"`; symbol: `qualified_name`; event: `"<kind>:<name>"`;
+    /// value mirror: the canonical mirrored value.
     pub identity: String,
     /// Owner repo (for routes / symbols).
     pub repo: Option<String>,
     pub surviving_consumers: Vec<RemovedSurfaceConsumer>,
     pub severity: RiskSeverity,
+    /// Human-readable detail line. `None` for route/symbol/event risks (their
+    /// `identity` + consumers carry the information); populated by the
+    /// value-mirror checks to name the un-updated mirror surface and value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// One surviving consumer of a removed surface.
@@ -493,7 +500,7 @@ pub struct ContractAlignments {
 /// A cluster of related contracts that share the same canonical identity.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContractAlignmentFinding {
-    /// Identity of the cluster (e.g. `"UpdateLabelProject"`).
+    /// Identity of the cluster (e.g. `"UpdateOrder"`).
     pub identity: String,
     /// Members of the alignment cluster: frontend payload, backend DTO,
     /// gateway mapping, route, shared symbol.
@@ -2717,9 +2724,9 @@ mod tests {
 
     #[test]
     fn schema_version_accepts_explicit_value() {
-        let report = make_empty_report(3);
+        let report = make_empty_report(4);
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["schema_version"], 4);
     }
 
     /// The canonical schema version is `DELTA_REPORT_SCHEMA_VERSION`.
@@ -2735,26 +2742,29 @@ mod tests {
         );
     }
 
-    /// Hard-pin the wire-version literal `3`. This catches an accidental bump
+    /// Hard-pin the wire-version literal `4`. This catches an accidental bump
     /// of `DELTA_REPORT_SCHEMA_VERSION` that the surrounding tests would
     /// otherwise tautologically pass — every renderer, MCP consumer, and the
     /// website docs all key off this literal.
     #[test]
-    fn schema_version_wire_literal_is_three() {
+    fn schema_version_wire_literal_is_four() {
         assert_eq!(
             super::DELTA_REPORT_SCHEMA_VERSION,
-            3,
-            "the public DeltaReport schema_version is 3 (added the `ai_contracts` \
-             AI structured-output delta section, Phase 4); a bump must be \
+            4,
+            "the public DeltaReport schema_version is 4 (added the `value_mirror` \
+             and `value_mirror_incomplete` removed-surface risk kinds plus the \
+             `detail` field on RemovedSurfaceRisk, v5.1 Task 5; the v5.1 Task 14 \
+             `enum_guard_incomplete` kind is another string value of the existing \
+             `kind` field and does NOT change the wire shape); a bump must be \
              intentional and accompanied by a CHANGELOG entry and docs/website \
              update."
         );
-        let report = make_empty_report(3);
+        let report = make_empty_report(4);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(
             json["schema_version"],
-            serde_json::Value::Number(3.into()),
-            "DeltaReport JSON must serialize `schema_version` as the literal `3`"
+            serde_json::Value::Number(4.into()),
+            "DeltaReport JSON must serialize `schema_version` as the literal `4`"
         );
     }
 
@@ -3016,6 +3026,7 @@ mod tests {
             repo: Some("backend".to_owned()),
             surviving_consumers: vec![],
             severity,
+            detail: None,
         }
     }
 
@@ -3043,7 +3054,7 @@ mod tests {
     /// High-severity risk emits a `pack` command targeting the risk identity.
     #[test]
     fn high_severity_risk_emits_pack_command() {
-        let risks = vec![make_risk("UpdateLabelProjectInput", RiskSeverity::High)];
+        let risks = vec![make_risk("UpdateOrderInput", RiskSeverity::High)];
         let cmds = synthesize_review_pack_commands(
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/reg.json"),
@@ -3055,7 +3066,7 @@ mod tests {
         );
         assert_eq!(cmds.len(), 1);
         assert!(
-            cmds[0].command.contains("pack UpdateLabelProjectInput"),
+            cmds[0].command.contains("pack UpdateOrderInput"),
             "command should pack the identity: {}",
             cmds[0].command
         );
@@ -3068,7 +3079,7 @@ mod tests {
         let mut payloads = PayloadContractDeltas::default();
         payloads
             .changed
-            .push(make_payload_change("UpdateLabelProjectDto", 3));
+            .push(make_payload_change("UpdateOrderDto", 3));
         let cmds = synthesize_review_pack_commands(
             std::path::Path::new("/tmp/ws"),
             std::path::Path::new("/tmp/reg.json"),
@@ -3080,7 +3091,7 @@ mod tests {
         );
         assert_eq!(cmds.len(), 1);
         assert!(
-            cmds[0].command.contains("pack UpdateLabelProjectDto"),
+            cmds[0].command.contains("pack UpdateOrderDto"),
             "command should pack the contract: {}",
             cmds[0].command
         );
@@ -3236,6 +3247,7 @@ mod tests {
                 repo: Some("backend".to_owned()),
                 surviving_consumers: vec![],
                 severity: RiskSeverity::High,
+                detail: None,
             }],
             contract_alignments: ContractAlignments {
                 findings: vec![ContractAlignmentFinding {
@@ -3593,6 +3605,7 @@ mod tests {
                 repo: Some("backend".to_owned()),
                 surviving_consumers: vec![],
                 severity: RiskSeverity::High,
+                detail: None,
             },
             RemovedSurfaceRisk {
                 kind: "shared_symbol".to_owned(),
@@ -3600,6 +3613,7 @@ mod tests {
                 repo: Some("backend".to_owned()),
                 surviving_consumers: vec![],
                 severity: RiskSeverity::High,
+                detail: None,
             },
             RemovedSurfaceRisk {
                 kind: "event".to_owned(),
@@ -3607,6 +3621,7 @@ mod tests {
                 repo: None,
                 surviving_consumers: vec![],
                 severity: RiskSeverity::Medium,
+                detail: None,
             },
             RemovedSurfaceRisk {
                 kind: "route".to_owned(),
@@ -3614,6 +3629,7 @@ mod tests {
                 repo: Some("backend".to_owned()),
                 surviving_consumers: vec![],
                 severity: RiskSeverity::Low,
+                detail: None,
             },
         ];
 

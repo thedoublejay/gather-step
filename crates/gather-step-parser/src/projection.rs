@@ -1320,6 +1320,7 @@ mod tests {
             call_sites: Vec::new(),
             import_bindings: Vec::new(),
             constant_strings: rustc_hash::FxHashMap::default(),
+            value_mirror_candidates: Vec::new(),
             parse_ms: 0,
         }
     }

@@ -97,6 +97,7 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
             repo: route.repo.clone(),
             surviving_consumers: consumers,
             severity,
+            detail: None,
         });
     }
 
@@ -149,6 +150,7 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
             repo: Some(symbol.repo.clone()),
             surviving_consumers: consumers,
             severity,
+            detail: None,
         });
     }
 
@@ -189,6 +191,7 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
             repo: None,
             surviving_consumers: consumers,
             severity,
+            detail: None,
         });
     }
 
@@ -226,9 +229,16 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
                 repo: (node.repo != "__virtual__").then(|| node.repo.clone()),
                 surviving_consumers: consumers,
                 severity,
+                detail: None,
             });
         }
     }
+
+    // ── Value-mirror risks (v5.1 Task 5) ─────────────────────────────────────
+    // Cross-repo precision layer over the value-mirror graph (Task 4): the
+    // add-and-forget completeness check (`value_mirror_incomplete`) and the
+    // modified-value edge-walk (`value_mirror`).
+    super::value_mirror::extend_with_value_mirror_risks(baseline, review, &mut risks)?;
 
     // Sort: severity descending (High > Medium > Low), then kind, then identity.
     risks.sort_by(|a, b| {
@@ -626,8 +636,8 @@ mod tests {
         let (_td_r, review) = open_store("ai-prompt-review");
 
         let prompt = prompt_virtual_node("doc-summary");
-        let caller_fn = function_node("reggenius", "src/usecase.ts", "sendMessage");
-        let owner = file_node("reggenius", "src/usecase.ts");
+        let caller_fn = function_node("service-api", "src/usecase.ts", "sendMessage");
+        let owner = file_node("service-api", "src/usecase.ts");
         let use_edge = edge(&caller_fn, &prompt, EdgeKind::UsesPrompt, &owner);
 
         baseline
@@ -635,7 +645,7 @@ mod tests {
             .expect("baseline insert");
 
         // The caller that uses the prompt still exists in review; the prompt is gone.
-        let review_owner = file_node("reggenius", "src/usecase.ts");
+        let review_owner = file_node("service-api", "src/usecase.ts");
         review
             .bulk_insert(&[caller_fn, review_owner], &[])
             .expect("review insert");

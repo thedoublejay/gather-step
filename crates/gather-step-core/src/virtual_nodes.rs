@@ -148,6 +148,13 @@ pub fn llm_model_qn(provider: &str, model: &str) -> String {
     format!("__llm__{provider}__{model}")
 }
 
+/// Cross-repo convergence id for a mirrored value carried verbatim across repos.
+#[must_use]
+pub fn value_mirror_qn(value: &str) -> String {
+    let value = canonical_topology_part_or(value, "unknown_value");
+    format!("__value__{value}")
+}
+
 #[must_use]
 pub fn shared_symbol_qn(package: &str, version: &str, symbol: &str) -> String {
     let package = package.trim();
@@ -376,7 +383,7 @@ mod tests {
         broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, llm_model_qn,
         mcp_tool_qn, parse_shared_symbol_qn, prompt_qn, queue_qn, route_qn, secret_qn,
         shared_package_root, shared_symbol_qn, shared_symbol_qn_unversioned, topic_qn,
-        vector_index_qn, virtual_node, virtual_node_id,
+        value_mirror_qn, vector_index_qn, virtual_node, virtual_node_id,
     };
     use crate::NodeKind;
 
@@ -558,5 +565,14 @@ mod tests {
             node.qualified_name.as_deref(),
             Some(qualified_name.as_str())
         );
+    }
+
+    #[test]
+    fn value_mirror_qn_canonicalizes_and_is_stable() {
+        assert_eq!(
+            value_mirror_qn("orders.statusCheck.triggered"),
+            "__value__orders.statuscheck.triggered"
+        );
+        assert_eq!(value_mirror_qn("  a__b  "), value_mirror_qn("a__b"));
     }
 }

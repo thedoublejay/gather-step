@@ -30,6 +30,23 @@ filter = '''
 '''
 slow-timeout = { period = "60s", terminate-after = 4 }
 
+# Heavy end-to-end daemon/watch tests: each indexes the fixture workspace AND
+# spawns a `serve`/`watch` daemon, then proxies multiple commands. They run in
+# ~4s locally but routinely hit 45-60s on loaded macOS CI runners (the green
+# baseline measured 48s), tipping over the default 30s x 2 = 60s terminate.
+# 60s x 4 = 240s matches the sibling heavy-test override and absorbs runner
+# variance without hiding real regressions: a genuine hang still trips the
+# tests' own 30s daemon-wait / child-exit deadlines well before 240s.
+[[profile.default.overrides]]
+filter = '''
+    test(=watch_json_ready_event_allows_scripts_to_avoid_startup_race)
+  | test(=serve_watch_proxies_read_only_commands_and_cleans_up_daemon_files)
+  | test(=serve_without_watch_proxies_read_only_commands_and_cleans_up_daemon_files)
+  | test(=watch_proxies_read_only_commands_and_cleans_up_daemon_files)
+  | test(=watch_rejects_concurrent_index_with_storage_held_error_and_cleans_up_daemon_files)
+'''
+slow-timeout = { period = "60s", terminate-after = 4 }
+
 [profile.stress]
 fail-fast = true
 retries = 0

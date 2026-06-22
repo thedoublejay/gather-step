@@ -78,6 +78,8 @@ pub fn edge_kind_label(kind: EdgeKind) -> &'static str {
         EdgeKind::DriftsFrom => "drifts_from",
         EdgeKind::ContractOn => "contract_on",
         EdgeKind::MigratesCollection => "migrates_collection",
+        EdgeKind::MirrorsValueFrom => "mirrors_value_from",
+        EdgeKind::GuardsEnumValue => "guards_enum_value",
         EdgeKind::DefinesAgentNode => "defines_agent_node",
         EdgeKind::GraphTransitionsTo => "graph_transitions_to",
         EdgeKind::ComposesAgent => "composes_agent",

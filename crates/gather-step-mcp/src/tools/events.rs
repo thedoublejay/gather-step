@@ -572,7 +572,16 @@ fn resolve_single_agent_target(
             "AI target `{target}` was not found"
         ))),
         [node] => Ok(node.clone()),
-        [first, ..] => Ok(first.clone()),
+        _ => {
+            let choices = matches
+                .iter()
+                .map(|node| format!("{}:{} ({})", node.repo, node.file_path, node.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(McpServerError::InvalidInput(format!(
+                "AI target `{target}` is ambiguous; refine the target or use a fully-qualified name: {choices}"
+            )))
+        }
     }
 }
 
@@ -1136,7 +1145,7 @@ mod tests {
         let registry_path = temp.path().join("registry.json");
         let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
 
-        let repo = "reggenius";
+        let repo = "service-api";
         let file_path = "src/agent.ts";
         let src = file(repo, file_path);
         let agent_graph = ai_node(
@@ -1195,7 +1204,7 @@ mod tests {
         registry
             .register_repo(
                 repo,
-                temp.path().join("repos/reggenius"),
+                temp.path().join("repos/service-api"),
                 Some(DepthLevel::Full),
             )
             .expect("repo registration should succeed");
@@ -1545,5 +1554,135 @@ mod tests {
                 .to_string()
                 .contains("event target `order.created` is ambiguous")
         );
+    }
+
+    #[test]
+    fn trace_agent_rejects_ambiguous_agent_targets() {
+        let temp = TempDir::new("trace-agent-ambiguous");
+        let graph_path = temp.path().join("graph.redb");
+        let registry_path = temp.path().join("registry.json");
+        let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
+
+        let agent_a = ai_node(
+            "repo_alpha",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+            None,
+        );
+        let agent_b = ai_node(
+            "repo_beta",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__agent",
+            None,
+        );
+
+        graph
+            .bulk_insert(&[agent_a, agent_b], &[])
+            .expect("graph write should succeed");
+        drop(graph);
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                "repo_alpha",
+                temp.path().join("repos/repo_alpha"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+        registry
+            .register_repo(
+                "repo_beta",
+                temp.path().join("repos/repo_beta"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let error = trace_agent_tool(
+            &ctx,
+            TraceAgentRequest {
+                budget_bytes: None,
+                depth: None,
+                limit: None,
+                target: "__agent_graph__agent".to_owned(),
+            },
+        )
+        .expect_err("ambiguous agent target should fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("AI target `__agent_graph__agent` is ambiguous"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            message.contains("repo_alpha"),
+            "candidate list should name repo_alpha: {error}"
+        );
+        assert!(
+            message.contains("repo_beta"),
+            "candidate list should name repo_beta: {error}"
+        );
+    }
+
+    #[test]
+    fn trace_agent_succeeds_when_target_is_unambiguous() {
+        let temp = TempDir::new("trace-agent-disambig");
+        let graph_path = temp.path().join("graph.redb");
+        let registry_path = temp.path().join("registry.json");
+        let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
+
+        let agent_a = ai_node(
+            "repo_alpha",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__unique_agent",
+            None,
+        );
+        let agent_b = ai_node(
+            "repo_beta",
+            "src/agent.ts",
+            NodeKind::AgentGraph,
+            "__agent_graph__other_agent",
+            None,
+        );
+
+        graph
+            .bulk_insert(&[agent_a.clone(), agent_b], &[])
+            .expect("graph write should succeed");
+        drop(graph);
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                "repo_alpha",
+                temp.path().join("repos/repo_alpha"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+        registry
+            .register_repo(
+                "repo_beta",
+                temp.path().join("repos/repo_beta"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let response = trace_agent_tool(
+            &ctx,
+            TraceAgentRequest {
+                budget_bytes: None,
+                depth: None,
+                limit: None,
+                target: "__agent_graph__unique_agent".to_owned(),
+            },
+        )
+        .expect("unambiguous target should resolve successfully");
+
+        assert_eq!(response.data.target_id, Some(encode_node_id(agent_a.id)));
     }
 }

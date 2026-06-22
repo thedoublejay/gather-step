@@ -5921,6 +5921,7 @@ indexing:
             repo: Some("backend".to_owned()),
             surviving_consumers: vec![],
             severity,
+            detail: None,
         }
     }
 

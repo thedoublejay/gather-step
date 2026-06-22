@@ -403,9 +403,26 @@ fn risk_key(r: &RemovedSurfaceRisk) -> String {
     format!("{}:{}", r.kind, r.identity)
 }
 
+/// Risk kinds derived from the value-mirror graph (`Defines` /
+/// `MirrorsValueFrom` edges over `ValueMirror` nodes). The overlay engine
+/// reconstructs only the changed slice of the graph and cannot reproduce the
+/// full mirror-surface edge set, so these kinds are not parity-checked — the
+/// same "surface unsupported on the overlay" treatment the AI surfaces use.
+fn is_overlay_unsupported_risk(r: &RemovedSurfaceRisk) -> bool {
+    matches!(r.kind.as_str(), "value_mirror" | "value_mirror_incomplete")
+}
+
 fn compare_risk_lists(a: &[RemovedSurfaceRisk], b: &[RemovedSurfaceRisk], diffs: &mut Vec<String>) {
-    let mut ak: Vec<String> = a.iter().map(risk_key).collect();
-    let mut bk: Vec<String> = b.iter().map(risk_key).collect();
+    let a: Vec<&RemovedSurfaceRisk> = a
+        .iter()
+        .filter(|r| !is_overlay_unsupported_risk(r))
+        .collect();
+    let b: Vec<&RemovedSurfaceRisk> = b
+        .iter()
+        .filter(|r| !is_overlay_unsupported_risk(r))
+        .collect();
+    let mut ak: Vec<String> = a.iter().map(|r| risk_key(r)).collect();
+    let mut bk: Vec<String> = b.iter().map(|r| risk_key(r)).collect();
     ak.sort();
     bk.sort();
     if ak != bk {
@@ -415,10 +432,10 @@ fn compare_risk_lists(a: &[RemovedSurfaceRisk], b: &[RemovedSurfaceRisk], diffs:
         return;
     }
     // Also check severity for matching keys.
-    let mut a_sorted = a.to_vec();
-    let mut b_sorted = b.to_vec();
-    a_sorted.sort_by_key(risk_key);
-    b_sorted.sort_by_key(risk_key);
+    let mut a_sorted = a.clone();
+    let mut b_sorted = b.clone();
+    a_sorted.sort_by_key(|r| risk_key(r));
+    b_sorted.sort_by_key(|r| risk_key(r));
     for (ra, rb) in a_sorted.iter().zip(b_sorted.iter()) {
         if ra.severity != rb.severity {
             diffs.push(format!(
@@ -715,16 +732,17 @@ mod tests {
                 repo: Some("backend".to_owned()),
                 surviving_consumers: vec![],
                 severity,
+                detail: None,
             }
         }
 
         let mut ti = empty_report();
         ti.removed_surface_risks
-            .push(make_risk("UpdateLabelProject", RiskSeverity::High));
+            .push(make_risk("UpdateOrder", RiskSeverity::High));
 
         let mut ov = empty_report();
         ov.removed_surface_risks
-            .push(make_risk("UpdateLabelProject", RiskSeverity::Medium));
+            .push(make_risk("UpdateOrder", RiskSeverity::Medium));
 
         let diff = compare_for_parity(&ti, &ov);
         assert!(!diff.is_match(), "severity mismatch should be detected");

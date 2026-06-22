@@ -75,6 +75,9 @@ use crate::{
             SearchRequest, SearchResponse, SymbolRequest, SymbolResponse, TraversalRequest,
             TraversalResponse, get_callees, get_callers, get_symbol, search_symbols,
         },
+        who_consumes::{
+            WhoConsumesRequest, WhoConsumesResponse, who_consumes_tool as run_who_consumes,
+        },
     },
 };
 
@@ -492,6 +495,25 @@ impl GatherStepMcpServer {
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("cross_repo_deps", &args, move || {
             run_cross_repo_deps(&ctx, request)
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[tool(
+        name = "who_consumes",
+        description = "Find which repos consume what a symbol's file produces, directly or via a transport boundary.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn who_consumes_tool(
+        &self,
+        Parameters(request): Parameters<WhoConsumesRequest>,
+    ) -> Result<Json<WhoConsumesResponse>, String> {
+        let args = serde_json::to_value(&request).unwrap_or_default();
+        let ctx = Arc::clone(&self.ctx);
+        self.traced_call("who_consumes", &args, move || {
+            run_who_consumes(&ctx, request)
                 .map(Json)
                 .map_err(|error| error.to_string())
         })

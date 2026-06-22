@@ -62,6 +62,68 @@ impl TsJsParseStatus {
 
 const MAX_DEPTH: usize = 256;
 
+/// Maximum number of value-mirror candidates captured from a single array
+/// literal. Guards pathological generated arrays from flooding the candidate
+/// stream while comfortably covering real allowlists/enum subsets.
+pub(crate) const VALUE_MIRROR_PER_ARRAY_CAP: usize = 256;
+
+// ── Value-mirror candidates (v5.1) ───────────────────────────────────────────
+
+/// Classification of a captured value-mirror candidate. See Task 2 brief.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueMirrorKind {
+    /// Raw string literal or named-const value (Mode A). `value` = the string.
+    Literal,
+    /// Array element referencing an enum member (Mode B, e.g. `[EventType.X]`).
+    /// `value` = the member NAME. Resolved to the member's string value at
+    /// convergence (Task 4), after which it converges exactly like a Literal.
+    EnumMemberRef { enum_qn: String },
+    /// Authoritative enum-member definition. `value` = the member's STRING
+    /// value; `member` = its name, so an `EnumMemberRef` resolves via
+    /// `(enum_qn, member)`.
+    EnumMemberDef { enum_qn: String, member: String },
+}
+
+/// Where a value-mirror candidate was captured. `Array` is the Parts 1–3
+/// default (cross-repo ≥2-repo gate applies); `Guard` marks a switch/if branch
+/// keyed on an enum value, which converges intra-repo and carries `has_default`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueMirrorSurface {
+    Array,
+    Guard { has_default: bool },
+}
+
+/// A captured value-mirror candidate. The parser only CAPTURES these; Task 4
+/// converges them into `ValueMirror` virtual nodes + `MirrorsValueFrom` edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueMirrorCandidate {
+    /// Literal value, or enum member name for `EnumMemberRef`.
+    pub value: String,
+    pub kind: ValueMirrorKind,
+    /// Owning file's repo (needed by convergence's ≥2-repo gate).
+    pub repo: String,
+    pub file_path: String,
+    pub line: u32,
+    /// Enum/union member or named const (the canonical definition).
+    pub authoritative: bool,
+    /// Nearest enclosing declared symbol node, else the file node.
+    pub owner_node_id: gather_step_core::NodeId,
+    /// Owning file's node id. Used as `owner_file` for convergence edges so
+    /// they satisfy the `OwnerNotAFile` validation (cross-file edges must own a
+    /// real File node, not the symbol they originate from).
+    pub file_node_id: gather_step_core::NodeId,
+    /// Capture surface. `Array` for Parts 1–3 captures; `Guard` (T12/T13) marks
+    /// guard branches that converge intra-repo via `GuardsEnumValue`.
+    pub surface: ValueMirrorSurface,
+}
+
+/// Specificity gate (precision): keep only identifier-ish values.
+#[must_use]
+pub fn is_specific_value_mirror(value: &str) -> bool {
+    let v = value.trim();
+    (v.contains('.') || v.contains(':')) || (v.len() >= 8 && !v.chars().any(char::is_whitespace))
+}
+
 // ── Public entry point ───────────────────────────────────────────────────────
 
 /// Parse a TypeScript or JavaScript file with Oxc and populate `state`.
@@ -195,6 +257,11 @@ struct VisitCtx<'a> {
     force_exported: bool,
     class_decorators: Vec<DecoratorCapture>,
     depth: usize,
+    /// Set transiently while descending into an object-property value so the
+    /// array arm can admit a single-element array in map-value position. Read
+    /// and cleared at the top of `visit_expression`, so deeper recursion never
+    /// inherits a stale flag.
+    in_object_property_value: bool,
 }
 
 impl<'a> VisitCtx<'a> {
@@ -208,11 +275,22 @@ impl<'a> VisitCtx<'a> {
             force_exported: false,
             class_decorators: Vec::new(),
             depth: 0,
+            in_object_property_value: false,
         }
     }
 
     fn span(&self, span: Span) -> SourceSpan {
         span_from_oxc(span, self.offsets)
+    }
+
+    /// 1-based starting line of `span` in the source.
+    fn line_of(&self, span: Span) -> u32 {
+        self.span(span).line_start
+    }
+
+    /// Nearest enclosing declared symbol node, falling back to the file node.
+    fn enclosing_owner_id(&self, state: &ParseState<'_>) -> gather_step_core::NodeId {
+        self.owner.unwrap_or_else(|| state.file_node_id())
     }
 
     fn child_with_owner(&self, owner: gather_step_core::NodeId) -> Self {
@@ -225,6 +303,7 @@ impl<'a> VisitCtx<'a> {
             force_exported: false,
             class_decorators: self.class_decorators.clone(),
             depth: self.depth + 1,
+            in_object_property_value: false,
         }
     }
 
@@ -242,6 +321,7 @@ impl<'a> VisitCtx<'a> {
             force_exported: self.force_exported,
             class_decorators,
             depth: self.depth + 1,
+            in_object_property_value: false,
         }
     }
 
@@ -255,6 +335,7 @@ impl<'a> VisitCtx<'a> {
             force_exported: true,
             class_decorators: self.class_decorators.clone(),
             depth: self.depth + 1,
+            in_object_property_value: false,
         }
     }
 
@@ -268,7 +349,209 @@ impl<'a> VisitCtx<'a> {
             force_exported: false,
             class_decorators: self.class_decorators.clone(),
             depth: self.depth + 1,
+            in_object_property_value: false,
         }
+    }
+}
+
+/// Resolve an array element to an enum-member reference: `EventType.X` yields
+/// `(member = "X", enum_qn = "EventType")`. The receiver name is used as the
+/// `enum_qn` placeholder; Task 4/5 resolves it to the enum node.
+fn enum_member_ref(expr: &Expression<'_>) -> Option<(String, String)> {
+    let Expression::StaticMemberExpression(member) = expr else {
+        return None;
+    };
+    let Expression::Identifier(receiver) = &member.object else {
+        return None;
+    };
+    Some((member.property.name.to_string(), receiver.name.to_string()))
+}
+
+/// Borrow every element of `arr` as an object literal, or `None` if the array
+/// is empty or any element is not an object expression.
+fn all_object_literals<'a>(
+    arr: &'a oxc_ast::ast::ArrayExpression<'a>,
+) -> Option<Vec<&'a ObjectExpression<'a>>> {
+    if arr.elements.is_empty() {
+        return None;
+    }
+    arr.elements
+        .iter()
+        .map(|e| match e.as_expression() {
+            Some(Expression::ObjectExpression(obj)) => Some(&**obj),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Init-kind property value for `key` on an object literal, if present.
+fn object_property_value<'a>(
+    obj: &'a ObjectExpression<'a>,
+    key: &str,
+) -> Option<&'a Expression<'a>> {
+    obj.properties.iter().find_map(|prop_or_spread| {
+        let ObjectPropertyKind::ObjectProperty(prop) = prop_or_spread else {
+            return None;
+        };
+        (prop.kind == PropertyKind::Init && property_key_text(&prop.key) == key)
+            .then_some(&prop.value)
+    })
+}
+
+/// True when `key` resolves to an enum-member ref on EVERY object element.
+fn key_is_homogeneous_enum_ref(objects: &[&ObjectExpression<'_>], key: &str) -> bool {
+    objects.iter().all(|obj| {
+        object_property_value(obj, key)
+            .and_then(enum_member_ref)
+            .is_some()
+    })
+}
+
+/// Pick the single canonical option-list key for an array of object literals:
+/// prefer `value`; else the sole other homogeneously enum-ref key. Returns
+/// `None` (capture nothing) when no key qualifies or when multiple non-`value`
+/// keys qualify (a v5.1-deferred multi-key follow-up — the downstream surface
+/// is file/owner-keyed and cannot represent two keys distinctly).
+fn enum_subset_object_array_key(objects: &[&ObjectExpression<'_>]) -> Option<String> {
+    if key_is_homogeneous_enum_ref(objects, "value") {
+        return Some("value".to_owned());
+    }
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(first) = objects.first() {
+        for prop_or_spread in &first.properties {
+            if let ObjectPropertyKind::ObjectProperty(prop) = prop_or_spread
+                && prop.kind == PropertyKind::Init
+            {
+                let key = property_key_text(&prop.key);
+                if !key.is_empty() && !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+    }
+    let qualifying: Vec<String> = keys
+        .into_iter()
+        .filter(|key| key_is_homogeneous_enum_ref(objects, key))
+        .collect();
+    match qualifying.as_slice() {
+        [single] => Some(single.clone()),
+        [] => None,
+        _ => {
+            tracing::debug!(
+                keys = ?qualifying,
+                "value-mirror: multiple enum-ref keys in object-literal array; \
+                 multi-key capture is a v5.1-deferred follow-up, skipping"
+            );
+            None
+        }
+    }
+}
+
+/// Push a `Guard`-surfaced `EnumMemberRef` candidate for an enum-member ref
+/// used in a switch case or `===`/`!==` comparison. `value` is the member
+/// name; Task 4 resolves it to the enum's string value at convergence.
+fn push_enum_guard_candidate(
+    member: String,
+    enum_qn: String,
+    span: Span,
+    has_default: bool,
+    state: &mut ParseState<'_>,
+    ctx: &VisitCtx<'_>,
+) {
+    let candidate = ValueMirrorCandidate {
+        value: member,
+        kind: ValueMirrorKind::EnumMemberRef { enum_qn },
+        repo: state.repo().to_owned(),
+        file_path: state.file_path().to_owned(),
+        line: ctx.line_of(span),
+        authoritative: false,
+        owner_node_id: ctx.enclosing_owner_id(state),
+        file_node_id: state.file_node_id(),
+        surface: ValueMirrorSurface::Guard { has_default },
+    };
+    state.push_value_mirror_candidate(candidate);
+}
+
+/// Static (non-computed) name of an enum member, if available.
+fn enum_member_name(name: &TSEnumMemberName<'_>) -> Option<String> {
+    match name {
+        TSEnumMemberName::Identifier(ident) => Some(ident.name.to_string()),
+        TSEnumMemberName::String(lit) => Some(lit.value.to_string()),
+        TSEnumMemberName::ComputedString(_) | TSEnumMemberName::ComputedTemplateString(_) => None,
+    }
+}
+
+/// Push authoritative `EnumMemberDef` candidates for each string-initialized
+/// member of `decl`. These double as the `(enum_qn, member) → value`
+/// resolution table that Mode B `EnumMemberRef`s join against in Task 4.
+fn capture_enum_member_defs(
+    decl: &oxc_ast::ast::TSEnumDeclaration<'_>,
+    state: &mut ParseState<'_>,
+    ctx: &VisitCtx<'_>,
+) {
+    let enum_qn = decl.id.name.to_string();
+    for member in &decl.body.members {
+        let Some(Expression::StringLiteral(lit)) = member.initializer.as_ref() else {
+            continue;
+        };
+        let Some(member_name) = enum_member_name(&member.id) else {
+            continue;
+        };
+        let value = lit.value.to_string();
+        if !is_specific_value_mirror(&value) {
+            continue;
+        }
+        let candidate = ValueMirrorCandidate {
+            value,
+            kind: ValueMirrorKind::EnumMemberDef {
+                enum_qn: enum_qn.clone(),
+                member: member_name,
+            },
+            repo: state.repo().to_owned(),
+            file_path: state.file_path().to_owned(),
+            line: ctx.line_of(lit.span),
+            authoritative: true,
+            owner_node_id: ctx.enclosing_owner_id(state),
+            file_node_id: state.file_node_id(),
+            surface: ValueMirrorSurface::Array,
+        };
+        state.push_value_mirror_candidate(candidate);
+    }
+}
+
+/// Push authoritative `Literal` candidates for each string-literal member of a
+/// string-literal union type alias (`type X = "a" | "b"`).
+fn capture_union_string_literals(
+    decl: &oxc_ast::ast::TSTypeAliasDeclaration<'_>,
+    state: &mut ParseState<'_>,
+    ctx: &VisitCtx<'_>,
+) {
+    let oxc_ast::ast::TSType::TSUnionType(union) = &decl.type_annotation else {
+        return;
+    };
+    for ty in &union.types {
+        let oxc_ast::ast::TSType::TSLiteralType(literal_type) = ty else {
+            continue;
+        };
+        let oxc_ast::ast::TSLiteral::StringLiteral(lit) = &literal_type.literal else {
+            continue;
+        };
+        let value = lit.value.to_string();
+        if !is_specific_value_mirror(&value) {
+            continue;
+        }
+        let candidate = ValueMirrorCandidate {
+            value,
+            kind: ValueMirrorKind::Literal,
+            repo: state.repo().to_owned(),
+            file_path: state.file_path().to_owned(),
+            line: ctx.line_of(lit.span),
+            authoritative: true,
+            owner_node_id: ctx.enclosing_owner_id(state),
+            file_node_id: state.file_node_id(),
+            surface: ValueMirrorSurface::Array,
+        };
+        state.push_value_mirror_candidate(candidate);
     }
 }
 
@@ -323,6 +606,7 @@ fn visit_statement(stmt: &Statement<'_>, state: &mut ParseState<'_>, ctx: &mut V
                 state,
                 ctx,
             );
+            capture_union_string_literals(decl, state, ctx);
         }
         Statement::TSInterfaceDeclaration(decl) => {
             push_type_symbol(
@@ -341,6 +625,7 @@ fn visit_statement(stmt: &Statement<'_>, state: &mut ParseState<'_>, ctx: &mut V
                 state,
                 ctx,
             );
+            capture_enum_member_defs(decl, state, ctx);
             // Enum members can carry initializer expressions with calls.
             for member in &decl.body.members {
                 if let Some(init) = member.initializer.as_ref() {
@@ -423,8 +708,24 @@ fn visit_statement(stmt: &Statement<'_>, state: &mut ParseState<'_>, ctx: &mut V
         }
         Statement::SwitchStatement(s) => {
             visit_expression(&s.discriminant, state, ctx);
+            let has_default = s.cases.iter().any(|case| case.test.is_none());
+            let any_enum_ref = s
+                .cases
+                .iter()
+                .filter_map(|case| case.test.as_ref())
+                .any(|test| enum_member_ref(test).is_some());
             for case in &s.cases {
                 if let Some(test) = &case.test {
+                    if any_enum_ref && let Some((member, enum_qn)) = enum_member_ref(test) {
+                        push_enum_guard_candidate(
+                            member,
+                            enum_qn,
+                            test.span(),
+                            has_default,
+                            state,
+                            ctx,
+                        );
+                    }
                     visit_expression(test, state, ctx);
                 }
                 for inner in &case.consequent {
@@ -614,6 +915,7 @@ fn visit_inline_declaration(
                 state,
                 ctx,
             );
+            capture_union_string_literals(decl, state, ctx);
         }
         Declaration::TSInterfaceDeclaration(decl) => {
             push_type_symbol(
@@ -632,6 +934,7 @@ fn visit_inline_declaration(
                 state,
                 ctx,
             );
+            capture_enum_member_defs(decl, state, ctx);
             for member in &decl.body.members {
                 if let Some(init) = member.initializer.as_ref() {
                     visit_expression(init, state, ctx);
@@ -851,6 +1154,7 @@ fn visit_nested_class_body(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &
                         force_exported: false,
                         class_decorators: ctx.class_decorators.clone(),
                         depth: ctx.depth + 1,
+                        in_object_property_value: false,
                     };
                     visit_function_body(body, state, &mut body_ctx);
                 }
@@ -875,6 +1179,7 @@ fn visit_nested_class_body(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &
                     force_exported: false,
                     class_decorators: ctx.class_decorators.clone(),
                     depth: ctx.depth + 1,
+                    in_object_property_value: false,
                 };
                 for stmt in &block.body {
                     visit_statement(stmt, state, &mut body_ctx);
@@ -936,6 +1241,7 @@ fn visit_class_element(
                     force_exported: false,
                     class_decorators: ctx.class_decorators.clone(),
                     depth: ctx.depth + 1,
+                    in_object_property_value: false,
                 };
                 visit_expression(value, state, &mut val_ctx);
             }
@@ -993,6 +1299,7 @@ fn visit_method_definition(
                 force_exported: false,
                 class_decorators: ctx.class_decorators.clone(),
                 depth: ctx.depth + 1,
+                in_object_property_value: false,
             };
             visit_function_body(body, state, &mut body_ctx);
         }
@@ -1247,6 +1554,7 @@ fn visit_variable_declarator(
             force_exported: ctx.force_exported,
             class_decorators: ctx.class_decorators.clone(),
             depth: ctx.depth + 1,
+            in_object_property_value: false,
         };
         visit_expression(init, state, &mut expr_ctx);
     }
@@ -1268,6 +1576,10 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
     if ctx.depth > MAX_DEPTH {
         return;
     }
+    // Consume the map-value gate exactly once: deeper recursion must not
+    // inherit it, so it only relaxes the single-element array threshold for the
+    // immediate object-property value.
+    let in_map_value = std::mem::take(&mut ctx.in_object_property_value);
     match expr {
         Expression::CallExpression(call) => visit_call_expression(call, state, ctx),
         Expression::NewExpression(new_expr) => visit_new_expression(new_expr, state, ctx),
@@ -1294,6 +1606,20 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
             }
         }
         Expression::BinaryExpression(b) => {
+            if b.operator.is_equality() {
+                for operand in [&b.left, &b.right] {
+                    if let Some((member, enum_qn)) = enum_member_ref(operand) {
+                        push_enum_guard_candidate(
+                            member,
+                            enum_qn,
+                            operand.span(),
+                            false,
+                            state,
+                            ctx,
+                        );
+                    }
+                }
+            }
             visit_expression(&b.left, state, ctx);
             visit_expression(&b.right, state, ctx);
         }
@@ -1345,9 +1671,93 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
         }
         Expression::ObjectExpression(obj) => visit_object_expression(obj, state, ctx),
         Expression::ArrayExpression(arr) => {
-            for elem in &arr.elements {
-                if let Some(expr) = elem.as_expression() {
-                    visit_expression(expr, state, ctx);
+            // Single-element arrays only qualify in object-value (map) position.
+            let min = if in_map_value { 1 } else { 2 };
+            let all_str = !arr.elements.is_empty()
+                && arr
+                    .elements
+                    .iter()
+                    .all(|e| matches!(e.as_expression(), Some(Expression::StringLiteral(_))));
+            let all_enum_ref = !arr.elements.is_empty()
+                && arr
+                    .elements
+                    .iter()
+                    .all(|e| e.as_expression().and_then(enum_member_ref).is_some());
+            if all_str && arr.elements.len() >= min {
+                for expr in arr
+                    .elements
+                    .iter()
+                    .filter_map(|e| e.as_expression())
+                    .take(VALUE_MIRROR_PER_ARRAY_CAP)
+                {
+                    if let Expression::StringLiteral(lit) = expr {
+                        let value = lit.value.to_string();
+                        if is_specific_value_mirror(&value) {
+                            let candidate = ValueMirrorCandidate {
+                                value,
+                                kind: ValueMirrorKind::Literal,
+                                repo: state.repo().to_owned(),
+                                file_path: state.file_path().to_owned(),
+                                line: ctx.line_of(lit.span),
+                                authoritative: false,
+                                owner_node_id: ctx.enclosing_owner_id(state),
+                                file_node_id: state.file_node_id(),
+                                surface: ValueMirrorSurface::Array,
+                            };
+                            state.push_value_mirror_candidate(candidate);
+                        }
+                    }
+                }
+            } else if all_enum_ref && arr.elements.len() >= min {
+                for expr in arr
+                    .elements
+                    .iter()
+                    .filter_map(|e| e.as_expression())
+                    .take(VALUE_MIRROR_PER_ARRAY_CAP)
+                {
+                    if let Some((member, enum_qn)) = enum_member_ref(expr) {
+                        let candidate = ValueMirrorCandidate {
+                            value: member,
+                            kind: ValueMirrorKind::EnumMemberRef { enum_qn },
+                            repo: state.repo().to_owned(),
+                            file_path: state.file_path().to_owned(),
+                            line: ctx.line_of(expr.span()),
+                            authoritative: false,
+                            owner_node_id: ctx.enclosing_owner_id(state),
+                            file_node_id: state.file_node_id(),
+                            surface: ValueMirrorSurface::Array,
+                        };
+                        state.push_value_mirror_candidate(candidate);
+                    }
+                }
+            } else if let Some(objects) = all_object_literals(arr)
+                && objects.len() >= min
+                && let Some(key) = enum_subset_object_array_key(&objects)
+            {
+                for obj in objects.into_iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
+                    let Some(value_expr) = object_property_value(obj, &key) else {
+                        continue;
+                    };
+                    if let Some((member, enum_qn)) = enum_member_ref(value_expr) {
+                        let candidate = ValueMirrorCandidate {
+                            value: member,
+                            kind: ValueMirrorKind::EnumMemberRef { enum_qn },
+                            repo: state.repo().to_owned(),
+                            file_path: state.file_path().to_owned(),
+                            line: ctx.line_of(value_expr.span()),
+                            authoritative: false,
+                            owner_node_id: ctx.enclosing_owner_id(state),
+                            file_node_id: state.file_node_id(),
+                            surface: ValueMirrorSurface::Array,
+                        };
+                        state.push_value_mirror_candidate(candidate);
+                    }
+                }
+            } else {
+                for elem in &arr.elements {
+                    if let Some(expr) = elem.as_expression() {
+                        visit_expression(expr, state, ctx);
+                    }
                 }
             }
         }
@@ -1402,6 +1812,7 @@ fn visit_class_expression(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &m
                         force_exported: false,
                         class_decorators: ctx.class_decorators.clone(),
                         depth: ctx.depth + 1,
+                        in_object_property_value: false,
                     };
                     visit_function_body(body, state, &mut body_ctx);
                 }
@@ -1426,6 +1837,7 @@ fn visit_class_expression(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &m
                     force_exported: false,
                     class_decorators: ctx.class_decorators.clone(),
                     depth: ctx.depth + 1,
+                    in_object_property_value: false,
                 };
                 for stmt in &block.body {
                     visit_statement(stmt, state, &mut body_ctx);
@@ -1445,7 +1857,9 @@ fn visit_object_expression(
         match prop_or_spread {
             ObjectPropertyKind::ObjectProperty(prop) => match prop.kind {
                 PropertyKind::Init => {
+                    ctx.in_object_property_value = true;
                     visit_expression(&prop.value, state, ctx);
+                    ctx.in_object_property_value = false;
                 }
                 PropertyKind::Get | PropertyKind::Set => {
                     if let Expression::FunctionExpression(func) = &prop.value
@@ -2821,6 +3235,21 @@ pub mod oxc_test_support {
         let names = top_level_declared_names_for_path(std::path::Path::new("source.ts"), source);
         names.iter().any(|n| n == ident_name)
     }
+
+    /// Drive the full Oxc visitor over `source` and return the value-mirror
+    /// candidates captured by the parser (v5.1). Used by capture/noise-guard
+    /// regression tests.
+    #[must_use]
+    pub fn value_mirror_candidates_for_test(
+        file: &FileEntry,
+        source: &str,
+    ) -> Vec<super::ValueMirrorCandidate> {
+        use crate::tree_sitter::ParseState;
+
+        let mut state = ParseState::for_test(file, source);
+        super::parse_ts_js_with_oxc(file, &mut state, source, std::path::Path::new("/tmp"));
+        state.value_mirror_candidates().to_vec()
+    }
 }
 
 #[cfg(all(test, feature = "test-support"))]
@@ -2834,6 +3263,7 @@ mod tests {
     use crate::{FileEntry, Language};
 
     use super::{
+        ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface, is_specific_value_mirror,
         line_offsets, parse_top_level_declared_names, parse_ts_js_for_status, source_type_for_path,
         span_to_source_span,
     };
@@ -2845,6 +3275,21 @@ mod tests {
             size_bytes: 0,
             content_hash: [0; 32],
             source_bytes: None,
+        }
+    }
+
+    /// Owned view of a single-file parse so tests can read the value-mirror
+    /// candidates off a temporary without juggling the borrowed `ParseState`.
+    struct OxcParse {
+        value_mirror_candidates: Vec<ValueMirrorCandidate>,
+    }
+
+    fn parse_ts_source_for_test(source: &str, path: &str) -> OxcParse {
+        let file = file(path);
+        OxcParse {
+            value_mirror_candidates: super::oxc_test_support::value_mirror_candidates_for_test(
+                &file, source,
+            ),
         }
     }
 
@@ -2915,5 +3360,269 @@ mod tests {
             react_names,
             vec!["ProjectionSummary".to_owned(), "Props".to_owned()],
         );
+    }
+
+    #[test]
+    fn captures_all_three_mirror_shapes_and_filters_noise() {
+        let src = r#"
+            // Mode A multi-element string array (FE-style allowlist)
+            const MAP = ["orders.statusCheck.triggered", "orders.statusUpdate"];
+            // Mode A single-element array in MAP-VALUE position (FE status category)
+            const BY_CATEGORY = { Status: ["orders.statusCheck.triggered"] };
+            // Mode B enum-member-reference array (service-log ALLOWED_VALUES)
+            const ALLOWED = { Admin: [EventType.StatusChanged, EventType.StatusUpdate] };
+            // authoritative definition
+            enum Category { Status = "orders.statusCheck.triggered" }
+            const COLORS = ["red", "blue"];        // non-specific -> filtered
+            const TOP_LEVEL_SINGLE = ["x.y"];      // single-element, NOT in map position -> filtered
+        "#;
+        let c = parse_ts_source_for_test(src, "map.util.ts").value_mirror_candidates;
+        // Mode A multi-element
+        assert!(c.iter().any(|x| matches!(x.kind, ValueMirrorKind::Literal)
+            && !x.authoritative
+            && x.value == "orders.statusCheck.triggered"));
+        // Mode A single-element in map-value position IS captured
+        assert!(
+            c.iter()
+                .filter(|x| matches!(x.kind, ValueMirrorKind::Literal)
+                    && x.value == "orders.statusCheck.triggered")
+                .count()
+                >= 2
+        );
+        // Mode B enum-member ref captured with enum_qn
+        assert!(c.iter().any(
+            |x| matches!(&x.kind, ValueMirrorKind::EnumMemberRef { enum_qn }
+            if enum_qn.ends_with("EventType"))
+                && x.value == "StatusChanged"
+        ));
+        // authoritative enum member
+        assert!(
+            c.iter()
+                .any(|x| x.authoritative && x.value == "orders.statusCheck.triggered")
+        );
+        // noise filtered
+        assert!(!c.iter().any(|x| x.value == "red"), "non-specific filtered");
+        assert!(
+            !c.iter().any(|x| x.value == "x.y"),
+            "top-level single-element filtered"
+        );
+    }
+
+    #[test]
+    fn value_mirror_noise_guards() {
+        // mixed-kind array -> none captured
+        let mixed = parse_ts_source_for_test("const X = [\"orders.alpha\", y, 3];", "mixed.ts")
+            .value_mirror_candidates;
+        assert!(
+            mixed.is_empty(),
+            "mixed-kind array must not capture any candidate"
+        );
+
+        // top-level single-element array (not in map-value position) -> none
+        let single = parse_ts_source_for_test("const X = [\"orders.alpha\"];", "single.ts")
+            .value_mirror_candidates;
+        assert!(
+            single.is_empty(),
+            "top-level single-element array must not capture"
+        );
+
+        // all-caps non-dotted short value -> none (specificity gate)
+        let shorty = parse_ts_source_for_test("const X = [\"RED\", \"BLUE\"];", "short.ts")
+            .value_mirror_candidates;
+        assert!(
+            shorty.is_empty(),
+            "short non-dotted values must be filtered"
+        );
+
+        // enum-member array in map position -> captured as EnumMemberRef
+        let enum_map =
+            parse_ts_source_for_test("const M = { Admin: [EventType.Created] };", "enummap.ts")
+                .value_mirror_candidates;
+        assert!(
+            enum_map
+                .iter()
+                .any(|x| matches!(&x.kind, ValueMirrorKind::EnumMemberRef { .. })
+                    && x.value == "Created"),
+            "single enum-member ref in map position is captured"
+        );
+    }
+
+    #[test]
+    fn captures_enum_subset_object_literal_arrays() {
+        // MUI valueOptions shape: array of object literals keyed on `value`.
+        let c = parse_ts_source_for_test(
+            "const opts = [{ value: Status.A, label: 'a' }, { value: Status.B, label: 'b' }];",
+            "useColumns.tsx",
+        )
+        .value_mirror_candidates;
+        let refs: Vec<&ValueMirrorCandidate> = c
+            .iter()
+            .filter(|x| {
+                matches!(&x.kind, ValueMirrorKind::EnumMemberRef { enum_qn } if enum_qn == "Status")
+                    && matches!(x.surface, ValueMirrorSurface::Array)
+            })
+            .collect();
+        assert_eq!(refs.len(), 2, "two value-key enum refs captured");
+        assert!(refs.iter().any(|x| x.value == "A"));
+        assert!(refs.iter().any(|x| x.value == "B"));
+
+        // Heterogeneous values on the canonical key -> none.
+        let het = parse_ts_source_for_test(
+            "const opts = [{ value: Status.A }, { value: 3 }];",
+            "het.tsx",
+        )
+        .value_mirror_candidates;
+        assert!(
+            het.is_empty(),
+            "heterogeneous `value` (enum ref + numeric) must capture none"
+        );
+
+        // Key absent in one element -> none.
+        let missing = parse_ts_source_for_test(
+            "const opts = [{ value: Status.A }, { label: 'x' }];",
+            "missing.tsx",
+        )
+        .value_mirror_candidates;
+        assert!(
+            missing.is_empty(),
+            "missing canonical key on any element must capture none"
+        );
+
+        // No `value` key, single other homogeneously enum-ref key -> use it.
+        let other_key = parse_ts_source_for_test(
+            "const opts = [{ status: Status.A }, { status: Status.B }];",
+            "otherkey.tsx",
+        )
+        .value_mirror_candidates;
+        assert_eq!(
+            other_key
+                .iter()
+                .filter(|x| matches!(&x.kind, ValueMirrorKind::EnumMemberRef { .. }))
+                .count(),
+            2,
+            "single non-`value` enum-ref key is used as the surface"
+        );
+
+        // No `value`, multiple enum-ref keys qualify -> capture none (deferred).
+        let multi = parse_ts_source_for_test(
+            "const opts = [{ from: Status.A, to: Status.B }, { from: Status.B, to: Status.A }];",
+            "multi.tsx",
+        )
+        .value_mirror_candidates;
+        assert!(
+            multi.is_empty(),
+            "multiple non-`value` enum-ref keys are a v5.1 deferral -> none"
+        );
+
+        // Object array with no enum-ref-valued key -> none (recurse unchanged).
+        let no_enum = parse_ts_source_for_test(
+            "const opts = [{ label: 'a' }, { label: 'b' }];",
+            "noenum.tsx",
+        )
+        .value_mirror_candidates;
+        assert!(
+            no_enum.is_empty(),
+            "object array with no enum-ref-valued key captures none"
+        );
+    }
+
+    #[test]
+    fn captures_switch_and_if_enum_guards_with_default_flag() {
+        let src = r#"
+            enum Status { Active = "active", Cancelled = "cancelled", Done = "done" }
+            function f(s: Status) {
+                switch (s) {            // covers Active, Done; NO default -> has_default:false
+                    case Status.Active: return 1;
+                    case Status.Done: return 2;
+                }
+            }
+            function g(s: Status) {
+                if (s === Status.Active) return 1;     // if-chain guard, no else
+                else if (s === Status.Done) return 2;
+            }
+            function h(s: Status) {
+                switch (s) { case Status.Active: return 1; default: return 0; }  // has_default:true
+            }
+        "#;
+        let c = parse_ts_source_for_test(src, "guards.ts").value_mirror_candidates;
+        // switch f: two guard EnumMemberRef candidates, has_default=false
+        assert!(c.iter().any(|x| matches!(
+            &x.surface,
+            ValueMirrorSurface::Guard { has_default: false }
+        ) && matches!(&x.kind, ValueMirrorKind::EnumMemberRef { .. })
+            && x.value == "Active"));
+        // if-chain g: guard candidates from `=== Status.X`
+        assert!(
+            c.iter()
+                .filter(|x| matches!(x.surface, ValueMirrorSurface::Guard { .. })
+                    && matches!(&x.kind, ValueMirrorKind::EnumMemberRef { .. }))
+                .count()
+                >= 4
+        );
+        // switch h: has_default=true
+        assert!(
+            c.iter()
+                .any(|x| matches!(x.surface, ValueMirrorSurface::Guard { has_default: true }))
+        );
+    }
+
+    #[test]
+    fn enum_guard_noise_guards() {
+        // string-label switch -> no guard candidate
+        let str_switch = parse_ts_source_for_test(
+            "function f(x: string) { switch (x) { case \"a\": return 1; } }",
+            "strsw.ts",
+        )
+        .value_mirror_candidates;
+        assert!(
+            !str_switch
+                .iter()
+                .any(|x| matches!(x.surface, ValueMirrorSurface::Guard { .. })),
+            "string-label switch must not capture guard candidates"
+        );
+
+        // `x === 3` and `x === "active"` -> none
+        let num_cmp =
+            parse_ts_source_for_test("function f(x: number) { if (x === 3) return 1; }", "num.ts")
+                .value_mirror_candidates;
+        assert!(
+            !num_cmp
+                .iter()
+                .any(|x| matches!(x.surface, ValueMirrorSurface::Guard { .. })),
+            "numeric comparison must not capture guard candidates"
+        );
+        let str_cmp = parse_ts_source_for_test(
+            "function f(x: string) { if (x === \"active\") return 1; }",
+            "strcmp.ts",
+        )
+        .value_mirror_candidates;
+        assert!(
+            !str_cmp
+                .iter()
+                .any(|x| matches!(x.surface, ValueMirrorSurface::Guard { .. })),
+            "string comparison must not capture guard candidates"
+        );
+
+        // plain `if (cond)` with no enum comparison -> none
+        let plain = parse_ts_source_for_test(
+            "function f(cond: boolean) { if (cond) return 1; }",
+            "plain.ts",
+        )
+        .value_mirror_candidates;
+        assert!(
+            !plain
+                .iter()
+                .any(|x| matches!(x.surface, ValueMirrorSurface::Guard { .. })),
+            "plain conditional must not capture guard candidates"
+        );
+    }
+
+    #[test]
+    fn specificity_filter_basics() {
+        assert!(is_specific_value_mirror("a.b"));
+        assert!(is_specific_value_mirror("scope:thing"));
+        assert!(is_specific_value_mirror("longishtoken"));
+        assert!(!is_specific_value_mirror("red"));
+        assert!(!is_specific_value_mirror("two words"));
     }
 }

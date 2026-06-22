@@ -117,6 +117,7 @@ fn repo_batch(repo: &str, file_path: &str, symbol_count: u16) -> RepoBatch {
             path_id_bytes: vec![],
             nodes,
             edges,
+            value_mirror_candidates: vec![],
             content_hash: symbol_count.to_be_bytes().to_vec(),
             size_bytes: 0,
             mtime_ns: 0,

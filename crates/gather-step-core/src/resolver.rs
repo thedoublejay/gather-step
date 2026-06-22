@@ -52,6 +52,8 @@ pub enum ResolverStrategy {
     FirstPass,
     /// Second-pass edge emitted after cross-repo resolution.
     SecondPass,
+    /// Edge emitted during value-mirror convergence (cross-repo verbatim value carry).
+    ValueMirror,
 }
 
 impl ResolverStrategy {
@@ -77,6 +79,7 @@ impl ResolverStrategy {
             Self::FieldLocalAlias => "field_local_alias",
             Self::FirstPass => "first-pass",
             Self::SecondPass => "second-pass",
+            Self::ValueMirror => "value_mirror",
         }
     }
 
@@ -111,6 +114,7 @@ impl ResolverStrategy {
             "field_local_alias" => Self::FieldLocalAlias,
             "first-pass" => Self::FirstPass,
             "second-pass" => Self::SecondPass,
+            "value_mirror" => Self::ValueMirror,
             _ => return None,
         })
     }
@@ -129,7 +133,7 @@ impl ResolverStrategy {
             Self::Unique => 70,
             Self::FrontendLiteral => 65,
             Self::FrontendHint => 60,
-            Self::HistoryOwnership => 50,
+            Self::HistoryOwnership | Self::ValueMirror => 50,
             Self::CoChange => 45,
             Self::FieldLocalAlias => 55,
             Self::Suffix => 40,
@@ -171,6 +175,7 @@ mod tests {
             ResolverStrategy::FieldLocalAlias,
             ResolverStrategy::FirstPass,
             ResolverStrategy::SecondPass,
+            ResolverStrategy::ValueMirror,
         ];
         for case in cases {
             assert_eq!(ResolverStrategy::from_str(case.as_str()), Some(case));
@@ -208,5 +213,17 @@ mod tests {
     fn strategy_weight_for_unknown_string_is_zero() {
         assert_eq!(super::strategy_weight(None), 0);
         assert_eq!(super::strategy_weight(Some("totally_unknown")), 0);
+    }
+}
+
+#[cfg(test)]
+mod value_mirror_tests {
+    use super::ResolverStrategy;
+    #[test]
+    fn value_mirror_roundtrips_and_weighs_50() {
+        let s = ResolverStrategy::ValueMirror;
+        assert_eq!(s.as_str(), "value_mirror");
+        assert_eq!(ResolverStrategy::from_str("value_mirror"), Some(s));
+        assert_eq!(s.strategy_weight(), 50);
     }
 }
