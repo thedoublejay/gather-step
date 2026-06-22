@@ -29,6 +29,7 @@ struct StatusOutput {
     pack_cache: PackCacheStatusOutput,
     repos: Vec<RepoStatusOutput>,
     graph: GraphStatusOutput,
+    locks: Vec<LockOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +54,15 @@ struct GraphStatusOutput {
     node_kinds: Vec<KindCountOutput>,
     edge_kinds: Vec<KindCountOutput>,
     semantic_health: SemanticHealthReport,
+}
+
+#[derive(Debug, Serialize)]
+struct LockOutput {
+    label: String,
+    age_secs: u64,
+    pid: Option<u32>,
+    hostname: Option<String>,
+    owner_alive: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +251,8 @@ pub(crate) fn execute(
         })
         .collect();
 
+    let locks = collect_locks(storage_root, registry);
+
     let payload = StatusOutput {
         event: "status_completed",
         workspace: relativize_to_workspace(workspace_path, workspace_path),
@@ -255,6 +267,7 @@ pub(crate) fn execute(
             semantic_health: semantic_health_for_workspace(storage.graph(), storage.metadata())
                 .context("computing workspace semantic health")?,
         },
+        locks,
     };
 
     let mut lines = vec![
@@ -270,6 +283,13 @@ pub(crate) fn execute(
             payload.pack_cache.unresolved_packs
         ),
     ];
+    if payload.locks.is_empty() {
+        lines.push("Locks: none".to_owned());
+    } else {
+        for lock in &payload.locks {
+            lines.push(format!("Locks: {}", format_lock_line(lock)));
+        }
+    }
     let mut repo_table = Table::new();
     repo_table.load_preset(UTF8_BORDERS_ONLY);
     repo_table.set_content_arrangement(ContentArrangement::Dynamic);
@@ -337,6 +357,49 @@ fn format_semantic_summary(health: &SemanticHealthReport) -> String {
         health.payload_contract_links.linked_targets,
         health.payload_contract_links.total_targets,
         health.orphan_topics
+    )
+}
+
+fn collect_locks(storage_root: &std::path::Path, registry: &RegistryStore) -> Vec<LockOutput> {
+    let locks_dir = gather_step_storage::lock::lock_dir(storage_root);
+    let repo_names: Vec<String> = registry.registry().repos.keys().cloned().collect();
+    gather_step_storage::lock::scan_locks(&locks_dir, &repo_names)
+        .into_iter()
+        .map(|report| LockOutput {
+            label: report
+                .repo
+                .unwrap_or_else(|| report.hash.chars().take(12).collect()),
+            age_secs: report.age.as_secs(),
+            pid: report.owner.as_ref().map(|owner| owner.pid),
+            hostname: report.owner.as_ref().map(|owner| owner.hostname.clone()),
+            owner_alive: report.owner_alive,
+        })
+        .collect()
+}
+
+fn format_lock_age(secs: u64) -> String {
+    if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn format_lock_line(lock: &LockOutput) -> String {
+    let owner = match (lock.pid, &lock.hostname) {
+        (Some(pid), Some(host)) => format!("pid {pid} on {host}"),
+        (Some(pid), None) => format!("pid {pid}"),
+        _ => "unknown owner".to_owned(),
+    };
+    let alive = match lock.owner_alive {
+        Some(true) => "alive",
+        Some(false) => "dead",
+        None => "unknown",
+    };
+    format!(
+        "`{}` held {} by {owner} ({alive})",
+        lock.label,
+        format_lock_age(lock.age_secs)
     )
 }
 
@@ -479,6 +542,11 @@ mod tests {
             payload["event"].as_str(),
             Some("status_completed"),
             "status payload should have event=status_completed"
+        );
+        assert!(
+            payload["locks"].is_array(),
+            "status payload should always carry a locks array, got {:?}",
+            payload["locks"]
         );
         for repo in repos {
             let freshness = repo["freshness"]

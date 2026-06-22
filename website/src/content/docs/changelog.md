@@ -5,6 +5,32 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.2.0 (2026-06-22)
+
+**Self-healing index locks.** A reindex could appear "stuck" with no actionable signal when an index lock was contended — the acquisition loop retried forever with no timeout, and `status` / `doctor` never revealed that a lock existed. The per-repo lock is OS-advisory (`flock`), so the kernel already releases a dead owner's lock automatically; this release fixes the two real gaps — the unbounded wait and the lack of visibility.
+
+### Added
+
+- **Bounded lock acquisition** — index/reindex now wait at most `--lock-timeout` seconds (default 300) for a contended lock, then report it as held with an actionable message (repo, owner pid, age, and the exact recovery command) and exit non-zero, instead of hanging indefinitely. `--lock-timeout 0` restores the wait-forever behaviour.
+- **Lock owner metadata** — lock files now record the owning `pid`, hostname, start time, and gather-step version. Legacy 0-byte and unparsable lock files are tolerated as "unknown owner".
+- **`--force-unlock`** — report a contended lock immediately instead of waiting, with recovery instructions. A held lock is never broken automatically: advisory locks cannot be safely reclaimed from outside (a dead owner's lock is already released by the kernel), so the flag surfaces the holder and the manual-recovery command rather than racing it.
+- **Liveness-aware reporting** — the owning process is probed (same-host only, to stay safe on shared filesystems) so messages distinguish a live concurrent index from a dead owner.
+- **`status` / `doctor` "Locks" summary** — both commands now list held locks with age and owner-alive state, so a stuck lock is visible at a glance.
+
+### Release-wide
+
+- Bumped the Cargo workspace and internal crate versions, website package metadata, and landing-page release stamps to `5.2.0`; refreshed dependencies (notably `gix`, `ratatui`, `camino`, and transitive crates) while preserving all intentional version pins; bumped the website's `astro` to the latest 6.x.
+
+## v5.1.0 (2026-06-22)
+
+**Cross-repo blind-spot closure.** Closes structural gaps in `pr-review` where a value hand-mirrored across repositories (an enum/union/const value copied into an allowlist array, a frontend category map, or a guard `switch`) had no edge and went unflagged when one side changed.
+
+### Added
+
+- **Value-mirror completeness** — `pr-review` now flags add-and-forget (`value_mirror_incomplete`) and stale-mirror (`value_mirror`) risks when an authoritative enum/union/const value diverges from an established cross-repo mirror surface.
+- **Enum-guard completeness** — a new enum member that an existing `switch` / `if` guard does not handle is flagged (`enum_guard_incomplete`), exempted when the guard has an explicit `default` / `case _`.
+- **Enum-subset object-literal arrays** — data-grid-style `valueOptions` arrays are captured as enum-ref mirror surfaces and flow through the same completeness check, scoped per referenced enum so unrelated enums sharing a string value never cross-flag.
+
 ## v5.0.0 (2026-06-21)
 
 **AI flow awareness.** gather-step now models LLM/agent/RAG/MCP code as first-class graph surfaces, alongside the existing routes, events, and data-shape layers. The release is **complementary**: every pre-v5 node and edge is preserved unchanged — verified by a full v4.4.4-vs-v5 reindex of a 31-repo workspace, where no node or edge kind decreased and all deltas were net-new AI/Python additions.

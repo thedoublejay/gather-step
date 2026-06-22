@@ -135,6 +135,10 @@ pub enum WatcherError {
 enum ProcessRepoChangeOutcome {
     Succeeded,
     Failed,
+    /// The repo lock was held by another indexer (e.g. a manual `index`
+    /// overlapping the watch reindex). Transient — retried on the next trigger
+    /// without counting as a failure, so it never trips the suppression limit.
+    Contended,
     Cancelled,
 }
 
@@ -438,25 +442,38 @@ impl Watcher {
                     return Ok(());
                 }
                 let failure_state = failures.entry(repo.clone()).or_default();
-                if matches!(outcome, ProcessRepoChangeOutcome::Succeeded) {
-                    failure_state.consecutive_errors = 0;
-                    failure_state.suppressed_until = None;
-                } else {
-                    failure_state.consecutive_errors =
-                        failure_state.consecutive_errors.saturating_add(1);
-                    let mut retry_state = state;
-                    retry_state.last_event_at = Some(Instant::now());
-                    pending.entry(repo.clone()).or_default().merge(retry_state);
-                    if failure_state.consecutive_errors >= self.config.consecutive_error_limit {
-                        failure_state.suppressed_until =
-                            Some(Instant::now() + self.config.error_backoff);
-                        warn!(
-                            repo,
-                            consecutive_errors = failure_state.consecutive_errors,
-                            backoff_ms = self.config.error_backoff.as_millis(),
-                            "suppressing watch reindex after repeated failures"
-                        );
+                match outcome {
+                    ProcessRepoChangeOutcome::Succeeded => {
+                        failure_state.consecutive_errors = 0;
+                        failure_state.suppressed_until = None;
                     }
+                    ProcessRepoChangeOutcome::Contended => {
+                        // Transient lock contention is neither success nor failure:
+                        // re-queue for the next trigger and leave the error counter
+                        // untouched, so a long concurrent index never trips the
+                        // suppression limit and silently halts the repo's reindexing.
+                        let mut retry_state = state;
+                        retry_state.last_event_at = Some(Instant::now());
+                        pending.entry(repo.clone()).or_default().merge(retry_state);
+                    }
+                    ProcessRepoChangeOutcome::Failed => {
+                        failure_state.consecutive_errors =
+                            failure_state.consecutive_errors.saturating_add(1);
+                        let mut retry_state = state;
+                        retry_state.last_event_at = Some(Instant::now());
+                        pending.entry(repo.clone()).or_default().merge(retry_state);
+                        if failure_state.consecutive_errors >= self.config.consecutive_error_limit {
+                            failure_state.suppressed_until =
+                                Some(Instant::now() + self.config.error_backoff);
+                            warn!(
+                                repo,
+                                consecutive_errors = failure_state.consecutive_errors,
+                                backoff_ms = self.config.error_backoff.as_millis(),
+                                "suppressing watch reindex after repeated failures"
+                            );
+                        }
+                    }
+                    ProcessRepoChangeOutcome::Cancelled => {}
                 }
             }
 
@@ -620,6 +637,13 @@ impl Watcher {
             Err(error) => {
                 if matches!(error, RepoIndexerError::Cancelled) {
                     return ProcessRepoChangeOutcome::Cancelled;
+                }
+                if matches!(error, RepoIndexerError::LockHeld(_)) {
+                    // Another indexer holds the lock; this is not a repo fault.
+                    // Surface it as info and retry on the next trigger rather than
+                    // counting it toward the consecutive-error suppression limit.
+                    info!(repo, %error, "watch reindex deferred: index lock held");
+                    return ProcessRepoChangeOutcome::Contended;
                 }
                 self.update_status(|status| {
                     status.errors = status.errors.saturating_add(1);

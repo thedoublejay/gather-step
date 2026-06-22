@@ -30,6 +30,16 @@ struct DoctorOutput {
     repos: Vec<RepoDoctorOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     quality_advisories: Vec<QualityAdvisory>,
+    locks: Vec<LockOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct LockOutput {
+    label: String,
+    age_secs: u64,
+    pid: Option<u32>,
+    hostname: Option<String>,
+    owner_alive: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +116,7 @@ pub(crate) fn execute(
     let repo_names: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
     let quality_advisories = collect_quality_advisories(storage, &repo_names)
         .context("collecting code-quality advisories")?;
+    let locks = collect_locks(storage, registry);
     let payload = DoctorOutput {
         event: "doctor_completed",
         ok: issue_count == 0,
@@ -113,6 +124,7 @@ pub(crate) fn execute(
         pack_metrics,
         repos,
         quality_advisories,
+        locks,
     };
 
     let mut lines = Vec::new();
@@ -163,6 +175,13 @@ pub(crate) fn execute(
                 "  - [{}] ({:.2}) {}",
                 advisory.rule_id, advisory.confidence, advisory.message
             ));
+        }
+    }
+    if payload.locks.is_empty() {
+        lines.push("Locks: none".to_owned());
+    } else {
+        for lock in &payload.locks {
+            lines.push(format!("Locks: {}", format_lock_line(lock)));
         }
     }
     let payload_json = json!(payload);
@@ -444,6 +463,49 @@ fn semantic_issues(health: &SemanticHealthReport) -> Vec<String> {
     issues
 }
 
+fn collect_locks(storage: &StorageCoordinator, registry: &RegistryStore) -> Vec<LockOutput> {
+    let locks_dir = gather_step_storage::lock::lock_dir(storage.root());
+    let repo_names: Vec<String> = registry.registry().repos.keys().cloned().collect();
+    gather_step_storage::lock::scan_locks(&locks_dir, &repo_names)
+        .into_iter()
+        .map(|report| LockOutput {
+            label: report
+                .repo
+                .unwrap_or_else(|| report.hash.chars().take(12).collect()),
+            age_secs: report.age.as_secs(),
+            pid: report.owner.as_ref().map(|owner| owner.pid),
+            hostname: report.owner.as_ref().map(|owner| owner.hostname.clone()),
+            owner_alive: report.owner_alive,
+        })
+        .collect()
+}
+
+fn format_lock_age(secs: u64) -> String {
+    if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn format_lock_line(lock: &LockOutput) -> String {
+    let owner = match (lock.pid, &lock.hostname) {
+        (Some(pid), Some(host)) => format!("pid {pid} on {host}"),
+        (Some(pid), None) => format!("pid {pid}"),
+        _ => "unknown owner".to_owned(),
+    };
+    let alive = match lock.owner_alive {
+        Some(true) => "alive",
+        Some(false) => "dead",
+        None => "unknown",
+    };
+    format!(
+        "`{}` held {} by {owner} ({alive})",
+        lock.label,
+        format_lock_age(lock.age_secs)
+    )
+}
+
 fn format_semantic_summary(health: &SemanticHealthReport) -> String {
     format!(
         "r {}/{} e {}/{} s {}/{} c {}/{} o {}",
@@ -505,6 +567,26 @@ mod tests {
             ambiguous_targets: 0,
             coverage_ratio: 1.0,
         }
+    }
+
+    #[test]
+    fn doctor_payload_always_carries_locks_array() {
+        let (ctx, _workspace) =
+            crate::test_helpers::indexed_fixture("doctor-locks", "pr-test-doctor");
+        let app = crate::test_helpers::test_app(ctx.workspace_root().to_path_buf());
+
+        let rendered =
+            super::run_rendered(&app, &ctx).expect("doctor::run_rendered should succeed");
+        let payload = rendered
+            .payload
+            .as_ref()
+            .expect("doctor should produce a JSON payload");
+
+        assert!(
+            payload["locks"].is_array(),
+            "doctor payload should always carry a locks array, got {:?}",
+            payload["locks"]
+        );
     }
 
     #[test]
