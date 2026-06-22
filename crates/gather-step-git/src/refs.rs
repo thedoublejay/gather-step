@@ -72,6 +72,12 @@ pub enum RefResolveError {
 // ---------------------------------------------------------------------------
 
 fn open_repo(repo: &Path) -> Result<gix::Repository, RefResolveError> {
+    // NOTE (v5.3 D3 deferral): opening with `Trust::Reduced` (as `history.rs`
+    // does) was tried but regresses `upstream_divergence` — reduced trust makes
+    // gix skip the remote config that `branch_remote_tracking_ref_name` needs,
+    // so divergence detection silently returns `None`. A proper hardening needs
+    // per-operation trust (reduced for ref/diff reads, remote config for the
+    // tracking lookup), tracked as a follow-up rather than this blanket change.
     gix::open(repo).map_err(|_| RefResolveError::RepoNotFound {
         path: repo.to_owned(),
     })

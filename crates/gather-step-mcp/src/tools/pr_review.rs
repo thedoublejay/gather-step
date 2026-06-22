@@ -164,7 +164,7 @@ pub fn run_pr_review(
     workspace: &std::path::Path,
     input: &PrReviewInput,
 ) -> Result<PrReviewResponse, String> {
-    let binary = resolve_binary();
+    let binary = resolve_binary()?;
 
     let mut cmd = Command::new(&binary);
     cmd.arg("--workspace").arg(workspace);
@@ -180,7 +180,7 @@ pub fn run_pr_review(
         input.keep_cache.unwrap_or(false),
         input.severity.as_deref(),
         input.no_baseline_check.unwrap_or(false),
-    );
+    )?;
 
     let (delta_report, threshold_exceeded) =
         run_pr_review_json_child(cmd, &binary, effective_timeout(input.timeout_secs))?;
@@ -199,11 +199,14 @@ fn append_common_pr_review_flags(
     keep_cache: bool,
     severity: Option<&str>,
     no_baseline_check: bool,
-) {
+) -> Result<(), String> {
     if let Some(config) = config {
         cmd.arg("--config")
-            .arg(path_for_workspace(workspace, config));
+            .arg(jail_readable_path(workspace, "--config", config)?);
     }
+    // `--cache-root` is intentionally NOT jailed: it is an explicit OS-cache
+    // override whose default lives outside the workspace; the disjoint-overlap
+    // guard downstream covers it.
     if let Some(cache_root) = cache_root {
         cmd.arg("--cache-root")
             .arg(path_for_workspace(workspace, cache_root));
@@ -217,6 +220,7 @@ fn append_common_pr_review_flags(
     if no_baseline_check {
         cmd.arg("--no-baseline-check");
     }
+    Ok(())
 }
 
 /// Run the coordinated PR-set review pipeline via the `gather-step` CLI.
@@ -224,7 +228,7 @@ pub fn run_pr_review_set(
     workspace: &std::path::Path,
     input: &PrReviewSetInput,
 ) -> Result<PrReviewSetResponse, String> {
-    let binary = resolve_binary();
+    let binary = resolve_binary()?;
 
     let mut cmd = Command::new(&binary);
     cmd.arg("--workspace").arg(workspace);
@@ -238,7 +242,7 @@ pub fn run_pr_review_set(
                 return Err("`allow_unknown_repos` is only valid when `from_gh` is set.".to_owned());
             }
             cmd.arg("--pr-set")
-                .arg(path_for_workspace(workspace, pr_set));
+                .arg(jail_readable_path(workspace, "--pr-set", pr_set)?);
         }
         (None, Some(from_gh)) => {
             cmd.arg("--from-gh").arg(from_gh);
@@ -265,7 +269,7 @@ pub fn run_pr_review_set(
         input.keep_cache.unwrap_or(false),
         input.severity.as_deref(),
         input.no_baseline_check.unwrap_or(false),
-    );
+    )?;
 
     let (multi_pr_delta_report, threshold_exceeded) =
         run_pr_review_json_child(cmd, &binary, effective_timeout(input.timeout_secs))?;
@@ -354,19 +358,18 @@ fn run_pr_review_json_child(
     Ok((delta_report, threshold_exceeded))
 }
 
-/// Resolve the path to the `gather-step` binary.
-///
-/// Searches (in order):
-/// 1. Same directory as the current executable.
-/// 2. `gather-step` on `PATH`.
-fn resolve_binary() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.with_file_name("gather-step");
-        if sibling.exists() {
-            return sibling;
-        }
+/// Resolve the path to the `gather-step` binary: the sibling of the current
+/// executable. We deliberately do **not** fall back to a bare-name `$PATH`
+/// spawn — that would let a hostile `$PATH` entry shadow the real binary.
+fn resolve_binary() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|_| "could not locate the gather-step binary (current_exe failed)".to_owned())?;
+    let sibling = exe.with_file_name("gather-step");
+    if sibling.exists() {
+        Ok(sibling)
+    } else {
+        Err("could not locate the gather-step binary next to the MCP server".to_owned())
     }
-    std::path::PathBuf::from("gather-step")
 }
 
 fn path_for_workspace(workspace: &std::path::Path, value: &str) -> std::path::PathBuf {
@@ -376,6 +379,28 @@ fn path_for_workspace(workspace: &std::path::Path, value: &str) -> std::path::Pa
     } else {
         workspace.join(path)
     }
+}
+
+/// Resolve an MCP-supplied *readable* path (`--config`, `--pr-set`) and confirm
+/// it canonicalises to a real file inside the workspace. Rejects path traversal
+/// and absolute paths outside the workspace (arbitrary-file-read defense). Error
+/// strings are intentionally path-free so they cannot echo a probed path back to
+/// the MCP client.
+fn jail_readable_path(
+    workspace: &std::path::Path,
+    kind: &str,
+    value: &str,
+) -> Result<std::path::PathBuf, String> {
+    let workspace_root = workspace
+        .canonicalize()
+        .map_err(|_| "workspace path could not be resolved".to_owned())?;
+    let resolved = path_for_workspace(workspace, value)
+        .canonicalize()
+        .map_err(|_| format!("{kind} must be an existing file inside the workspace"))?;
+    if !resolved.starts_with(&workspace_root) {
+        return Err(format!("{kind} must be inside the workspace"));
+    }
+    Ok(resolved)
 }
 
 fn effective_timeout(requested: Option<u64>) -> Duration {
@@ -645,6 +670,33 @@ mod tests {
             path_for_workspace(workspace, "sets/review.yaml"),
             std::path::PathBuf::from("/tmp/workspace/sets/review.yaml")
         );
+    }
+
+    #[test]
+    fn jail_readable_path_rejects_paths_outside_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        // An in-workspace file resolves.
+        let inside = workspace.path().join("gather-step.config.yaml");
+        std::fs::write(&inside, b"repos: []\n").unwrap();
+        assert!(
+            jail_readable_path(workspace.path(), "--config", "gather-step.config.yaml").is_ok()
+        );
+
+        // An absolute path outside the workspace is rejected, and the error does
+        // not echo the probed path back (D2).
+        let secret = outside.path().join("secret.yaml");
+        std::fs::write(&secret, b"x\n").unwrap();
+        let err = jail_readable_path(workspace.path(), "--config", secret.to_str().unwrap())
+            .expect_err("outside path must be rejected");
+        assert!(
+            !err.contains(secret.to_str().unwrap()),
+            "error leaked the path: {err}"
+        );
+
+        // A traversal escape is rejected.
+        assert!(jail_readable_path(workspace.path(), "--config", "../../etc/hosts").is_err());
     }
 
     #[test]

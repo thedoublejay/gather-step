@@ -84,6 +84,8 @@ pub enum DeploymentParseError {
         "deployment artifact `{path}` contains unrendered template syntax; skipping YAML parse"
     )]
     Templated { path: String },
+    #[error("deployment artifact `{path}` rejected by the YAML safety guard: {reason}")]
+    Guard { path: String, reason: String },
 }
 
 #[must_use]
@@ -1204,6 +1206,12 @@ fn workflow_needs(value: &Value) -> BTreeSet<String> {
 }
 
 fn parse_yaml(content: &str, path: &str) -> Result<Value, DeploymentParseError> {
+    if let Err(error) = gather_step_core::config::guard_yaml_source(content, path) {
+        return Err(DeploymentParseError::Guard {
+            path: path.to_owned(),
+            reason: error.to_string(),
+        });
+    }
     serde_norway::from_str(content).map_err(|source| {
         if looks_like_templated_yaml(content) {
             DeploymentParseError::Templated {

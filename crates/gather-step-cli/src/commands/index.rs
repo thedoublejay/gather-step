@@ -919,7 +919,10 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             .count_edge_summary()
             .context("finalizing workspace edge summary")?;
         stats.cross_repo_edges = cross_repo_edges;
-        stats.total_edges = u64::try_from(total_edges_in_graph).unwrap_or(u64::MAX);
+        // `usize -> u64` is lossless on supported (64-bit) targets; never
+        // fabricate `u64::MAX`, which would silently corrupt the summary
+        // invariant check below.
+        stats.total_edges = total_edges_in_graph as u64;
         (
             true_cross_repo_edges,
             history_ownership_edges,

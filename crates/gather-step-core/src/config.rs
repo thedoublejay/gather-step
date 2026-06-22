@@ -158,8 +158,68 @@ pub enum ConfigError {
 /// expansion can cause unbounded memory growth on adversarially crafted input.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// Maximum YAML anchors / aliases accepted before parsing. Workspace and
+/// deployment configs have no legitimate need for anchors, so capping them low
+/// blocks an alias expansion (billion laughs) attack — where a small source
+/// expands to gigabytes — without affecting real configs. `serde_norway`
+/// (`libyaml`) does not bound alias expansion itself.
+const MAX_YAML_ANCHORS: usize = 32;
+const MAX_YAML_ALIASES: usize = 64;
+
+/// Guard raw YAML against size and alias expansion attacks *before* it reaches
+/// the parser. Shared by every YAML parse site in the workspace.
+pub fn guard_yaml_source(input: &str, path: &str) -> Result<(), ConfigError> {
+    if input.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(ConfigError::Validation {
+            path: path.to_owned(),
+            reason: format!(
+                "YAML input exceeds the 1 MiB safety limit ({} bytes)",
+                input.len()
+            ),
+        });
+    }
+    let (anchors, aliases) = count_yaml_anchors_aliases(input);
+    if anchors > MAX_YAML_ANCHORS || aliases > MAX_YAML_ALIASES {
+        return Err(ConfigError::Validation {
+            path: path.to_owned(),
+            reason: "YAML uses too many anchors/aliases (possible alias-expansion bomb)".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Count YAML anchor (`&name`) and alias (`*name`) tokens. Conservative: only
+/// counts a marker that begins a token (preceded by structural whitespace/flow
+/// punctuation) and is followed by a name char, so quoted globs like `"*.rs"`
+/// are not miscounted.
+fn count_yaml_anchors_aliases(input: &str) -> (usize, usize) {
+    let bytes = input.as_bytes();
+    let mut anchors = 0usize;
+    let mut aliases = 0usize;
+    let mut prev_structural = true;
+    for (i, &c) in bytes.iter().enumerate() {
+        if (c == b'&' || c == b'*')
+            && prev_structural
+            && let Some(&next) = bytes.get(i + 1)
+            && (next.is_ascii_alphanumeric() || next == b'_' || next == b'-')
+        {
+            if c == b'&' {
+                anchors += 1;
+            } else {
+                aliases += 1;
+            }
+        }
+        prev_structural = matches!(
+            c,
+            b' ' | b'\t' | b'\n' | b'\r' | b':' | b'-' | b'[' | b']' | b'{' | b'}' | b','
+        );
+    }
+    (anchors, aliases)
+}
+
 impl GatherStepConfig {
     pub fn from_yaml_str(input: &str) -> Result<Self, ConfigError> {
+        guard_yaml_source(input, "<inline>")?;
         let config: Self = serde_norway::from_str(input).map_err(|source| ConfigError::Parse {
             path: "<inline>".to_owned(),
             source,
@@ -193,6 +253,7 @@ impl GatherStepConfig {
             path: path.clone(),
             source,
         })?;
+        guard_yaml_source(&raw, &path)?;
 
         let config: Self = serde_norway::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
@@ -521,7 +582,25 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use super::{ConfigError, DepthLevel, GatherStepConfig};
+    use super::{ConfigError, DepthLevel, GatherStepConfig, guard_yaml_source};
+
+    #[test]
+    fn yaml_guard_rejects_alias_bomb_but_allows_normal_config() {
+        use std::fmt::Write as _;
+
+        // A normal config (no anchors) passes.
+        assert!(guard_yaml_source("repos:\n  - name: a\n    path: ./a\n", "<t>").is_ok());
+
+        // An anchor/alias-heavy document (billion-laughs shape) is rejected.
+        let mut bomb = String::from("a: &a [x, x, x, x, x, x, x, x]\n");
+        for i in 0..40 {
+            let _ = writeln!(bomb, "b{i}: &b{i} [*a, *a, *a, *a, *a, *a, *a, *a]");
+        }
+        assert!(matches!(
+            guard_yaml_source(&bomb, "<t>"),
+            Err(ConfigError::Validation { .. })
+        ));
+    }
 
     #[test]
     fn parses_workspace_yaml_config() {

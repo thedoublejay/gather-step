@@ -100,6 +100,15 @@ impl LocalConfig {
             }
         };
 
+        if gather_step_core::config::guard_yaml_source(&raw, &config_path.display().to_string())
+            .is_err()
+        {
+            tracing::warn!(
+                path = %config_path.display(),
+                "local config rejected by the YAML safety guard; falling back to auto-detection"
+            );
+            return None;
+        }
         match serde_norway::from_str::<Self>(&raw) {
             Ok(config) => Some(config),
             Err(err) => {
