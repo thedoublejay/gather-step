@@ -193,7 +193,9 @@ where
     ak.sort();
     bk.sort();
     if ak != bk {
-        diffs.push(format!("{label}: temp-index has {ak:?}, overlay has {bk:?}"));
+        diffs.push(format!(
+            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
+        ));
     }
 }
 
@@ -230,13 +232,7 @@ fn compare_ai_contract_changed_lists(
     b: &[AiContractDeltaChange],
     diffs: &mut Vec<String>,
 ) {
-    compare_sorted(
-        "ai_contracts.changed",
-        a,
-        b,
-        ai_contract_change_key,
-        diffs,
-    );
+    compare_sorted("ai_contracts.changed", a, b, ai_contract_change_key, diffs);
 }
 
 fn route_key(r: &RouteDelta) -> String {
