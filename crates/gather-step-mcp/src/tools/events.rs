@@ -1685,4 +1685,32 @@ mod tests {
 
         assert_eq!(response.data.target_id, Some(encode_node_id(agent_a.id)));
     }
+
+    /// Payload-shape guard: the serialized `trace_route` response must keep its
+    /// stable top-level `data` keys (`callers`, `handlers`, `method`, `path`).
+    /// Behavioral tests assert Rust struct fields, which a serde rename would
+    /// not catch; this pins the JSON wire contract directly.
+    #[test]
+    fn trace_route_response_serializes_with_stable_keys() {
+        use super::{TraceRouteData, TraceRouteResponse};
+
+        let response = TraceRouteResponse {
+            data: TraceRouteData {
+                callers: Vec::new(),
+                handlers: Vec::new(),
+                method: "GET".to_owned(),
+                path: "/orders".to_owned(),
+                target_id: None,
+                target_name: None,
+            },
+            meta: None,
+        };
+
+        let value = serde_json::to_value(&response).expect("response must serialize");
+        let data = value.get("data").expect("`data` key must be present");
+        assert!(data.get("callers").is_some(), "`callers` key");
+        assert!(data.get("handlers").is_some(), "`handlers` key");
+        assert_eq!(data.get("method").and_then(|v| v.as_str()), Some("GET"));
+        assert_eq!(data.get("path").and_then(|v| v.as_str()), Some("/orders"));
+    }
 }

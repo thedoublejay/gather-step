@@ -877,6 +877,77 @@ mod tests {
         );
     }
 
+    /// Payload-shape guard: a serialized search hit must keep BOTH the legacy
+    /// result keys (`symbol_id`, `symbol_name`, `repo`, `file_path`, `kind`,
+    /// `language`, `score`, `exact_match`, `line_start`) AND the cross-repo
+    /// fields (`consumer_repos`, `participates`). The legacy keys protect
+    /// existing MCP clients; the new keys protect the cross-repo-consumer
+    /// feature. A serde rename or removal on either set would break the wire
+    /// contract without failing the behavioral tests.
+    #[test]
+    fn search_result_serializes_legacy_and_cross_repo_keys() {
+        use super::{SearchResponse, SearchResponseData};
+
+        let item = SearchResultItem {
+            consumer_repos: vec!["service-ui".to_owned()],
+            exact_match: true,
+            file_path: "src/config/credit.ts".to_owned(),
+            kind: "constant".to_owned(),
+            language: "typescript".to_owned(),
+            line_start: Some(12),
+            participates: true,
+            repo: "service-api".to_owned(),
+            score: 1.5,
+            symbol_id: "abc123".to_owned(),
+            symbol_name: "CREDIT_AGENT_CONFIGS".to_owned(),
+        };
+        let response = SearchResponse {
+            data: SearchResponseData {
+                results: vec![item],
+                returned: 1,
+                total_estimate: 1,
+            },
+            meta: None,
+        };
+
+        let value = serde_json::to_value(&response).expect("response must serialize");
+        let data = value.get("data").expect("`data` key must be present");
+        assert!(data.get("results").is_some(), "`results` key");
+        assert!(data.get("returned").is_some(), "`returned` key");
+        assert!(data.get("total_estimate").is_some(), "`total_estimate` key");
+
+        let hit = &data["results"][0];
+        for legacy_key in [
+            "symbol_id",
+            "symbol_name",
+            "repo",
+            "file_path",
+            "kind",
+            "language",
+            "score",
+            "exact_match",
+            "line_start",
+        ] {
+            assert!(
+                hit.get(legacy_key).is_some(),
+                "legacy result key `{legacy_key}` must be present"
+            );
+        }
+        // Cross-repo-consumer fields ship alongside the legacy shape.
+        assert_eq!(
+            hit.get("consumer_repos")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(1),
+            "`consumer_repos` must carry the foreign consumer"
+        );
+        assert_eq!(
+            hit.get("participates").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "`participates` must be true when consumer_repos is non-empty"
+        );
+    }
+
     #[test]
     fn search_surfaces_cross_repo_consumers() {
         use std::{env, fs};
