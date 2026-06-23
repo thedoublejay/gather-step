@@ -21,7 +21,10 @@
 
 use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id};
 
-use crate::tree_sitter::{EnrichedCallSite, ParsedFile};
+use crate::{
+    top_level_split::split_top_level,
+    tree_sitter::{EnrichedCallSite, ParsedFile},
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PythonKafkaAugmentation {
@@ -60,8 +63,8 @@ fn producer_topic(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<S
         return None;
     }
     let raw = call_site.raw_arguments.as_deref()?;
-    let first = split_top_level(raw).into_iter().next()?;
-    resolve_topic(parsed, &first)
+    let first = split_top_level(raw, ',').into_iter().next()?;
+    resolve_topic(parsed, first)
 }
 
 /// Topics consumed at this call site (the `AIOKafkaConsumer(...)` constructor
@@ -89,8 +92,8 @@ fn constructor_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<
         return Vec::new();
     };
     let mut topics = Vec::new();
-    for argument in split_top_level(raw) {
-        match resolve_topic(parsed, &argument) {
+    for argument in split_top_level(raw, ',') {
+        match resolve_topic(parsed, argument) {
             Some(topic) => topics.push(topic),
             None => break,
         }
@@ -103,15 +106,15 @@ fn subscribe_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<St
     let Some(raw) = call_site.raw_arguments.as_deref() else {
         return Vec::new();
     };
-    let Some(list) = split_top_level(raw).into_iter().next() else {
+    let Some(list) = split_top_level(raw, ',').into_iter().next() else {
         return Vec::new();
     };
     let inner = list
         .trim()
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
-        .unwrap_or(&list);
-    split_top_level(inner)
+        .unwrap_or(list);
+    split_top_level(inner, ',')
         .iter()
         .filter_map(|element| resolve_topic(parsed, element))
         .collect()
@@ -203,37 +206,6 @@ fn string_literal(argument: &str) -> Option<String> {
         return Some(argument[1..argument.len() - 1].to_owned());
     }
     None
-}
-
-/// Split a comma-separated argument string at top level, respecting quotes and
-/// `()`/`[]`/`{}` nesting. Returns trimmed, non-empty fragments.
-fn split_top_level(raw: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    let mut depth = 0_i32;
-    let mut in_string: Option<u8> = None;
-    let mut start = 0;
-    for (index, &byte) in raw.as_bytes().iter().enumerate() {
-        match in_string {
-            Some(quote) => {
-                if byte == quote {
-                    in_string = None;
-                }
-            }
-            None => match byte {
-                b'"' | b'\'' => in_string = Some(byte),
-                b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' => depth -= 1,
-                b',' if depth == 0 => {
-                    fragments.push(raw[start..index].trim().to_owned());
-                    start = index + 1;
-                }
-                _ => {}
-            },
-        }
-    }
-    fragments.push(raw[start..].trim().to_owned());
-    fragments.retain(|fragment| !fragment.is_empty());
-    fragments
 }
 
 #[cfg(test)]

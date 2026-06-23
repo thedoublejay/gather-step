@@ -61,6 +61,17 @@ pub fn augment(parsed: &ParsedFile) -> GatewayProxyAugmentation {
             owner_file: file_node_id,
             is_cross_file: false,
         });
+        aug.edges.push(EdgeData {
+            source: file_node_id,
+            target: route_id,
+            kind: EdgeKind::ConsumesApiFrom,
+            metadata: EdgeMetadata {
+                confidence: Some(820),
+                ..EdgeMetadata::default()
+            },
+            owner_file: file_node_id,
+            is_cross_file: true,
+        });
     }
 
     aug

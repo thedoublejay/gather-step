@@ -282,6 +282,7 @@ fn reset_and_reopen_indexer(
     options: IndexingOptions,
     output: &crate::app::Output,
 ) -> Result<RepoIndexer> {
+    crate::app::mark_telemetry_recovery_event();
     clean::reset_index_state(registry_path, storage_root).with_context(|| {
         format!(
             "auto-recover clearing generated state at {} and {}",

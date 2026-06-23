@@ -118,7 +118,7 @@ fn encode_resolution_input(input: &ResolutionInput) -> Vec<u8> {
             })
             .collect(),
     };
-    bitcode::encode(&stored)
+    crate::bitcode_blob::wrap(&bitcode::encode(&stored))
 }
 
 /// Decode a [`ResolutionInput`] from compact bitcode bytes produced by
@@ -130,7 +130,14 @@ fn decode_resolution_input(bytes: &[u8]) -> Result<ResolutionInput, rusqlite::Er
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
 
-    let stored: StoredResolutionInput = bitcode::decode(bytes).map_err(|error| {
+    let payload = crate::bitcode_blob::unwrap(bytes).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            bytes.len(),
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::other(error.to_string())),
+        )
+    })?;
+    let stored: StoredResolutionInput = bitcode::decode(payload).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             bytes.len(),
             rusqlite::types::Type::Blob,
@@ -1022,7 +1029,10 @@ pub enum MetadataStoreError {
 /// Bumped to 1 in v5 when the `ai_contracts` table was added. `SQLite`
 /// metadata carries no migration branches; a version mismatch forces a clean
 /// reindex (the same contract as the graph store).
-pub const METADATA_SCHEMA_VERSION: i64 = 1;
+///
+/// Bumped 1→2 in v5.3: unresolved-call bitcode blobs are wrapped with a schema
+/// byte and BLAKE3 checksum. Reindex required because older rows lack it.
+pub const METADATA_SCHEMA_VERSION: i64 = 2;
 
 impl MetadataStoreDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetadataStoreError> {
@@ -1699,9 +1709,7 @@ impl MetadataStoreDb {
                     "INSERT INTO unresolved_call_candidate_keys(repo, source_path, candidate_key) VALUES (?1, ?2, ?3)",
                 )?;
                 for input in inputs {
-                    let file_path_bytes = PathId::from_path(&input.file_path)
-                        .as_bytes()
-                        .to_vec();
+                    let file_path_bytes = PathId::from_path(&input.file_path).into_bytes();
                     let payload = encode_resolution_input(input);
                     ins_unresolved.execute(params![repo, &file_path_bytes, payload])?;
                     for candidate_key in Self::unresolved_candidate_keys(input) {
@@ -1812,9 +1820,7 @@ impl MetadataStoreDb {
                     "INSERT INTO unresolved_call_candidate_keys(repo, source_path, candidate_key) VALUES (?1, ?2, ?3)",
                 )?;
                 for input in inputs {
-                    let file_path_bytes = PathId::from_path(&input.file_path)
-                        .as_bytes()
-                        .to_vec();
+                    let file_path_bytes = PathId::from_path(&input.file_path).into_bytes();
                     let payload = encode_resolution_input(input);
                     ins_unresolved.execute(params![repo, &file_path_bytes, payload])?;
                     for candidate_key in Self::unresolved_candidate_keys(input) {
@@ -1843,9 +1849,7 @@ impl MetadataStoreDb {
             )?;
 
             for input in inputs {
-                let file_path_bytes = PathId::from_path(&input.file_path)
-                    .as_bytes()
-                    .to_vec();
+                let file_path_bytes = PathId::from_path(&input.file_path).into_bytes();
                 let payload = encode_resolution_input(input);
                 tx.execute(
                     "INSERT INTO unresolved_call_candidates(repo, file_path, payload) VALUES (?1, ?2, ?3)",
@@ -5330,9 +5334,7 @@ mod tests {
             }],
         };
 
-        let path_id = gather_step_core::PathId::from_path(&file_path)
-            .as_bytes()
-            .to_vec();
+        let path_id = gather_step_core::PathId::from_path(&file_path).into_bytes();
         store.replace_unresolved_resolution_inputs_for_files(
             repo,
             &[path_id],

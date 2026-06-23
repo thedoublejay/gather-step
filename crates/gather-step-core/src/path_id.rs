@@ -92,6 +92,11 @@ impl PathId {
         &self.0
     }
 
+    /// Consume the identity and return its raw path bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
     /// Lossily convert to a displayable string for log lines, CLI output, and
     /// markdown rendering where valid UTF-8 cannot be guaranteed.
     ///

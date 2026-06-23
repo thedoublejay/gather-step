@@ -6,6 +6,7 @@ pub mod graph;
 pub mod high_contract;
 pub mod path_id;
 pub mod payload;
+pub mod process_metrics;
 pub mod registry;
 pub mod resolver;
 pub mod schema;
@@ -29,6 +30,7 @@ pub use payload::{
     DriftKind, PayloadConfidenceBand, PayloadContractDoc, PayloadContractRecord, PayloadField,
     PayloadInferenceKind, PayloadSide, payload_contract_external_id, payload_contract_node_id,
 };
+pub use process_metrics::capture_rss;
 pub use registry::{
     CursorState, RegisteredRepo, RegistryError, RegistrySource, RegistryStore, RepoIndexMetadata,
     WorkspaceRegistry,

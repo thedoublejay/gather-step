@@ -13,6 +13,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -633,85 +634,133 @@ enum RunOutcome {
 /// [`quarantine_on_error`], so the artifact remains discoverable by
 /// `pr-review clean --run-id <id>` or `pr-review clean --older-than <duration>`.
 struct ReviewCleanupGuard {
+    state: Arc<Mutex<ReviewCleanupState>>,
+    retention: CacheRetention,
+    signal_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct ReviewCleanupState {
     artifact_root_path: Option<std::path::PathBuf>,
     worktrees: Vec<ReviewWorktree>,
-    retention: CacheRetention,
 }
 
 impl ReviewCleanupGuard {
     fn new(retention: CacheRetention) -> Self {
         Self {
-            artifact_root_path: None,
-            worktrees: Vec::new(),
+            state: Arc::new(Mutex::new(ReviewCleanupState::default())),
             retention,
+            signal_task: None,
         }
     }
 
+    fn install_signal_handler(&mut self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        let retention = self.retention;
+        self.signal_task = Some(handle.spawn(async move {
+            if pr_review_shutdown_signal().await.is_ok() {
+                if let Ok(mut state) = state.lock() {
+                    cleanup_review_artifacts(&mut state, retention);
+                }
+                std::process::exit(130);
+            }
+        }));
+    }
+
     fn arm(&mut self, artifact_root_path: std::path::PathBuf, worktrees: Vec<ReviewWorktree>) {
-        self.artifact_root_path = Some(artifact_root_path);
-        self.worktrees = worktrees;
+        if let Ok(mut state) = self.state.lock() {
+            state.artifact_root_path = Some(artifact_root_path);
+            state.worktrees = worktrees;
+        }
     }
 
     fn disarm(&mut self) {
-        self.artifact_root_path = None;
-        self.worktrees.clear();
+        if let Ok(mut state) = self.state.lock() {
+            state.artifact_root_path = None;
+            state.worktrees.clear();
+        }
     }
 }
 
 impl Drop for ReviewCleanupGuard {
     fn drop(&mut self) {
-        if self.retention.keeps_cache() {
-            // User opted to inspect the artifact (including failures).
-            // Drop the references so we don't double-cleanup if a later
-            // explicit cleanup path runs, but do not touch disk.
-            self.artifact_root_path = None;
-            self.worktrees.clear();
+        if let Some(task) = self.signal_task.take() {
+            task.abort();
+        }
+        if let Ok(mut state) = self.state.lock() {
+            cleanup_review_artifacts(&mut state, self.retention);
+        }
+    }
+}
+
+async fn pr_review_shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = sigterm.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
+}
+
+fn cleanup_review_artifacts(state: &mut ReviewCleanupState, retention: CacheRetention) {
+    if retention.keeps_cache() {
+        state.artifact_root_path = None;
+        state.worktrees.clear();
+        return;
+    }
+    // Worktree removal is the gate for artifact-root removal: if `git
+    // worktree remove` fails (e.g. dirty working tree, locked refs), the
+    // source repo's `.git/worktrees/<id>` pointer is still present and
+    // would be left dangling if we deleted the artifact dir it points
+    // at. Quarantine instead so the user can run `pr-review clean
+    // --run-id <id>` once the worktree state is unstuck.
+    let mut worktree_removed = true;
+    for wt in state.worktrees.drain(..) {
+        if let Err(e) = remove_worktree(&wt) {
+            worktree_removed = false;
+            tracing::warn!(
+                error = %e,
+                worktree = %wt.root.display(),
+                "pr-review cleanup guard: Failed to remove a worktree on a panic, signal, or early-return path; leaving the artifact for manual cleanup.",
+            );
+        }
+    }
+    if let Some(path) = state.artifact_root_path.take() {
+        if !worktree_removed {
+            let quarantined = quarantine_artifact_path(&path);
+            if quarantined {
+                tracing::warn!(
+                    path = %path.display(),
+                    "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. The artifact marker was moved to the Quarantined state. \
+                     Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                );
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed, and the marker could not be transitioned to Quarantined. \
+                     Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
+                );
+            }
             return;
         }
-        // Worktree removal is the gate for artifact-root removal: if `git
-        // worktree remove` fails (e.g. dirty working tree, locked refs), the
-        // source repo's `.git/worktrees/<id>` pointer is still present and
-        // would be left dangling if we deleted the artifact dir it points
-        // at. Quarantine instead so the user can run `pr-review clean
-        // --run-id <id>` once the worktree state is unstuck.
-        let mut worktree_removed = true;
-        for wt in self.worktrees.drain(..) {
-            if let Err(e) = remove_worktree(&wt) {
-                worktree_removed = false;
-                tracing::warn!(
-                    error = %e,
-                    worktree = %wt.root.display(),
-                    "pr-review cleanup guard: Failed to remove a worktree on a panic or early-return path; leaving the artifact for manual cleanup.",
-                );
-            }
-        }
-        if let Some(path) = self.artifact_root_path.take() {
-            if !worktree_removed {
-                let quarantined = quarantine_artifact_path(&path);
-                if quarantined {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed. The artifact marker was moved to the Quarantined state. \
-                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
-                    );
-                } else {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "pr-review cleanup guard: Skipping artifact directory removal because worktree removal failed, and the marker could not be transitioned to Quarantined. \
-                         Run `gather-step pr-review clean --run-id <id>` after fixing the worktree state.",
-                    );
-                }
-                return;
-            }
-            if path.exists()
-                && let Err(e) = std::fs::remove_dir_all(&path)
-            {
-                tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "pr-review cleanup guard: Failed to remove the artifact directory on a panic or early-return path.",
-                );
-            }
+        if path.exists()
+            && let Err(e) = std::fs::remove_dir_all(&path)
+        {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "pr-review cleanup guard: Failed to remove the artifact directory on a panic, signal, or early-return path.",
+            );
         }
     }
 }
@@ -1162,6 +1211,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
     // than leaving them as InProgress orphans in the user's OS cache.
     let mut cleanup_guard =
         ReviewCleanupGuard::new(CacheRetention::from_keep_cache(args.keep_cache));
+    cleanup_guard.install_signal_handler();
 
     // Try to reuse a prior completed artifact with the same cache key.
     // Cache reuse is independent of `keep_cache` — `keep_cache` controls

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gix::{bstr::ByteSlice as _, object::tree::diff::Change};
+use gix::{bstr::ByteSlice as _, object::tree::diff::Change, sec::trust::DefaultForLevel as _};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -72,12 +72,13 @@ pub enum RefResolveError {
 // ---------------------------------------------------------------------------
 
 fn open_repo(repo: &Path) -> Result<gix::Repository, RefResolveError> {
-    // NOTE (v5.3 D3 deferral): opening with `Trust::Reduced` (as `history.rs`
-    // does) was tried but regresses `upstream_divergence` — reduced trust makes
-    // gix skip the remote config that `branch_remote_tracking_ref_name` needs,
-    // so divergence detection silently returns `None`. A proper hardening needs
-    // per-operation trust (reduced for ref/diff reads, remote config for the
-    // tracking lookup), tracked as a follow-up rather than this blanket change.
+    let opts = gix::open::Options::default_for_level(gix::sec::Trust::Reduced);
+    gix::open_opts(repo, opts).map_err(|_| RefResolveError::RepoNotFound {
+        path: repo.to_owned(),
+    })
+}
+
+fn open_repo_for_tracking_config(repo: &Path) -> Result<gix::Repository, RefResolveError> {
     gix::open(repo).map_err(|_| RefResolveError::RepoNotFound {
         path: repo.to_owned(),
     })
@@ -167,8 +168,9 @@ pub fn upstream_divergence(
         .map_err(|e| git_op(repo, e))?
         .detach();
 
-    let Some(Ok(tracking_name)) =
-        r.branch_remote_tracking_ref_name(local_name.as_ref(), gix::remote::Direction::Fetch)
+    let config_repo = open_repo_for_tracking_config(repo)?;
+    let Some(Ok(tracking_name)) = config_repo
+        .branch_remote_tracking_ref_name(local_name.as_ref(), gix::remote::Direction::Fetch)
     else {
         return Ok(None);
     };

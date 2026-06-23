@@ -13,6 +13,7 @@ use crate::{
     FileEntry,
     frameworks::Framework,
     resolve::ImportBinding,
+    top_level_split::split_top_level,
     traverse::{Language, classify_language},
     tree_sitter::{
         DecoratorCapture, EnrichedCallSite, ParsedFile, SymbolCapture, parse_file_with_context,
@@ -1592,52 +1593,6 @@ fn split_topic_metadata_values(raw: &str) -> Vec<String> {
     } else {
         vec![trimmed.to_owned()]
     }
-}
-
-fn split_top_level(raw: &str, delimiter: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut bracket_depth = 0_u32;
-    let mut brace_depth = 0_u32;
-    let mut paren_depth = 0_u32;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-    let mut escape = false;
-
-    for (index, ch) in raw.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if in_single || in_double || in_backtick => {
-                escape = true;
-            }
-            '\'' if !in_double && !in_backtick => in_single = !in_single,
-            '"' if !in_single && !in_backtick => in_double = !in_double,
-            '`' if !in_single && !in_double => in_backtick = !in_backtick,
-            _ if in_single || in_double || in_backtick => {}
-            '[' => bracket_depth = bracket_depth.saturating_add(1),
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            '{' => brace_depth = brace_depth.saturating_add(1),
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '(' => paren_depth = paren_depth.saturating_add(1),
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            _ if ch == delimiter && bracket_depth == 0 && brace_depth == 0 && paren_depth == 0 => {
-                parts.push(raw[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    let tail = raw[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts
 }
 
 pub(crate) fn extract_call_argument(raw_arguments: &str, index: usize) -> Option<&str> {
@@ -4488,7 +4443,8 @@ export class Svc {
 
     #[test]
     fn split_top_level_keeps_template_literals_intact() {
-        let values = super::split_top_level("`hello,${world}`,'user.updated'", ',');
+        let values =
+            crate::top_level_split::split_top_level("`hello,${world}`,'user.updated'", ',');
         assert_eq!(values, vec!["`hello,${world}`", "'user.updated'"]);
     }
 

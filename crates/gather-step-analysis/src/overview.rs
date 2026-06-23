@@ -6,37 +6,6 @@ use thiserror::Error;
 
 use crate::dead_code::{DeadCodeError, find_dead_code};
 
-fn node_kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::File => "file",
-        NodeKind::Function => "function",
-        NodeKind::Class => "class",
-        NodeKind::Type => "type",
-        NodeKind::Module => "module",
-        NodeKind::Import => "import",
-        NodeKind::Decorator => "decorator",
-        NodeKind::Entity => "entity",
-        NodeKind::Route => "route",
-        NodeKind::Topic => "topic",
-        NodeKind::Queue => "queue",
-        NodeKind::Subject => "subject",
-        NodeKind::Stream => "stream",
-        NodeKind::Event => "event",
-        NodeKind::SharedSymbol => "shared_symbol",
-        NodeKind::PayloadContract => "payload_contract",
-        NodeKind::Repo => "repo",
-        NodeKind::Convention => "convention",
-        NodeKind::Service => "service",
-        NodeKind::Commit => "commit",
-        NodeKind::PR => "pr",
-        NodeKind::Review => "review",
-        NodeKind::Comment => "comment",
-        NodeKind::Author => "author",
-        NodeKind::Ticket => "ticket",
-        _ => "unknown",
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum OverviewError {
     #[error(transparent)]
@@ -73,9 +42,7 @@ pub fn build_overview<G: GraphStore, M: MetadataStore>(
     let mut node_counts = BTreeMap::<String, usize>::new();
     let mut module_counts = BTreeMap::<String, usize>::new();
     for node in &nodes {
-        *node_counts
-            .entry(node_kind_label(node.kind).to_owned())
-            .or_default() += 1;
+        *node_counts.entry(node.kind.label().to_owned()).or_default() += 1;
         if node.kind == NodeKind::File {
             let module = node
                 .file_path

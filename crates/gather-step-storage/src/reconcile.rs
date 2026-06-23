@@ -270,7 +270,7 @@ fn reconcile_unresolved_calls(
     // need string paths for graph-store / reconcile bookkeeping.
     let affected_path_ids: Vec<Vec<u8>> = unresolved
         .iter()
-        .map(|input| PathId::from_path(&input.file_path).as_bytes().to_vec())
+        .map(|input| PathId::from_path(&input.file_path).into_bytes())
         .collect();
     let affected_file_paths: Vec<String> = unresolved
         .iter()

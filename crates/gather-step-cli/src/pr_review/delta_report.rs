@@ -1229,7 +1229,7 @@ fn removed_surface_evidence(risk: &RemovedSurfaceRisk) -> Evidence {
         EvidenceCitation {
             kind: CitationKind::Symbol,
             repo: risk.repo.clone(),
-            path: None,
+            path: removed_surface_risk_path(risk),
             line: None,
             symbol_id: None,
             symbol_kind: Some(risk.kind.clone()),
@@ -1248,6 +1248,20 @@ fn removed_surface_evidence(risk: &RemovedSurfaceRisk) -> Evidence {
         EvidenceSupportMethod::GraphTraversal,
         None,
     ))
+}
+
+fn removed_surface_risk_path(risk: &RemovedSurfaceRisk) -> Option<String> {
+    if !matches!(
+        risk.kind.as_str(),
+        "value_mirror" | "value_mirror_incomplete" | "enum_guard_incomplete"
+    ) {
+        return None;
+    }
+    let detail = risk.detail.as_deref()?;
+    let (_, after_surface) = detail.split_once("surface ")?;
+    let location = after_surface.split_whitespace().next()?;
+    let (_, path) = location.split_once("::")?;
+    (!path.is_empty()).then(|| path.to_owned())
 }
 
 fn contract_alignment_evidence(finding: &ContractAlignmentFinding) -> Evidence {

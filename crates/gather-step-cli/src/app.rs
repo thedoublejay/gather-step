@@ -2,21 +2,73 @@ use std::{
     env,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use console::{set_colors_enabled, set_colors_enabled_stderr, style};
 use indicatif::{MultiProgress, ProgressDrawTarget};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{MakeWriter, time::ChronoLocal},
+    layer::{Context as LayerContext, Layer},
+    prelude::*,
 };
 
 use crate::{commands::Cli, path_safety};
 
 const BANNER: &str = include_str!("../assets/banner.txt");
+static TELEMETRY_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
+static TELEMETRY_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
+static TELEMETRY_RECOVERY_EVENT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug)]
+struct TelemetryCounterLayer;
+
+impl<S> Layer<S> for TelemetryCounterLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
+        match *event.metadata().level() {
+            Level::WARN => {
+                TELEMETRY_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+            Level::ERROR => {
+                TELEMETRY_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[must_use]
+pub fn telemetry_counts() -> (u32, u32) {
+    (
+        TELEMETRY_WARN_COUNT.load(Ordering::Relaxed),
+        TELEMETRY_ERROR_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+pub fn mark_telemetry_recovery_event() {
+    TELEMETRY_RECOVERY_EVENT.store(true, Ordering::Relaxed);
+}
+
+pub fn reset_telemetry_run_state() {
+    TELEMETRY_WARN_COUNT.store(0, Ordering::Relaxed);
+    TELEMETRY_ERROR_COUNT.store(0, Ordering::Relaxed);
+    TELEMETRY_RECOVERY_EVENT.store(false, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn telemetry_recovery_event() -> bool {
+    TELEMETRY_RECOVERY_EVENT.load(Ordering::Relaxed)
+}
 
 #[expect(
     clippy::struct_excessive_bools,
@@ -193,13 +245,16 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
     configure_console_colors(cli);
 
     if cli.json {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
+        let fmt_layer = tracing_subscriber::fmt::layer()
             .with_writer(io::stderr)
             .with_timer(ChronoLocal::rfc_3339())
             .with_target(false)
             .with_ansi(false)
-            .json()
+            .json();
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(TelemetryCounterLayer)
+            .with(fmt_layer)
             .init();
         return Ok(MultiProgress::with_draw_target(ProgressDrawTarget::hidden()));
     }
@@ -219,12 +274,15 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
     // visually with the rest of the CLI output. Operators who need
     // machine-parseable timestamps should run with `--json`, which
     // restores the RFC 3339 timer in the JSON formatter above.
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(writer)
         .without_time()
         .with_target(false)
-        .with_ansi(color_enabled_for(cli.color, stderr_is_tty, cli.json))
+        .with_ansi(color_enabled_for(cli.color, stderr_is_tty, cli.json));
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(TelemetryCounterLayer)
+        .with(fmt_layer)
         .init();
     Ok(multi_progress)
 }

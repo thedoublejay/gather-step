@@ -49,8 +49,9 @@ fn fresh_schema_stamps_current_metadata_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("The user_version pragma should read.");
-    // Tracks METADATA_SCHEMA_VERSION; bumped to 1 when the ai_contracts table landed.
-    assert_eq!(version, 1);
+    // Tracks METADATA_SCHEMA_VERSION; bumped to 2 when checked bitcode blobs
+    // wrapped stored resolution inputs with schema/checksum bytes.
+    assert_eq!(version, 2);
 }
 
 #[test]
@@ -92,9 +93,9 @@ fn fresh_schema_stamps_current_graph_version() {
         .expect("The graph schema version should be stamped.")
         .value();
     // Tracks GRAPH_SCHEMA_VERSION; bumped to 1 when NodeData gained `ai_role`,
-    // then to 2 (v5.1) when StoredEdgeMetadata gained `guard_has_default` and
-    // `enum_qn`.
-    assert_eq!(version, 2);
+    // to 2 (v5.1) when StoredEdgeMetadata gained `guard_has_default` and
+    // `enum_qn`, and to 3 when checked bitcode blobs wrapped graph rows.
+    assert_eq!(version, 3);
 }
 
 /// Open-time enforcement: a graph store stamped with a future schema

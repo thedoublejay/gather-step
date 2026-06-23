@@ -8,6 +8,7 @@ use thiserror::Error;
 use tracing::{error, warn};
 
 pub mod adjacency_blob;
+mod bitcode_blob;
 pub mod daemon_metadata;
 pub mod daemon_state;
 pub mod footprint;
@@ -21,6 +22,7 @@ pub mod pack_store;
 pub mod reconcile;
 pub mod search_store;
 pub mod stores;
+pub mod telemetry;
 pub mod watcher;
 pub mod workspace_indexer;
 
@@ -78,6 +80,10 @@ pub use search_store::{
     TantivySearchStore,
 };
 pub use stores::{WorkspaceStores, WorkspaceStoresError};
+pub use telemetry::{
+    TelemetryError, TelemetryErrorEvent, TelemetryRun, TelemetryRunFinish, TelemetryRunRecord,
+    TelemetryStore,
+};
 pub use watcher::{
     WatchCause, WatchEvent, Watcher, WatcherConfig, WatcherError, WatcherStatus, WorkspaceWatcher,
 };
