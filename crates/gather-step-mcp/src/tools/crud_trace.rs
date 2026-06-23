@@ -48,6 +48,7 @@ pub struct CrudTraceData {
     pub database_hints: Vec<CrudTraceSymbol>,
     pub entities: Vec<CrudTraceSymbol>,
     pub evidence: Vec<Evidence>,
+    pub gateways: Vec<CrudTraceSymbol>,
     pub handlers: Vec<CrudTraceSymbol>,
     pub method: String,
     pub path: String,
@@ -149,6 +150,7 @@ pub fn crud_trace_tool(
                 database_hints: trace.database_hints.into_iter().map(symbol).collect(),
                 entities: trace.entities.into_iter().map(symbol).collect(),
                 evidence: Vec::new(),
+                gateways: trace.gateways.into_iter().map(symbol).collect(),
                 handlers: trace.handlers.into_iter().map(symbol).collect(),
                 method,
                 path,
@@ -163,6 +165,7 @@ pub fn crud_trace_tool(
         };
         sort_crud_symbols(&mut response.data.handlers);
         sort_crud_symbols(&mut response.data.callers);
+        sort_crud_symbols(&mut response.data.gateways);
         sort_crud_symbols(&mut response.data.continuation);
         sort_crud_symbols(&mut response.data.database_hints);
         sort_crud_symbols(&mut response.data.entities);
@@ -186,6 +189,7 @@ pub fn crud_trace_tool(
                 database_hints: Vec::new(),
                 entities: Vec::new(),
                 evidence: Vec::new(),
+                gateways: Vec::new(),
                 handlers: Vec::new(),
                 method: request.method.unwrap_or_default(),
                 path: request.path.unwrap_or_default(),
@@ -298,6 +302,7 @@ fn symbol(entry: gather_step_analysis::CrudTraceEntry) -> CrudTraceSymbol {
 fn role_label(role: CrudTraceRole) -> &'static str {
     match role {
         CrudTraceRole::Caller => "caller",
+        CrudTraceRole::Gateway => "gateway",
         CrudTraceRole::Handler => "handler",
         CrudTraceRole::Service => "service",
         CrudTraceRole::Repository => "repository",
