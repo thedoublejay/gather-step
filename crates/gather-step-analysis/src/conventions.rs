@@ -117,46 +117,15 @@ pub fn detect_conventions<S: GraphStore>(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{NodeData, NodeKind, node_id};
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
     use super::detect_conventions;
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-conventions-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     #[test]
     fn detects_repeated_directory_and_decorator_patterns() {
-        let temp_db = TempDb::new("conventions");
+        let temp_db = TempDb::new("conventions", "conventions");
         let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
         let nodes = vec![
             node(

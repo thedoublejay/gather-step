@@ -182,6 +182,13 @@ pub struct EdgeMetadata {
     /// enum-member-ref `MirrorsValueFrom`/`GuardsEnumValue` edges. `None` for
     /// Mode-A literal mirror edges, which keep value-only matching.
     pub enum_qn: Option<String>,
+    /// How the source reaches the target (v5.4, K15). `None` until the edge is
+    /// persisted, at which point the graph store fills it from the edge's
+    /// [`EdgeKind`](crate::EdgeKind) via [`EdgeKind::access_mechanism`]; a
+    /// detector may set it eagerly to override the kind-derived default.
+    /// `#[serde(default)]` so legacy blobs without the field still deserialize.
+    #[serde(default)]
+    pub access_mechanism: Option<crate::AccessMechanism>,
 }
 
 pub const MIGRATION_FILTERS_METADATA_PREFIX: &str = "migration_filters:";
@@ -485,6 +492,7 @@ mod tests {
                 resolver: Some(crate::ResolverStrategy::ImportMap.as_str().to_owned()),
                 guard_has_default: None,
                 enum_qn: None,
+                access_mechanism: None,
             },
             owner_file: NodeId([3; 16]),
             is_cross_file: true,
@@ -522,5 +530,40 @@ mod tests {
 
         assert_eq!(metadata.resolver_strategy(), None);
         assert_eq!(metadata.resolver_strategy_weight(), 0);
+    }
+
+    #[test]
+    fn edge_metadata_deserializes_legacy_blob_missing_newer_fields() {
+        // A blob persisted before `guard_has_default` and `enum_qn` existed
+        // omits those keys. Deserialization must still succeed and default the
+        // absent `Option` fields to `None` rather than erroring, so an old-shape
+        // payload survives a binary upgrade.
+        let legacy = "\
+weight: 4
+confidence: 800
+timestamp_unix: 1713000000
+drift_kind: shape
+resolver: import_map
+";
+        let metadata: EdgeMetadata =
+            serde_norway::from_str(legacy).expect("legacy edge-metadata blob must deserialize");
+
+        assert_eq!(metadata.weight, Some(4));
+        assert_eq!(metadata.confidence, Some(800));
+        assert_eq!(metadata.timestamp_unix, Some(1_713_000_000));
+        assert_eq!(metadata.drift_kind.as_deref(), Some("shape"));
+        assert_eq!(metadata.resolver.as_deref(), Some("import_map"));
+        // The fields introduced after the blob was written default to None.
+        assert_eq!(metadata.guard_has_default, None);
+        assert_eq!(metadata.enum_qn, None);
+    }
+
+    #[test]
+    fn edge_metadata_deserializes_empty_legacy_blob_as_default() {
+        // The earliest-shape blob carried no metadata keys at all; it must
+        // deserialize to the all-`None` default rather than failing.
+        let metadata: EdgeMetadata =
+            serde_norway::from_str("{}").expect("empty edge-metadata blob must deserialize");
+        assert_eq!(metadata, EdgeMetadata::default());
     }
 }

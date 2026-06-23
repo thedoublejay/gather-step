@@ -481,3 +481,42 @@ fn trim_trace_impact_response(response: &mut TraceImpactResponse) -> bool {
 fn strongest_repo_confidence(repo: &ImpactRepo) -> Option<u16> {
     repo.hops.iter().filter_map(|hop| hop.confidence).max()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CrossRepoDepsData, CrossRepoDepsResponse, RepoDependency};
+
+    /// Payload-shape guard: the serialized `cross_repo_deps` response must keep
+    /// its stable top-level and per-dependency JSON keys. A serde rename or
+    /// field drop would break MCP clients without failing the Rust-struct
+    /// assertions elsewhere, so this pins the wire contract directly.
+    #[test]
+    fn cross_repo_deps_response_serializes_with_stable_keys() {
+        let response = CrossRepoDepsResponse {
+            data: CrossRepoDepsData {
+                dependencies: vec![RepoDependency {
+                    edge_kinds: vec!["consumes_api_from".to_owned()],
+                    repo: "service-ui".to_owned(),
+                }],
+                evidence: Vec::new(),
+                repo: "service-api".to_owned(),
+            },
+        };
+
+        let value = serde_json::to_value(&response).expect("response must serialize");
+        let data = value.get("data").expect("`data` key must be present");
+        assert!(data.get("dependencies").is_some(), "`dependencies` key");
+        assert!(data.get("evidence").is_some(), "`evidence` key");
+        assert_eq!(
+            data.get("repo").and_then(|v| v.as_str()),
+            Some("service-api")
+        );
+
+        let dependency = &data["dependencies"][0];
+        assert!(dependency.get("edge_kinds").is_some(), "`edge_kinds` key");
+        assert_eq!(
+            dependency.get("repo").and_then(|v| v.as_str()),
+            Some("service-ui")
+        );
+    }
+}

@@ -423,13 +423,6 @@ fn count_orphan_topics(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, Visibility, node_id,
         ref_node_id,
@@ -441,33 +434,7 @@ mod tests {
     };
 
     use super::{classify_attached_virtual_targets, count_orphan_topics};
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-semantic-health-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     fn file_node(repo: &str, file_path: &str) -> NodeData {
         NodeData {
@@ -553,7 +520,7 @@ mod tests {
 
     #[test]
     fn shared_symbol_health_counts_type_edges_as_linked() {
-        let temp = TempDb::new("shared-symbol");
+        let temp = TempDb::new("semantic-health", "shared-symbol");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let file = file_node("backend_standard", "src/controller.ts");
         let function = function_node("backend_standard", "src/controller.ts", "handle", 0);
@@ -623,7 +590,7 @@ mod tests {
 
     #[test]
     fn event_health_counts_payload_and_consumer_edges_as_linked() {
-        let temp = TempDb::new("event");
+        let temp = TempDb::new("semantic-health", "event");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let file = file_node("backend_standard", "src/events.ts");
         let producer = function_node("backend_standard", "src/events.ts", "emit", 0);

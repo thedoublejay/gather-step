@@ -171,13 +171,6 @@ pub fn cross_repo_deps<S: GraphStore>(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, Visibility, node_id,
         virtual_node,
@@ -186,33 +179,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{cross_repo_deps, trace_across_repos};
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-cross-repo-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     fn node(repo: &str, file_path: &str, name: &str, _ordinal: u16) -> NodeData {
         NodeData {
@@ -255,7 +222,7 @@ mod tests {
 
     #[test]
     fn traces_shared_virtual_node_across_two_repos() {
-        let temp_db = TempDb::new("trace");
+        let temp_db = TempDb::new("cross-repo", "trace");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
         let producer_file = file("producer", "src/producer.ts");
         let consumer_file = file("consumer", "src/consumer.ts");
@@ -318,7 +285,7 @@ mod tests {
     ///   `repoA::producer_fn`  --Publishes-->  `virtual_topic`
     ///   `repoB::consumer_fn`  --Consumes-->   `virtual_topic`
     fn build_cross_repo_emit_consume_fixture() -> (GraphStoreDb, String, String) {
-        let temp_db = TempDb::new("cross-repo-emit-consume");
+        let temp_db = TempDb::new("cross-repo", "cross-repo-emit-consume");
         let path = temp_db.path().to_path_buf();
         std::mem::forget(temp_db);
 
@@ -420,7 +387,7 @@ mod tests {
         // `trace_across_repos` walks ALL edge kinds.  The resulting hops for
         // advisory_repo must expose EdgeKind::CoChangesWith so the caller can
         // identify them as advisory-band evidence.
-        let temp_db = TempDb::new("co-change-advisory-hops");
+        let temp_db = TempDb::new("cross-repo", "co-change-advisory-hops");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         let anchor_file = file("anchor_repo", "src/anchor.ts");
@@ -501,7 +468,7 @@ mod tests {
     /// during traversal.
     #[test]
     fn co_change_only_edge_kind_is_not_rewritten_during_traversal() {
-        let temp_db = TempDb::new("co-change-kind-preserved");
+        let temp_db = TempDb::new("cross-repo", "co-change-kind-preserved");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         let topic = gather_step_core::virtual_node(
@@ -569,7 +536,7 @@ mod tests {
     /// each in a distinct `file_path`, to exercise the `file_path` tiebreak.
     /// Returns the store and the virtual topic `NodeId`.
     fn build_multi_consumer_fixture() -> (GraphStoreDb, gather_step_core::NodeId) {
-        let temp_db = TempDb::new("multi-consumer");
+        let temp_db = TempDb::new("cross-repo", "multi-consumer");
         let path = temp_db.path().to_path_buf();
         std::mem::forget(temp_db);
 
@@ -660,7 +627,7 @@ mod tests {
     fn trace_across_repos_output_invariant_under_insertion_order() {
         let (store_forward, topic_id) = build_multi_consumer_fixture();
 
-        let temp_db = TempDb::new("multi-consumer-reversed");
+        let temp_db = TempDb::new("cross-repo", "multi-consumer-reversed");
         let path = temp_db.path().to_path_buf();
         std::mem::forget(temp_db);
         let store_rev = GraphStoreDb::open(&path).expect("store should open");

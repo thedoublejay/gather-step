@@ -28,6 +28,7 @@ use crate::pr_review::delta_report::{
     PayloadContractDelta, PayloadContractDeltaChange, PayloadContractDeltas, PayloadFieldSummary,
     PayloadFieldTypeChange,
 };
+use crate::pr_review::extract::common::three_way_diff;
 
 /// `(repo, file_path, target_qualified_name, side)` diff key.
 type ContractKey = (String, String, String, String);
@@ -46,29 +47,14 @@ pub fn extract_payload_contract_deltas<M: MetadataStore>(
     let baseline_map = build_contract_map(baseline)?;
     let review_map = build_contract_map(review)?;
 
-    let mut added: Vec<PayloadContractDelta> = Vec::new();
-    let mut removed: Vec<PayloadContractDelta> = Vec::new();
-    let mut changed: Vec<PayloadContractDeltaChange> = Vec::new();
-
-    // Added: in review but not in baseline.
-    for (key, record) in &review_map {
-        if !baseline_map.contains_key(key) {
-            added.push(record_to_delta(record));
-        }
-    }
-
-    // Removed: in baseline but not in review.
-    for (key, record) in &baseline_map {
-        if !review_map.contains_key(key) {
-            removed.push(record_to_delta(record));
-        }
-    }
+    let diff = three_way_diff(baseline_map, review_map);
+    let mut added: Vec<PayloadContractDelta> = diff.added.iter().map(record_to_delta).collect();
+    let mut removed: Vec<PayloadContractDelta> = diff.removed.iter().map(record_to_delta).collect();
 
     // Changed: same key in both — diff field sets.
-    for (key, review_record) in &review_map {
-        if let Some(baseline_record) = baseline_map.get(key)
-            && let Some(change) = diff_fields(key, baseline_record, review_record)
-        {
+    let mut changed: Vec<PayloadContractDeltaChange> = Vec::new();
+    for (key, baseline_record, review_record) in &diff.common {
+        if let Some(change) = diff_fields(key, baseline_record, review_record) {
             changed.push(change);
         }
     }

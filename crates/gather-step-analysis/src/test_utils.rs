@@ -3,7 +3,11 @@
 /// These utilities are used by the `#[cfg(test)]` blocks in `transport`,
 /// `evidence`, and `anchor` to avoid duplicating fixture-construction logic.
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{env, fs, path::PathBuf, process};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process,
+};
 
 use gather_step_core::{NodeData, NodeKind, SourceSpan, Visibility, node_id};
 use gather_step_storage::GraphStoreDb;
@@ -29,6 +33,12 @@ impl TempDb {
     /// Open a [`GraphStoreDb`] at this path.
     pub(crate) fn open(&self) -> GraphStoreDb {
         GraphStoreDb::open(&self.path).expect("store should open")
+    }
+
+    /// Borrow the backing temp-file path (for callers that open the store
+    /// themselves via `GraphStoreDb::open(temp.path())`).
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 }
 

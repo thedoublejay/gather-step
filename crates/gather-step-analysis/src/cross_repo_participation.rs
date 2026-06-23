@@ -244,13 +244,7 @@ impl CrossRepoConsumerLookup {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        cell::Cell,
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::cell::Cell;
 
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, Visibility, node_id,
@@ -258,33 +252,7 @@ mod tests {
     use gather_step_storage::{GraphStore, GraphStoreDb, GraphStoreError};
 
     use super::cross_repo_participation_by_file;
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-xrepo-participation-unit-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     fn file(repo: &str, file_path: &str) -> NodeData {
         NodeData {
@@ -485,7 +453,7 @@ mod tests {
     /// repo produces. This guards stage (b)'s edge direction.
     #[test]
     fn direct_non_virtual_consumer_seeds_producer_file_with_consumer_repo() {
-        let temp_db = TempDb::new("direct-inbound");
+        let temp_db = TempDb::new("xrepo-participation-unit", "direct-inbound");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         // Producer side: the analysed repo exports a symbol.
@@ -541,7 +509,7 @@ mod tests {
     /// count well past the file count.
     #[test]
     fn propagation_scans_edges_by_owner_once_per_file_not_per_node() {
-        let temp_db = TempDb::new("perf-shape");
+        let temp_db = TempDb::new("xrepo-participation-unit", "perf-shape");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         let f1 = file("repo", "src/a.ts");

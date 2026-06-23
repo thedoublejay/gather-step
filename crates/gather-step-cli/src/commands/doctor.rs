@@ -245,21 +245,17 @@ fn summarize_graph_health(
         }
     }
 
-    let degraded = !stale_repos.is_empty()
-        || !unknown_repos.is_empty()
-        || !never_indexed_repos.is_empty()
-        || truncated_packs > 0;
+    // Unknown freshness means git freshness could not be computed (e.g. the
+    // registered path is not a git repository). That is informational, not a
+    // graph degradation, so it is reported in `unknown_repos` but never flips
+    // `degraded` / fails `doctor`.
+    let degraded =
+        !stale_repos.is_empty() || !never_indexed_repos.is_empty() || truncated_packs > 0;
     let mut reasons = Vec::new();
     if !stale_repos.is_empty() {
         reasons.push(format!(
             "{} repo(s) are stale relative to git HEAD",
             stale_repos.len()
-        ));
-    }
-    if !unknown_repos.is_empty() {
-        reasons.push(format!(
-            "{} repo(s) have unknown freshness",
-            unknown_repos.len()
         ));
     }
     if !never_indexed_repos.is_empty() {
@@ -698,5 +694,55 @@ mod tests {
         };
 
         assert!(semantic_issues(&health).is_empty());
+    }
+
+    fn freshness(repo: &str, kind: &str) -> crate::freshness::RepoFreshness {
+        crate::freshness::RepoFreshness {
+            repo: repo.to_owned(),
+            freshness: kind.to_owned(),
+        }
+    }
+
+    #[test]
+    fn unknown_freshness_is_informational_not_degraded() {
+        // Non-git workspaces report "unknown" freshness because git freshness
+        // cannot be computed. That must not flip the graph to degraded or fail
+        // `doctor`; otherwise indexing any non-git workspace reports unhealthy.
+        let health = super::summarize_graph_health(
+            vec![
+                freshness("backend", "unknown"),
+                freshness("frontend", "unknown"),
+            ],
+            None,
+            0,
+        );
+
+        assert!(
+            !health.degraded,
+            "unknown-only freshness should not be degraded"
+        );
+        assert_eq!(health.unknown_repos.len(), 2); // still reported for visibility
+        assert!(health.reasons.is_empty()); // reasons list only degradation causes
+    }
+
+    #[test]
+    fn stale_repo_is_degraded() {
+        let health = super::summarize_graph_health(vec![freshness("backend", "stale")], None, 0);
+        assert!(health.degraded);
+        assert_eq!(health.stale_repos, vec!["backend".to_owned()]);
+    }
+
+    #[test]
+    fn never_indexed_repo_is_degraded() {
+        let health =
+            super::summarize_graph_health(vec![freshness("backend", "never_indexed")], None, 0);
+        assert!(health.degraded);
+    }
+
+    #[test]
+    fn truncated_packs_are_degraded() {
+        let health = super::summarize_graph_health(vec![freshness("backend", "fresh")], None, 3);
+        assert!(health.degraded);
+        assert_eq!(health.truncated_packs, 3);
     }
 }

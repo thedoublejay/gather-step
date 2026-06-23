@@ -94,8 +94,9 @@ fn fresh_schema_stamps_current_graph_version() {
         .value();
     // Tracks GRAPH_SCHEMA_VERSION; bumped to 1 when NodeData gained `ai_role`,
     // to 2 (v5.1) when StoredEdgeMetadata gained `guard_has_default` and
-    // `enum_qn`, and to 3 when checked bitcode blobs wrapped graph rows.
-    assert_eq!(version, 3);
+    // `enum_qn`, to 3 when checked bitcode blobs wrapped graph rows, and to 4
+    // (v5.4, K15) when StoredEdgeMetadata gained `access_mechanism`.
+    assert_eq!(version, 4);
 }
 
 /// Open-time enforcement: a graph store stamped with a future schema

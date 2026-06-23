@@ -872,8 +872,11 @@ fn collect_incoming_matches_many_kinds<S: GraphStore>(
                 continue;
             }
 
-            let key = (node.id.as_bytes(), edge.kind.as_u8());
-            if !seen.insert(key) {
+            // Dedup by source node only. A single caller often has several
+            // matching edge kinds to the same target (the React parser emits
+            // both `Consumes` and `ConsumesApiFrom` from one call site), and it
+            // must surface as one match — not one per edge kind.
+            if !seen.insert(node.id.as_bytes()) {
                 continue;
             }
 
@@ -1064,13 +1067,6 @@ fn match_sort_key(left: &TopologyMatch, right: &TopologyMatch) -> std::cmp::Orde
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, Visibility,
         node_id, route_qn, topic_qn, virtual_node,
@@ -1081,33 +1077,7 @@ pub(crate) mod tests {
     use super::{
         event_blast_radius, resolve_event_targets, resolve_route_target, trace_event, trace_route,
     };
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-event-topology-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     fn file(repo: &str, file_path: &str) -> NodeData {
         NodeData {
@@ -1150,7 +1120,7 @@ pub(crate) mod tests {
 
     #[test]
     fn traces_event_producers_and_consumers_across_repos() {
-        let temp_db = TempDb::new("trace-event");
+        let temp_db = TempDb::new("event-topology", "trace-event");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
         let producer_file = file("backend_standard", "src/producer.ts");
         let consumer_file = file("frontend_standard", "src/consumer.ts");
@@ -1221,7 +1191,7 @@ pub(crate) mod tests {
 
     #[test]
     fn resolve_event_targets_expands_event_family_prefixes() {
-        let temp_db = TempDb::new("resolve-family");
+        let temp_db = TempDb::new("event-topology", "resolve-family");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
         let created = virtual_node(
             NodeKind::Topic,
@@ -1260,7 +1230,7 @@ pub(crate) mod tests {
 
     #[test]
     fn traces_event_support_edges_beyond_plain_publish_consume() {
-        let temp_db = TempDb::new("trace-event-support-edges");
+        let temp_db = TempDb::new("event-topology", "trace-event-support-edges");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
         let producer_file = file("backend_standard", "src/producer.ts");
         let consumer_file = file("frontend_standard", "src/consumer.ts");
@@ -1319,7 +1289,7 @@ pub(crate) mod tests {
 
     #[test]
     fn traces_route_handlers_and_callers_across_repos() {
-        let temp_db = TempDb::new("trace-route");
+        let temp_db = TempDb::new("event-topology", "trace-route");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
         let handler_file = file("backend_standard", "src/controller.ts");
         let caller_file = file("frontend_standard", "src/api.ts");
@@ -1383,7 +1353,7 @@ pub(crate) mod tests {
 
     #[test]
     fn traces_route_callers_from_api_call_variants() {
-        let temp_db = TempDb::new("trace-route-api-call");
+        let temp_db = TempDb::new("event-topology", "trace-route-api-call");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
         let handler_file = file("backend_standard", "src/controller.ts");
         let caller_file = file("frontend_standard", "src/api.ts");
@@ -1453,6 +1423,111 @@ pub(crate) mod tests {
         assert_eq!(trace.callers[0].confidence, Some(930));
     }
 
+    #[test]
+    fn route_caller_with_consumes_and_api_from_edges_counts_once() {
+        // The React parser emits BOTH a `Consumes` and a `ConsumesApiFrom`
+        // edge from a single resolved call site to the route node. `trace_route`
+        // follows both kinds, so the caller must be deduped by node — surfacing
+        // once, not once per edge kind.
+        let temp_db = TempDb::new("event-topology", "trace-route-dedup");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+        let handler_file = file("backend_standard", "src/controller.ts");
+        let caller_file = file("frontend_standard", "src/api.ts");
+        let unrelated_file = file("frontend_standard", "src/api_unresolved.ts");
+        let handler = symbol("backend_standard", "src/controller.ts", "create_order", 0);
+        let caller = symbol("frontend_standard", "src/api.ts", "create_order", 0);
+        // Resolves to a different route (`gw/orders/pending`), so it must NOT
+        // surface as a caller of `POST /orders`.
+        let unrelated = symbol(
+            "frontend_standard",
+            "src/api_unresolved.ts",
+            "submit_pending_order",
+            0,
+        );
+        let route = virtual_node(
+            NodeKind::Route,
+            "backend_standard",
+            "src/controller.ts",
+            "POST /orders",
+            route_qn("POST", "/orders"),
+        );
+        let pending_route = virtual_node(
+            NodeKind::Route,
+            "frontend_standard",
+            "src/api_unresolved.ts",
+            "gw/orders/pending",
+            "__api_config__gw/orders/pending",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    handler_file.clone(),
+                    caller_file.clone(),
+                    unrelated_file.clone(),
+                    handler.clone(),
+                    caller.clone(),
+                    unrelated.clone(),
+                    route.clone(),
+                    pending_route.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: handler.id,
+                        target: route.id,
+                        kind: EdgeKind::Serves,
+                        metadata: EdgeMetadata {
+                            confidence: Some(980),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: handler_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: caller.id,
+                        target: route.id,
+                        kind: EdgeKind::Consumes,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: caller_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: caller.id,
+                        target: route.id,
+                        kind: EdgeKind::ConsumesApiFrom,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: caller_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: unrelated.id,
+                        target: pending_route.id,
+                        kind: EdgeKind::ConsumesApiFrom,
+                        metadata: EdgeMetadata {
+                            confidence: Some(450),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: unrelated_file.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("graph write should succeed");
+
+        let trace = trace_route(&store, route.id, 10).expect("trace should succeed");
+        // 1 because: the literal `/orders` caller is deduped across its two edge
+        // kinds, and `submit_pending_order` resolves to `gw/orders/pending`.
+        assert_eq!(trace.callers.len(), 1);
+        assert_eq!(trace.callers[0].node_id, caller.id);
+        assert_eq!(trace.callers[0].repo, "frontend_standard");
+    }
+
     /// Build a fixture with 3 produce-only virtual topic nodes and 3
     /// consume-only virtual topic nodes (6 orphans total).
     ///
@@ -1464,7 +1539,7 @@ pub(crate) mod tests {
     /// that the per-owner-file edge-replacement logic in the store does not
     /// silently remove edges from earlier batches.
     pub(crate) fn build_orphan_fixture_for_truncation_test() -> GraphStoreDb {
-        let temp_db = TempDb::new("orphan-truncation");
+        let temp_db = TempDb::new("event-topology", "orphan-truncation");
         // Leak the TempDb so the file is not deleted while the store is open.
         // Tests that call this helper accept the file lingering in /tmp until
         // the OS cleans it up.
@@ -1578,7 +1653,7 @@ pub(crate) mod tests {
     /// the result must be unchanged.
     #[test]
     fn trace_event_falls_back_to_topic_envelope_when_event_node_has_no_producers() {
-        let temp_db = TempDb::new("envelope-fallback");
+        let temp_db = TempDb::new("event-topology", "envelope-fallback");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         // Fine-grained Event node — no producers will be linked directly to it.
@@ -1641,7 +1716,7 @@ pub(crate) mod tests {
 
     #[test]
     fn trace_event_falls_back_to_topic_envelope_when_event_node_has_no_consumers() {
-        let temp_db = TempDb::new("envelope-consumer-fallback");
+        let temp_db = TempDb::new("event-topology", "envelope-consumer-fallback");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         let event_node = virtual_node(
@@ -1704,7 +1779,7 @@ pub(crate) mod tests {
     /// topic-envelope fallback must NOT fire.
     #[test]
     fn trace_event_skips_envelope_fallback_when_fine_grained_producers_exist() {
-        let temp_db = TempDb::new("no-fallback-when-producers-exist");
+        let temp_db = TempDb::new("event-topology", "no-fallback-when-producers-exist");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         let event_node = virtual_node(
@@ -1785,7 +1860,7 @@ pub(crate) mod tests {
     /// broken the trace would return an empty or wrong result.
     #[test]
     fn indexed_event_lookup_resolves_single_target_from_1000_events() {
-        let temp_db = TempDb::new("indexed-event-1000");
+        let temp_db = TempDb::new("event-topology", "indexed-event-1000");
         let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
 
         let mut all_nodes: Vec<NodeData> = Vec::new();
@@ -1860,7 +1935,7 @@ pub(crate) mod tests {
     /// depth / repo / `file_path` / name so that only the `node_id` tiebreak
     /// can distinguish them.  Returns the store and the virtual topic `NodeId`.
     fn build_blast_radius_shared_key_fixture() -> (GraphStoreDb, NodeId) {
-        let temp_db = TempDb::new("blast-radius-stable");
+        let temp_db = TempDb::new("event-topology", "blast-radius-stable");
         let path = temp_db.path().to_path_buf();
         std::mem::forget(temp_db);
 
@@ -2036,7 +2111,7 @@ pub(crate) mod tests {
     fn event_blast_radius_output_invariant_under_insertion_order() {
         let (store_forward, topic_id) = build_blast_radius_shared_key_fixture();
 
-        let temp_db = TempDb::new("blast-radius-reversed");
+        let temp_db = TempDb::new("event-topology", "blast-radius-reversed");
         let path = temp_db.path().to_path_buf();
         std::mem::forget(temp_db);
         let store_rev = GraphStoreDb::open(&path).expect("store should open");

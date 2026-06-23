@@ -3494,21 +3494,9 @@ fn workspace_package_dirs(workspace_root: &Path) -> Vec<PathBuf> {
             );
         }
     }
-    let pnpm_manifest = workspace_root.join("pnpm-workspace.yaml");
-    if let Some(pnpm_manifest) = canonicalize_existing_file_under(&pnpm_manifest, workspace_root)
-        && let Ok(raw) = fs::read_to_string(pnpm_manifest)
-        && gather_step_core::config::guard_yaml_source(&raw, "pnpm-workspace.yaml").is_ok()
-        && let Ok(document) = serde_norway::from_str::<serde_norway::Value>(&raw)
-        && let Some(entries) = document
-            .get("packages")
-            .and_then(serde_norway::Value::as_sequence)
-    {
-        patterns.extend(
-            entries
-                .iter()
-                .filter_map(|value| value.as_str().map(ToOwned::to_owned)),
-        );
-    }
+    patterns.extend(crate::workspace_manifest::pnpm_workspace_patterns(
+        workspace_root,
+    ));
 
     let mut dirs = Vec::new();
     for pattern in patterns {

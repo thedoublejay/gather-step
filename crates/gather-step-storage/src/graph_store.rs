@@ -5,8 +5,8 @@ use std::{
 };
 
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId,
-    NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO,
+    AccessMechanism, EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData,
+    NodeId, NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO,
 };
 use redb::{
     Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadableDatabase,
@@ -53,6 +53,7 @@ struct StoredEdgeMetadata {
     resolver: Option<StoredResolver>,
     guard_has_default: Option<bool>,
     enum_qn: Option<String>,
+    access_mechanism: Option<AccessMechanism>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, bitcode::Encode, bitcode::Decode)]
@@ -88,6 +89,7 @@ impl StoredEdgeMetadata {
                 .map(StoredResolver::from_public),
             guard_has_default: metadata.guard_has_default,
             enum_qn: metadata.enum_qn.clone(),
+            access_mechanism: metadata.access_mechanism,
         }
     }
 
@@ -100,6 +102,7 @@ impl StoredEdgeMetadata {
             resolver: self.resolver.map(StoredResolver::into_public),
             guard_has_default: self.guard_has_default,
             enum_qn: self.enum_qn,
+            access_mechanism: self.access_mechanism,
         }
     }
 }
@@ -278,7 +281,12 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 ///
 /// Bumped 2→3 (v5.3): node/edge bitcode blobs are wrapped with a schema byte
 /// and BLAKE3 checksum. Reindex required because older rows lack the wrapper.
-pub const GRAPH_SCHEMA_VERSION: u32 = 3;
+///
+/// Bumped 3→4 (v5.4, K15): `StoredEdgeMetadata` gained `access_mechanism`,
+/// appending a field to the positional bitcode edge layout. Older graphs must
+/// wipe-and-rebuild via the existing auto-recover path because their rows lack
+/// the trailing field.
+pub const GRAPH_SCHEMA_VERSION: u32 = 4;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -1635,12 +1643,18 @@ impl GraphStoreDb {
     }
 
     fn encode_edge(edge: &EdgeData) -> Vec<u8> {
+        let mut metadata = StoredEdgeMetadata::from_public(&edge.metadata);
+        // Central population: every persisted edge gets a mechanism derived from
+        // its kind unless a detector already set one on the public metadata.
+        metadata.access_mechanism = metadata
+            .access_mechanism
+            .or_else(|| Some(edge.kind.access_mechanism()));
         crate::bitcode_blob::wrap(&bitcode::encode(&StoredEdge {
             source: edge.source,
             target: edge.target,
             kind: edge.kind,
             owner_file: edge.owner_file,
-            metadata: StoredEdgeMetadata::from_public(&edge.metadata),
+            metadata,
         }))
     }
 
@@ -3863,8 +3877,8 @@ mod tests {
     };
 
     use gather_step_core::{
-        EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, ResolverStrategy, SourceSpan,
-        Visibility, node_id,
+        AccessMechanism, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX,
+        ResolverStrategy, SourceSpan, Visibility, node_id,
     };
     use pretty_assertions::assert_eq;
     use redb::ReadableDatabase;
@@ -3931,7 +3945,12 @@ mod tests {
             source,
             target,
             kind: EdgeKind::Calls,
-            metadata: EdgeMetadata::default(),
+            // Persisted edges get their `access_mechanism` derived from the kind
+            // (K15) when unset, so the expected value must match the stored one.
+            metadata: EdgeMetadata {
+                access_mechanism: Some(EdgeKind::Calls.access_mechanism()),
+                ..EdgeMetadata::default()
+            },
             owner_file,
             is_cross_file: false,
         }
@@ -4332,6 +4351,7 @@ mod tests {
                 resolver: Some(ResolverStrategy::FirstPass.as_str().to_owned()),
                 guard_has_default: None,
                 enum_qn: None,
+                access_mechanism: None,
             },
             owner_file: file.id,
             is_cross_file: false,
@@ -4345,6 +4365,7 @@ mod tests {
                 resolver: Some(ResolverStrategy::SecondPass.as_str().to_owned()),
                 guard_has_default: None,
                 enum_qn: None,
+                access_mechanism: Some(EdgeKind::Calls.access_mechanism()),
             },
             ..original.clone()
         };
@@ -4371,6 +4392,7 @@ mod tests {
             resolver: Some(ResolverStrategy::ImportMap.as_str().to_owned()),
             guard_has_default: None,
             enum_qn: None,
+            access_mechanism: Some(AccessMechanism::SharedType),
         };
 
         let stored = StoredEdgeMetadata::from_public(&metadata);
@@ -4385,7 +4407,42 @@ mod tests {
             stored.resolver,
             Some(StoredResolver::Known(ResolverStrategy::ImportMap))
         );
+        // `from_public` mirrors the public mechanism verbatim (no kind-based
+        // defaulting — that happens centrally in `encode_edge`).
+        assert_eq!(stored.access_mechanism, Some(AccessMechanism::SharedType));
         assert_eq!(stored.into_public(), metadata);
+    }
+
+    #[test]
+    fn persisted_edge_gets_kind_derived_access_mechanism() {
+        let store = test_store("edge-access-mechanism");
+        let file = node("svc", "src/a.ts", NodeKind::File, "src/a.ts", 0);
+        let source = node("svc", "src/a.ts", NodeKind::Function, "caller", 1);
+        let target = node("svc", "src/b.ts", NodeKind::Function, "callee", 0);
+
+        store
+            .bulk_insert(&[file.clone(), source.clone(), target.clone()], &[])
+            .expect("nodes should insert");
+
+        // A `Calls` edge with no explicit mechanism on its public metadata.
+        let edge = EdgeData {
+            source: source.id,
+            target: target.id,
+            kind: EdgeKind::Calls,
+            metadata: EdgeMetadata::default(),
+            owner_file: file.id,
+            is_cross_file: false,
+        };
+        assert_eq!(edge.metadata.access_mechanism, None);
+
+        store.insert_edge(&edge).expect("edge should insert");
+
+        let outgoing = store.get_outgoing(source.id).expect("outgoing should load");
+        // `Calls` maps to `DirectCall`, populated centrally at persist time.
+        assert_eq!(
+            outgoing[0].metadata.access_mechanism,
+            Some(AccessMechanism::DirectCall)
+        );
     }
 
     #[test]
@@ -4777,7 +4834,10 @@ mod tests {
             source: file.id,
             target: author_new.id,
             kind: EdgeKind::OwnedBy,
-            metadata: EdgeMetadata::default(),
+            metadata: EdgeMetadata {
+                access_mechanism: Some(EdgeKind::OwnedBy.access_mechanism()),
+                ..EdgeMetadata::default()
+            },
             owner_file: file.id,
             is_cross_file: false,
         };
@@ -4785,7 +4845,10 @@ mod tests {
             source: file.id,
             target: target_b.id,
             kind: EdgeKind::CoChangesWith,
-            metadata: EdgeMetadata::default(),
+            metadata: EdgeMetadata {
+                access_mechanism: Some(EdgeKind::CoChangesWith.access_mechanism()),
+                ..EdgeMetadata::default()
+            },
             owner_file: file.id,
             is_cross_file: false,
         };

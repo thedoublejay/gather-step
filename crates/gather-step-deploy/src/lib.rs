@@ -23,6 +23,23 @@ pub enum DeploymentArtifactKind {
     Unknown,
 }
 
+impl DeploymentArtifactKind {
+    /// Stable `snake_case` identifier, matching the serde representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dockerfile => "dockerfile",
+            Self::Compose => "compose",
+            Self::Kubernetes => "kubernetes",
+            Self::Kustomize => "kustomize",
+            Self::Helm => "helm",
+            Self::GithubActions => "github_actions",
+            Self::EnvFile => "env_file",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeploymentParseOutput {
     pub repo: String,
@@ -147,6 +164,44 @@ pub fn detect_artifact_kind(path: &str, content: &str) -> DeploymentArtifactKind
         return DeploymentArtifactKind::Kubernetes;
     }
 
+    DeploymentArtifactKind::Unknown
+}
+
+/// Path-only artifact-kind heuristic for callers that have a file path but no
+/// file content (e.g. graph-node deployment deltas). Coarser than
+/// [`detect_artifact_kind`]: any unrecognised YAML file is assumed to be a
+/// Kubernetes manifest, because content-based disambiguation is unavailable.
+#[must_use]
+pub fn detect_artifact_kind_from_path(path: &str) -> DeploymentArtifactKind {
+    let mut normalized = path.replace('\\', "/");
+    normalized.make_ascii_lowercase();
+    let file_name = Path::new(&normalized)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+
+    if normalized.contains("/.github/workflows/") || normalized.starts_with(".github/workflows/") {
+        return DeploymentArtifactKind::GithubActions;
+    }
+    if file_name == "dockerfile" || file_name.starts_with("dockerfile.") {
+        return DeploymentArtifactKind::Dockerfile;
+    }
+    if matches!(
+        file_name,
+        "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
+    ) {
+        return DeploymentArtifactKind::Compose;
+    }
+    if matches!(file_name, "kustomization.yaml" | "kustomization.yml") {
+        return DeploymentArtifactKind::Kustomize;
+    }
+    let extension = Path::new(&normalized)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+    if matches!(extension, "yaml" | "yml") {
+        return DeploymentArtifactKind::Kubernetes;
+    }
     DeploymentArtifactKind::Unknown
 }
 

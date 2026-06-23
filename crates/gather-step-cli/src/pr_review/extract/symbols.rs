@@ -23,6 +23,7 @@ use gather_step_storage::GraphStore;
 use rustc_hash::FxHashMap;
 
 use crate::pr_review::delta_report::{SymbolDelta, SymbolDeltaChange, SymbolDeltas};
+use crate::pr_review::extract::common::three_way_diff;
 
 /// `(repo, qualified_name)` → `SymbolDelta` mapping built from one snapshot.
 type SymbolMap = FxHashMap<(String, String), SymbolDelta>;
@@ -36,40 +37,25 @@ pub fn extract_symbol_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<
     let baseline_map = build_symbol_map(baseline)?;
     let review_map = build_symbol_map(review)?;
 
-    let mut added: Vec<SymbolDelta> = Vec::new();
-    let mut removed: Vec<SymbolDelta> = Vec::new();
-    let mut changed: Vec<SymbolDeltaChange> = Vec::new();
-
-    // Added: in review but not in baseline.
-    for (key, delta) in &review_map {
-        if !baseline_map.contains_key(key) {
-            added.push(delta.clone());
-        }
-    }
-
-    // Removed: in baseline but not in review.
-    for (key, delta) in &baseline_map {
-        if !review_map.contains_key(key) {
-            removed.push(delta.clone());
-        }
-    }
+    let diff = three_way_diff(baseline_map, review_map);
+    let mut added = diff.added;
+    let mut removed = diff.removed;
 
     // Changed: same key in both — diff signature and visibility.
-    for (key, review_delta) in &review_map {
-        if let Some(baseline_delta) = baseline_map.get(key) {
-            let signature_changed = baseline_delta.signature != review_delta.signature;
-            let visibility_changed = baseline_delta.visibility != review_delta.visibility;
-            if signature_changed || visibility_changed {
-                changed.push(SymbolDeltaChange {
-                    kind: review_delta.kind.clone(),
-                    repo: key.0.clone(),
-                    qualified_name: key.1.clone(),
-                    before: baseline_delta.clone(),
-                    after: review_delta.clone(),
-                    signature_changed,
-                    visibility_changed,
-                });
-            }
+    let mut changed: Vec<SymbolDeltaChange> = Vec::new();
+    for (key, baseline_delta, review_delta) in diff.common {
+        let signature_changed = baseline_delta.signature != review_delta.signature;
+        let visibility_changed = baseline_delta.visibility != review_delta.visibility;
+        if signature_changed || visibility_changed {
+            changed.push(SymbolDeltaChange {
+                kind: review_delta.kind.clone(),
+                repo: key.0.clone(),
+                qualified_name: key.1.clone(),
+                before: baseline_delta,
+                after: review_delta,
+                signature_changed,
+                visibility_changed,
+            });
         }
     }
 

@@ -224,12 +224,7 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::path::Path;
 
     use gather_step_core::{
         EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, Visibility, node_id,
@@ -238,33 +233,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::GraphQuery;
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-analysis-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     fn test_store(path: &Path) -> GraphStoreDb {
         GraphStoreDb::open(path).expect("graph store should open")
@@ -309,7 +278,7 @@ mod tests {
 
     #[test]
     fn supports_node_lookup_and_depth_limited_traversal() {
-        let temp_db = TempDb::new("query");
+        let temp_db = TempDb::new("analysis", "query");
         let store = test_store(temp_db.path());
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 0);
@@ -352,7 +321,7 @@ mod tests {
 
     #[test]
     fn min_confidence_filters_low_confidence_edges_but_keeps_structural() {
-        let temp_db = TempDb::new("query-confidence");
+        let temp_db = TempDb::new("analysis", "query-confidence");
         let store = test_store(temp_db.path());
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 0);
@@ -391,7 +360,7 @@ mod tests {
 
     #[test]
     fn traverse_with_provenance_flags_depth_capping() {
-        let temp_db = TempDb::new("query-depth-cap");
+        let temp_db = TempDb::new("analysis", "query-depth-cap");
         let store = test_store(temp_db.path());
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 0);
@@ -430,7 +399,7 @@ mod tests {
 
     #[test]
     fn traverse_with_provenance_records_every_in_path() {
-        let temp_db = TempDb::new("query-provenance");
+        let temp_db = TempDb::new("analysis", "query-provenance");
         let store = test_store(temp_db.path());
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let root = node("service-a", "src/a.ts", NodeKind::Function, "root", 0);
@@ -478,7 +447,7 @@ mod tests {
 
     #[test]
     fn traverse_with_provenance_flags_fan_out_truncation() {
-        let temp_db = TempDb::new("query-fan-out");
+        let temp_db = TempDb::new("analysis", "query-fan-out");
         let store = test_store(temp_db.path());
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let hub = node("service-a", "src/a.ts", NodeKind::Function, "hub", 0);
@@ -518,7 +487,7 @@ mod tests {
 
     #[test]
     fn counts_nodes_and_edges_by_kind() {
-        let temp_db = TempDb::new("counts");
+        let temp_db = TempDb::new("analysis", "counts");
         let store = test_store(temp_db.path());
         let file = node("service-a", "src/a.ts", NodeKind::File, "src/a.ts", 0);
         let a = node("service-a", "src/a.ts", NodeKind::Function, "a", 0);

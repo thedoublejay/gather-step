@@ -12,6 +12,8 @@ use std::{fs, path::Path};
 
 use rustc_hash::FxHashSet;
 
+use crate::workspace_manifest::workspace_member_dirs;
+
 /// A framework whose extractor pack is gated on per-repo detection.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Framework {
@@ -146,6 +148,32 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     // imports can appear in any TypeScript/JavaScript codebase regardless of
     // which framework it uses.
     frameworks.insert(Framework::FrontendHooks);
+    frameworks
+}
+
+/// Workspace-aware framework detection.
+///
+/// [`detect_frameworks`] only inspects `repo_root` and `repo_root/src`. In a
+/// monorepo whose members live under `apps/*` / `packages/*`, the framework
+/// dependencies and source markers sit inside the member directories, not at
+/// the root, so a root-only scan detects nothing (e.g. a pnpm platform-services
+/// repo indexes as a plain repo with no routes).
+///
+/// This runs [`detect_frameworks`] at `repo_root` and, when the root is a
+/// workspace manifest (npm/Yarn/Bun `workspaces` OR `pnpm-workspace.yaml`),
+/// unions the detection results from every discovered member directory. The
+/// member scan also picks up each member's own `src/` marker directory, which
+/// is what makes `NestJS` source-marker detection fire for nested apps.
+///
+/// Detection cost grows from one manifest read to N (one per member), which is
+/// bounded and cheap — members are read once at index time and the result is
+/// cached per repo by the orchestrator.
+#[must_use]
+pub fn detect_frameworks_workspace_aware(repo_root: &Path) -> FxHashSet<Framework> {
+    let mut frameworks = detect_frameworks(repo_root);
+    for member in workspace_member_dirs(repo_root) {
+        frameworks.extend(detect_frameworks(&member));
+    }
     frameworks
 }
 
@@ -618,8 +646,9 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        Framework, detect_frameworks, is_ai_typescript, is_drizzle, is_fastapi, is_mongoose,
-        is_nestjs, is_nextjs, is_prisma, is_react, is_tailwind, is_typeorm,
+        Framework, detect_frameworks, detect_frameworks_workspace_aware, is_ai_typescript,
+        is_drizzle, is_fastapi, is_mongoose, is_nestjs, is_nextjs, is_prisma, is_react,
+        is_tailwind, is_typeorm,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1011,5 +1040,52 @@ dependencies = [
             r#"{ "dependencies": { "react": "^18.0.0" } }"#,
         );
         assert!(!is_ai_typescript(&dir.path));
+    }
+
+    #[test]
+    fn workspace_aware_detects_nestjs_in_pnpm_member() {
+        let dir = TempDir::new("ws-aware-pnpm");
+        dir.write("package.json", r#"{ "name": "root", "private": true }"#);
+        dir.write("pnpm-workspace.yaml", "packages:\n  - \"apps/*\"\n");
+        dir.write(
+            "apps/api/package.json",
+            r#"{ "name": "@root/api", "dependencies": { "@nestjs/core": "^11.0.0" } }"#,
+        );
+
+        // Root-only detection misses the nested NestJS dependency.
+        assert!(!detect_frameworks(&dir.path).contains(&Framework::NestJs));
+        // Workspace-aware detection unions the member's frameworks.
+        assert!(detect_frameworks_workspace_aware(&dir.path).contains(&Framework::NestJs));
+    }
+
+    #[test]
+    fn workspace_aware_detects_nestjs_in_npm_workspaces_member() {
+        let dir = TempDir::new("ws-aware-npm");
+        dir.write(
+            "package.json",
+            r#"{ "name": "root", "workspaces": ["apps/*"] }"#,
+        );
+        dir.write(
+            "apps/api/package.json",
+            r#"{ "name": "@root/api", "dependencies": { "@nestjs/core": "^11.0.0" } }"#,
+        );
+
+        assert!(!detect_frameworks(&dir.path).contains(&Framework::NestJs));
+        assert!(detect_frameworks_workspace_aware(&dir.path).contains(&Framework::NestJs));
+    }
+
+    #[test]
+    fn workspace_aware_matches_plain_detection_for_non_workspace_repo() {
+        let dir = TempDir::new("ws-aware-plain");
+        dir.write(
+            "package.json",
+            r#"{ "dependencies": { "@nestjs/core": "^11.0.0" } }"#,
+        );
+
+        // No workspace manifest → no members → identical to detect_frameworks.
+        assert_eq!(
+            detect_frameworks_workspace_aware(&dir.path),
+            detect_frameworks(&dir.path)
+        );
     }
 }

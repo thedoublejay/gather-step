@@ -40,6 +40,7 @@ use gather_step_storage::GraphStore;
 use rustc_hash::FxHashMap;
 
 use crate::pr_review::delta_report::{DecoratorDelta, DecoratorDeltaChange, DecoratorDeltas};
+use crate::pr_review::extract::common::three_way_diff;
 
 /// Decorator names considered interesting for PR review (case-insensitive).
 ///
@@ -57,42 +58,26 @@ const INTERESTING_DECORATORS: &[&str] = &[
 type DecoratorKey = (String, String, String, String);
 
 /// Extract added / removed / changed decorator deltas.
-pub fn extract_decorator_deltas<S: GraphStore>(
-    baseline: &S,
-    review: &S,
+pub fn extract_decorator_deltas<B: GraphStore, R: GraphStore>(
+    baseline: &B,
+    review: &R,
 ) -> Result<DecoratorDeltas> {
     let baseline_map = build_decorator_map(baseline)?;
     let review_map = build_decorator_map(review)?;
 
-    let mut added: Vec<DecoratorDelta> = Vec::new();
-    let mut removed: Vec<DecoratorDelta> = Vec::new();
-    let mut changed: Vec<DecoratorDeltaChange> = Vec::new();
-
-    // Added: in review only.
-    for (key, delta) in &review_map {
-        if !baseline_map.contains_key(key) {
-            added.push(delta.clone());
-        }
-    }
-
-    // Removed: in baseline only.
-    for (key, delta) in &baseline_map {
-        if !review_map.contains_key(key) {
-            removed.push(delta.clone());
-        }
-    }
+    let diff = three_way_diff(baseline_map, review_map);
+    let mut added = diff.added;
+    let mut removed = diff.removed;
 
     // Changed: same key, different args.
-    for (key, review_delta) in &review_map {
-        if let Some(baseline_delta) = baseline_map
-            .get(key)
-            .filter(|b| b.args != review_delta.args)
-        {
+    let mut changed: Vec<DecoratorDeltaChange> = Vec::new();
+    for (key, baseline_delta, review_delta) in diff.common {
+        if baseline_delta.args != review_delta.args {
             changed.push(DecoratorDeltaChange {
                 repo: key.0.clone(),
                 target_qualified_name: key.3.clone(),
-                before: baseline_delta.clone(),
-                after: review_delta.clone(),
+                before: baseline_delta,
+                after: review_delta,
                 args_changed: true,
             });
         }

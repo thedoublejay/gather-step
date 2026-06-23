@@ -26,7 +26,7 @@ use gather_step_mcp::{
         planning_pack_tool, review_pack_tool,
     },
 };
-use gather_step_parser::frameworks::{Framework, detect_frameworks};
+use gather_step_parser::frameworks::{Framework, detect_frameworks_workspace_aware};
 use gather_step_storage::{
     EdgeCountSummary, GraphStore, IndexingOptions, RepoIndexPayload, RepoIndexer,
 };
@@ -669,7 +669,9 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
             for (repo_idx, repo) in config_ref.repos.iter().enumerate() {
                 let repo_root = config_root_ref.join(&repo.path);
                 let detected_frameworks: Vec<Framework> =
-                    detect_frameworks(&repo_root).into_iter().collect();
+                    detect_frameworks_workspace_aware(&repo_root)
+                        .into_iter()
+                        .collect();
                 if let Some(bar) = workspace_bar_ref {
                     // Show the repo name, not the full path — the workspace
                     // root is already displayed at the top of the run, so

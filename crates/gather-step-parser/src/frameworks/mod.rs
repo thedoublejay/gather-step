@@ -9,6 +9,8 @@ pub mod frontend_router;
 pub mod gateway_proxy;
 pub mod local_config;
 pub mod migration_utils;
+pub mod mongo;
+pub mod mongo_safety;
 pub mod mongoose;
 pub mod mongoose_migration;
 pub mod nestjs;
@@ -22,4 +24,4 @@ pub mod tailwind;
 pub mod typeorm;
 pub mod typeorm_migration;
 
-pub use detect::{Framework, detect_frameworks};
+pub use detect::{Framework, detect_frameworks, detect_frameworks_workspace_aware};

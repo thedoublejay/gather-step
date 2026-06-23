@@ -34,6 +34,7 @@ kanal.workspace = true
 dhat = { workspace = true, optional = true }
 gather-step-analysis.workspace = true
 gather-step-core.workspace = true
+gather-step-deploy.workspace = true
 rustc-hash.workspace = true
 gather-step-git.workspace = true
 gather-step-mcp.workspace = true

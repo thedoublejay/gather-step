@@ -25,26 +25,9 @@ use crate::error::McpServerError;
 /// proofs for each target repo are kept.
 pub const MAX_PROOFS_PER_REPO: usize = 2;
 
-/// Strength assigned to each proof kind.
-///
-/// Invariants checked by tests:
-/// - `CoChangeAdvisory` < 33
-/// - `ImportBridge` in 33–67
-/// - all other kinds ≥ 67
-pub fn proof_strength(kind: ProofKind) -> u8 {
-    match kind {
-        ProofKind::DirectCall => 85,
-        ProofKind::EventProducerConsumer | ProofKind::GuardUsage => 80,
-        ProofKind::SharedContractConsumer => 75,
-        ProofKind::ProjectionFieldEvidence => 72,
-        ProofKind::RouteClientServer => 70,
-        ProofKind::ImportBridge => 55,
-        ProofKind::CoChangeAdvisory => 25,
-        // `ProofKind` is `#[non_exhaustive]`; future variants default to the
-        // lowest structural strength so they remain visible but conservative.
-        _ => 67,
-    }
-}
+/// Re-exported from `gather_step_analysis`, the single source of truth for
+/// proof-kind strength. See [`gather_step_analysis::proof_strength`].
+pub use gather_step_analysis::proof_strength;
 
 /// Map a single [`EdgeKind`] to its dominant [`ProofKind`], if it carries
 /// cross-repo semantic meaning.  Returns `None` for intra-repo structural

@@ -43,7 +43,7 @@ tree-sitter-go = "0.25"
 tree-sitter-java = "0.23.5"
 redb = "=4.1.0"
 tantivy = "=0.26.1"
-rusqlite = { version = "=0.40.0", features = ["bundled"] }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
 rayon = "1.12"
 kanal = "0.1.1"
 clap = { version = "4.6.1", features = ["derive"] }
@@ -72,6 +72,8 @@ hashbrown = "=0.17.1"
 parking_lot = "=0.12.5"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net", "io-util"] }
 tokio-util = "0.7.18"
+# Pinned to the 9.0.0-rc.4 prerelease: the 9.0 stable line is not yet published and
+# the rc carries the cross-platform watcher fixes the indexer's file-watch path depends on.
 notify = "=9.0.0-rc.4"
 gix = { version = "0.85", default-features = true }
 regex = "1.12.4"
@@ -80,7 +82,7 @@ simdutf8 = "=0.1.5"
 similar = "3.1.1"
 lru = "=0.18.0"
 quick_cache = "0.6.23"
-smallvec = { version = "=1.15.1", features = ["serde"] }
+smallvec = { version = "=1.15.2", features = ["serde"] }
 camino = "1.2.3"
 aho-corasick = "1.1.4"
 memchr = "2.8.2"

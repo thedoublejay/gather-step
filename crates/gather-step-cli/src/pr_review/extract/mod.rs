@@ -10,6 +10,7 @@
 //! Phase 7 adds `deployment`.
 
 pub mod ai_contracts;
+pub mod common;
 pub mod contract_alignment;
 pub mod decorators;
 pub mod deployment;

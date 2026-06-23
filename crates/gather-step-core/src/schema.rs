@@ -181,6 +181,74 @@ pub enum EdgeKind {
     ExposesMcpTool = 123,
 }
 
+/// How the source of an edge reaches its target. Whereas [`EdgeKind`] records
+/// *that* an edge exists, the access mechanism records *by what means* the
+/// source reaches the target, collapsing the many edge kinds onto a small,
+/// stable vocabulary suitable for surfacing in traces and cross-repo reports.
+///
+/// The mechanism for almost every edge is fully determined by its [`EdgeKind`]
+/// via [`EdgeKind::access_mechanism`]; the field on `EdgeMetadata` exists so a
+/// detector can override it in the rare case the kind alone is ambiguous.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    bitcode::Encode,
+    bitcode::Decode,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum AccessMechanism {
+    /// Direct in-process invocation (calls, decorators, structural references).
+    DirectCall = 0,
+    /// HTTP/RPC route — client→server or server-side route handler.
+    HttpRoute = 1,
+    /// Asynchronous domain event over a broker/queue (publish/consume).
+    Event = 2,
+    /// Environment variable read.
+    EnvVar = 3,
+    /// Config map / secret / managed-config consumption.
+    Config = 4,
+    /// Shared type / contract / guard usage across a package or repo boundary.
+    SharedType = 5,
+    /// Anything not captured by a more specific mechanism.
+    Other = 6,
+}
+
+impl AccessMechanism {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DirectCall => "direct_call",
+            Self::HttpRoute => "http_route",
+            Self::Event => "event",
+            Self::EnvVar => "env_var",
+            Self::Config => "config",
+            Self::SharedType => "shared_type",
+            Self::Other => "other",
+        }
+    }
+
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+impl fmt::Display for AccessMechanism {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("invalid {kind} discriminant: {value}")]
 pub struct DiscriminantError {
@@ -464,6 +532,90 @@ impl EdgeKind {
                 | Self::CallsMcpTool
                 | Self::RetrievesFrom
         )
+    }
+
+    /// The [`AccessMechanism`] this edge kind reaches its target by. This is
+    /// the central mapping used to populate `EdgeMetadata.access_mechanism` for
+    /// every edge without touching individual detectors; it is exhaustive over
+    /// [`EdgeKind`] so a new kind forces an explicit classification here.
+    #[must_use]
+    pub const fn access_mechanism(self) -> AccessMechanism {
+        match self {
+            // Direct in-process invocation / structural reference.
+            Self::Calls
+            | Self::UsesDecorator
+            | Self::References
+            | Self::Triggers
+            | Self::DefinesAgentNode
+            | Self::GraphTransitionsTo
+            | Self::ComposesAgent
+            | Self::SpawnsSubagent
+            | Self::BindsTool
+            | Self::InvokesLlm
+            | Self::ProducesAiContract
+            | Self::CallsMcpTool
+            | Self::ExposesMcpTool => AccessMechanism::DirectCall,
+            // HTTP/RPC route — client→server or server-side handler.
+            Self::Serves | Self::ConsumesApiFrom => AccessMechanism::HttpRoute,
+            // Asynchronous domain event over a broker/queue.
+            Self::Publishes
+            | Self::Consumes
+            | Self::UsesEventFrom
+            | Self::ProducesEventFor
+            | Self::PropagatesEvent
+            | Self::UsesBroker => AccessMechanism::Event,
+            // Environment variable read.
+            Self::ReadsEnv => AccessMechanism::EnvVar,
+            // Config map / secret / managed-config consumption.
+            Self::UsesPrompt | Self::FetchesPromptFrom => AccessMechanism::Config,
+            // Shared type / contract / guard usage across a boundary.
+            Self::UsesShared
+            | Self::UsesTypeFrom
+            | Self::UsesGuardFrom
+            | Self::ImplementsContractFrom
+            | Self::ConsumesHookFrom
+            | Self::ContractOn
+            | Self::DriftsFrom
+            | Self::MirrorsValueFrom
+            | Self::GuardsEnumValue => AccessMechanism::SharedType,
+            // Everything else: structural, VCS/people, projection, deployment,
+            // persistence, and AI-retrieval edges that don't map to a more
+            // specific mechanism.
+            Self::Defines
+            | Self::Imports
+            | Self::Exports
+            | Self::Extends
+            | Self::Implements
+            | Self::DependsOn
+            | Self::PersistsTo
+            | Self::ChangedIn
+            | Self::IntroducedBy
+            | Self::AuthoredBy
+            | Self::ReviewedBy
+            | Self::MergedAs
+            | Self::CommentedOn
+            | Self::Resolves
+            | Self::RelatesTo
+            | Self::PartOf
+            | Self::BreaksIfChanged
+            | Self::CoChangesWith
+            | Self::OwnedBy
+            | Self::CrossRepoDepends
+            | Self::MigratesCollection
+            | Self::ReadsField
+            | Self::WritesField
+            | Self::DerivesFieldFrom
+            | Self::FiltersOnField
+            | Self::IndexesField
+            | Self::BackfillsField
+            | Self::DeployedAs
+            | Self::BackedBy
+            | Self::BuiltBy
+            | Self::UsesDatabase
+            | Self::RetrievesFrom
+            | Self::Embeds
+            | Self::IndexesVector => AccessMechanism::Other,
+        }
     }
 
     pub const fn all() -> &'static [Self] {
@@ -820,7 +972,7 @@ pub fn proof_sort_key(proof: &PlanningProof) -> impl Ord {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use super::{EdgeKind, NodeKind};
+    use super::{AccessMechanism, EdgeKind, NodeKind};
 
     #[test]
     fn node_kind_round_trips_through_u8() {
@@ -932,6 +1084,104 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{kind:?} should decode"));
             assert_eq!(decoded, kind);
         }
+    }
+
+    #[test]
+    fn access_mechanism_is_total_over_every_edge_kind() {
+        // `access_mechanism` is a `const fn` exhaustive match, so a new EdgeKind
+        // variant fails to compile until it is mapped. Iterating all() here also
+        // guards against a future `_` catch-all silently swallowing new kinds.
+        for kind in EdgeKind::all() {
+            let _mechanism = kind.access_mechanism();
+        }
+    }
+
+    #[test]
+    fn access_mechanism_maps_representative_kinds() {
+        assert_eq!(
+            EdgeKind::Calls.access_mechanism(),
+            AccessMechanism::DirectCall
+        );
+        assert_eq!(
+            EdgeKind::ConsumesApiFrom.access_mechanism(),
+            AccessMechanism::HttpRoute
+        );
+        assert_eq!(
+            EdgeKind::Serves.access_mechanism(),
+            AccessMechanism::HttpRoute
+        );
+        assert_eq!(
+            EdgeKind::ProducesEventFor.access_mechanism(),
+            AccessMechanism::Event
+        );
+        assert_eq!(
+            EdgeKind::UsesEventFrom.access_mechanism(),
+            AccessMechanism::Event
+        );
+        assert_eq!(
+            EdgeKind::Publishes.access_mechanism(),
+            AccessMechanism::Event
+        );
+        assert_eq!(
+            EdgeKind::Consumes.access_mechanism(),
+            AccessMechanism::Event
+        );
+        assert_eq!(
+            EdgeKind::ReadsEnv.access_mechanism(),
+            AccessMechanism::EnvVar
+        );
+        assert_eq!(
+            EdgeKind::FetchesPromptFrom.access_mechanism(),
+            AccessMechanism::Config
+        );
+        assert_eq!(
+            EdgeKind::UsesShared.access_mechanism(),
+            AccessMechanism::SharedType
+        );
+        assert_eq!(
+            EdgeKind::UsesTypeFrom.access_mechanism(),
+            AccessMechanism::SharedType
+        );
+        assert_eq!(
+            EdgeKind::ImplementsContractFrom.access_mechanism(),
+            AccessMechanism::SharedType
+        );
+        assert_eq!(
+            EdgeKind::ContractOn.access_mechanism(),
+            AccessMechanism::SharedType
+        );
+        assert_eq!(EdgeKind::Defines.access_mechanism(), AccessMechanism::Other);
+        assert_eq!(EdgeKind::Imports.access_mechanism(), AccessMechanism::Other);
+    }
+
+    #[test]
+    fn access_mechanism_round_trips_through_u8_and_serde() {
+        for mechanism in [
+            AccessMechanism::DirectCall,
+            AccessMechanism::HttpRoute,
+            AccessMechanism::Event,
+            AccessMechanism::EnvVar,
+            AccessMechanism::Config,
+            AccessMechanism::SharedType,
+            AccessMechanism::Other,
+        ] {
+            let json = serde_json::to_string(&mechanism).expect("mechanism should serialize");
+            let decoded: AccessMechanism =
+                serde_json::from_str(&json).expect("mechanism should deserialize");
+            assert_eq!(decoded, mechanism);
+            // serde uses snake_case; matches the human label.
+            assert_eq!(json, format!("\"{}\"", mechanism.label()));
+        }
+    }
+
+    #[test]
+    fn edge_metadata_without_access_mechanism_deserializes_to_none() {
+        // Legacy serde blobs predate the field; `#[serde(default)]` must fill None.
+        let legacy = r#"{"weight":1,"confidence":90,"timestamp_unix":null,"drift_kind":null,"resolver":null,"guard_has_default":null,"enum_qn":null}"#;
+        let decoded: super::super::graph::EdgeMetadata =
+            serde_json::from_str(legacy).expect("legacy metadata should deserialize");
+        assert_eq!(decoded.access_mechanism, None);
+        assert_eq!(decoded.weight, Some(1));
     }
 
     #[test]

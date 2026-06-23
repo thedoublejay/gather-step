@@ -447,4 +447,41 @@ mod tests {
 
         storage_root
     }
+
+    /// Payload-shape guard: the serialized `who_consumes` response must keep its
+    /// stable top-level and per-consumer JSON keys so MCP clients reading
+    /// `data.consumers[].repo` / `.linking_symbols` do not silently break on a
+    /// serde rename.
+    #[test]
+    fn who_consumes_response_serializes_with_stable_keys() {
+        use super::{ConsumerRepo, WhoConsumesData, WhoConsumesResponse};
+
+        let response = WhoConsumesResponse {
+            data: WhoConsumesData {
+                consumers: vec![ConsumerRepo {
+                    linking_symbols: vec!["CREDIT_AGENT_CONFIGS".to_owned()],
+                    repo: "service-ui".to_owned(),
+                }],
+                symbol: "CREDIT_AGENT_CONFIGS".to_owned(),
+            },
+        };
+
+        let value = serde_json::to_value(&response).expect("response must serialize");
+        let data = value.get("data").expect("`data` key must be present");
+        assert!(data.get("consumers").is_some(), "`consumers` key");
+        assert_eq!(
+            data.get("symbol").and_then(|v| v.as_str()),
+            Some("CREDIT_AGENT_CONFIGS")
+        );
+
+        let consumer = &data["consumers"][0];
+        assert!(
+            consumer.get("linking_symbols").is_some(),
+            "`linking_symbols` key"
+        );
+        assert_eq!(
+            consumer.get("repo").and_then(|v| v.as_str()),
+            Some("service-ui")
+        );
+    }
 }

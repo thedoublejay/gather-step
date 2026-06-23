@@ -23,59 +23,46 @@ use rustc_hash::FxHashMap;
 use crate::pr_review::delta_report::{
     EventDelta, EventDeltaChange, EventDeltas, EventEndpointSummary,
 };
+use crate::pr_review::extract::common::three_way_diff;
 
 /// `(event_kind, event_name)` → `EventDelta` mapping built from one snapshot.
 type EventMap = FxHashMap<(String, String), EventDelta>;
 
 /// Extract added / removed / changed event deltas by diffing virtual event nodes
 /// in `baseline` against those in `review`.
-pub fn extract_event_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<EventDeltas> {
+pub fn extract_event_deltas<B: GraphStore, R: GraphStore>(
+    baseline: &B,
+    review: &R,
+) -> Result<EventDeltas> {
     let baseline_map = build_event_map(baseline)?;
     let review_map = build_event_map(review)?;
 
-    let mut added: Vec<EventDelta> = Vec::new();
-    let mut removed: Vec<EventDelta> = Vec::new();
-    let mut changed: Vec<EventDeltaChange> = Vec::new();
-
-    // Added: in review but not in baseline.
-    for (key, delta) in &review_map {
-        if !baseline_map.contains_key(key) {
-            added.push(delta.clone());
-        }
-    }
-
-    // Removed: in baseline but not in review.
-    for (key, delta) in &baseline_map {
-        if !review_map.contains_key(key) {
-            removed.push(delta.clone());
-        }
-    }
+    let diff = three_way_diff(baseline_map, review_map);
+    let mut added = diff.added;
+    let mut removed = diff.removed;
 
     // Changed: same key in both — diff producer/consumer sets.
-    for (key, review_delta) in &review_map {
-        if let Some(baseline_delta) = baseline_map.get(key) {
-            let producers_added = endpoint_diff(&baseline_delta.producers, &review_delta.producers);
-            let producers_removed =
-                endpoint_diff(&review_delta.producers, &baseline_delta.producers);
-            let consumers_added = endpoint_diff(&baseline_delta.consumers, &review_delta.consumers);
-            let consumers_removed =
-                endpoint_diff(&review_delta.consumers, &baseline_delta.consumers);
+    let mut changed: Vec<EventDeltaChange> = Vec::new();
+    for (key, baseline_delta, review_delta) in diff.common {
+        let producers_added = endpoint_diff(&baseline_delta.producers, &review_delta.producers);
+        let producers_removed = endpoint_diff(&review_delta.producers, &baseline_delta.producers);
+        let consumers_added = endpoint_diff(&baseline_delta.consumers, &review_delta.consumers);
+        let consumers_removed = endpoint_diff(&review_delta.consumers, &baseline_delta.consumers);
 
-            let has_changes = !producers_added.is_empty()
-                || !producers_removed.is_empty()
-                || !consumers_added.is_empty()
-                || !consumers_removed.is_empty();
+        let has_changes = !producers_added.is_empty()
+            || !producers_removed.is_empty()
+            || !consumers_added.is_empty()
+            || !consumers_removed.is_empty();
 
-            if has_changes {
-                changed.push(EventDeltaChange {
-                    event_kind: key.0.clone(),
-                    event_name: key.1.clone(),
-                    producers_added,
-                    producers_removed,
-                    consumers_added,
-                    consumers_removed,
-                });
-            }
+        if has_changes {
+            changed.push(EventDeltaChange {
+                event_kind: key.0.clone(),
+                event_name: key.1.clone(),
+                producers_added,
+                producers_removed,
+                consumers_added,
+                consumers_removed,
+            });
         }
     }
 
