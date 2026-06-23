@@ -5,7 +5,7 @@
 //! or `pnpm-workspace.yaml`), the framework dependencies and source markers sit
 //! inside the member directories, so a root-only scan detects nothing.
 //! `detect_frameworks_workspace_aware` unions detection across discovered
-//! members, which is what makes NestJS detection fire — and, via each member's
+//! members, which is what makes `NestJS` detection fire — and, via each member's
 //! own `src/`, what lets the nested app's events extract.
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ fn fixture_root(monorepo: &str) -> PathBuf {
         .join(monorepo)
 }
 
-/// Parse a fixture-relative TypeScript file with the given frameworks active.
+/// Parse a fixture-relative `TypeScript` file with the given frameworks active.
 fn parse_member_file(monorepo: &str, relative_path: &str, frameworks: &[Framework]) -> Vec<String> {
     let root = fixture_root(monorepo);
     let path = Path::new(relative_path);

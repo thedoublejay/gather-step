@@ -163,7 +163,7 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
 /// workspace manifest (npm/Yarn/Bun `workspaces` OR `pnpm-workspace.yaml`),
 /// unions the detection results from every discovered member directory. The
 /// member scan also picks up each member's own `src/` marker directory, which
-/// is what makes NestJS source-marker detection fire for nested apps.
+/// is what makes `NestJS` source-marker detection fire for nested apps.
 ///
 /// Detection cost grows from one manifest read to N (one per member), which is
 /// bounded and cheap — members are read once at index time and the result is
