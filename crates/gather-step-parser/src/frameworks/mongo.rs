@@ -29,6 +29,24 @@ const QUERY_OPERATORS: &[&str] = &[
     "countDocuments",
 ];
 
+/// Mutating operators whose dangerous document is the *update* argument
+/// (`arg 2`), not the filter (`arg 1`): `updateOne(filter, update)`,
+/// `findOneAndReplace(filter, replacement, opts)`, etc. For these the filter
+/// and the update doc are both scanned; the `$set`/`$toObjectId`/null-parent
+/// rules key on the update doc, so scanning only `arg 1` would never fire.
+const UPDATE_OPERATORS: &[&str] = &[
+    "updateOne",
+    "updateMany",
+    "findOneAndUpdate",
+    "findOneAndReplace",
+    "replaceOne",
+];
+
+/// Maximum object/array nesting the JS-literal parser descends before bailing.
+/// Bounds recursion on attacker-influenceable indexed source so a deeply
+/// nested literal cannot overflow the stack and abort the indexer.
+const MAX_PARSE_DEPTH: usize = 128;
+
 /// Operators that define an Atlas search index. The first object argument is
 /// the index definition (`{ name, definition: { mappings: { … } } }` or the
 /// bare `{ mappings: { … } }` shape).
@@ -68,16 +86,30 @@ pub fn extract(parsed: &ParsedFile) -> MongoExtraction {
         let Some(first) = arguments.first() else {
             continue;
         };
+        let callee = call.callee_name.as_str();
 
-        if QUERY_OPERATORS.contains(&call.callee_name.as_str())
-            && let Some(value) = parse_js_value(first)
-        {
-            collect_referenced_fields(&value, &mut referenced);
-            extraction.queries.push(value);
-        } else if ATLAS_INDEX_OPERATORS.contains(&call.callee_name.as_str())
-            && let Some(value) = parse_js_value(first)
-        {
-            extraction.atlas_indexes.push(normalize_atlas_index(value));
+        if ATLAS_INDEX_OPERATORS.contains(&callee) {
+            if let Some(value) = parse_js_value(first) {
+                extraction.atlas_indexes.push(normalize_atlas_index(value));
+            }
+            continue;
+        }
+
+        let is_query = QUERY_OPERATORS.contains(&callee);
+        let is_update = UPDATE_OPERATORS.contains(&callee);
+        if !is_query && !is_update {
+            continue;
+        }
+
+        // For mutating ops the dangerous document is the update doc (arg 2);
+        // scan both the filter (arg 1) and the update doc. For read ops only
+        // arg 1 (the query/pipeline) is structurally interesting.
+        let scan_upto = if is_update { 2 } else { 1 };
+        for arg in arguments.iter().take(scan_upto) {
+            if let Some(value) = parse_js_value(arg) {
+                collect_referenced_fields(&value, &mut referenced);
+                extraction.queries.push(value);
+            }
         }
     }
 
@@ -101,18 +133,36 @@ fn normalize_atlas_index(value: Value) -> Value {
     }
 }
 
-/// Collect the top-level field names referenced by a query/filter object so
-/// the Atlas drift detector can see which fields the code queries. Mongo
-/// operators (keys starting with `$`) are pipeline directives, not fields, so
-/// they are skipped; for a pipeline array each stage's `$match`/`$search`
-/// object contributes its non-operator keys.
+/// Collect the field names referenced by a query/filter/pipeline object so the
+/// Atlas drift detector can see which fields the code queries. Mongo operators
+/// (keys starting with `$`) are pipeline directives, not fields, so plain keys
+/// are skipped; specific operators contribute fields via their own shape:
+/// `$match`/`$text` descend into their object; Atlas `$search` exposes its
+/// matched field(s) under a nested `path` (string or array of strings);
+/// `$group._id` and `$lookup` (`localField`/`foreignField`) name fields by
+/// `$`-prefixed string reference.
 fn collect_referenced_fields(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+    collect_referenced_fields_inner(value, 0, out);
+}
+
+fn collect_referenced_fields_inner(
+    value: &Value,
+    depth: usize,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    if depth >= MAX_PARSE_DEPTH {
+        return;
+    }
     match value {
         Value::Object(map) => {
             for (key, child) in map {
                 if let Some(operator) = key.strip_prefix('$') {
-                    if matches!(operator, "match" | "search" | "text") {
-                        collect_referenced_fields(child, out);
+                    match operator {
+                        "match" | "text" => collect_referenced_fields_inner(child, depth + 1, out),
+                        "search" => collect_search_paths(child, depth + 1, out),
+                        "group" => collect_group_fields(child, out),
+                        "lookup" => collect_lookup_fields(child, out),
+                        _ => {}
                     }
                 } else if !key.contains('$') {
                     out.insert(key.clone());
@@ -121,7 +171,103 @@ fn collect_referenced_fields(value: &Value, out: &mut std::collections::BTreeSet
         }
         Value::Array(items) => {
             for item in items {
-                collect_referenced_fields(item, out);
+                collect_referenced_fields_inner(item, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Atlas `$search` operators name their target field(s) under a `path` key,
+/// which is a single string or an array of strings (and may sit one level
+/// down under the operator name, e.g. `{ text: { query, path } }`). Pull every
+/// referenced field out of any `path` encountered in the subtree.
+fn collect_search_paths(value: &Value, depth: usize, out: &mut std::collections::BTreeSet<String>) {
+    if depth >= MAX_PARSE_DEPTH {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if key == "path" {
+                    insert_path_fields(child, out);
+                } else {
+                    collect_search_paths(child, depth + 1, out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_search_paths(item, depth + 1, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn insert_path_fields(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::String(field) => {
+            out.insert(field.clone());
+        }
+        Value::Array(items) => {
+            for item in items {
+                insert_path_fields(item, out);
+            }
+        }
+        // `{ value: "field", multi: "..." }` wrapped path form.
+        Value::Object(map) => {
+            if let Some(Value::String(field)) = map.get("value") {
+                out.insert(field.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `$group._id` references the grouped field(s) by `$`-prefixed string
+/// (`{ _id: "$entity" }` or `{ _id: { e: "$entity" } }`); accumulator
+/// expressions likewise reference fields by `$field` strings.
+fn collect_group_fields(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    for child in map.values() {
+        collect_field_references(child, out);
+    }
+}
+
+/// `$lookup` names the local/foreign join fields directly as bare strings.
+fn collect_lookup_fields(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    for key in ["localField", "foreignField"] {
+        if let Some(Value::String(field)) = map.get(key) {
+            out.insert(field.clone());
+        }
+    }
+}
+
+/// Pull field names out of an aggregation expression: a `$field` string is a
+/// field path reference; objects/arrays are descended.
+fn collect_field_references(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::String(text) => {
+            if let Some(field) = text.strip_prefix('$') {
+                if !field.is_empty() && !field.starts_with('$') {
+                    out.insert(field.to_owned());
+                }
+            }
+        }
+        Value::Object(map) => {
+            for child in map.values() {
+                collect_field_references(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_field_references(item, out);
             }
         }
         _ => {}
@@ -137,66 +283,140 @@ fn collect_referenced_fields(value: &Value, out: &mut std::collections::BTreeSet
 #[must_use]
 pub fn parse_js_value(source: &str) -> Option<Value> {
     let mut parser = LiteralParser::new(source);
-    parser.skip_whitespace();
+    parser.skip_trivia();
     if !matches!(parser.peek(), Some('{' | '[')) {
         return None;
     }
-    let value = parser.parse_value()?;
-    parser.skip_whitespace();
+    let value = parser.parse_value(0)?;
+    // Tolerate a trailing TS cast (`as Filter<T>` / `satisfies UpdateDoc`) and
+    // comments after the literal — they do not change the materialized value
+    // but would otherwise fail the strict end-of-input check (false negative).
+    parser.skip_trivia();
+    parser.skip_trailing_cast();
+    parser.skip_trivia();
     parser.at_end().then_some(value)
 }
 
 /// Recursive-descent parser for the JS-literal subset. Deliberately rejects
 /// anything it cannot faithfully turn into a `serde_json::Value` rather than
 /// guessing, so the detectors never run on an incorrectly materialized value.
-struct LiteralParser<'a> {
-    chars: std::iter::Peekable<std::str::Chars<'a>>,
+///
+/// Backed by an indexed `Vec<char>` rather than a one-char `Peekable` so the
+/// trivia skipper can look ahead for `//` / `/* */` comments and a trailing
+/// `as` / `satisfies <type>` cast.
+struct LiteralParser {
+    chars: Vec<char>,
+    pos: usize,
 }
 
-impl<'a> LiteralParser<'a> {
-    fn new(source: &'a str) -> Self {
+impl LiteralParser {
+    fn new(source: &str) -> Self {
         Self {
-            chars: source.chars().peekable(),
+            chars: source.chars().collect(),
+            pos: 0,
         }
     }
 
-    fn peek(&mut self) -> Option<char> {
-        self.chars.peek().copied()
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.chars.get(self.pos + offset).copied()
     }
 
     fn bump(&mut self) -> Option<char> {
-        self.chars.next()
+        let ch = self.chars.get(self.pos).copied();
+        if ch.is_some() {
+            self.pos += 1;
+        }
+        ch
     }
 
-    fn at_end(&mut self) -> bool {
-        self.peek().is_none()
+    fn at_end(&self) -> bool {
+        self.pos >= self.chars.len()
     }
 
-    fn skip_whitespace(&mut self) {
-        while let Some(ch) = self.peek() {
-            if ch.is_whitespace() {
-                self.bump();
-            } else {
-                break;
+    /// Skip whitespace and `//` line / `/* */` block comments. Comments may
+    /// appear between tokens in real source (`{ /* keep */ status: 1 }`), so
+    /// every former `skip_whitespace` call site uses this.
+    fn skip_trivia(&mut self) {
+        loop {
+            match self.peek() {
+                Some(ch) if ch.is_whitespace() => {
+                    self.bump();
+                }
+                Some('/') if self.peek_at(1) == Some('/') => {
+                    while let Some(ch) = self.peek() {
+                        if ch == '\n' {
+                            break;
+                        }
+                        self.bump();
+                    }
+                }
+                Some('/') if self.peek_at(1) == Some('*') => {
+                    self.bump();
+                    self.bump();
+                    while let Some(ch) = self.bump() {
+                        if ch == '*' && self.peek() == Some('/') {
+                            self.bump();
+                            break;
+                        }
+                    }
+                }
+                _ => break,
             }
         }
     }
 
-    fn parse_value(&mut self) -> Option<Value> {
-        self.skip_whitespace();
+    /// Tolerate a trailing TS type assertion after the literal: `as Filter<T>`
+    /// or `satisfies UpdateDoc`. Consumes the keyword and the remaining type
+    /// expression up to end-of-input so the strict `at_end` check still passes.
+    fn skip_trailing_cast(&mut self) {
+        for keyword in ["as", "satisfies"] {
+            if self.matches_keyword(keyword) {
+                self.pos += keyword.len();
+                // The type expression runs to the end of this argument slice.
+                self.pos = self.chars.len();
+                return;
+            }
+        }
+    }
+
+    /// True when the next chars spell `keyword` followed by a non-identifier
+    /// boundary (so `assignee` is not mistaken for the `as` keyword).
+    fn matches_keyword(&self, keyword: &str) -> bool {
+        let kw: Vec<char> = keyword.chars().collect();
+        if self.chars[self.pos..].iter().take(kw.len()).ne(kw.iter()) {
+            return false;
+        }
+        match self.peek_at(kw.len()) {
+            Some(ch) => !(ch.is_alphanumeric() || ch == '_' || ch == '$'),
+            None => true,
+        }
+    }
+
+    fn parse_value(&mut self, depth: usize) -> Option<Value> {
+        if depth >= MAX_PARSE_DEPTH {
+            return None;
+        }
+        self.skip_trivia();
         match self.peek()? {
-            '{' => self.parse_object(),
-            '[' => self.parse_array(),
+            '{' => self.parse_object(depth),
+            '[' => self.parse_array(depth),
             '"' | '\'' => self.parse_string().map(Value::String),
             _ => self.parse_keyword_or_number(),
         }
     }
 
-    fn parse_object(&mut self) -> Option<Value> {
+    fn parse_object(&mut self, depth: usize) -> Option<Value> {
+        if depth >= MAX_PARSE_DEPTH {
+            return None;
+        }
         self.expect('{')?;
         let mut map = Map::new();
         loop {
-            self.skip_whitespace();
+            self.skip_trivia();
             match self.peek()? {
                 '}' => {
                     self.bump();
@@ -207,20 +427,23 @@ impl<'a> LiteralParser<'a> {
                 }
                 _ => {
                     let key = self.parse_key()?;
-                    self.skip_whitespace();
+                    self.skip_trivia();
                     self.expect(':')?;
-                    let value = self.parse_value()?;
+                    let value = self.parse_value(depth + 1)?;
                     map.insert(key, value);
                 }
             }
         }
     }
 
-    fn parse_array(&mut self) -> Option<Value> {
+    fn parse_array(&mut self, depth: usize) -> Option<Value> {
+        if depth >= MAX_PARSE_DEPTH {
+            return None;
+        }
         self.expect('[')?;
         let mut items = Vec::new();
         loop {
-            self.skip_whitespace();
+            self.skip_trivia();
             match self.peek()? {
                 ']' => {
                     self.bump();
@@ -229,7 +452,7 @@ impl<'a> LiteralParser<'a> {
                 ',' => {
                     self.bump();
                 }
-                _ => items.push(self.parse_value()?),
+                _ => items.push(self.parse_value(depth + 1)?),
             }
         }
     }
@@ -238,7 +461,7 @@ impl<'a> LiteralParser<'a> {
     /// (`field`, `$lookup`, `meta.flags`). Bare keys run up to the next `:`,
     /// whitespace, or terminator.
     fn parse_key(&mut self) -> Option<String> {
-        self.skip_whitespace();
+        self.skip_trivia();
         match self.peek()? {
             '"' | '\'' => self.parse_string(),
             _ => {
@@ -397,5 +620,79 @@ mod tests {
     fn extractor_yields_nothing_without_mongo_calls() {
         let parsed = parse("const x = compute({ a: 1 }); export default x;");
         assert!(extract(&parsed).is_empty());
+    }
+
+    #[test]
+    fn parses_literal_with_trailing_ts_cast_and_comments() {
+        // F5: a trailing `as Filter<T>` / `satisfies` cast and `//` / `/* */`
+        // comments must not defeat the strict end-of-input check.
+        let cast = parse_js_value("{ status: 'active' } as Filter<User>").expect("cast tolerated");
+        assert_eq!(cast, json!({ "status": "active" }));
+
+        let satisfies =
+            parse_js_value("{ $set: { name: 'x' } } satisfies UpdateDoc").expect("satisfies");
+        assert_eq!(satisfies, json!({ "$set": { "name": "x" } }));
+
+        let commented = parse_js_value("{ /* keep */ status: 'active' } // trailing line comment")
+            .expect("comments tolerated");
+        assert_eq!(commented, json!({ "status": "active" }));
+    }
+
+    #[test]
+    fn deeply_nested_literal_returns_none_without_panic() {
+        // F3: 500 levels of nesting must bail past the depth bound and return
+        // None instead of overflowing the stack.
+        let mut source = String::new();
+        for _ in 0..500 {
+            source.push('[');
+        }
+        for _ in 0..500 {
+            source.push(']');
+        }
+        assert!(parse_js_value(&source).is_none());
+    }
+
+    #[test]
+    fn update_op_scans_filter_and_update_doc_arguments() {
+        // F1: the dangerous doc on `updateOne` is arg 2; both args are scanned
+        // and materialized as queries.
+        let source = r"
+            async function run(model) {
+                await model.updateOne(
+                    { _id: '123' },
+                    { $set: { 'meta.flags.active': true } }
+                );
+            }
+        ";
+        let extraction = extract(&parse(source));
+        assert_eq!(extraction.queries.len(), 2, "filter + update doc");
+        assert!(
+            extraction.queries.iter().any(|q| q.get("$set").is_some()),
+            "the update doc (arg 2) is captured"
+        );
+    }
+
+    #[test]
+    fn search_path_and_pipeline_stage_fields_are_referenced() {
+        // F4: real Atlas `$search` exposes its field under `path`; `$group._id`
+        // and `$lookup` local/foreign fields are referenced too.
+        let source = r"
+            async function run(model) {
+                await model.aggregate([
+                    { $search: { text: { query: 'x', path: 'entity' } } },
+                    { $group: { _id: '$category', n: { $sum: 1 } } },
+                    { $lookup: {
+                        from: 'users', localField: 'ownerId', foreignField: '_id', as: 'owner'
+                    } }
+                ]);
+            }
+        ";
+        let extraction = extract(&parse(source));
+        let fields = &extraction.referenced_fields;
+        assert!(fields.iter().any(|f| f == "entity"), "$search.path field");
+        assert!(fields.iter().any(|f| f == "category"), "$group._id field");
+        assert!(fields.iter().any(|f| f == "ownerId"), "$lookup localField");
+        assert!(fields.iter().any(|f| f == "_id"), "$lookup foreignField");
+        assert!(!fields.iter().any(|f| f.starts_with('$')));
     }
 }

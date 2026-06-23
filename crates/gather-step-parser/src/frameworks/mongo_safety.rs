@@ -1,13 +1,28 @@
 //! Structural safety detectors for Mongo queries, aggregations, and Atlas
-//! search-index definitions. Pure over a [`serde_json::Value`] so they are
-//! testable without a live parser.
+//! search-index definitions, plus the production wiring that runs them over a
+//! parsed file.
+//!
+//! The detectors are pure over a [`serde_json::Value`] so they are testable
+//! without a live parser. The extractor in [`super::mongo`] materializes the
+//! relevant values out of TS/JS source; [`scan_parsed_file`] wires the two
+//! together. These live in the parser crate (rather than
+//! `gather-step-analysis`) so the storage indexer can call them without a
+//! crate cycle.
 
 use serde_json::Value;
+
+use super::mongo::{self, MongoExtraction};
+use crate::tree_sitter::ParsedFile;
 
 pub const RULE_INDEX_DEFEAT: &str = "GS-MONGO-INDEX-DEFEAT";
 pub const RULE_UNSAFE_COERCION: &str = "GS-MONGO-UNSAFE-COERCION";
 pub const RULE_NULL_PARENT_PATH: &str = "GS-MONGO-NULL-PARENT-PATH";
 pub const RULE_ATLAS_INDEX_DRIFT: &str = "GS-MONGO-ATLAS-INDEX-DRIFT";
+
+/// Maximum object/array nesting the structural walk descends before bailing.
+/// Bounds recursion on attacker-influenceable indexed source so a deeply
+/// nested literal cannot overflow the stack and abort the indexer.
+pub const MAX_SCAN_DEPTH: usize = 128;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MongoQueryFinding {
@@ -17,10 +32,45 @@ pub struct MongoQueryFinding {
     pub path: String,
 }
 
+/// Run the Mongo safety detectors over the queries and Atlas indexes
+/// extracted from `parsed`. Findings are sorted by `(rule_id, path)` so the
+/// output is stable across runs.
+#[must_use]
+pub fn scan_parsed_file(parsed: &ParsedFile) -> Vec<MongoQueryFinding> {
+    scan_extraction(&mongo::extract(parsed))
+}
+
+/// Run the detectors over an already-materialized [`MongoExtraction`]. Split
+/// out so callers that extract once can scan without re-parsing.
+#[must_use]
+pub fn scan_extraction(extraction: &MongoExtraction) -> Vec<MongoQueryFinding> {
+    let referenced: Vec<&str> = extraction
+        .referenced_fields
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    let mut findings = Vec::new();
+    for query in &extraction.queries {
+        findings.extend(analyze_mongo_value(query));
+    }
+    for index in &extraction.atlas_indexes {
+        findings.extend(analyze_atlas_index_drift(index, &referenced));
+    }
+
+    findings.sort_by(|left, right| {
+        left.rule_id
+            .cmp(right.rule_id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    findings.dedup();
+    findings
+}
+
 #[must_use]
 pub fn analyze_mongo_value(value: &Value) -> Vec<MongoQueryFinding> {
     let mut findings = Vec::new();
-    walk(value, "$", &mut findings);
+    walk(value, "$", 0, &mut findings);
     findings.sort_by(|left, right| {
         left.rule_id
             .cmp(right.rule_id)
@@ -44,7 +94,7 @@ pub fn analyze_atlas_index_drift(
     }
     let mut mapped = std::collections::BTreeSet::new();
     if let Some(fields) = mappings.and_then(|m| m.get("fields")) {
-        collect_mapped_fields(fields, "", &mut mapped);
+        collect_mapped_fields(fields, "", 0, &mut mapped);
     }
 
     let mut findings: Vec<MongoQueryFinding> = referenced_fields
@@ -67,8 +117,12 @@ pub fn analyze_atlas_index_drift(
 fn collect_mapped_fields(
     fields: &Value,
     prefix: &str,
+    depth: usize,
     out: &mut std::collections::BTreeSet<String>,
 ) {
+    if depth >= MAX_SCAN_DEPTH {
+        return;
+    }
     let Some(map) = fields.as_object() else {
         return;
     };
@@ -79,13 +133,16 @@ fn collect_mapped_fields(
             format!("{prefix}.{name}")
         };
         if let Some(nested) = def.get("fields") {
-            collect_mapped_fields(nested, &full, out);
+            collect_mapped_fields(nested, &full, depth + 1, out);
         }
         out.insert(full);
     }
 }
 
-fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
+fn walk(value: &Value, path: &str, depth: usize, findings: &mut Vec<MongoQueryFinding>) {
+    if depth >= MAX_SCAN_DEPTH {
+        return;
+    }
     match value {
         Value::Object(map) => {
             for (key, child) in map {
@@ -103,12 +160,12 @@ fn walk(value: &Value, path: &str, findings: &mut Vec<MongoQueryFinding>) {
                     "$set" | "$addFields" => detect_null_parent_path(child, &child_path, findings),
                     _ => {}
                 }
-                walk(child, &child_path, findings);
+                walk(child, &child_path, depth + 1, findings);
             }
         }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                walk(item, &format!("{path}[{index}]"), findings);
+                walk(item, &format!("{path}[{index}]"), depth + 1, findings);
             }
         }
         _ => {}
@@ -185,11 +242,11 @@ fn mentions_operator(value: &Value, op: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod detector_tests {
     use super::{
         RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH, RULE_UNSAFE_COERCION, analyze_mongo_value,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn rule_ids(value: &serde_json::Value) -> Vec<&'static str> {
         analyze_mongo_value(value)
@@ -355,5 +412,114 @@ mod tests {
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);
+    }
+
+    #[test]
+    fn deeply_nested_value_returns_without_panic() {
+        // 500 levels of nesting must not overflow the stack; the bounded walk
+        // bails past MAX_SCAN_DEPTH and returns whatever it found above it.
+        let mut value = json!({ "$toObjectId": "$x" });
+        for _ in 0..500 {
+            value = Value::Object(serde_json::Map::from_iter([("a".to_owned(), value)]));
+        }
+        let findings = analyze_mongo_value(&value);
+        // The deeply buried `$toObjectId` is below the depth bound, so it is
+        // not reached — the point is that the walk terminates without aborting.
+        assert!(findings.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::{RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, scan_extraction, scan_parsed_file};
+    use crate::frameworks::Framework;
+    use crate::frameworks::mongo::MongoExtraction;
+    use crate::tree_sitter::parse_file_with_frameworks;
+    use crate::{FileEntry, Language};
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+
+    fn parse(source: &str) -> crate::tree_sitter::ParsedFile {
+        let entry = FileEntry {
+            path: PathBuf::from("src/repo.ts"),
+            language: Language::TypeScript,
+            size_bytes: 0,
+            content_hash: [0; 32],
+            source_bytes: Some(source.as_bytes().to_vec().into()),
+        };
+        parse_file_with_frameworks("demo", Path::new("/tmp/demo"), &entry, &[Framework::NestJs])
+            .expect("parse")
+    }
+
+    #[test]
+    fn flags_index_defeating_lookup_extracted_from_source() {
+        let source = r"
+            async function run(model) {
+                await model.aggregate([
+                    { $lookup: {
+                        from: 'users',
+                        let: { uid: '$userId' },
+                        pipeline: [{ $match: { $expr: { $eq: [{ $toString: '$_id' }, '$$uid'] } } }],
+                        as: 'user'
+                    } }
+                ]);
+            }
+        ";
+        let findings = scan_parsed_file(&parse(source));
+        assert!(
+            findings.iter().any(|f| f.rule_id == RULE_INDEX_DEFEAT),
+            "the coercing $lookup join key must be flagged"
+        );
+    }
+
+    #[test]
+    fn flags_null_parent_path_in_update_doc_second_argument() {
+        // The dangerous doc on a mutating op is arg 2, not arg 1. The filter
+        // (arg 1) is clean; the `$set` update doc (arg 2) has an unguarded
+        // dotted path that must be flagged.
+        let source = r"
+            async function run(model) {
+                await model.updateOne(
+                    { _id: '123' },
+                    { $set: { 'meta.flags.active': true } }
+                );
+            }
+        ";
+        let findings = scan_parsed_file(&parse(source));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == super::RULE_NULL_PARENT_PATH),
+            "the unguarded dotted $set in the update doc (arg 2) must be flagged"
+        );
+    }
+
+    #[test]
+    fn flags_atlas_drift_for_unmapped_referenced_field() {
+        // `entity` is queried but absent from the `dynamic:false` mapping.
+        let extraction = MongoExtraction {
+            queries: vec![json!([{ "$search": { "path": "entity", "query": "x" } }])],
+            atlas_indexes: vec![
+                json!({ "mappings": { "dynamic": false, "fields": { "title": {} } } }),
+            ],
+            referenced_fields: vec!["entity".to_owned(), "title".to_owned()],
+        };
+        let findings = scan_extraction(&extraction);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == RULE_ATLAS_INDEX_DRIFT && f.path == "entity")
+        );
+        assert!(!findings.iter().any(|f| f.path == "title"));
+    }
+
+    #[test]
+    fn clean_source_yields_no_findings() {
+        let source = r"
+            async function run(model) {
+                await model.find({ status: 'active' });
+            }
+        ";
+        assert!(scan_parsed_file(&parse(source)).is_empty());
     }
 }

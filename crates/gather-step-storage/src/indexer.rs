@@ -24,7 +24,8 @@ use gather_step_parser::{
     CallSite, FileEntry as SourceFileEntry, FileStat, ManifestError, ParseError, ParsedFile,
     TraverseConfig, TraverseError, collect_repo_files, extract_package_manifest,
     frameworks::{
-        Framework, detect_frameworks, detect_frameworks_workspace_aware, local_config::LocalConfig,
+        Framework, detect_frameworks_workspace_aware, local_config::LocalConfig,
+        mongo_safety::scan_parsed_file,
     },
     infer_ai_contracts, infer_payload_contracts, parse_file_with_context, parse_file_with_packs,
     resolve::ResolutionInput,
@@ -744,7 +745,9 @@ impl RepoIndexer {
         progress: Option<&dyn Fn(IndexProgress)>,
     ) -> Result<IndexingStats, RepoIndexerError> {
         let repo_root = repo_root.as_ref();
-        let frameworks: Vec<Framework> = detect_frameworks(repo_root).into_iter().collect();
+        let frameworks: Vec<Framework> = detect_frameworks_workspace_aware(repo_root)
+            .into_iter()
+            .collect();
         self.index_repo_cancellable_with_frameworks(repo, repo_root, &frameworks, cancel, progress)
     }
 
@@ -1090,7 +1093,7 @@ impl RepoIndexer {
             .map(|file| file.path.clone())
             .collect::<Vec<_>>();
         self.storage.purge_deleted_files(repo, &deleted_paths)?;
-        let detected_frameworks = detect_frameworks(&repo_root)
+        let detected_frameworks = detect_frameworks_workspace_aware(&repo_root)
             .into_iter()
             .collect::<Vec<_>>();
         let mut stats = self.index_repo_files(
@@ -1227,6 +1230,14 @@ impl RepoIndexer {
                         .into_iter()
                         .map(|record| AiContractStoreRecord { record }),
                 );
+                for finding in scan_parsed_file(&parsed) {
+                    tracing::warn!(
+                        rule = finding.rule_id,
+                        file = %parsed.file.path.display(),
+                        path = %finding.path,
+                        "mongo query safety finding"
+                    );
+                }
 
                 let ParsedFile {
                     file,
@@ -1589,6 +1600,14 @@ impl RepoIndexer {
                                 .into_iter()
                                 .map(|record| AiContractStoreRecord { record }),
                         );
+                        for finding in scan_parsed_file(&parsed) {
+                            tracing::warn!(
+                                rule = finding.rule_id,
+                                file = %parsed.file.path.display(),
+                                path = %finding.path,
+                                "mongo query safety finding"
+                            );
+                        }
 
                         let ParsedFile {
                             file,
