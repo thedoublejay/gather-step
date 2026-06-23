@@ -180,6 +180,23 @@ use crate::pr_review::delta_report::{
     SymbolDeltaChange,
 };
 
+/// Compare two delta lists by a stable key, ignoring order, and record a
+/// human-readable diff when the key multisets differ. Shared by every
+/// per-surface parity check.
+fn compare_sorted<T, K, F>(label: &str, a: &[T], b: &[T], key: F, diffs: &mut Vec<String>)
+where
+    K: Ord + std::fmt::Debug,
+    F: Fn(&T) -> K,
+{
+    let mut ak: Vec<K> = a.iter().map(&key).collect();
+    let mut bk: Vec<K> = b.iter().map(&key).collect();
+    ak.sort();
+    bk.sort();
+    if ak != bk {
+        diffs.push(format!("{label}: temp-index has {ak:?}, overlay has {bk:?}"));
+    }
+}
+
 /// Identity for an AI contract delta: `repo::file::<schema|model|inline>`.
 fn ai_contract_key(c: &AiContractDelta) -> String {
     let label = c
@@ -205,15 +222,7 @@ fn compare_ai_contract_lists(
     b: &[AiContractDelta],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a.iter().map(ai_contract_key).collect();
-    let mut bk: Vec<String> = b.iter().map(ai_contract_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, ai_contract_key, diffs);
 }
 
 fn compare_ai_contract_changed_lists(
@@ -221,15 +230,13 @@ fn compare_ai_contract_changed_lists(
     b: &[AiContractDeltaChange],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a.iter().map(ai_contract_change_key).collect();
-    let mut bk: Vec<String> = b.iter().map(ai_contract_change_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "ai_contracts.changed: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(
+        "ai_contracts.changed",
+        a,
+        b,
+        ai_contract_change_key,
+        diffs,
+    );
 }
 
 fn route_key(r: &RouteDelta) -> String {
@@ -237,15 +244,7 @@ fn route_key(r: &RouteDelta) -> String {
 }
 
 fn compare_route_lists(label: &str, a: &[RouteDelta], b: &[RouteDelta], diffs: &mut Vec<String>) {
-    let mut ak: Vec<String> = a.iter().map(route_key).collect();
-    let mut bk: Vec<String> = b.iter().map(route_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, route_key, diffs);
 }
 
 fn compare_route_changed_lists(
@@ -254,21 +253,7 @@ fn compare_route_changed_lists(
     b: &[RouteDeltaChange],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a
-        .iter()
-        .map(|c| format!("{} {}", c.method, c.path))
-        .collect();
-    let mut bk: Vec<String> = b
-        .iter()
-        .map(|c| format!("{} {}", c.method, c.path))
-        .collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, |c| format!("{} {}", c.method, c.path), diffs);
 }
 
 fn symbol_key(s: &SymbolDelta) -> String {
@@ -281,15 +266,7 @@ fn compare_symbol_lists(
     b: &[SymbolDelta],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a.iter().map(symbol_key).collect();
-    let mut bk: Vec<String> = b.iter().map(symbol_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, symbol_key, diffs);
 }
 
 fn compare_symbol_changed_lists(
@@ -298,21 +275,13 @@ fn compare_symbol_changed_lists(
     b: &[SymbolDeltaChange],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a
-        .iter()
-        .map(|c| format!("{}::{}", c.repo, c.qualified_name))
-        .collect();
-    let mut bk: Vec<String> = b
-        .iter()
-        .map(|c| format!("{}::{}", c.repo, c.qualified_name))
-        .collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(
+        label,
+        a,
+        b,
+        |c| format!("{}::{}", c.repo, c.qualified_name),
+        diffs,
+    );
 }
 
 fn payload_key(p: &PayloadContractDelta) -> String {
@@ -325,15 +294,7 @@ fn compare_payload_lists(
     b: &[PayloadContractDelta],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a.iter().map(payload_key).collect();
-    let mut bk: Vec<String> = b.iter().map(payload_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, payload_key, diffs);
 }
 
 fn event_key(e: &EventDelta) -> String {
@@ -341,15 +302,7 @@ fn event_key(e: &EventDelta) -> String {
 }
 
 fn compare_event_lists(label: &str, a: &[EventDelta], b: &[EventDelta], diffs: &mut Vec<String>) {
-    let mut ak: Vec<String> = a.iter().map(event_key).collect();
-    let mut bk: Vec<String> = b.iter().map(event_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, event_key, diffs);
 }
 
 fn decorator_key(d: &DecoratorDelta) -> String {
@@ -367,15 +320,7 @@ fn compare_decorator_lists(
     b: &[DecoratorDelta],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a.iter().map(decorator_key).collect();
-    let mut bk: Vec<String> = b.iter().map(decorator_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, decorator_key, diffs);
 }
 
 fn alignment_key(f: &ContractAlignmentFinding) -> String {
@@ -388,15 +333,7 @@ fn compare_alignment_lists(
     b: &[ContractAlignmentFinding],
     diffs: &mut Vec<String>,
 ) {
-    let mut ak: Vec<String> = a.iter().map(alignment_key).collect();
-    let mut bk: Vec<String> = b.iter().map(alignment_key).collect();
-    ak.sort();
-    bk.sort();
-    if ak != bk {
-        diffs.push(format!(
-            "{label}: temp-index has {ak:?}, overlay has {bk:?}"
-        ));
-    }
+    compare_sorted(label, a, b, alignment_key, diffs);
 }
 
 fn risk_key(r: &RemovedSurfaceRisk) -> String {
