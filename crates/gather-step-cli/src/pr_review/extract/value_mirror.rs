@@ -208,7 +208,13 @@ struct MirrorSurface {
 
 impl MirrorSurface {
     fn same_surface(&self, other: &Self) -> bool {
-        self.owner == other.owner && self.repo == other.repo && self.file == other.file
+        // `enum_qn` is part of the surface identity: two surfaces in the same
+        // file/owner that reference *different* enums must stay distinct, or
+        // Task-17 enum-scoped completeness collapses into false negatives/positives.
+        self.owner == other.owner
+            && self.repo == other.repo
+            && self.file == other.file
+            && self.enum_qn == other.enum_qn
     }
 
     fn edge_kind(&self) -> EdgeKind {

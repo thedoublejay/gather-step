@@ -100,6 +100,18 @@ impl LocalConfig {
             }
         };
 
+        // Alias-only guard: `read_local_config_capped` already enforces this
+        // file's own 2 MiB byte cap, so we must not re-impose the shared 1 MiB
+        // size limit here (that would silently reject valid 1–2 MiB configs).
+        if gather_step_core::config::guard_yaml_aliases(&raw, &config_path.display().to_string())
+            .is_err()
+        {
+            tracing::warn!(
+                path = %config_path.display(),
+                "local config rejected by the YAML safety guard; falling back to auto-detection"
+            );
+            return None;
+        }
         match serde_norway::from_str::<Self>(&raw) {
             Ok(config) => Some(config),
             Err(err) => {

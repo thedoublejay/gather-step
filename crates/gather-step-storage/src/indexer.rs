@@ -2174,6 +2174,15 @@ fn record_deployment_parse_skip(
                 "skipping malformed deployment artifact during indexing",
             );
         }
+        DeploymentParseError::Guard { .. } => {
+            skips.malformed_artifact = skips.malformed_artifact.saturating_add(1);
+            warn!(
+                repo,
+                path = %file_path,
+                error = %error,
+                "skipping deployment artifact rejected by the YAML safety guard during indexing",
+            );
+        }
     }
 }
 

@@ -2161,6 +2161,9 @@ fn render_risks_section(buf: &mut String, risks: &[RemovedSurfaceRisk]) {
             "### [{severity_label}] `{}` — {}{}\n",
             r.identity, r.kind, repo_part
         );
+        if let Some(detail) = &r.detail {
+            let _ = writeln!(buf, "_{detail}_\n");
+        }
         if r.surviving_consumers.is_empty() {
             buf.push_str("_no surviving consumers_\n");
         } else {

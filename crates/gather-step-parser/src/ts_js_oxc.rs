@@ -16,16 +16,16 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::TSModuleDeclarationName;
 use oxc_ast::ast::{
     Argument, ArrayAssignmentTarget, ArrowFunctionExpression, AssignmentTarget,
-    AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern, CallExpression,
-    ChainElement, Class, ClassElement, Declaration, Decorator, ExportAllDeclaration,
-    ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-    ForStatementInit, ForStatementLeft, Function, FunctionBody, ImportDeclaration,
-    ImportDeclarationSpecifier, ImportOrExportKind, JSXAttributeItem, JSXAttributeValue, JSXChild,
-    JSXElement, JSXExpression, MemberExpression, MethodDefinition, MethodDefinitionKind,
-    ModuleExportName, NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPropertyKind,
-    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, TSAccessibility,
-    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclarationBody, TSTypeName,
-    VariableDeclaration, VariableDeclarator,
+    AssignmentTargetMaybeDefault, AssignmentTargetProperty, BinaryOperator, BindingPattern,
+    CallExpression, ChainElement, Class, ClassElement, Declaration, Decorator,
+    ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
+    ExportNamedDeclaration, Expression, ForStatementInit, ForStatementLeft, Function, FunctionBody,
+    ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, JSXAttributeItem,
+    JSXAttributeValue, JSXChild, JSXElement, JSXExpression, MemberExpression, MethodDefinition,
+    MethodDefinitionKind, ModuleExportName, NewExpression, ObjectAssignmentTarget,
+    ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind, SimpleAssignmentTarget,
+    Statement, TSAccessibility, TSEnumMemberName, TSImportEqualsDeclaration,
+    TSModuleDeclarationBody, TSTypeName, VariableDeclaration, VariableDeclarator,
 };
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
@@ -1606,7 +1606,13 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
             }
         }
         Expression::BinaryExpression(b) => {
-            if b.operator.is_equality() {
+            // Only positive equality (`==`/`===`) is an enum guard. `is_equality()`
+            // also matches `!=`/`!==`, which would wrongly flag `if (s !== Archived)`
+            // as guarding `Archived`.
+            if matches!(
+                b.operator,
+                BinaryOperator::Equality | BinaryOperator::StrictEquality
+            ) {
                 for operand in [&b.left, &b.right] {
                     if let Some((member, enum_qn)) = enum_member_ref(operand) {
                         push_enum_guard_candidate(

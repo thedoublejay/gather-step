@@ -66,11 +66,32 @@ pub fn resolve_pr_set_from_gh(
     manifest_from_gh_prs(&responses, &lookup, options)
 }
 
+/// Maximum accepted length of a `--from-gh` search query. GitHub's own search
+/// query limit is well under this; the cap simply bounds what we hand to `gh`.
+const MAX_GH_QUERY_LEN: usize = 512;
+
+/// Reject queries that are over-long or contain control characters before they
+/// reach the `gh` subprocess. The query runs under the caller's `gh` token.
+fn validate_gh_query(query: &str) -> Result<(), GhResolverError> {
+    if query.len() > MAX_GH_QUERY_LEN {
+        return Err(GhResolverError::InvalidQuery {
+            reason: "query exceeds the maximum length",
+        });
+    }
+    if query.chars().any(char::is_control) {
+        return Err(GhResolverError::InvalidQuery {
+            reason: "query contains control characters",
+        });
+    }
+    Ok(())
+}
+
 fn gh_pr_list(
     workspace: &Path,
     repo: Option<&str>,
     query: &str,
 ) -> Result<Vec<GhPr>, GhResolverError> {
+    validate_gh_query(query)?;
     let mut cmd = Command::new("gh");
     cmd.arg("pr").arg("list");
     if let Some(repo) = repo {
@@ -240,6 +261,10 @@ pub enum GhResolverError {
     },
     #[error("`gh pr list` exited with status {status:?}.")]
     Command { status: Option<i32> },
+    #[error(
+        "GitHub PR-set query is invalid: {reason}. Provide a shorter, single-line search query."
+    )]
+    InvalidQuery { reason: &'static str },
     #[error("Failed to parse `gh pr list` JSON: {source}")]
     Parse {
         #[source]
@@ -256,8 +281,18 @@ pub enum GhResolverError {
 
 #[cfg(test)]
 mod tests {
-    use super::{GhPr, GhResolveOptions, RepoLookup, manifest_from_gh_prs, slugify_set_id};
+    use super::{
+        GhPr, GhResolveOptions, RepoLookup, manifest_from_gh_prs, slugify_set_id, validate_gh_query,
+    };
     use gather_step_core::{GatherStepConfig, RepoConfig};
+
+    #[test]
+    fn gh_query_validation_rejects_control_chars_and_overlong_input() {
+        assert!(validate_gh_query("is:open author:me").is_ok());
+        assert!(validate_gh_query("ok\nmalicious").is_err());
+        assert!(validate_gh_query("x\0y").is_err());
+        assert!(validate_gh_query(&"a".repeat(1000)).is_err());
+    }
 
     fn config() -> GatherStepConfig {
         GatherStepConfig {

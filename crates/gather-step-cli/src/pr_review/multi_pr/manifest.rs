@@ -49,6 +49,8 @@ pub enum ManifestError {
         #[source]
         source: serde_norway::Error,
     },
+    #[error("PR-set manifest rejected by the YAML safety guard: {reason}")]
+    Guard { reason: String },
     #[error("Unsupported PR-set manifest version {found}; expected {expected}.")]
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("PR-set manifest id must not be empty.")]
@@ -82,6 +84,11 @@ impl PrSetManifest {
     }
 
     pub fn from_yaml_str(raw: &str) -> Result<Self, ManifestError> {
+        gather_step_core::config::guard_yaml_source(raw, "<pr-set manifest>").map_err(|error| {
+            ManifestError::Guard {
+                reason: error.to_string(),
+            }
+        })?;
         let manifest: Self =
             serde_norway::from_str(raw).map_err(|source| ManifestError::Parse { source })?;
         manifest.validate()?;

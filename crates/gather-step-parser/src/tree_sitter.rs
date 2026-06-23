@@ -3593,6 +3593,7 @@ fn workspace_package_dirs(workspace_root: &Path) -> Vec<PathBuf> {
     let pnpm_manifest = workspace_root.join("pnpm-workspace.yaml");
     if let Some(pnpm_manifest) = canonicalize_existing_file_under(&pnpm_manifest, workspace_root)
         && let Ok(raw) = fs::read_to_string(pnpm_manifest)
+        && gather_step_core::config::guard_yaml_source(&raw, "pnpm-workspace.yaml").is_ok()
         && let Ok(document) = serde_norway::from_str::<serde_norway::Value>(&raw)
         && let Some(entries) = document
             .get("packages")

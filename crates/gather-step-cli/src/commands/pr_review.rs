@@ -1325,7 +1325,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // Load the head config from the worktree for prefix matching.
         let head_cfg_for_affected = {
             let cfg_path = artifact_root.worktree_root.join("gather-step.config.yaml");
-            GatherStepConfig::from_yaml_file(&cfg_path).ok()
+            GatherStepConfig::from_yaml_file(&cfg_path)
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        path = %cfg_path.display(),
+                        %error,
+                        "head config not loaded (e.g. YAML safety-guard rejection); affected-repo matching may be degraded"
+                    );
+                })
+                .ok()
         };
 
         // Open the baseline graph for reverse-dependents expansion.  Fail-soft:
@@ -1429,7 +1437,15 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
     // ── 7. Head config-derived repo names ─────────────────────────────────
     let config_path = artifact_root.worktree_root.join("gather-step.config.yaml");
-    let head_config = GatherStepConfig::from_yaml_file(&config_path).ok();
+    let head_config = GatherStepConfig::from_yaml_file(&config_path)
+        .inspect_err(|error| {
+            tracing::warn!(
+                path = %config_path.display(),
+                %error,
+                "head config not loaded (e.g. YAML safety-guard rejection); repo-name derivation may be degraded"
+            );
+        })
+        .ok();
     let indexed_repos: Vec<String> = per_repo_changes.as_ref().map_or_else(
         || {
             head_config.as_ref().map_or_else(
