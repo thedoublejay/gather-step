@@ -51,6 +51,16 @@ const ENFORCEMENT_DECORATORS: &[&str] = &[
     "requirespermission",
 ];
 
+/// Real symbol kinds (non-virtual) whose direct removal we scan for surviving
+/// cross-repo callers. Mirrors the kinds the shared-symbol fallback matches.
+const DIRECT_SYMBOL_KINDS: &[NodeKind] = &[NodeKind::Function, NodeKind::Class, NodeKind::Type];
+
+/// Incoming edge kinds marking a *direct* code-level consumer of a symbol: a
+/// call site (`Calls`) or a reference (`References`). These bypass the virtual
+/// route/event/shared-symbol stubs (which use `ConsumesApiFrom`, `Consumes`,
+/// `UsesShared`, …), so they catch cross-repo consumers that those passes miss.
+const DIRECT_CONSUMER_EDGE_KINDS: &[EdgeKind] = &[EdgeKind::Calls, EdgeKind::References];
+
 /// Incoming edge kinds that mark a consumer of an AI surface node.
 const AI_CONSUMER_EDGE_KINDS: &[EdgeKind] = &[
     EdgeKind::UsesPrompt,
@@ -256,6 +266,18 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
     // decorated surface to survive in review.
     risks.extend(removed_enforcement_decorator_risks(baseline, review)?);
 
+    // ── Removed symbols with direct cross-repo consumers (v5.4 H5) ───────────
+    // When a PR removes a symbol that another repo calls/references *directly*
+    // (a `Calls` / `References` edge, not a virtual route/event/shared-symbol
+    // stub), the cross-repo caller is left dangling and is invisible to the
+    // passes above. The FP gate skips symbols already covered by the
+    // shared-symbol removal pass (`symbols_removed`).
+    risks.extend(removed_symbol_cross_repo_consumer_risks(
+        baseline,
+        review,
+        symbols_removed,
+    )?);
+
     // ── Value-mirror risks (v5.1 Task 5) ─────────────────────────────────────
     // Cross-repo precision layer over the value-mirror graph (Task 4): the
     // add-and-forget completeness check (`value_mirror_incomplete`) and the
@@ -420,6 +442,72 @@ fn decorated_surface<S: GraphStore>(
     Ok(None)
 }
 
+/// Flag every removed real symbol that a *different repo* still consumes via a
+/// direct `Calls` / `References` edge.
+///
+/// A symbol node is "removed" when its ID exists in `baseline` but not in
+/// `review`. Virtual stubs are skipped (their removals are covered by the route
+/// / event / shared-symbol passes), as are symbols already reported by the
+/// shared-symbol removal pass (`symbols_removed`). A risk is only
+/// emitted when at least one *surviving cross-repo* consumer remains — same-repo
+/// consumers and consumers via virtual stubs do not qualify.
+fn removed_symbol_cross_repo_consumer_risks<S: GraphStore>(
+    baseline: &S,
+    review: &S,
+    symbols_removed: &[SymbolDelta],
+) -> Result<Vec<RemovedSurfaceRisk>> {
+    let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
+
+    for &kind in DIRECT_SYMBOL_KINDS {
+        for node in baseline.nodes_by_type(kind)? {
+            // Virtual nodes are handled by the route/event/shared-symbol passes.
+            if node.is_virtual {
+                continue;
+            }
+            // Removed = present in baseline, absent in review.
+            if review.get_node(node.id)?.is_some() {
+                continue;
+            }
+            // FP gate: the shared-symbol pass already covers these by qn.
+            let qn = node.qualified_name.as_deref().unwrap_or(&node.name);
+            if symbols_removed
+                .iter()
+                .any(|s| s.qualified_name == qn && s.repo == node.repo)
+            {
+                continue;
+            }
+
+            // Direct consumers (Calls / References) that still exist in review.
+            let consumers =
+                surviving_consumers(baseline, review, node.id, DIRECT_CONSUMER_EDGE_KINDS)?;
+            // Keep only direct cross-repo consumers: a different *real* repo.
+            // Same-repo callers are not the blind spot; virtual-stub sources
+            // (`repo == "__virtual__"`) are covered by the route/event passes.
+            let cross_repo: Vec<RemovedSurfaceConsumer> = consumers
+                .into_iter()
+                .filter(|c| c.repo != node.repo && c.repo != "__virtual__")
+                .collect();
+            if cross_repo.is_empty() {
+                continue;
+            }
+
+            let severity = severity_for_consumers(&cross_repo, Some(&node.repo), true);
+            risks.push(RemovedSurfaceRisk {
+                kind: "cross_repo_consumer".to_owned(),
+                identity: qn.to_owned(),
+                repo: Some(node.repo.clone()),
+                surviving_consumers: cross_repo,
+                severity,
+                detail: None,
+            });
+        }
+    }
+
+    risks.sort_by(|a, b| a.identity.cmp(&b.identity));
+
+    Ok(risks)
+}
+
 /// Map event kind string back to `NodeKind`.
 fn event_kind_to_node_kind(kind: &str) -> NodeKind {
     match kind {
@@ -434,6 +522,8 @@ fn event_kind_to_node_kind(kind: &str) -> NodeKind {
 /// Human-readable name for an `EdgeKind`.
 fn edge_kind_name(kind: EdgeKind) -> String {
     match kind {
+        EdgeKind::Calls => "Calls".to_owned(),
+        EdgeKind::References => "References".to_owned(),
         EdgeKind::ConsumesApiFrom => "ConsumesApiFrom".to_owned(),
         EdgeKind::UsesShared => "UsesShared".to_owned(),
         EdgeKind::UsesTypeFrom => "UsesTypeFrom".to_owned(),
@@ -928,6 +1018,106 @@ mod tests {
         assert!(
             !risks.iter().any(|r| r.kind == "security_decorator"),
             "a fully-removed surface must not raise a security_decorator risk"
+        );
+    }
+
+    /// A removed function with a surviving cross-repo `Calls` consumer →
+    /// High `cross_repo_consumer` risk.
+    #[test]
+    fn removed_symbol_with_cross_repo_caller_is_flagged() {
+        let (_td_b, baseline) = open_store("xrepo-call-baseline");
+        let (_td_r, review) = open_store("xrepo-call-review");
+
+        let removed = function_node("service-a", "src/util.ts", "computeTotal");
+        let caller = function_node("service-b", "src/order.ts", "checkout");
+        let owner = file_node("service-b", "src/order.ts");
+        let call_edge = edge(&caller, &removed, EdgeKind::Calls, &owner);
+
+        baseline
+            .bulk_insert(&[removed, caller.clone(), owner], &[call_edge])
+            .expect("baseline insert");
+
+        // The cross-repo caller survives; the called symbol is gone.
+        let review_owner = file_node("service-b", "src/order.ts");
+        review
+            .bulk_insert(&[caller, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        let risk = risks
+            .iter()
+            .find(|r| r.kind == "cross_repo_consumer")
+            .expect("a cross_repo_consumer risk must be flagged");
+        assert_eq!(risk.identity, "service-a::computeTotal");
+        assert_eq!(risk.severity, RiskSeverity::High);
+        assert_eq!(risk.surviving_consumers.len(), 1);
+        assert_eq!(risk.surviving_consumers[0].repo, "service-b");
+        assert_eq!(risk.surviving_consumers[0].edge_kind, "Calls");
+    }
+
+    /// A removed function consumed only by a same-repo caller → no
+    /// `cross_repo_consumer` risk.
+    #[test]
+    fn removed_symbol_with_only_same_repo_caller_is_not_flagged() {
+        let (_td_b, baseline) = open_store("samerepo-call-baseline");
+        let (_td_r, review) = open_store("samerepo-call-review");
+
+        let removed = function_node("service-a", "src/util.ts", "computeTotal");
+        let caller = function_node("service-a", "src/order.ts", "checkout");
+        let owner = file_node("service-a", "src/order.ts");
+        let call_edge = edge(&caller, &removed, EdgeKind::Calls, &owner);
+
+        baseline
+            .bulk_insert(&[removed, caller.clone(), owner], &[call_edge])
+            .expect("baseline insert");
+
+        let review_owner = file_node("service-a", "src/order.ts");
+        review
+            .bulk_insert(&[caller, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        assert!(
+            !risks.iter().any(|r| r.kind == "cross_repo_consumer"),
+            "a same-repo-only caller must not raise a cross_repo_consumer risk"
+        );
+    }
+
+    /// A removed symbol consumed only through a virtual route stub
+    /// (`ConsumesApiFrom`, not `Calls`/`References`) → no spurious
+    /// `cross_repo_consumer` risk (covered by the route pass instead).
+    #[test]
+    fn removed_symbol_consumed_via_virtual_stub_is_not_flagged_as_direct() {
+        let (_td_b, baseline) = open_store("virtual-stub-baseline");
+        let (_td_r, review) = open_store("virtual-stub-review");
+
+        let removed = function_node("service-a", "src/handler.ts", "listOrders");
+        // Consumption flows through a virtual route stub, not a direct call.
+        let route = route_virtual_node("GET", "/orders");
+        let caller = function_node("frontend", "src/api.ts", "fetchOrders");
+        let owner = file_node("frontend", "src/api.ts");
+        let api_edge = edge(&caller, &route, EdgeKind::ConsumesApiFrom, &owner);
+
+        baseline
+            .bulk_insert(&[removed, route, caller.clone(), owner], &[api_edge])
+            .expect("baseline insert");
+
+        // The frontend caller survives; the handler symbol is gone.
+        let review_owner = file_node("frontend", "src/api.ts");
+        review
+            .bulk_insert(&[caller, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        assert!(
+            !risks.iter().any(|r| r.kind == "cross_repo_consumer"),
+            "virtual-stub consumption must not raise a direct cross_repo_consumer risk"
         );
     }
 }
