@@ -19,6 +19,7 @@ pub mod evidence;
 pub mod impact;
 pub mod mock_leakage;
 pub mod mongo_query_safety;
+pub mod mongo_scan;
 pub mod overview;
 pub mod pack_assembly;
 pub mod projection_impact;
@@ -72,6 +73,7 @@ pub use mongo_query_safety::{
     MongoQueryFinding, RULE_ATLAS_INDEX_DRIFT, RULE_INDEX_DEFEAT, RULE_NULL_PARENT_PATH,
     RULE_UNSAFE_COERCION, analyze_atlas_index_drift, analyze_mongo_value,
 };
+pub use mongo_scan::{scan_extraction, scan_parsed_file};
 pub use overview::{ModuleSummary, OverviewError, RepoOverview, build_overview};
 pub use pack_assembly::{
     CandidateKey, Pack, PackAssembler, PackItem, PackMode, QueryShape, SimplePackAssembler,

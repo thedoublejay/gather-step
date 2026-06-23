@@ -9,6 +9,7 @@ pub mod frontend_router;
 pub mod gateway_proxy;
 pub mod local_config;
 pub mod migration_utils;
+pub mod mongo;
 pub mod mongoose;
 pub mod mongoose_migration;
 pub mod nestjs;
