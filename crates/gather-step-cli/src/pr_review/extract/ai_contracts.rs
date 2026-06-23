@@ -30,6 +30,7 @@ use crate::pr_review::delta_report::{
     AiContractDelta, AiContractDeltaChange, AiContractDeltas, AiContractFieldSummary,
     AiContractFieldTypeChange, AiFacetChange,
 };
+use crate::pr_review::extract::common::three_way_diff;
 
 /// `ai_contract_node_id` diff key — globally unique per call site because the
 /// producer mints it from `(repo, file, target_node_id, source_symbol_node_id)`.
@@ -51,24 +52,13 @@ pub fn extract_ai_contract_deltas<M: MetadataStore>(
     let baseline_map = build_contract_map(baseline)?;
     let review_map = build_contract_map(review)?;
 
-    let mut added: Vec<AiContractDelta> = Vec::new();
-    let mut removed: Vec<AiContractDelta> = Vec::new();
-    let mut changed: Vec<AiContractDeltaChange> = Vec::new();
+    let diff = three_way_diff(baseline_map, review_map);
+    let mut added: Vec<AiContractDelta> = diff.added.iter().map(record_to_delta).collect();
+    let mut removed: Vec<AiContractDelta> = diff.removed.iter().map(record_to_delta).collect();
 
-    for (key, record) in &review_map {
-        if !baseline_map.contains_key(key) {
-            added.push(record_to_delta(record));
-        }
-    }
-    for (key, record) in &baseline_map {
-        if !review_map.contains_key(key) {
-            removed.push(record_to_delta(record));
-        }
-    }
-    for (key, review_record) in &review_map {
-        if let Some(baseline_record) = baseline_map.get(key)
-            && let Some(change) = diff_contract(baseline_record, review_record)
-        {
+    let mut changed: Vec<AiContractDeltaChange> = Vec::new();
+    for (_key, baseline_record, review_record) in &diff.common {
+        if let Some(change) = diff_contract(baseline_record, review_record) {
             changed.push(change);
         }
     }

@@ -21,6 +21,7 @@ use rustc_hash::FxHashMap;
 use tracing::warn;
 
 use crate::pr_review::delta_report::{RouteDelta, RouteDeltaChange, RouteDeltas};
+use crate::pr_review::extract::common::three_way_diff;
 
 /// `(method, canonical_path)` → `RouteDelta` mapping built from one snapshot.
 type RouteMap = FxHashMap<(String, String), RouteDelta>;
@@ -40,37 +41,22 @@ pub fn extract_route_deltas<B: GraphStore, R: GraphStore>(
     let baseline_map = build_route_map(baseline)?;
     let review_map = build_route_map(review)?;
 
-    let mut added: Vec<RouteDelta> = Vec::new();
-    let mut removed: Vec<RouteDelta> = Vec::new();
-    let mut changed: Vec<RouteDeltaChange> = Vec::new();
-
-    // Added: in review but not in baseline.
-    for (key, delta) in &review_map {
-        if !baseline_map.contains_key(key) {
-            added.push(delta.clone());
-        }
-    }
-
-    // Removed: in baseline but not in review.
-    for (key, delta) in &baseline_map {
-        if !review_map.contains_key(key) {
-            removed.push(delta.clone());
-        }
-    }
+    let diff = three_way_diff(baseline_map, review_map);
+    let mut added = diff.added;
+    let mut removed = diff.removed;
 
     // Changed: in both — diff handler tuple.
-    for (key, review_delta) in &review_map {
-        if let Some(baseline_delta) = baseline_map.get(key) {
-            let handler_changed = handler_tuple(baseline_delta) != handler_tuple(review_delta);
-            if handler_changed {
-                changed.push(RouteDeltaChange {
-                    method: key.0.clone(),
-                    path: key.1.clone(),
-                    before: Some(baseline_delta.clone()),
-                    after: Some(review_delta.clone()),
-                    handler_changed: true,
-                });
-            }
+    let mut changed: Vec<RouteDeltaChange> = Vec::new();
+    for (key, baseline_delta, review_delta) in diff.common {
+        let handler_changed = handler_tuple(&baseline_delta) != handler_tuple(&review_delta);
+        if handler_changed {
+            changed.push(RouteDeltaChange {
+                method: key.0.clone(),
+                path: key.1.clone(),
+                before: Some(baseline_delta),
+                after: Some(review_delta),
+                handler_changed: true,
+            });
         }
     }
 
