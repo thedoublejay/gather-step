@@ -736,7 +736,6 @@ impl GitHistoryIndexer {
             let parent_tree = parent_commit.tree().map_err(Box::new)?;
             let commit_tree = commit.tree().map_err(Box::new)?;
             let deltas = collect_file_deltas(
-                repo,
                 &self.repo,
                 &id.to_string(),
                 &parent_tree,
@@ -922,7 +921,6 @@ fn change_kind_to_storage(kind: CommitFileChangeKind) -> StoredChangeKind {
 }
 
 fn collect_file_deltas(
-    repo: &Repository,
     repo_name: &str,
     commit_sha: &str,
     parent_tree: &gix::Tree<'_>,
