@@ -58,11 +58,29 @@
 //! dwarfed by the full PR-branch reindex `pr-review` performs in the same run,
 //! so the cost is bounded in practice.
 
+use std::collections::{BTreeSet, HashMap};
+
 use anyhow::Result;
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::GraphStore;
 
 use crate::pr_review::delta_report::{RemovedSurfaceRisk, RiskSeverity};
+
+/// Minimum number of shared canonical values for two differently-named enums to
+/// be treated as a hand-mirrored copy of the same set (H3). Set deliberately
+/// high (medium FP-risk): two enums sharing only 1–2 values are coincidental,
+/// not hand-copies, and must NOT be linked.
+const HAND_MIRROR_MIN_SHARED_VALUES: usize = 3;
+
+/// Trailing identifier suffixes stripped (case-insensitive) before comparing two
+/// enum names for hand-mirror correspondence (H3). `OrderStatusEnum` ↔
+/// `OrderStatusType` collapse to the same stem.
+const HAND_MIRROR_NAME_SUFFIXES: [&str; 3] = ["enum", "type", "status"];
+
+/// A suffix-stripped name match is only a SECONDARY signal: it links two enums
+/// solely when they ALSO share at least this many canonical values. This keeps
+/// the gate strict — a name coincidence with zero value overlap never links.
+const HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES: usize = 1;
 
 /// Append value-mirror risks (`value_mirror_incomplete` + `value_mirror`) to
 /// `risks`, derived from the value-mirror graph diff between `baseline` (PR
@@ -72,6 +90,11 @@ pub fn extend_with_value_mirror_risks<S: GraphStore>(
     review: &S,
     risks: &mut Vec<RemovedSurfaceRisk>,
 ) -> Result<()> {
+    // Hand-mirror correspondence index (H3): canonical value set per enum_qn in
+    // the head graph. Built once so the per-surface enum-scope check can decide
+    // whether two differently-named enums are really the same hand-copied set.
+    let enum_value_sets = enum_value_sets_by_qn(review)?;
+
     // ── Added authoritative values (add-and-forget completeness check) ────────
     for added in added_authoritative_values(baseline, review)? {
         let AddedValue {
@@ -104,11 +127,14 @@ pub fn extend_with_value_mirror_risks<S: GraphStore>(
             // Enum-scoped matching (Task 17): when the added member's owner enum
             // has a known `enum_qn`, an enum-ref surface is only relevant if it
             // mirrors/guards the SAME enum. A surface carrying a different
-            // `enum_qn` shares only a coincidental string value, so skip it.
-            // Mode-A literal surfaces (`enum_qn == None`) keep value-only
-            // matching and are always considered.
+            // `enum_qn` shares only a coincidental string value, so skip it —
+            // UNLESS the two enums are hand-mirrored copies of the same set (H3),
+            // in which case the surface's enum is a hand-copy that should track
+            // the new member too. Mode-A literal surfaces (`enum_qn == None`)
+            // keep value-only matching and are always considered.
             if let (Some(owner_qn), Some(surface_qn)) = (&owner_enum_qn, &surface.enum_qn)
                 && owner_qn != surface_qn
+                && !enums_hand_mirror_correspond(owner_qn, surface_qn, &enum_value_sets)
             {
                 continue;
             }
@@ -396,6 +422,69 @@ fn canonical_value_label(value_node: &NodeData) -> String {
         .filter(|qn| !qn.is_empty())
         .unwrap_or(&value_node.name);
     raw.strip_prefix("__value__").unwrap_or(raw).to_owned()
+}
+
+/// Canonical value set per `enum_qn` in `store`, derived from authoritative
+/// `Defines` edges (enum owner → `ValueMirror`). The set uses the same
+/// canonical value labels as the risk output ([`canonical_value_label`]), so
+/// "shared values" between two enums is an exact canonical-form comparison.
+/// Drives H3 hand-mirror correspondence.
+fn enum_value_sets_by_qn<S: GraphStore>(store: &S) -> Result<HashMap<String, BTreeSet<String>>> {
+    let mut out: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for value_node in store.nodes_by_type(NodeKind::ValueMirror)? {
+        let label = canonical_value_label(&value_node);
+        for edge in store.get_incoming(value_node.id)? {
+            if edge.kind != EdgeKind::Defines {
+                continue;
+            }
+            if let Some(enum_qn) = &edge.metadata.enum_qn {
+                out.entry(enum_qn.clone())
+                    .or_default()
+                    .insert(label.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Strip a single trailing [`HAND_MIRROR_NAME_SUFFIXES`] token (case-insensitive)
+/// and lowercase the result, yielding a stem for hand-mirror name comparison.
+/// `OrderStatusEnum` → `orderstatus`, `OrderStatusType` → `orderstatus`.
+fn hand_mirror_name_stem(enum_qn: &str) -> String {
+    let lower = enum_qn.to_ascii_lowercase();
+    for suffix in HAND_MIRROR_NAME_SUFFIXES {
+        if lower.len() > suffix.len()
+            && let Some(stem) = lower.strip_suffix(suffix)
+        {
+            return stem.to_owned();
+        }
+    }
+    lower
+}
+
+/// Whether two differently-named enums are a hand-mirrored copy of the same set
+/// (H3). STRICT FP gate: link when they share ≥ [`HAND_MIRROR_MIN_SHARED_VALUES`]
+/// canonical values, OR their suffix-stripped names match AND they still share
+/// ≥ [`HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES`] value (suffix-name-match is a
+/// secondary signal only — never links on a bare name coincidence). Two enums
+/// sharing 1–2 values with non-matching names are NOT linked.
+fn enums_hand_mirror_correspond(
+    owner_qn: &str,
+    surface_qn: &str,
+    enum_value_sets: &HashMap<String, BTreeSet<String>>,
+) -> bool {
+    let (Some(owner_values), Some(surface_values)) = (
+        enum_value_sets.get(owner_qn),
+        enum_value_sets.get(surface_qn),
+    ) else {
+        return false;
+    };
+    let shared = owner_values.intersection(surface_values).count();
+    if shared >= HAND_MIRROR_MIN_SHARED_VALUES {
+        return true;
+    }
+    let names_match = hand_mirror_name_stem(owner_qn) == hand_mirror_name_stem(surface_qn);
+    names_match && shared >= HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1347,19 +1436,17 @@ mod tests {
         assert_eq!(risk.repo.as_deref(), Some("web-frontend"));
     }
 
-    /// Task 17 STEP 4b (cross-repo, NOT auto-covered — documents the deferred
-    /// gap): a FE enum `OrderStatus` is a hand-copy of the BE enum
-    /// `OrderStatusEnum` (DIFFERENT `enum_qn`, same string values). BE
-    /// adds `cancelled`. The FE array references the FE enum's `enum_qn`, so
-    /// `enum_qn` scoping does NOT flag it — reliable coverage of hand-mirrors
-    /// needs explicit enum-correspondence (deferred). This test asserts the
-    /// HONEST behaviour: NOT flagged.
-    #[test]
-    fn cross_repo_hand_mirrored_enum_is_not_flagged() {
-        let (_tb, baseline) = open_store("xrepo-handmirror-baseline");
-        let (_tr, review) = open_store("xrepo-handmirror-review");
-
-        // BE enum (authoritative).
+    /// Build the cross-repo hand-mirror fixture: a BE enum `OrderStatusEnum`
+    /// and a FE hand-copy enum `OrderStatus` (DIFFERENT `enum_qn`, same string
+    /// values) with a FE array surface referencing the FE enum's `enum_qn`. The
+    /// baseline shares `shared_members` between the two enums; BE then adds
+    /// `cancelled` (FE untouched). Returns the FE array's owner name + file so a
+    /// test can assert whether it is flagged.
+    fn build_cross_repo_hand_mirror(
+        baseline: &GraphStoreDb,
+        review: &GraphStoreDb,
+        shared_members: &[&str],
+    ) {
         let be_file = file_node("service-log", "src/status.ts");
         let be_enum = owner_node(
             "service-log",
@@ -1368,7 +1455,6 @@ mod tests {
             NodeKind::Type,
         );
 
-        // FE enum (hand-copy) + its array surface, referencing the FE enum_qn.
         let fe_enum_file = file_node("web-frontend", "src/status.ts");
         let fe_enum = owner_node(
             "web-frontend",
@@ -1384,8 +1470,149 @@ mod tests {
             NodeKind::DataField,
         );
 
+        let cancelled = value_node("status.cancelled");
+        let shared: Vec<NodeData> = shared_members.iter().map(|v| value_node(v)).collect();
+
+        let mut base_nodes = vec![
+            be_file.clone(),
+            be_enum.clone(),
+            fe_enum_file.clone(),
+            fe_enum.clone(),
+            fe_array_file.clone(),
+            fe_array.clone(),
+        ];
+        base_nodes.extend(shared.iter().cloned());
+
+        let mut base_edges = Vec::new();
+        for member in &shared {
+            // BE enum (authoritative) + FE hand-copy enum both define the shared
+            // members; the FE array mirrors them under the FE enum_qn.
+            base_edges.push(defines_edge_qn(
+                &be_enum,
+                member,
+                &be_file,
+                "OrderStatusEnum",
+            ));
+            base_edges.push(defines_edge_qn(
+                &fe_enum,
+                member,
+                &fe_enum_file,
+                "OrderStatus",
+            ));
+            base_edges.push(mirrors_edge_qn(
+                &fe_array,
+                member,
+                &fe_array_file,
+                "OrderStatus",
+            ));
+        }
+        baseline
+            .bulk_insert(&base_nodes, &base_edges)
+            .expect("baseline insert");
+
+        let mut review_nodes = base_nodes.clone();
+        review_nodes.push(cancelled.clone());
+        let mut review_edges = base_edges.clone();
+        // BE gains `cancelled`; FE hand-copy enum + array are untouched.
+        review_edges.push(defines_edge_qn(
+            &be_enum,
+            &cancelled,
+            &be_file,
+            "OrderStatusEnum",
+        ));
+        review
+            .bulk_insert(&review_nodes, &review_edges)
+            .expect("review insert");
+    }
+
+    /// H3 POSITIVE: a FE enum `OrderStatus` is a hand-copy of the BE enum
+    /// `OrderStatusEnum` (DIFFERENT `enum_qn`) sharing ≥3 canonical values. BE
+    /// adds `cancelled`. Hand-mirror correspondence links the two sets, so the
+    /// un-updated FE array surface IS flagged.
+    #[test]
+    fn cross_repo_hand_mirror_sharing_three_values_is_flagged() {
+        let (_tb, baseline) = open_store("xrepo-handmirror-3-baseline");
+        let (_tr, review) = open_store("xrepo-handmirror-3-review");
+        build_cross_repo_hand_mirror(
+            &baseline,
+            &review,
+            &["status.active", "status.done", "status.pending"],
+        );
+
+        let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
+        extend_with_value_mirror_risks(&baseline, &review, &mut risks).expect("should succeed");
+
+        let risk = risks
+            .iter()
+            .find(|r| {
+                r.kind == "value_mirror_incomplete"
+                    && r.detail.as_deref().is_some_and(|d| {
+                        d.contains("statusOptions") || d.contains("src/statusColumns.tsx")
+                    })
+            })
+            .expect("hand-mirror sharing ≥3 values must flag the FE array surface");
+        let detail = risk.detail.as_deref().expect("detail should be set");
+        assert!(
+            detail.contains("status.cancelled"),
+            "detail must name the missing (canonical) value, got: {detail}"
+        );
+    }
+
+    /// H3 NEGATIVE (the required strict-gate test): two enums sharing EXACTLY 2
+    /// canonical values with non-matching suffix-stripped names. The shared set
+    /// is below the ≥3 hand-mirror bar, so the FE surface must NOT be
+    /// cross-flagged when the BE enum gains a member.
+    #[test]
+    fn cross_repo_hand_mirror_sharing_two_values_is_not_flagged() {
+        let (_tb, baseline) = open_store("xrepo-handmirror-2-baseline");
+        let (_tr, review) = open_store("xrepo-handmirror-2-review");
+        // `OrderStatusEnum` stem → `orderstatus`; `OrderStatus` stem → `order`
+        // (one suffix stripped each): names do NOT match, so the secondary
+        // name-match signal is inert and only the ≥3 value bar applies — which
+        // 2 shared values fails.
+        build_cross_repo_hand_mirror(&baseline, &review, &["status.active", "status.done"]);
+
+        let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
+        extend_with_value_mirror_risks(&baseline, &review, &mut risks).expect("should succeed");
+
+        assert!(
+            risks.iter().all(|r| r.detail.as_deref().is_none_or(
+                |d| !d.contains("statusOptions") && !d.contains("src/statusColumns.tsx")
+            )),
+            "two enums sharing only 2 values must NOT be hand-mirror linked: {risks:?}"
+        );
+    }
+
+    /// H3 SECONDARY SIGNAL: two enums whose names match after stripping the
+    /// `Enum`/`Type` suffix (`StatusType` ↔ `StatusEnum` → `status`) and that
+    /// share 1 value are linked — the FE array surface IS flagged. Confirms the
+    /// suffix-name-match path activates only with value overlap present.
+    #[test]
+    fn suffix_name_match_with_value_overlap_is_flagged() {
+        let (_tb, baseline) = open_store("suffix-match-baseline");
+        let (_tr, review) = open_store("suffix-match-review");
+
+        // BE enum `StatusEnum` (authoritative).
+        let be_file = file_node("service-log", "src/status.ts");
+        let be_enum = owner_node("service-log", "src/status.ts", "StatusEnum", NodeKind::Type);
+
+        // FE enum `StatusType` (hand-copy, different enum_qn, same stem) + array.
+        let fe_enum_file = file_node("web-frontend", "src/status.ts");
+        let fe_enum = owner_node(
+            "web-frontend",
+            "src/status.ts",
+            "StatusType",
+            NodeKind::Type,
+        );
+        let fe_array_file = file_node("web-frontend", "src/statusColumns.tsx");
+        let fe_array = owner_node(
+            "web-frontend",
+            "src/statusColumns.tsx",
+            "statusOptions",
+            NodeKind::DataField,
+        );
+
         let active = value_node("status.active");
-        let done = value_node("status.done");
         let cancelled = value_node("status.cancelled");
 
         baseline
@@ -1398,24 +1625,15 @@ mod tests {
                     fe_array_file.clone(),
                     fe_array.clone(),
                     active.clone(),
-                    done.clone(),
                 ],
                 &[
-                    // BE enum defines the authoritative values.
-                    defines_edge_qn(&be_enum, &active, &be_file, "OrderStatusEnum"),
-                    defines_edge_qn(&be_enum, &done, &be_file, "OrderStatusEnum"),
-                    // FE enum ALSO defines them (hand-copy), and the FE array
-                    // mirrors them referencing the FE enum_qn.
-                    defines_edge_qn(&fe_enum, &active, &fe_enum_file, "OrderStatus"),
-                    defines_edge_qn(&fe_enum, &done, &fe_enum_file, "OrderStatus"),
-                    mirrors_edge_qn(&fe_array, &active, &fe_array_file, "OrderStatus"),
-                    mirrors_edge_qn(&fe_array, &done, &fe_array_file, "OrderStatus"),
+                    defines_edge_qn(&be_enum, &active, &be_file, "StatusEnum"),
+                    defines_edge_qn(&fe_enum, &active, &fe_enum_file, "StatusType"),
+                    mirrors_edge_qn(&fe_array, &active, &fe_array_file, "StatusType"),
                 ],
             )
             .expect("baseline insert");
 
-        // Review: BE adds `cancelled`. The FE hand-copy enum + array are
-        // untouched.
         review
             .bulk_insert(
                 &[
@@ -1426,17 +1644,13 @@ mod tests {
                     fe_array_file.clone(),
                     fe_array.clone(),
                     active.clone(),
-                    done.clone(),
                     cancelled.clone(),
                 ],
                 &[
-                    defines_edge_qn(&be_enum, &active, &be_file, "OrderStatusEnum"),
-                    defines_edge_qn(&be_enum, &done, &be_file, "OrderStatusEnum"),
-                    defines_edge_qn(&be_enum, &cancelled, &be_file, "OrderStatusEnum"),
-                    defines_edge_qn(&fe_enum, &active, &fe_enum_file, "OrderStatus"),
-                    defines_edge_qn(&fe_enum, &done, &fe_enum_file, "OrderStatus"),
-                    mirrors_edge_qn(&fe_array, &active, &fe_array_file, "OrderStatus"),
-                    mirrors_edge_qn(&fe_array, &done, &fe_array_file, "OrderStatus"),
+                    defines_edge_qn(&be_enum, &active, &be_file, "StatusEnum"),
+                    defines_edge_qn(&be_enum, &cancelled, &be_file, "StatusEnum"),
+                    defines_edge_qn(&fe_enum, &active, &fe_enum_file, "StatusType"),
+                    mirrors_edge_qn(&fe_array, &active, &fe_array_file, "StatusType"),
                 ],
             )
             .expect("review insert");
@@ -1444,16 +1658,14 @@ mod tests {
         let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
         extend_with_value_mirror_risks(&baseline, &review, &mut risks).expect("should succeed");
 
-        // Honest deferred-gap behaviour: the FE hand-mirror is NOT flagged,
-        // because its array references a different `enum_qn` than the BE enum
-        // that gained the member. Reliable cross-repo hand-mirror coverage needs
-        // explicit enum-correspondence and is a documented v5.1 deferral.
         assert!(
-            risks.iter().all(|r| r.detail.as_deref().is_none_or(
-                |d| !d.contains("statusOptions") && !d.contains("src/statusColumns.tsx")
-            )),
-            "FE hand-mirror (different enum_qn) must not be flagged by enum_qn \
-             scoping — this is the documented deferred gap: {risks:?}"
+            risks.iter().any(|r| {
+                r.kind == "value_mirror_incomplete"
+                    && r.detail.as_deref().is_some_and(|d| {
+                        d.contains("statusOptions") || d.contains("src/statusColumns.tsx")
+                    })
+            }),
+            "suffix-name-matched enums sharing ≥1 value must be hand-mirror linked: {risks:?}"
         );
     }
 }
