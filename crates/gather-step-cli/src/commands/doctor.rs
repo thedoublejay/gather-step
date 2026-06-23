@@ -249,9 +249,8 @@ fn summarize_graph_health(
     // registered path is not a git repository). That is informational, not a
     // graph degradation, so it is reported in `unknown_repos` but never flips
     // `degraded` / fails `doctor`.
-    let degraded = !stale_repos.is_empty()
-        || !never_indexed_repos.is_empty()
-        || truncated_packs > 0;
+    let degraded =
+        !stale_repos.is_empty() || !never_indexed_repos.is_empty() || truncated_packs > 0;
     let mut reasons = Vec::new();
     if !stale_repos.is_empty() {
         reasons.push(format!(
