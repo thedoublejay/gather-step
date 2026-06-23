@@ -305,7 +305,7 @@ pub fn is_fastapi(repo_root: &Path) -> bool {
 }
 
 /// Returns `true` when a LangChain-style AI dependency is present in the Node
-/// manifest, or when a MongoDB client dependency can exercise the Atlas vector
+/// manifest, or when a `MongoDB` client dependency can exercise the Atlas vector
 /// search APIs handled by the same augmenter.
 #[must_use]
 pub fn is_ai_typescript(repo_root: &Path) -> bool {
