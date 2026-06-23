@@ -872,8 +872,11 @@ fn collect_incoming_matches_many_kinds<S: GraphStore>(
                 continue;
             }
 
-            let key = (node.id.as_bytes(), edge.kind.as_u8());
-            if !seen.insert(key) {
+            // Dedup by source node only. A single caller often has several
+            // matching edge kinds to the same target (the React parser emits
+            // both `Consumes` and `ConsumesApiFrom` from one call site), and it
+            // must surface as one match — not one per edge kind.
+            if !seen.insert(node.id.as_bytes()) {
                 continue;
             }
 
@@ -1451,6 +1454,111 @@ pub(crate) mod tests {
         assert_eq!(trace.callers.len(), 1);
         assert_eq!(trace.callers[0].repo, "frontend_standard");
         assert_eq!(trace.callers[0].confidence, Some(930));
+    }
+
+    #[test]
+    fn route_caller_with_consumes_and_api_from_edges_counts_once() {
+        // The React parser emits BOTH a `Consumes` and a `ConsumesApiFrom`
+        // edge from a single resolved call site to the route node. `trace_route`
+        // follows both kinds, so the caller must be deduped by node — surfacing
+        // once, not once per edge kind.
+        let temp_db = TempDb::new("trace-route-dedup");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+        let handler_file = file("backend_standard", "src/controller.ts");
+        let caller_file = file("frontend_standard", "src/api.ts");
+        let unrelated_file = file("frontend_standard", "src/api_unresolved.ts");
+        let handler = symbol("backend_standard", "src/controller.ts", "create_order", 0);
+        let caller = symbol("frontend_standard", "src/api.ts", "create_order", 0);
+        // Resolves to a different route (`gw/orders/pending`), so it must NOT
+        // surface as a caller of `POST /orders`.
+        let unrelated = symbol(
+            "frontend_standard",
+            "src/api_unresolved.ts",
+            "submit_pending_order",
+            0,
+        );
+        let route = virtual_node(
+            NodeKind::Route,
+            "backend_standard",
+            "src/controller.ts",
+            "POST /orders",
+            route_qn("POST", "/orders"),
+        );
+        let pending_route = virtual_node(
+            NodeKind::Route,
+            "frontend_standard",
+            "src/api_unresolved.ts",
+            "gw/orders/pending",
+            "__api_config__gw/orders/pending",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    handler_file.clone(),
+                    caller_file.clone(),
+                    unrelated_file.clone(),
+                    handler.clone(),
+                    caller.clone(),
+                    unrelated.clone(),
+                    route.clone(),
+                    pending_route.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: handler.id,
+                        target: route.id,
+                        kind: EdgeKind::Serves,
+                        metadata: EdgeMetadata {
+                            confidence: Some(980),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: handler_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: caller.id,
+                        target: route.id,
+                        kind: EdgeKind::Consumes,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: caller_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: caller.id,
+                        target: route.id,
+                        kind: EdgeKind::ConsumesApiFrom,
+                        metadata: EdgeMetadata {
+                            confidence: Some(900),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: caller_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: unrelated.id,
+                        target: pending_route.id,
+                        kind: EdgeKind::ConsumesApiFrom,
+                        metadata: EdgeMetadata {
+                            confidence: Some(450),
+                            ..EdgeMetadata::default()
+                        },
+                        owner_file: unrelated_file.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("graph write should succeed");
+
+        let trace = trace_route(&store, route.id, 10).expect("trace should succeed");
+        // 1 because: the literal `/orders` caller is deduped across its two edge
+        // kinds, and `submit_pending_order` resolves to `gw/orders/pending`.
+        assert_eq!(trace.callers.len(), 1);
+        assert_eq!(trace.callers[0].node_id, caller.id);
+        assert_eq!(trace.callers[0].repo, "frontend_standard");
     }
 
     /// Build a fixture with 3 produce-only virtual topic nodes and 3
