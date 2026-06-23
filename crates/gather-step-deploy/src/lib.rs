@@ -24,7 +24,7 @@ pub enum DeploymentArtifactKind {
 }
 
 impl DeploymentArtifactKind {
-    /// Stable snake_case identifier, matching the serde representation.
+    /// Stable `snake_case` identifier, matching the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

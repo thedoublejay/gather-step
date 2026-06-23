@@ -1,4 +1,4 @@
-//! Materialize MongoDB query / aggregation objects and Atlas search-index
+//! Materialize `MongoDB` query / aggregation objects and `Atlas` search-index
 //! definitions found in TS/JS source into [`serde_json::Value`] so the
 //! structural safety detectors in
 //! `gather_step_analysis::mongo_query_safety` can run on them.
