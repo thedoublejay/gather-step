@@ -481,7 +481,7 @@ fn log_value_mirror_array_truncation(total: usize, surface: &'static str, state:
 }
 
 fn if_chain_has_trailing_default(stmt: &IfStatement<'_>) -> bool {
-    match stmt.alternate.as_deref() {
+    match stmt.alternate.as_ref() {
         Some(Statement::IfStatement(next)) => if_chain_has_trailing_default(next),
         Some(_) => true,
         None => false,
