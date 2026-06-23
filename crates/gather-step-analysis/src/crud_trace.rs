@@ -20,7 +20,6 @@ pub enum CrudTraceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrudTraceRole {
     Caller,
-    Gateway,
     Handler,
     Service,
     Repository,
@@ -48,7 +47,6 @@ pub struct CrudTraceEntry {
 pub struct CrudTrace {
     pub target: NodeData,
     pub callers: Vec<CrudTraceEntry>,
-    pub gateways: Vec<CrudTraceEntry>,
     pub handlers: Vec<CrudTraceEntry>,
     pub continuation: Vec<CrudTraceEntry>,
     pub entities: Vec<CrudTraceEntry>,
@@ -93,22 +91,11 @@ fn build_crud_trace<S: GraphStore>(
     limit: usize,
     max_depth: usize,
 ) -> Result<CrudTrace, CrudTraceError> {
-    // A `File`-node caller is a gateway/proxy serviceConfig that emits a
-    // ConsumesApiFrom edge to the route, not a real code caller. Surface it in
-    // its own `gateways` bucket so the caller list stays code callers only
-    // while the gateway dependency remains visible.
-    let (gateway_matches, caller_matches): (Vec<_>, Vec<_>) = route_trace
+    let callers = route_trace
         .callers
         .iter()
         .cloned()
-        .partition(|entry| entry.node_kind == NodeKind::File);
-    let callers = caller_matches
-        .into_iter()
         .map(|entry| crud_entry(entry, CrudTraceRole::Caller, 0))
-        .collect::<Vec<_>>();
-    let gateways = gateway_matches
-        .into_iter()
-        .map(|entry| crud_entry(entry, CrudTraceRole::Gateway, 0))
         .collect::<Vec<_>>();
     let handlers = route_trace
         .handlers
@@ -216,7 +203,6 @@ fn build_crud_trace<S: GraphStore>(
     Ok(CrudTrace {
         target: route_trace.target,
         callers,
-        gateways,
         handlers,
         continuation,
         entities,

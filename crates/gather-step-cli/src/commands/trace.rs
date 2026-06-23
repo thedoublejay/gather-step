@@ -110,7 +110,6 @@ pub(crate) fn execute_crud(
     let mut response = response;
     if let Some(repo) = repo_filter {
         response.data.callers.retain(|item| item.repo == repo);
-        response.data.gateways.retain(|item| item.repo == repo);
         response.data.handlers.retain(|item| item.repo == repo);
         response.data.continuation.retain(|item| item.repo == repo);
         response.data.entities.retain(|item| item.repo == repo);
@@ -126,7 +125,6 @@ pub(crate) fn execute_crud(
         "continuation": response.data.continuation,
         "database_hints": response.data.database_hints,
         "entities": response.data.entities,
-        "gateways": response.data.gateways,
         "handlers": response.data.handlers,
         "method": response.data.method,
         "path": response.data.path,
@@ -152,22 +150,6 @@ pub(crate) fn execute_crud(
                 caller.evidence_kind,
                 format_confidence(caller.confidence),
                 format_resolver(caller.resolver.as_deref()),
-            ));
-        }
-    }
-    lines.push("Gateways:".to_owned());
-    if response.data.gateways.is_empty() {
-        lines.push("  none".to_owned());
-    } else {
-        for gateway in &response.data.gateways {
-            lines.push(format!(
-                "  {} {}:{} evidence={}{}{}",
-                gateway.symbol_name,
-                gateway.repo,
-                gateway.file_path,
-                gateway.evidence_kind,
-                format_confidence(gateway.confidence),
-                format_resolver(gateway.resolver.as_deref()),
             ));
         }
     }
