@@ -1,0 +1,7 @@
+{
+  "name": "@pnpm-monorepo/api",
+  "dependencies": {
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/microservices": "^11.0.0"
+  }
+}

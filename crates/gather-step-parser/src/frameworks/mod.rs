@@ -23,4 +23,4 @@ pub mod tailwind;
 pub mod typeorm;
 pub mod typeorm_migration;
 
-pub use detect::{Framework, detect_frameworks};
+pub use detect::{Framework, detect_frameworks, detect_frameworks_workspace_aware};

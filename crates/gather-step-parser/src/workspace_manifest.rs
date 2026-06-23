@@ -71,60 +71,16 @@ pub struct WorkspacePackage {
 /// ```
 #[must_use]
 pub fn discover_workspace_packages(workspace_root: &Path) -> Vec<WorkspacePackage> {
-    let root_manifest_path = workspace_root.join("package.json");
-    let Some(root_manifest_path) =
-        canonicalize_existing_file_under(&root_manifest_path, workspace_root)
-    else {
-        trace!(
-            path = %root_manifest_path.display(),
-            "workspace root package.json not found — skipping workspace discovery"
-        );
-        return Vec::new();
-    };
-    let Ok(raw) = fs::read_to_string(&root_manifest_path) else {
-        trace!(
-            path = %root_manifest_path.display(),
-            "workspace root package.json is unreadable — skipping workspace discovery"
-        );
-        return Vec::new();
-    };
-    let Ok(root_manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        trace!(
-            path = %root_manifest_path.display(),
-            "workspace root package.json is malformed JSON — skipping workspace discovery"
-        );
-        return Vec::new();
-    };
+    let mut patterns = npm_workspace_patterns(workspace_root);
+    patterns.extend(pnpm_workspace_patterns(workspace_root));
 
-    let Some(workspaces_value) = root_manifest.get("workspaces") else {
+    if patterns.is_empty() {
         trace!(
-            path = %root_manifest_path.display(),
-            "no `workspaces` field in root package.json — not a monorepo workspace root"
+            root = %workspace_root.display(),
+            "no `workspaces` field or pnpm-workspace.yaml at root — not a monorepo workspace root"
         );
         return Vec::new();
-    };
-
-    // `workspaces` can be an array of patterns directly, or (in some Bun
-    // configs) an object with a `packages` key.
-    let patterns: Vec<String> = if let Some(array) = workspaces_value.as_array() {
-        array
-            .iter()
-            .filter_map(|v| v.as_str().map(ToOwned::to_owned))
-            .collect()
-    } else if let Some(obj) = workspaces_value.as_object() {
-        // Yarn/Bun: `"workspaces": { "packages": ["packages/*"] }`
-        obj.get("packages")
-            .and_then(|v| v.as_array())
-            .map(|array| {
-                array
-                    .iter()
-                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        return Vec::new();
-    };
+    }
 
     let mut packages = Vec::new();
     for pattern in &patterns {
@@ -179,6 +135,112 @@ pub fn find_workspace_root(start_dir: &Path, max_depth: usize) -> Option<PathBuf
         }
     }
     None
+}
+
+/// Read the npm/Yarn/Bun `workspaces` patterns from `<workspace_root>/package.json`.
+///
+/// Supports the array form (`"workspaces": ["packages/*"]`) and the object
+/// form (`"workspaces": { "packages": ["packages/*"] }`). Returns an empty
+/// `Vec` on any failure (missing/unreadable/malformed manifest, no
+/// `workspaces` field). A symlinked root manifest is rejected by
+/// [`canonicalize_existing_file_under`].
+fn npm_workspace_patterns(workspace_root: &Path) -> Vec<String> {
+    let manifest_path = workspace_root.join("package.json");
+    let Some(manifest_path) = canonicalize_existing_file_under(&manifest_path, workspace_root)
+    else {
+        return Vec::new();
+    };
+    let Ok(raw) = fs::read_to_string(&manifest_path) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(workspaces_value) = manifest.get("workspaces") else {
+        return Vec::new();
+    };
+
+    if let Some(array) = workspaces_value.as_array() {
+        array
+            .iter()
+            .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+            .collect()
+    } else if let Some(obj) = workspaces_value.as_object() {
+        obj.get("packages")
+            .and_then(|v| v.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Read the `packages:` globs from `<workspace_root>/pnpm-workspace.yaml`.
+///
+/// pnpm monorepos declare their members in a top-level YAML file rather than
+/// in `package.json`, so npm `workspaces` parsing alone misses them. Returns
+/// an empty `Vec` when the file is absent, fails the YAML safety guard, is
+/// malformed, or has no `packages` sequence. A symlinked manifest is rejected
+/// by [`canonicalize_existing_file_under`].
+///
+/// This is the single source of pnpm-workspace parsing — both
+/// [`discover_workspace_packages`] and the tree-sitter import resolver call it
+/// rather than duplicating the YAML read.
+#[must_use]
+pub fn pnpm_workspace_patterns(workspace_root: &Path) -> Vec<String> {
+    let manifest_path = workspace_root.join("pnpm-workspace.yaml");
+    let Some(manifest_path) = canonicalize_existing_file_under(&manifest_path, workspace_root)
+    else {
+        return Vec::new();
+    };
+    let Ok(raw) = fs::read_to_string(&manifest_path) else {
+        return Vec::new();
+    };
+    if gather_step_core::config::guard_yaml_source(&raw, "pnpm-workspace.yaml").is_err() {
+        return Vec::new();
+    }
+    let Ok(document) = serde_norway::from_str::<serde_norway::Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(entries) = document
+        .get("packages")
+        .and_then(serde_norway::Value::as_sequence)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
+/// Discover all workspace member directories under `workspace_root`.
+///
+/// Unions the npm/Yarn/Bun `workspaces` patterns and the pnpm
+/// `pnpm-workspace.yaml` `packages` globs, expands each into concrete
+/// directories, and returns the deduplicated set. Unlike
+/// [`discover_workspace_packages`], a member is included even when it has no
+/// resolvable JS/TS entry-point — callers that only need the directory (such
+/// as workspace-aware framework detection) should not require an entry-point.
+///
+/// Returns an empty `Vec` when `workspace_root` is not a monorepo root.
+#[must_use]
+pub fn workspace_member_dirs(workspace_root: &Path) -> Vec<PathBuf> {
+    let mut patterns = npm_workspace_patterns(workspace_root);
+    patterns.extend(pnpm_workspace_patterns(workspace_root));
+
+    let mut dirs = Vec::new();
+    for pattern in &patterns {
+        dirs.extend(expand_workspace_pattern(workspace_root, pattern));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +491,10 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use super::{discover_workspace_packages, find_workspace_root};
+    use super::{
+        discover_workspace_packages, find_workspace_root, pnpm_workspace_patterns,
+        workspace_member_dirs,
+    };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -743,5 +808,65 @@ mod tests {
         // The root is at depth 4 from `deep`, so it should NOT be found with max_depth=3.
         let found = find_workspace_root(&deep, 3);
         assert!(found.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // pnpm_workspace_patterns / workspace_member_dirs
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn pnpm_workspace_patterns_reads_packages_globs() {
+        let dir = TempDir::new("pnpm-patterns");
+        dir.write(
+            "pnpm-workspace.yaml",
+            "packages:\n  - \"apps/*\"\n  - \"packages/*\"\n",
+        );
+
+        let patterns = pnpm_workspace_patterns(&dir.path);
+        assert_eq!(patterns, vec!["apps/*".to_owned(), "packages/*".to_owned()]);
+    }
+
+    #[test]
+    fn pnpm_workspace_patterns_empty_without_manifest() {
+        let dir = TempDir::new("pnpm-no-manifest");
+        assert!(pnpm_workspace_patterns(&dir.path).is_empty());
+    }
+
+    #[test]
+    fn discovers_packages_from_pnpm_workspace() {
+        let dir = TempDir::new("pnpm-discover");
+        dir.write("pnpm-workspace.yaml", "packages:\n  - \"packages/*\"\n");
+        dir.write(
+            "packages/contracts/package.json",
+            r#"{ "name": "@workspace/contracts", "main": "src/index.ts" }"#,
+        );
+        dir.write(
+            "packages/contracts/src/index.ts",
+            "export interface IFoo { id: string; }",
+        );
+
+        let packages = discover_workspace_packages(&dir.path);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "@workspace/contracts");
+    }
+
+    #[test]
+    fn workspace_member_dirs_includes_member_without_entry_point() {
+        let dir = TempDir::new("member-dirs");
+        dir.write("pnpm-workspace.yaml", "packages:\n  - \"apps/*\"\n");
+        // An app member with a package.json but no resolvable JS/TS entry-point:
+        // discover_workspace_packages would drop it, but member-dir discovery
+        // must still surface it for workspace-aware framework detection.
+        dir.write(
+            "apps/api/package.json",
+            r#"{ "name": "@workspace/api", "dependencies": { "@nestjs/core": "^11.0.0" } }"#,
+        );
+
+        let dirs = workspace_member_dirs(&dir.path);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], canonical(dir.path.join("apps/api")));
+
+        // The same member is absent from package discovery (no entry-point).
+        assert!(discover_workspace_packages(&dir.path).is_empty());
     }
 }

@@ -23,7 +23,9 @@ use gather_step_deploy::{
 use gather_step_parser::{
     CallSite, FileEntry as SourceFileEntry, FileStat, ManifestError, ParseError, ParsedFile,
     TraverseConfig, TraverseError, collect_repo_files, extract_package_manifest,
-    frameworks::{Framework, detect_frameworks, local_config::LocalConfig},
+    frameworks::{
+        Framework, detect_frameworks, detect_frameworks_workspace_aware, local_config::LocalConfig,
+    },
     infer_ai_contracts, infer_payload_contracts, parse_file_with_context, parse_file_with_packs,
     resolve::ResolutionInput,
     resolve_calls_with_unresolved,
@@ -472,7 +474,9 @@ impl RepoIndexer {
         repo_root: impl AsRef<Path>,
     ) -> Result<RepoIndexPayload, RepoIndexerError> {
         let repo_root = repo_root.as_ref();
-        let frameworks: Vec<Framework> = detect_frameworks(repo_root).into_iter().collect();
+        let frameworks: Vec<Framework> = detect_frameworks_workspace_aware(repo_root)
+            .into_iter()
+            .collect();
         self.prepare_repo_payload_with_frameworks(repo, repo_root, &frameworks)
     }
 

@@ -8,7 +8,7 @@ use gather_step_core::{
     GatherStepConfig, RegistryStore, RepoConfig, WorkspaceIndexDelegate, WorkspaceIndexError,
     WorkspaceRepoResult, WorkspaceStats, index_workspace,
 };
-use gather_step_parser::frameworks::{Framework, detect_frameworks};
+use gather_step_parser::frameworks::{Framework, detect_frameworks_workspace_aware};
 
 use crate::{IndexingOptions, RepoIndexer, RepoIndexerError};
 
@@ -46,7 +46,9 @@ impl WorkspaceIndexDelegate for StorageWorkspaceIndexDelegate {
         repo: &RepoConfig,
         repo_root: &Path,
     ) -> Result<WorkspaceRepoResult, Self::Error> {
-        let detected_frameworks = detect_frameworks(repo_root).into_iter().collect::<Vec<_>>();
+        let detected_frameworks = detect_frameworks_workspace_aware(repo_root)
+            .into_iter()
+            .collect::<Vec<_>>();
         let mut frameworks = detected_frameworks
             .iter()
             .copied()
