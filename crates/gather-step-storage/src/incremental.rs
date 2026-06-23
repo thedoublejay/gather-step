@@ -138,7 +138,7 @@ pub fn snapshot_repo_files(
             continue;
         }
 
-        let path_id_bytes = PathId::from_path(&relative_path).as_bytes().to_vec();
+        let path_id_bytes = PathId::from_path(&relative_path).into_bytes();
         let size_bytes = i64::try_from(file_metadata.len()).unwrap_or(i64::MAX);
         let mtime_ns = metadata_mtime_ns(&file_metadata);
 
@@ -246,13 +246,13 @@ fn snapshot_from_traversal(
         // (e.g. b"bad-\xff.ts" and b"bad-\xfe.ts") are not collapsed to the
         // same map entry under to_string_lossy (which maps both to
         // "bad-\u{FFFD}.ts").
-        let path_key = PathId::from_path(&file.path).as_bytes().to_vec();
+        let path_id_bytes = PathId::from_path(&file.path).into_bytes();
         let path_display = file.path.to_string_lossy().replace('\\', "/");
         files_by_path.insert(
-            path_key,
+            path_id_bytes.clone(),
             IncrementalFileEntry {
                 path: path_display,
-                path_id_bytes: PathId::from_path(&file.path).as_bytes().to_vec(),
+                path_id_bytes,
                 content_hash: file.content_hash.to_vec(),
             },
         );
@@ -949,9 +949,7 @@ mod tests {
 
         // Persist the cold snapshot's stat so the next pass takes the warm
         // fast path (stored hash reused, no read).
-        let path_id_bytes = PathId::from_path(Path::new("src/hello.ts"))
-            .as_bytes()
-            .to_vec();
+        let path_id_bytes = PathId::from_path(Path::new("src/hello.ts")).into_bytes();
         let stat = cold
             .file_stats
             .get(&path_id_bytes)

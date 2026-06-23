@@ -7,6 +7,7 @@ pub mod payload;
 pub(crate) mod projection;
 pub(crate) mod regex_dfa;
 pub mod resolve;
+pub(crate) mod top_level_split;
 pub mod traverse;
 pub mod tree_sitter;
 pub(crate) mod ts_js_oxc;

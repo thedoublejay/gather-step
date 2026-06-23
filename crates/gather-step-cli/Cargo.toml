@@ -41,7 +41,7 @@ gather-step-output.workspace = true
 gather-step-parser.workspace = true
 gather-step-storage.workspace = true
 indicatif.workspace = true
-mimalloc = { version = "=0.1.52", default-features = false }
+mimalloc.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true

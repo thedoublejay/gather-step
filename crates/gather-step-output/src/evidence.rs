@@ -6,7 +6,6 @@
 /// All node names and paths flow through the sanitize helpers from
 /// [`crate::sanitize`] before being emitted, preventing markdown injection.
 use gather_step_analysis::evidence::EvidenceChain;
-use gather_step_core::EdgeKind;
 use gather_step_storage::GraphStore;
 
 use crate::sanitize::wrap_inline_code;
@@ -45,10 +44,10 @@ pub fn render_evidence_chain<S: GraphStore>(
     }
 
     for step in &chain.steps {
-        let edge_label = edge_kind_label(step.edge_kind);
         let target_name = node_display_name(store, step.to)?;
         lines.push(format!(
-            " → {edge_label} {}",
+            " → {} {}",
+            step.edge_kind.label(),
             wrap_inline_code(&target_name)
         ));
     }
@@ -82,49 +81,4 @@ fn hex_id(id: gather_step_core::NodeId) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
-}
-
-/// Human-readable label for an edge kind (kept intentionally concise).
-fn edge_kind_label(kind: EdgeKind) -> &'static str {
-    match kind {
-        EdgeKind::Defines => "Defines",
-        EdgeKind::Calls => "Calls",
-        EdgeKind::Imports => "Imports",
-        EdgeKind::Exports => "Exports",
-        EdgeKind::Extends => "Extends",
-        EdgeKind::Implements => "Implements",
-        EdgeKind::References => "References",
-        EdgeKind::DependsOn => "DependsOn",
-        EdgeKind::UsesDecorator => "UsesDecorator",
-        EdgeKind::Publishes => "Publishes",
-        EdgeKind::Consumes => "Consumes",
-        EdgeKind::Triggers => "Triggers",
-        EdgeKind::Serves => "Serves",
-        EdgeKind::PersistsTo => "PersistsTo",
-        EdgeKind::UsesShared => "UsesShared",
-        EdgeKind::UsesTypeFrom => "UsesTypeFrom",
-        EdgeKind::UsesEventFrom => "UsesEventFrom",
-        EdgeKind::UsesGuardFrom => "UsesGuardFrom",
-        EdgeKind::ConsumesApiFrom => "ConsumesApiFrom",
-        EdgeKind::ProducesEventFor => "ProducesEventFor",
-        EdgeKind::ImplementsContractFrom => "ImplementsContractFrom",
-        EdgeKind::ChangedIn => "ChangedIn",
-        EdgeKind::IntroducedBy => "IntroducedBy",
-        EdgeKind::AuthoredBy => "AuthoredBy",
-        EdgeKind::ReviewedBy => "ReviewedBy",
-        EdgeKind::MergedAs => "MergedAs",
-        EdgeKind::CommentedOn => "CommentedOn",
-        EdgeKind::Resolves => "Resolves",
-        EdgeKind::RelatesTo => "RelatesTo",
-        EdgeKind::PartOf => "PartOf",
-        EdgeKind::BreaksIfChanged => "BreaksIfChanged",
-        EdgeKind::CoChangesWith => "CoChangesWith",
-        EdgeKind::OwnedBy => "OwnedBy",
-        EdgeKind::CrossRepoDepends => "CrossRepoDepends",
-        EdgeKind::PropagatesEvent => "PropagatesEvent",
-        EdgeKind::DriftsFrom => "DriftsFrom",
-        EdgeKind::ContractOn => "ContractOn",
-        // EdgeKind is #[non_exhaustive]; new variants fall back to debug name.
-        _ => "UnknownEdge",
-    }
 }

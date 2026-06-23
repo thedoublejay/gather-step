@@ -17,6 +17,7 @@ use gix::{
     sec::trust::DefaultForLevel as _, traverse::commit::simple::CommitTimeOrder,
 };
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
 use thiserror::Error;
 use tracing::{debug, trace, warn};
 
@@ -931,12 +932,6 @@ fn collect_file_deltas(
     use gix::object::tree::diff::Change;
 
     let mut deltas = Vec::new();
-    // One resource cache per `collect_file_deltas` call, reused across all
-    // changes. gix's blob-diff platform internally re-uses interned blob
-    // text via this cache, so we get O(distinct blobs) loads instead of
-    // O(changes) loads. `clear_resource_cache_keep_allocation` between
-    // iterations resets per-change state without freeing the buffer.
-    let mut resource_cache = repo.diff_resource_cache_for_tree_diff().map_err(Box::new)?;
     let mut platform = parent_tree
         .changes()
         .map_err(|err| GitHistoryError::TreeDiffOptions(Box::new(err)))?;
@@ -964,13 +959,8 @@ fn collect_file_deltas(
                     if !entry_mode.is_blob() {
                         return Ok(std::ops::ControlFlow::Continue(()));
                     }
-                    let (insertions, deletions) = change_line_counts_lenient(
-                        &change,
-                        &mut resource_cache,
-                        repo_name,
-                        commit_sha,
-                        location,
-                    );
+                    let (insertions, deletions) =
+                        change_line_counts_lenient(&change, repo_name, commit_sha, location);
                     CommitFileDelta {
                         file_path: location.to_str_lossy().into_owned(),
                         change_kind: CommitFileChangeKind::Added,
@@ -987,13 +977,8 @@ fn collect_file_deltas(
                     if !entry_mode.is_blob() {
                         return Ok(std::ops::ControlFlow::Continue(()));
                     }
-                    let (insertions, deletions) = change_line_counts_lenient(
-                        &change,
-                        &mut resource_cache,
-                        repo_name,
-                        commit_sha,
-                        location,
-                    );
+                    let (insertions, deletions) =
+                        change_line_counts_lenient(&change, repo_name, commit_sha, location);
                     CommitFileDelta {
                         file_path: location.to_str_lossy().into_owned(),
                         change_kind: CommitFileChangeKind::Deleted,
@@ -1016,13 +1001,8 @@ fn collect_file_deltas(
                     if !entry_mode.is_blob() && !previous_entry_mode.is_blob() {
                         return Ok(std::ops::ControlFlow::Continue(()));
                     }
-                    let (insertions, deletions) = change_line_counts_lenient(
-                        &change,
-                        &mut resource_cache,
-                        repo_name,
-                        commit_sha,
-                        location,
-                    );
+                    let (insertions, deletions) =
+                        change_line_counts_lenient(&change, repo_name, commit_sha, location);
                     CommitFileDelta {
                         file_path: location.to_str_lossy().into_owned(),
                         change_kind: kind,
@@ -1043,15 +1023,7 @@ fn collect_file_deltas(
                     // similarity); fall back to the full path if it's
                     // somehow absent.
                     let (insertions, deletions) = diff.as_ref().map_or_else(
-                        || {
-                            change_line_counts_lenient(
-                                &change,
-                                &mut resource_cache,
-                                repo_name,
-                                commit_sha,
-                                location,
-                            )
-                        },
+                        || change_line_counts_lenient(&change, repo_name, commit_sha, location),
                         |stats| {
                             (
                                 Some(u64::from(stats.insertions)),
@@ -1073,9 +1045,6 @@ fn collect_file_deltas(
                 }
             };
             deltas.push(delta);
-            // Reset per-change cache state but keep the underlying buffer
-            // for the next iteration.
-            resource_cache.clear_resource_cache_keep_allocation();
             // `Action` is a type alias for `ControlFlow<()>`; `Continue(())`
             // tells the platform to keep emitting changes for this tree.
             Ok(std::ops::ControlFlow::Continue(()))
@@ -1089,31 +1058,80 @@ fn collect_file_deltas(
     Ok(deltas)
 }
 
-/// Returns `(insertions, deletions)` for a single tree-diff change using
-/// gix's built-in blob-diff platform. Returns `(None, None)` for binary
-/// blobs or any case where line counts cannot be computed (e.g. one side
-/// is a non-blob).
+/// Returns `(insertions, deletions)` for a single tree-diff change using raw
+/// object bytes only.
 ///
-/// Replaces the previous manual `similar::TextDiff` pass: gix's path uses
-/// `imara-diff` (histogram by default), respects the repo's `diff.algorithm`
-/// config, handles binary detection via gitattributes, and reuses the
-/// resource cache across changes — none of which the manual path did.
+/// This deliberately avoids `gix::diff::blob::Platform`: that platform consults
+/// `.gitattributes` and configured filter/textconv drivers while preparing
+/// diffable resources. History analytics only need approximate line counts, so
+/// reading blob objects directly is the safer default for untrusted repos.
 fn change_line_counts(
     change: &gix::object::tree::diff::Change<'_, '_, '_>,
-    resource_cache: &mut gix::diff::blob::Platform,
 ) -> Result<(Option<u64>, Option<u64>), GitHistoryError> {
-    let mut platform = change.diff(resource_cache).map_err(Box::new)?;
-    match platform.line_counts().map_err(Box::new)? {
-        Some(counter) => Ok((
-            Some(u64::from(counter.insertions)),
-            Some(u64::from(counter.removals)),
-        )),
-        // `None` is gix's signal that one or both sides are binary, so we
-        // mirror the previous behaviour of returning `(None, None)` rather
-        // than (Some(0), Some(0)) — a binary change is not a zero-line
-        // change.
-        None => Ok((None, None)),
+    use gix::object::tree::diff::Change;
+
+    let (old, new) = match change {
+        Change::Addition { entry_mode, id, .. } => (None, blob_bytes(*id, *entry_mode)?),
+        Change::Deletion { entry_mode, id, .. } => (blob_bytes(*id, *entry_mode)?, None),
+        Change::Modification {
+            previous_entry_mode,
+            previous_id,
+            entry_mode,
+            id,
+            ..
+        } => (
+            blob_bytes(*previous_id, *previous_entry_mode)?,
+            blob_bytes(*id, *entry_mode)?,
+        ),
+        Change::Rewrite {
+            source_entry_mode,
+            source_id,
+            entry_mode,
+            id,
+            ..
+        } => (
+            blob_bytes(*source_id, *source_entry_mode)?,
+            blob_bytes(*id, *entry_mode)?,
+        ),
+    };
+
+    Ok(line_counts_from_bytes(
+        old.as_deref().unwrap_or_default(),
+        new.as_deref().unwrap_or_default(),
+    )
+    .map_or((None, None), |(insertions, deletions)| {
+        (Some(insertions), Some(deletions))
+    }))
+}
+
+fn blob_bytes(
+    id: gix::Id<'_>,
+    mode: gix::object::tree::EntryMode,
+) -> Result<Option<Vec<u8>>, GitHistoryError> {
+    if !mode.is_blob() {
+        return Ok(None);
     }
+    let object = id.object().map_err(Box::new)?;
+    Ok(Some(object.data.clone()))
+}
+
+fn line_counts_from_bytes(old: &[u8], new: &[u8]) -> Option<(u64, u64)> {
+    if old.contains(&0) || new.contains(&0) {
+        return None;
+    }
+    let old = std::str::from_utf8(old).ok()?;
+    let new = std::str::from_utf8(new).ok()?;
+    let diff = TextDiff::from_lines(old, new);
+    let mut insertions = 0_u64;
+    let mut deletions = 0_u64;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Delete => deletions = deletions.saturating_add(1),
+            ChangeTag::Insert => insertions = insertions.saturating_add(1),
+            ChangeTag::Equal => {}
+        }
+    }
+    Some((insertions, deletions))
 }
 
 /// Lenient wrapper around [`change_line_counts`] for use inside the tree-walk
@@ -1140,12 +1158,11 @@ fn change_line_counts(
 /// loop would flood logs without adding actionable signal.
 fn change_line_counts_lenient(
     change: &gix::object::tree::diff::Change<'_, '_, '_>,
-    resource_cache: &mut gix::diff::blob::Platform,
     repo_name: &str,
     commit_sha: &str,
     path: &gix::bstr::BStr,
 ) -> (Option<u64>, Option<u64>) {
-    match change_line_counts(change, resource_cache) {
+    match change_line_counts(change) {
         Ok(counts) => counts,
         Err(error) => {
             trace!(

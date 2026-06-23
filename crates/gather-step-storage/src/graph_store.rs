@@ -275,7 +275,10 @@ const NEXT_SIGNATURE_ID_KEY: u8 = 2;
 /// changing the bitcode edge layout. Reindex required. v5.1 Task 17 adds
 /// `StoredEdgeMetadata.enum_qn` on the same unreleased v2 layout — its reindex
 /// folds into Task 11's, so no further bump is warranted.
-pub const GRAPH_SCHEMA_VERSION: u32 = 2;
+///
+/// Bumped 2→3 (v5.3): node/edge bitcode blobs are wrapped with a schema byte
+/// and BLAKE3 checksum. Reindex required because older rows lack the wrapper.
+pub const GRAPH_SCHEMA_VERSION: u32 = 3;
 
 /// All five cross-repo and total-edge counters aggregated in one EDGES scan.
 ///
@@ -628,6 +631,8 @@ pub enum GraphStoreError {
     Io(#[from] std::io::Error),
     #[error("failed to decode bitcode payload: {0}")]
     Decode(#[from] bitcode::Error),
+    #[error("failed to validate bitcode payload wrapper: {0}")]
+    BitcodeBlob(String),
     #[error(
         "graph storage `{path}` is locked by gather-step pid {pid} for workspace `{workspace_root}` \
          (started_at_epoch_ms={started_at_epoch_ms}); stop that process or wait for it to exit before retrying"
@@ -1620,25 +1625,29 @@ impl GraphStoreDb {
     }
 
     fn encode_stored_node(node: &StoredNode) -> Vec<u8> {
-        bitcode::encode(node)
+        crate::bitcode_blob::wrap(bitcode::encode(node))
     }
 
     fn decode_stored_node(bytes: &[u8]) -> Result<StoredNode, GraphStoreError> {
-        bitcode::decode(bytes).map_err(GraphStoreError::from)
+        let payload = crate::bitcode_blob::unwrap(bytes)
+            .map_err(|error| GraphStoreError::BitcodeBlob(error.to_string()))?;
+        bitcode::decode(payload).map_err(GraphStoreError::from)
     }
 
     fn encode_edge(edge: &EdgeData) -> Vec<u8> {
-        bitcode::encode(&StoredEdge {
+        crate::bitcode_blob::wrap(bitcode::encode(&StoredEdge {
             source: edge.source,
             target: edge.target,
             kind: edge.kind,
             owner_file: edge.owner_file,
             metadata: StoredEdgeMetadata::from_public(&edge.metadata),
-        })
+        }))
     }
 
     fn decode_edge(bytes: &[u8]) -> Result<EdgeData, GraphStoreError> {
-        let stored: StoredEdge = bitcode::decode(bytes).map_err(GraphStoreError::from)?;
+        let payload = crate::bitcode_blob::unwrap(bytes)
+            .map_err(|error| GraphStoreError::BitcodeBlob(error.to_string()))?;
+        let stored: StoredEdge = bitcode::decode(payload).map_err(GraphStoreError::from)?;
         // `is_cross_file` is derivable from the source and owner_file nodes.
         // It is reconstructed as `false` here; callers that need the precise
         // value can compare source node file_path with owner_file.

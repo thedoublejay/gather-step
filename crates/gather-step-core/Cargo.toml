@@ -17,6 +17,9 @@ thiserror.workspace = true
 rayon.workspace = true
 smallvec.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs.workspace = true
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 

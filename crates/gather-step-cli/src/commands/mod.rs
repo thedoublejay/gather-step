@@ -9,6 +9,7 @@ pub mod generate;
 pub mod impact;
 pub mod index;
 pub mod init;
+pub mod log;
 pub mod no_args;
 pub mod pack;
 pub mod pr_review;
@@ -25,15 +26,22 @@ pub mod tui;
 pub mod watch;
 pub mod who_consumes;
 
-use std::process::ExitCode;
+use std::{panic::PanicHookInfo, path::PathBuf, process::ExitCode};
 
 use anyhow::{Result, bail};
 use clap::{
     ArgAction, Args, Parser, Subcommand,
     builder::styling::{AnsiColor, Effects, Styles},
 };
+use gather_step_core::capture_rss;
+use gather_step_storage::{TelemetryErrorEvent, TelemetryRun, TelemetryRunFinish, TelemetryStore};
+use serde_json::json;
+use tracing::warn;
 
-use crate::app::{AppContext, ColorModeArg};
+use crate::{
+    app::{self, AppContext, ColorModeArg},
+    errors::graph_lock_contention,
+};
 
 /// `--version` long form. Concatenated at compile time from the package
 /// version, the current copyright year, and the canonical author so the
@@ -65,6 +73,7 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     ("status", "Show indexing status and counts per repo"),
     ("storage-report", "Print storage size and segment breakdown"),
     ("doctor", "Run health checks against the workspace"),
+    ("log", "Inspect local run and error telemetry"),
     ("search", "Search indexed symbols, files, and concepts"),
     ("trace", "Trace impact, events, or routes from a target"),
     ("impact", "Inspect change-impact for a symbol or file"),
@@ -165,6 +174,7 @@ pub enum Command {
     #[command(name = "storage-report")]
     StorageReport(storage_report::StorageReportArgs),
     Doctor(doctor::DoctorArgs),
+    Log(log::LogArgs),
     Generate(generate::GenerateCommand),
     Impact(impact::ImpactArgs),
     #[command(name = "cross-repo-deps", visible_alias = "cross_repo_deps")]
@@ -230,6 +240,40 @@ fn success(result: Result<()>) -> Result<CliOutcome> {
 
 /// Run the dispatched subcommand and return the user-visible outcome.
 pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
+    let command_name = command_telemetry_name(cli.command.as_ref());
+    app::reset_telemetry_run_state();
+    let workspace_path = app.workspace_path.clone();
+    let telemetry = open_telemetry_store();
+    let run = telemetry.as_ref().and_then(|store| {
+        match store.begin_run(
+            command_name,
+            &workspace_path,
+            env!("CARGO_PKG_VERSION"),
+            &telemetry_schema_versions(),
+        ) {
+            Ok(run) => Some(run),
+            Err(error) => {
+                warn!(%error, "failed to write telemetry run start");
+                None
+            }
+        }
+    });
+
+    if let (Some(store), Some(run)) = (&telemetry, &run) {
+        install_telemetry_panic_hook(store.clone(), run.clone());
+    }
+
+    let outcome = run_inner(cli, app).await;
+    if let (Some(store), Some(run)) = (&telemetry, &run) {
+        let finish = telemetry_finish_fields(&outcome);
+        if let Err(error) = store.finish_run(run, &finish) {
+            warn!(%error, "failed to write telemetry run finish");
+        }
+    }
+    outcome
+}
+
+async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     match cli.command {
         Some(Command::Init(args)) => success(init::run(&app, args).await),
         Some(Command::Index(args)) => success(index::run(&app, args).await),
@@ -245,6 +289,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Status(args)) => success(status::run(&app, args)),
         Some(Command::StorageReport(args)) => success(storage_report::run(&app, args)),
         Some(Command::Doctor(args)) => success(doctor::run(&app, args)),
+        Some(Command::Log(args)) => success(log::run(&app, args)),
         Some(Command::Generate(command)) => success(generate::run(&app, command)),
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
         Some(Command::CrossRepoDeps(args)) => success(cross_repo_deps::run(&app, &args)),
@@ -262,6 +307,150 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
             McpSubcommand::Serve(args) => success(serve::run(&app, args).await),
         },
         None => success(no_args::run(&app).await),
+    }
+}
+
+fn open_telemetry_store() -> Option<TelemetryStore> {
+    let Some(telemetry_root) = telemetry_root() else {
+        warn!("failed to locate data directory for telemetry store");
+        return None;
+    };
+    match TelemetryStore::open(&telemetry_root) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            warn!(%error, "failed to open telemetry store");
+            None
+        }
+    }
+}
+
+fn command_telemetry_name(command: Option<&Command>) -> &'static str {
+    match command {
+        Some(Command::Init(_)) => "init",
+        Some(Command::Index(_)) => "index",
+        Some(Command::Clean(_)) => "clean",
+        Some(Command::Compact(_)) => "compact",
+        Some(Command::Reindex(_)) => "reindex",
+        Some(Command::Search(_)) => "search",
+        Some(Command::Trace(_)) => "trace",
+        Some(Command::Serve(_)) => "serve",
+        Some(Command::Watch(_)) => "watch",
+        Some(Command::Tui(_)) => "tui",
+        Some(Command::SetupMcp(_)) => "setup-mcp",
+        Some(Command::Status(_)) => "status",
+        Some(Command::StorageReport(_)) => "storage-report",
+        Some(Command::Doctor(_)) => "doctor",
+        Some(Command::Log(_)) => "log",
+        Some(Command::Generate(_)) => "generate",
+        Some(Command::Impact(_)) => "impact",
+        Some(Command::CrossRepoDeps(_)) => "cross-repo-deps",
+        Some(Command::WhoConsumes(_)) => "who-consumes",
+        Some(Command::ProjectionImpact(_)) => "projection-impact",
+        Some(Command::DeploymentTopology(_)) => "deployment-topology",
+        Some(Command::QaEvidence(_)) => "qa-evidence",
+        Some(Command::Pack(_)) => "pack",
+        Some(Command::Events(_)) => "events",
+        Some(Command::Conventions(_)) => "conventions",
+        Some(Command::PrReview(_)) => "pr-review",
+        Some(Command::Mcp(_)) => "mcp",
+        None => "no-args",
+    }
+}
+
+fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
+    let (warn_count, traced_error_count) = app::telemetry_counts();
+    let (exit_status, error) = match result {
+        Ok(CliOutcome::Success) => ("success".to_owned(), None),
+        Ok(CliOutcome::ReviewThresholdExceeded) => ("review_threshold_exceeded".to_owned(), None),
+        Err(error) => {
+            let category = telemetry_error_category(error);
+            (
+                "error".to_owned(),
+                Some(TelemetryErrorEvent {
+                    level: "ERROR".to_owned(),
+                    category: category.to_owned(),
+                    message: error.to_string(),
+                    context_json: None,
+                }),
+            )
+        }
+    };
+    let explicit_error_count = if error.is_some() { 1 } else { 0 };
+    TelemetryRunFinish {
+        exit_status,
+        peak_rss_bytes: capture_rss(),
+        warn_count,
+        error_count: traced_error_count.saturating_add(explicit_error_count),
+        recovery_event: app::telemetry_recovery_event(),
+        error,
+        ..TelemetryRunFinish::default()
+    }
+}
+
+pub(crate) fn telemetry_root() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|root| root.join("gather-step"))
+}
+
+fn telemetry_schema_versions() -> serde_json::Value {
+    json!({
+        "telemetry": gather_step_storage::telemetry::TELEMETRY_SCHEMA_VERSION,
+        "graph": gather_step_storage::graph_store::GRAPH_SCHEMA_VERSION,
+        "metadata": gather_step_storage::metadata::METADATA_SCHEMA_VERSION,
+    })
+}
+
+fn telemetry_error_category(error: &anyhow::Error) -> &'static str {
+    if graph_lock_contention(error) {
+        return "graph_lock_contention";
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("schema") && message.contains("version") {
+        "schema_mismatch"
+    } else if message.contains("git") {
+        "git_error"
+    } else if message.contains("storage") || message.contains("sqlite") || message.contains("redb")
+    {
+        "storage_io"
+    } else if message.contains("config") {
+        "config_invalid"
+    } else if message.contains("network")
+        || message.contains("http")
+        || message.contains("github")
+        || message.contains("jira")
+    {
+        "network"
+    } else if message.contains("parse") {
+        "parse_failure"
+    } else if message.contains("auto-recover") || message.contains("auto recovered") {
+        "auto_recovered"
+    } else {
+        "unknown"
+    }
+}
+
+fn install_telemetry_panic_hook(store: TelemetryStore, run: TelemetryRun) {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = panic_message(info);
+        if let Err(error) = store.mark_panic(&run, "panic", &message) {
+            warn!(%error, "failed to write telemetry panic event");
+        }
+        previous_hook(info);
+    }));
+}
+
+fn panic_message(info: &PanicHookInfo<'_>) -> String {
+    let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
+        *message
+    } else if let Some(message) = info.payload().downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
+    };
+    if let Some(location) = info.location() {
+        format!("{payload} at {}:{}", location.file(), location.line())
+    } else {
+        payload.to_owned()
     }
 }
 

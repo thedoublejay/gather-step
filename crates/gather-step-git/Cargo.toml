@@ -16,6 +16,7 @@ hashbrown.workspace = true
 regex.workspace = true
 blake3.workspace = true
 serde.workspace = true
+similar.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

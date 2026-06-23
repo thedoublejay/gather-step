@@ -20,18 +20,20 @@ use oxc_ast::ast::{
     CallExpression, ChainElement, Class, ClassElement, Declaration, Decorator,
     ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
     ExportNamedDeclaration, Expression, ForStatementInit, ForStatementLeft, Function, FunctionBody,
-    ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, JSXAttributeItem,
-    JSXAttributeValue, JSXChild, JSXElement, JSXExpression, MemberExpression, MethodDefinition,
-    MethodDefinitionKind, ModuleExportName, NewExpression, ObjectAssignmentTarget,
-    ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind, SimpleAssignmentTarget,
-    Statement, TSAccessibility, TSEnumMemberName, TSImportEqualsDeclaration,
-    TSModuleDeclarationBody, TSTypeName, VariableDeclaration, VariableDeclarator,
+    IfStatement, ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind,
+    JSXAttributeItem, JSXAttributeValue, JSXChild, JSXElement, JSXExpression, MemberExpression,
+    MethodDefinition, MethodDefinitionKind, ModuleExportName, NewExpression,
+    ObjectAssignmentTarget, ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind,
+    SimpleAssignmentTarget, Statement, TSAccessibility, TSEnumMemberName,
+    TSImportEqualsDeclaration, TSModuleDeclarationBody, TSTypeName, VariableDeclaration,
+    VariableDeclarator,
 };
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::{
     resolve::ImportBinding,
+    top_level_split::split_top_level,
     traverse::FileEntry,
     tree_sitter::{DecoratorCapture, ParseState},
 };
@@ -262,6 +264,7 @@ struct VisitCtx<'a> {
     /// and cleared at the top of `visit_expression`, so deeper recursion never
     /// inherits a stale flag.
     in_object_property_value: bool,
+    suppress_enum_guard_capture: bool,
 }
 
 impl<'a> VisitCtx<'a> {
@@ -276,6 +279,7 @@ impl<'a> VisitCtx<'a> {
             class_decorators: Vec::new(),
             depth: 0,
             in_object_property_value: false,
+            suppress_enum_guard_capture: false,
         }
     }
 
@@ -304,6 +308,7 @@ impl<'a> VisitCtx<'a> {
             class_decorators: self.class_decorators.clone(),
             depth: self.depth + 1,
             in_object_property_value: false,
+            suppress_enum_guard_capture: false,
         }
     }
 
@@ -322,6 +327,7 @@ impl<'a> VisitCtx<'a> {
             class_decorators,
             depth: self.depth + 1,
             in_object_property_value: false,
+            suppress_enum_guard_capture: false,
         }
     }
 
@@ -336,6 +342,7 @@ impl<'a> VisitCtx<'a> {
             class_decorators: self.class_decorators.clone(),
             depth: self.depth + 1,
             in_object_property_value: false,
+            suppress_enum_guard_capture: false,
         }
     }
 
@@ -350,6 +357,7 @@ impl<'a> VisitCtx<'a> {
             class_decorators: self.class_decorators.clone(),
             depth: self.depth + 1,
             in_object_property_value: false,
+            suppress_enum_guard_capture: false,
         }
     }
 }
@@ -407,44 +415,31 @@ fn key_is_homogeneous_enum_ref(objects: &[&ObjectExpression<'_>], key: &str) -> 
     })
 }
 
-/// Pick the single canonical option-list key for an array of object literals:
-/// prefer `value`; else the sole other homogeneously enum-ref key. Returns
-/// `None` (capture nothing) when no key qualifies or when multiple non-`value`
-/// keys qualify (a v5.1-deferred multi-key follow-up — the downstream surface
-/// is file/owner-keyed and cannot represent two keys distinctly).
-fn enum_subset_object_array_key(objects: &[&ObjectExpression<'_>]) -> Option<String> {
-    if key_is_homogeneous_enum_ref(objects, "value") {
-        return Some("value".to_owned());
-    }
+/// Pick every option-list key whose value resolves to an enum-member ref on
+/// every object literal. Keep `value` first for stable legacy ordering, then
+/// preserve first-object source order for additional homogeneous keys.
+fn enum_subset_object_array_keys(objects: &[&ObjectExpression<'_>]) -> Option<Vec<String>> {
     let mut keys: Vec<String> = Vec::new();
+    if key_is_homogeneous_enum_ref(objects, "value") {
+        keys.push("value".to_owned());
+    }
     if let Some(first) = objects.first() {
         for prop_or_spread in &first.properties {
             if let ObjectPropertyKind::ObjectProperty(prop) = prop_or_spread
                 && prop.kind == PropertyKind::Init
             {
                 let key = property_key_text(&prop.key);
-                if !key.is_empty() && !keys.contains(&key) {
+                if !key.is_empty()
+                    && key != "value"
+                    && !keys.contains(&key)
+                    && key_is_homogeneous_enum_ref(objects, &key)
+                {
                     keys.push(key);
                 }
             }
         }
     }
-    let qualifying: Vec<String> = keys
-        .into_iter()
-        .filter(|key| key_is_homogeneous_enum_ref(objects, key))
-        .collect();
-    match qualifying.as_slice() {
-        [single] => Some(single.clone()),
-        [] => None,
-        _ => {
-            tracing::debug!(
-                keys = ?qualifying,
-                "value-mirror: multiple enum-ref keys in object-literal array; \
-                 multi-key capture is a v5.1-deferred follow-up, skipping"
-            );
-            None
-        }
-    }
+    (!keys.is_empty()).then_some(keys)
 }
 
 /// Push a `Guard`-surfaced `EnumMemberRef` candidate for an enum-member ref
@@ -470,6 +465,81 @@ fn push_enum_guard_candidate(
         surface: ValueMirrorSurface::Guard { has_default },
     };
     state.push_value_mirror_candidate(candidate);
+}
+
+fn log_value_mirror_array_truncation(total: usize, surface: &'static str, state: &ParseState<'_>) {
+    if total > VALUE_MIRROR_PER_ARRAY_CAP {
+        tracing::debug!(
+            repo = state.repo(),
+            file = state.file_path(),
+            surface,
+            total,
+            cap = VALUE_MIRROR_PER_ARRAY_CAP,
+            "value-mirror array capture truncated at configured cap"
+        );
+    }
+}
+
+fn if_chain_has_trailing_default(stmt: &IfStatement<'_>) -> bool {
+    match stmt.alternate.as_deref() {
+        Some(Statement::IfStatement(next)) => if_chain_has_trailing_default(next),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn capture_if_condition_enum_guards(
+    expr: &Expression<'_>,
+    has_default: bool,
+    state: &mut ParseState<'_>,
+    ctx: &VisitCtx<'_>,
+) {
+    match expr {
+        Expression::BinaryExpression(b) => {
+            if matches!(
+                b.operator,
+                BinaryOperator::Equality | BinaryOperator::StrictEquality
+            ) {
+                for operand in [&b.left, &b.right] {
+                    if let Some((member, enum_qn)) = enum_member_ref(operand) {
+                        push_enum_guard_candidate(
+                            member,
+                            enum_qn,
+                            operand.span(),
+                            has_default,
+                            state,
+                            ctx,
+                        );
+                    }
+                }
+            }
+            capture_if_condition_enum_guards(&b.left, has_default, state, ctx);
+            capture_if_condition_enum_guards(&b.right, has_default, state, ctx);
+        }
+        Expression::LogicalExpression(b) => {
+            capture_if_condition_enum_guards(&b.left, has_default, state, ctx);
+            capture_if_condition_enum_guards(&b.right, has_default, state, ctx);
+        }
+        Expression::ParenthesizedExpression(p) => {
+            capture_if_condition_enum_guards(&p.expression, has_default, state, ctx);
+        }
+        Expression::TSAsExpression(t) => {
+            capture_if_condition_enum_guards(&t.expression, has_default, state, ctx);
+        }
+        Expression::TSSatisfiesExpression(t) => {
+            capture_if_condition_enum_guards(&t.expression, has_default, state, ctx);
+        }
+        Expression::TSTypeAssertion(t) => {
+            capture_if_condition_enum_guards(&t.expression, has_default, state, ctx);
+        }
+        Expression::TSNonNullExpression(t) => {
+            capture_if_condition_enum_guards(&t.expression, has_default, state, ctx);
+        }
+        Expression::TSInstantiationExpression(t) => {
+            capture_if_condition_enum_guards(&t.expression, has_default, state, ctx);
+        }
+        _ => {}
+    }
 }
 
 /// Static (non-computed) name of an enum member, if available.
@@ -659,7 +729,12 @@ fn visit_statement(stmt: &Statement<'_>, state: &mut ParseState<'_>, ctx: &mut V
             }
         }
         Statement::IfStatement(s) => {
+            let has_default = if_chain_has_trailing_default(s);
+            capture_if_condition_enum_guards(&s.test, has_default, state, ctx);
+            let previous_suppression = ctx.suppress_enum_guard_capture;
+            ctx.suppress_enum_guard_capture = true;
             visit_expression(&s.test, state, ctx);
+            ctx.suppress_enum_guard_capture = previous_suppression;
             visit_statement(&s.consequent, state, ctx);
             if let Some(alt) = &s.alternate {
                 visit_statement(alt, state, ctx);
@@ -1155,6 +1230,7 @@ fn visit_nested_class_body(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &
                         class_decorators: ctx.class_decorators.clone(),
                         depth: ctx.depth + 1,
                         in_object_property_value: false,
+                        suppress_enum_guard_capture: false,
                     };
                     visit_function_body(body, state, &mut body_ctx);
                 }
@@ -1180,6 +1256,7 @@ fn visit_nested_class_body(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &
                     class_decorators: ctx.class_decorators.clone(),
                     depth: ctx.depth + 1,
                     in_object_property_value: false,
+                    suppress_enum_guard_capture: false,
                 };
                 for stmt in &block.body {
                     visit_statement(stmt, state, &mut body_ctx);
@@ -1242,6 +1319,7 @@ fn visit_class_element(
                     class_decorators: ctx.class_decorators.clone(),
                     depth: ctx.depth + 1,
                     in_object_property_value: false,
+                    suppress_enum_guard_capture: false,
                 };
                 visit_expression(value, state, &mut val_ctx);
             }
@@ -1300,6 +1378,7 @@ fn visit_method_definition(
                 class_decorators: ctx.class_decorators.clone(),
                 depth: ctx.depth + 1,
                 in_object_property_value: false,
+                suppress_enum_guard_capture: false,
             };
             visit_function_body(body, state, &mut body_ctx);
         }
@@ -1555,6 +1634,7 @@ fn visit_variable_declarator(
             class_decorators: ctx.class_decorators.clone(),
             depth: ctx.depth + 1,
             in_object_property_value: false,
+            suppress_enum_guard_capture: false,
         };
         visit_expression(init, state, &mut expr_ctx);
     }
@@ -1609,10 +1689,12 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
             // Only positive equality (`==`/`===`) is an enum guard. `is_equality()`
             // also matches `!=`/`!==`, which would wrongly flag `if (s !== Archived)`
             // as guarding `Archived`.
-            if matches!(
-                b.operator,
-                BinaryOperator::Equality | BinaryOperator::StrictEquality
-            ) {
+            if !ctx.suppress_enum_guard_capture
+                && matches!(
+                    b.operator,
+                    BinaryOperator::Equality | BinaryOperator::StrictEquality
+                )
+            {
                 for operand in [&b.left, &b.right] {
                     if let Some((member, enum_qn)) = enum_member_ref(operand) {
                         push_enum_guard_candidate(
@@ -1690,6 +1772,7 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
                     .iter()
                     .all(|e| e.as_expression().and_then(enum_member_ref).is_some());
             if all_str && arr.elements.len() >= min {
+                log_value_mirror_array_truncation(arr.elements.len(), "string_array", state);
                 for expr in arr
                     .elements
                     .iter()
@@ -1715,6 +1798,7 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
                     }
                 }
             } else if all_enum_ref && arr.elements.len() >= min {
+                log_value_mirror_array_truncation(arr.elements.len(), "enum_ref_array", state);
                 for expr in arr
                     .elements
                     .iter()
@@ -1738,25 +1822,28 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
                 }
             } else if let Some(objects) = all_object_literals(arr)
                 && objects.len() >= min
-                && let Some(key) = enum_subset_object_array_key(&objects)
+                && let Some(keys) = enum_subset_object_array_keys(&objects)
             {
-                for obj in objects.into_iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
-                    let Some(value_expr) = object_property_value(obj, &key) else {
-                        continue;
-                    };
-                    if let Some((member, enum_qn)) = enum_member_ref(value_expr) {
-                        let candidate = ValueMirrorCandidate {
-                            value: member,
-                            kind: ValueMirrorKind::EnumMemberRef { enum_qn },
-                            repo: state.repo().to_owned(),
-                            file_path: state.file_path().to_owned(),
-                            line: ctx.line_of(value_expr.span()),
-                            authoritative: false,
-                            owner_node_id: ctx.enclosing_owner_id(state),
-                            file_node_id: state.file_node_id(),
-                            surface: ValueMirrorSurface::Array,
+                log_value_mirror_array_truncation(objects.len(), "object_array", state);
+                for key in keys {
+                    for obj in objects.iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
+                        let Some(value_expr) = object_property_value(obj, &key) else {
+                            continue;
                         };
-                        state.push_value_mirror_candidate(candidate);
+                        if let Some((member, enum_qn)) = enum_member_ref(value_expr) {
+                            let candidate = ValueMirrorCandidate {
+                                value: member,
+                                kind: ValueMirrorKind::EnumMemberRef { enum_qn },
+                                repo: state.repo().to_owned(),
+                                file_path: state.file_path().to_owned(),
+                                line: ctx.line_of(value_expr.span()),
+                                authoritative: false,
+                                owner_node_id: ctx.enclosing_owner_id(state),
+                                file_node_id: state.file_node_id(),
+                                surface: ValueMirrorSurface::Array,
+                            };
+                            state.push_value_mirror_candidate(candidate);
+                        }
                     }
                 }
             } else {
@@ -1819,6 +1906,7 @@ fn visit_class_expression(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &m
                         class_decorators: ctx.class_decorators.clone(),
                         depth: ctx.depth + 1,
                         in_object_property_value: false,
+                        suppress_enum_guard_capture: false,
                     };
                     visit_function_body(body, state, &mut body_ctx);
                 }
@@ -1844,6 +1932,7 @@ fn visit_class_expression(class: &Class<'_>, state: &mut ParseState<'_>, ctx: &m
                     class_decorators: ctx.class_decorators.clone(),
                     depth: ctx.depth + 1,
                     in_object_property_value: false,
+                    suppress_enum_guard_capture: false,
                 };
                 for stmt in &block.body {
                     visit_statement(stmt, state, &mut body_ctx);
@@ -2801,54 +2890,6 @@ fn scan_matched_paren(open: char, close: char, s: &str, start: usize) -> Option<
     None
 }
 
-fn split_top_level(input: &str, separator: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut paren_depth = 0_u32;
-    let mut angle_depth = 0_u32;
-    let mut bracket_depth = 0_u32;
-    let mut brace_depth = 0_u32;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-
-    for (index, ch) in input.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_single || in_double => escape = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            _ if in_single || in_double => {}
-            '(' => paren_depth = paren_depth.saturating_add(1),
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '<' => angle_depth = angle_depth.saturating_add(1),
-            '>' => angle_depth = angle_depth.saturating_sub(1),
-            '[' => bracket_depth = bracket_depth.saturating_add(1),
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            '{' => brace_depth = brace_depth.saturating_add(1),
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            _ if ch == separator
-                && paren_depth == 0
-                && angle_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0 =>
-            {
-                parts.push(input[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let tail = input[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts
-}
-
 fn extract_deps_from_param_text(text: &str) -> Vec<String> {
     let Some(open) = text.find('(') else {
         return Vec::new();
@@ -3509,15 +3550,19 @@ mod tests {
             "single non-`value` enum-ref key is used as the surface"
         );
 
-        // No `value`, multiple enum-ref keys qualify -> capture none (deferred).
+        // No `value`, multiple enum-ref keys qualify -> capture each key.
         let multi = parse_ts_source_for_test(
             "const opts = [{ from: Status.A, to: Status.B }, { from: Status.B, to: Status.A }];",
             "multi.tsx",
         )
         .value_mirror_candidates;
-        assert!(
-            multi.is_empty(),
-            "multiple non-`value` enum-ref keys are a v5.1 deferral -> none"
+        assert_eq!(
+            multi
+                .iter()
+                .filter(|x| matches!(&x.kind, ValueMirrorKind::EnumMemberRef { .. }))
+                .count(),
+            4,
+            "multiple non-`value` enum-ref keys are captured independently"
         );
 
         // Object array with no enum-ref-valued key -> none (recurse unchanged).

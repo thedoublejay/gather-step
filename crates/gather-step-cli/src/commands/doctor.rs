@@ -15,6 +15,7 @@ use serde_json::json;
 
 use crate::command_render::RenderedCommand;
 use crate::daemon_protocol::DaemonRequest;
+use crate::freshness::{RepoFreshness, workspace_freshness};
 use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
@@ -26,6 +27,7 @@ struct DoctorOutput {
     event: &'static str,
     ok: bool,
     issue_count: usize,
+    graph_health: GraphHealthOutput,
     pack_metrics: PackDoctorOutput,
     repos: Vec<RepoDoctorOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -47,6 +49,18 @@ struct QualityAdvisory {
     rule_id: &'static str,
     confidence: f64,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GraphHealthOutput {
+    degraded: bool,
+    total_repos: usize,
+    fresh_repos: usize,
+    stale_repos: Vec<String>,
+    unknown_repos: Vec<String>,
+    never_indexed_repos: Vec<String>,
+    truncated_packs: usize,
+    reasons: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,8 +125,14 @@ pub(crate) fn execute(
         bail!("Repo `{repo}` is not present in the workspace registry.");
     }
 
-    let issue_count = repos.iter().map(|repo| repo.issues.len()).sum();
     let pack_metrics = pack_metrics(storage.metadata()).context("computing pack diagnostics")?;
+    let graph_health = summarize_graph_health(
+        workspace_freshness(registry, storage.metadata()),
+        repo_filter,
+        pack_metrics.truncated_packs,
+    );
+    let issue_count = repos.iter().map(|repo| repo.issues.len()).sum::<usize>()
+        + usize::from(graph_health.degraded);
     let repo_names: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
     let quality_advisories = collect_quality_advisories(storage, &repo_names)
         .context("collecting code-quality advisories")?;
@@ -121,6 +141,7 @@ pub(crate) fn execute(
         event: "doctor_completed",
         ok: issue_count == 0,
         issue_count,
+        graph_health,
         pack_metrics,
         repos,
         quality_advisories,
@@ -130,8 +151,10 @@ pub(crate) fn execute(
     let mut lines = Vec::new();
     if payload.ok {
         lines.push("Doctor checks passed.".to_owned());
+        lines.push(format_graph_health_line(&payload.graph_health));
     } else {
         lines.push(format!("Doctor found {} issue(s).", payload.issue_count));
+        lines.push(format_graph_health_line(&payload.graph_health));
         let mut table = Table::new();
         table.load_preset(UTF8_BORDERS_ONLY);
         table.set_content_arrangement(ContentArrangement::Dynamic);
@@ -197,6 +220,80 @@ pub(crate) fn execute(
 }
 
 const MAX_ADVISORIES_PER_CATEGORY: usize = 50;
+
+fn summarize_graph_health(
+    freshness: Vec<RepoFreshness>,
+    repo_filter: Option<&str>,
+    truncated_packs: usize,
+) -> GraphHealthOutput {
+    let mut total_repos = 0_usize;
+    let mut fresh_repos = 0_usize;
+    let mut stale_repos = Vec::new();
+    let mut unknown_repos = Vec::new();
+    let mut never_indexed_repos = Vec::new();
+
+    for entry in freshness
+        .into_iter()
+        .filter(|entry| repo_filter.is_none_or(|wanted| entry.repo == wanted))
+    {
+        total_repos += 1;
+        match entry.freshness.as_str() {
+            "fresh" => fresh_repos += 1,
+            "stale" => stale_repos.push(entry.repo),
+            "never_indexed" => never_indexed_repos.push(entry.repo),
+            _ => unknown_repos.push(entry.repo),
+        }
+    }
+
+    let degraded = !stale_repos.is_empty()
+        || !unknown_repos.is_empty()
+        || !never_indexed_repos.is_empty()
+        || truncated_packs > 0;
+    let mut reasons = Vec::new();
+    if !stale_repos.is_empty() {
+        reasons.push(format!(
+            "{} repo(s) are stale relative to git HEAD",
+            stale_repos.len()
+        ));
+    }
+    if !unknown_repos.is_empty() {
+        reasons.push(format!(
+            "{} repo(s) have unknown freshness",
+            unknown_repos.len()
+        ));
+    }
+    if !never_indexed_repos.is_empty() {
+        reasons.push(format!(
+            "{} repo(s) have never been indexed",
+            never_indexed_repos.len()
+        ));
+    }
+    if truncated_packs > 0 {
+        reasons.push(format!("{truncated_packs} context pack(s) are truncated"));
+    }
+
+    GraphHealthOutput {
+        degraded,
+        total_repos,
+        fresh_repos,
+        stale_repos,
+        unknown_repos,
+        never_indexed_repos,
+        truncated_packs,
+        reasons,
+    }
+}
+
+fn format_graph_health_line(health: &GraphHealthOutput) -> String {
+    if health.degraded {
+        format!("Graph health: degraded ({})", health.reasons.join("; "))
+    } else {
+        format!(
+            "Graph health: fresh ({} of {} repo(s))",
+            health.fresh_repos, health.total_repos
+        )
+    }
+}
 
 fn collect_quality_advisories(
     storage: &StorageCoordinator,

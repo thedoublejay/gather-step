@@ -514,7 +514,7 @@ pub fn collect_repo_files(
                 content_hash,
                 source_bytes: Some(source_bytes),
             };
-            let path_id_bytes = PathId::from_path(&relative_path).as_bytes().to_vec();
+            let path_id_bytes = PathId::from_path(&relative_path).into_bytes();
             guard
                 .summary
                 .file_stats
@@ -659,7 +659,7 @@ pub fn collect_selected_repo_files(
 
         let content_hash = hash_bytes(&bytes);
         let source_bytes: std::sync::Arc<[u8]> = bytes.into_boxed_slice().into();
-        let path_id_bytes = PathId::from_path(&normalized).as_bytes().to_vec();
+        let path_id_bytes = PathId::from_path(&normalized).into_bytes();
         summary
             .file_stats
             .insert(path_id_bytes, file_stat(&file_metadata));

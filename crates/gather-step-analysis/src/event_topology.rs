@@ -458,8 +458,12 @@ pub fn trace_route<S: GraphStore>(
     let route_targets = matching_route_target_ids(store, &target_node)?;
     let (handlers, handlers_truncated) =
         collect_incoming_matches_many(store, &route_targets, EdgeKind::Serves, limit)?;
-    let (callers, callers_truncated) =
-        collect_incoming_matches_many(store, &route_targets, EdgeKind::Consumes, limit)?;
+    let (callers, callers_truncated) = collect_incoming_matches_many_kinds(
+        store,
+        &route_targets,
+        &[EdgeKind::Consumes, EdgeKind::ConsumesApiFrom],
+        limit,
+    )?;
 
     Ok(RouteTrace {
         target: target_node,

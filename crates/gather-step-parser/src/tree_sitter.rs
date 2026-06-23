@@ -4,6 +4,7 @@ use std::{
     num::NonZeroUsize,
     ops::ControlFlow,
     path::{Component, Path, PathBuf},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 
@@ -28,10 +29,14 @@ use crate::{
         canonicalize_existing_file_under_any,
     },
     resolve::ImportBinding,
+    top_level_split::split_top_level,
     traverse::{FileEntry, Language},
     tsconfig::PathAliases,
     workspace_manifest::find_workspace_root,
 };
+
+static FORCE_TREE_SITTER_DIAG: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("GATHER_STEP_DIAG_TS").is_ok_and(|v| v == "treesitter"));
 
 /// Captured data for a single decorator occurrence.
 ///
@@ -232,7 +237,7 @@ fn parse_file_core(
     // Diagnostic bypass: when `GATHER_STEP_DIAG_TS=treesitter` is set, force
     // TS/JS files through the tree-sitter path instead of the dedicated Oxc
     // visitor. Used for empirical comparison against the Oxc output.
-    let force_tree_sitter = std::env::var("GATHER_STEP_DIAG_TS").is_ok_and(|v| v == "treesitter");
+    let force_tree_sitter = *FORCE_TREE_SITTER_DIAG;
 
     // ── TS/JS: use the Oxc visitor (unless the diagnostic bypass is active) ─
     if should_use_ts_js_visitor(file) && !force_tree_sitter {
@@ -332,66 +337,6 @@ fn parse_file_core(
             visit_ts_js(tree.root_node(), &mut state, None, None, false, &[], 0);
         }
 
-        // Framework augmentations (same logic as the tree-sitter fallback path
-        // below; macro avoids cloning the snapshot when no augmenters apply).
-        macro_rules! state_snapshot_oxc {
-            () => {
-                ParsedFile {
-                    file: file.clone(),
-                    source_path: absolute_path.clone(),
-                    source: source.clone(),
-                    file_node: file_node.clone(),
-                    nodes: state.nodes.clone(),
-                    edges: state.edges.clone(),
-                    symbols: state.symbols.clone(),
-                    call_sites: state.call_sites.clone(),
-                    import_bindings: state.import_bindings.clone(),
-                    constant_strings: state.constant_strings.clone(),
-                    value_mirror_candidates: state.value_mirror_candidates.clone(),
-                    parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
-                }
-            };
-        }
-
-        if run_augmentations {
-            let mut active_pack_refs = active_packs_arg.to_vec();
-            if !active_pack_refs
-                .iter()
-                .any(|pack| pack.id == crate::frameworks::registry::PackId::SharedLib)
-            {
-                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                    id: crate::frameworks::registry::PackId::SharedLib,
-                    options: serde_norway::Value::Null,
-                });
-            }
-            if !active_pack_refs
-                .iter()
-                .any(|pack| pack.id == crate::frameworks::registry::PackId::FrontendHooks)
-            {
-                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                    id: crate::frameworks::registry::PackId::FrontendHooks,
-                    options: serde_norway::Value::Null,
-                });
-            }
-
-            let registry =
-                BUILTIN_REGISTRY.get_or_init(crate::frameworks::registry::PackRegistry::builtin);
-            let mut seen_groups = rustc_hash::FxHashSet::default();
-            for pack in &active_pack_refs {
-                let pack_id = pack.id;
-                if !pack_id.applies_to_language(file.language) {
-                    continue;
-                }
-                let group = pack_id.aug_group();
-                if !seen_groups.insert(group) {
-                    continue;
-                }
-                let augmentation = registry.augment(pack_id, &state_snapshot_oxc!());
-                append_unique_nodes(&mut state.nodes, augmentation.nodes);
-                state.edges.extend(augmentation.edges);
-            }
-        }
-
         let mut parsed = ParsedFile {
             file: file.clone(),
             source_path: absolute_path,
@@ -407,6 +352,7 @@ fn parse_file_core(
             parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
         };
         if run_augmentations {
+            apply_pack_augmentations(&mut parsed, active_packs_arg);
             crate::projection::augment_projection_fields(&mut parsed);
             apply_workspace_semantic_edges(&mut parsed, repo_root);
         }
@@ -499,82 +445,6 @@ fn parse_file_core(
         Language::Rust | Language::Go | Language::Java => {}
     }
 
-    // Framework augmentations: convert the active_frameworks slice to a
-    // Vec<PackId>, then run each pack's augmentation group at most once.
-    // The snapshot is rebuilt before each group so every group sees the
-    // accumulated output of all previous groups - preserving the original
-    // sequential semantics while eliminating the hardcoded if-chain.
-    macro_rules! state_snapshot {
-        () => {
-            ParsedFile {
-                file: file.clone(),
-                source_path: absolute_path.clone(),
-                source: source.clone(),
-                file_node: file_node.clone(),
-                nodes: state.nodes.clone(),
-                edges: state.edges.clone(),
-                symbols: state.symbols.clone(),
-                call_sites: state.call_sites.clone(),
-                import_bindings: state.import_bindings.clone(),
-                constant_strings: state.constant_strings.clone(),
-                value_mirror_candidates: state.value_mirror_candidates.clone(),
-                parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
-            }
-        };
-    }
-
-    if run_augmentations {
-        // Build the final active-packs list from the caller-supplied slice.
-        // SharedLib and FrontendHooks always run for TS/JS files regardless of
-        // which packs were requested, so we append them when absent.
-        let mut active_pack_refs = active_packs_arg.to_vec();
-        if matches!(file.language, Language::TypeScript | Language::JavaScript) {
-            if !active_pack_refs
-                .iter()
-                .any(|pack| pack.id == PackId::SharedLib)
-            {
-                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                    id: PackId::SharedLib,
-                    options: serde_norway::Value::Null,
-                });
-            }
-            if !active_pack_refs
-                .iter()
-                .any(|pack| pack.id == PackId::FrontendHooks)
-            {
-                active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
-                    id: PackId::FrontendHooks,
-                    options: serde_norway::Value::Null,
-                });
-            }
-        }
-
-        // Reuse a single process-wide registry: `builtin()` allocates a 15-entry
-        // Vec<PackEntry> and was previously called per file.
-        let registry = BUILTIN_REGISTRY.get_or_init(PackRegistry::builtin);
-
-        // Deduplicate by augmentation *group* and run each group exactly once.
-        // Multiple packs may share a group (e.g. Azure + LaunchDarkly both map
-        // to AugGroup::Azure).  A fresh snapshot is taken before each group so
-        // every group sees the accumulated output of all previous groups,
-        // preserving the original sequential augmentation semantics.
-        let mut seen_groups = rustc_hash::FxHashSet::default();
-        for pack in &active_pack_refs {
-            let pack_id = pack.id;
-            if !pack_id.applies_to_language(file.language) {
-                continue;
-            }
-            let group = pack_id.aug_group();
-            if !seen_groups.insert(group) {
-                // Another pack in this group was already processed.
-                continue;
-            }
-            let augmentation = registry.augment(pack_id, &state_snapshot!());
-            append_unique_nodes(&mut state.nodes, augmentation.nodes);
-            state.edges.extend(augmentation.edges);
-        }
-    }
-
     let mut parsed = ParsedFile {
         file: file.clone(),
         source_path: absolute_path,
@@ -590,10 +460,57 @@ fn parse_file_core(
         parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
     if run_augmentations {
+        apply_pack_augmentations(&mut parsed, active_packs_arg);
         crate::projection::augment_projection_fields(&mut parsed);
         apply_workspace_semantic_edges(&mut parsed, repo_root);
     }
     Ok(parsed)
+}
+
+fn apply_pack_augmentations(
+    parsed: &mut ParsedFile,
+    active_packs_arg: &[crate::frameworks::profile::ResolvedPack],
+) {
+    let mut active_pack_refs = active_packs_arg.to_vec();
+    if matches!(
+        parsed.file.language,
+        Language::TypeScript | Language::JavaScript
+    ) {
+        if !active_pack_refs
+            .iter()
+            .any(|pack| pack.id == PackId::SharedLib)
+        {
+            active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
+                id: PackId::SharedLib,
+                options: serde_norway::Value::Null,
+            });
+        }
+        if !active_pack_refs
+            .iter()
+            .any(|pack| pack.id == PackId::FrontendHooks)
+        {
+            active_pack_refs.push(crate::frameworks::profile::ResolvedPack {
+                id: PackId::FrontendHooks,
+                options: serde_norway::Value::Null,
+            });
+        }
+    }
+
+    let registry = BUILTIN_REGISTRY.get_or_init(PackRegistry::builtin);
+    let mut seen_groups = rustc_hash::FxHashSet::default();
+    for pack in &active_pack_refs {
+        let pack_id = pack.id;
+        if !pack_id.applies_to_language(parsed.file.language) {
+            continue;
+        }
+        let group = pack_id.aug_group();
+        if !seen_groups.insert(group) {
+            continue;
+        }
+        let augmentation = registry.augment(pack_id, parsed);
+        append_unique_nodes(&mut parsed.nodes, augmentation.nodes);
+        parsed.edges.extend(augmentation.edges);
+    }
 }
 
 /// True when this file should be parsed by the dedicated TS/JS visitor (Oxc)
@@ -2249,7 +2166,7 @@ fn collect_constructor_dependencies(node: Node<'_>, source: &str) -> Vec<String>
                 if let Some(open) = text.find('(')
                     && let Some(close) = text[open + 1..].find(')')
                 {
-                    for parameter in split_top_level_commas(&text[open + 1..open + 1 + close]) {
+                    for parameter in split_top_level(&text[open + 1..open + 1 + close], ',') {
                         let parameter = parameter.trim();
                         if parameter.is_empty() || matches!(parameter, "self" | "this") {
                             continue;
@@ -2323,7 +2240,7 @@ fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
         return Vec::new();
     };
 
-    split_top_level_commas(implements_clause)
+    split_top_level(implements_clause, ',')
         .into_iter()
         .filter_map(|entry| {
             let trimmed = entry.trim();
@@ -2435,6 +2352,16 @@ fn capture_python_string_list(
     if !elements.iter().all(|n| n.kind() == "string") {
         return;
     }
+    if elements.len() > VALUE_MIRROR_PER_ARRAY_CAP {
+        tracing::debug!(
+            repo = state.repo(),
+            file = state.file_path(),
+            surface = "python_string_list",
+            total = elements.len(),
+            cap = VALUE_MIRROR_PER_ARRAY_CAP,
+            "value-mirror array capture truncated at configured cap"
+        );
+    }
     for elem in elements.into_iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
         let value = sanitize_string_literal(node_text(elem, state.source));
         if value.is_empty() || !is_specific_value_mirror(&value) {
@@ -2484,6 +2411,16 @@ fn capture_python_literal_type(
         .collect();
     if args.is_empty() {
         return;
+    }
+    if args.len() > VALUE_MIRROR_PER_ARRAY_CAP {
+        tracing::debug!(
+            repo = state.repo(),
+            file = state.file_path(),
+            surface = "python_literal_type",
+            total = args.len(),
+            cap = VALUE_MIRROR_PER_ARRAY_CAP,
+            "value-mirror array capture truncated at configured cap"
+        );
     }
     for arg in args.into_iter().take(VALUE_MIRROR_PER_ARRAY_CAP) {
         let value = sanitize_string_literal(node_text(arg, state.source));
@@ -2654,39 +2591,6 @@ fn type_reference_head(reference: &str) -> &str {
         .unwrap_or(reference)
         .trim_end_matches(',')
         .trim()
-}
-
-fn split_top_level_commas(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0_usize;
-    let mut angle_depth = 0_u32;
-    let mut paren_depth = 0_u32;
-    let mut brace_depth = 0_u32;
-    let mut bracket_depth = 0_u32;
-
-    for (index, ch) in input.char_indices() {
-        match ch {
-            '<' => angle_depth = angle_depth.saturating_add(1),
-            '>' => angle_depth = angle_depth.saturating_sub(1),
-            '(' => paren_depth = paren_depth.saturating_add(1),
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            '{' => brace_depth = brace_depth.saturating_add(1),
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '[' => bracket_depth = bracket_depth.saturating_add(1),
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            ',' if angle_depth == 0
-                && paren_depth == 0
-                && brace_depth == 0
-                && bracket_depth == 0 =>
-            {
-                parts.push(&input[start..index]);
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(&input[start..]);
-    parts
 }
 
 fn parse_import_source(raw: &str) -> Option<String> {

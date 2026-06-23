@@ -5,6 +5,7 @@ use gather_step_core::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
+    top_level_split::split_top_level,
     traverse::{FileEntry, Language},
     tree_sitter::{EnrichedCallSite, ParsedFile, parse_file},
 };
@@ -820,41 +821,6 @@ fn balanced_prefix(raw: &str, open: char, close: char) -> Option<&str> {
         }
     }
     None
-}
-
-fn split_top_level(raw: &str, delimiter: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut bracket_depth = 0_u32;
-    let mut brace_depth = 0_u32;
-    let mut paren_depth = 0_u32;
-    let mut in_single = false;
-    let mut in_double = false;
-
-    for (index, ch) in raw.char_indices() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            _ if in_single || in_double => {}
-            '[' => bracket_depth = bracket_depth.saturating_add(1),
-            ']' => bracket_depth = bracket_depth.saturating_sub(1),
-            '{' => brace_depth = brace_depth.saturating_add(1),
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '(' => paren_depth = paren_depth.saturating_add(1),
-            ')' => paren_depth = paren_depth.saturating_sub(1),
-            _ if ch == delimiter && bracket_depth == 0 && brace_depth == 0 && paren_depth == 0 => {
-                parts.push(raw[start..index].trim());
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-
-    let tail = raw[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail);
-    }
-    parts
 }
 
 /// Normalise an API path: strip leading `/` and surrounding whitespace/quotes.

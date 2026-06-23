@@ -189,6 +189,53 @@ pub struct DiscriminantError {
 }
 
 impl NodeKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Function => "function",
+            Self::Class => "class",
+            Self::Type => "type",
+            Self::Module => "module",
+            Self::Import => "import",
+            Self::Decorator => "decorator",
+            Self::Entity => "entity",
+            Self::Route => "route",
+            Self::Topic => "topic",
+            Self::Queue => "queue",
+            Self::Subject => "subject",
+            Self::Stream => "stream",
+            Self::Event => "event",
+            Self::SharedSymbol => "shared_symbol",
+            Self::PayloadContract => "payload_contract",
+            Self::Repo => "repo",
+            Self::Convention => "convention",
+            Self::Service => "service",
+            Self::Commit => "commit",
+            Self::PR => "pr",
+            Self::Review => "review",
+            Self::Comment => "comment",
+            Self::Author => "author",
+            Self::Ticket => "ticket",
+            Self::DataField => "data_field",
+            Self::Deployment => "deployment",
+            Self::EnvVar => "env_var",
+            Self::Secret => "secret",
+            Self::ConfigMap => "config_map",
+            Self::WorkflowJob => "workflow_job",
+            Self::Broker => "broker",
+            Self::Database => "database",
+            Self::AgentGraph => "agent_graph",
+            Self::Prompt => "prompt",
+            Self::AiContract => "ai_contract",
+            Self::VectorIndex => "vector_index",
+            Self::McpServer => "mcp_server",
+            Self::McpTool => "mcp_tool",
+            Self::LlmModel => "llm_model",
+            Self::ValueMirror => "value_mirror",
+        }
+    }
+
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
@@ -289,6 +336,79 @@ impl NodeKind {
 }
 
 impl EdgeKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Defines => "defines",
+            Self::Calls => "calls",
+            Self::Imports => "imports",
+            Self::Exports => "exports",
+            Self::Extends => "extends",
+            Self::Implements => "implements",
+            Self::References => "references",
+            Self::DependsOn => "depends_on",
+            Self::UsesDecorator => "uses_decorator",
+            Self::Publishes => "publishes",
+            Self::Consumes => "consumes",
+            Self::Triggers => "triggers",
+            Self::Serves => "serves",
+            Self::PersistsTo => "persists_to",
+            Self::UsesShared => "uses_shared",
+            Self::UsesTypeFrom => "uses_type_from",
+            Self::UsesEventFrom => "uses_event_from",
+            Self::UsesGuardFrom => "uses_guard_from",
+            Self::ConsumesApiFrom => "consumes_api_from",
+            Self::ProducesEventFor => "produces_event_for",
+            Self::ImplementsContractFrom => "implements_contract_from",
+            Self::ConsumesHookFrom => "consumes_hook_from",
+            Self::ChangedIn => "changed_in",
+            Self::IntroducedBy => "introduced_by",
+            Self::AuthoredBy => "authored_by",
+            Self::ReviewedBy => "reviewed_by",
+            Self::MergedAs => "merged_as",
+            Self::CommentedOn => "commented_on",
+            Self::Resolves => "resolves",
+            Self::RelatesTo => "relates_to",
+            Self::PartOf => "part_of",
+            Self::BreaksIfChanged => "breaks_if_changed",
+            Self::CoChangesWith => "co_changes_with",
+            Self::OwnedBy => "owned_by",
+            Self::CrossRepoDepends => "cross_repo_depends",
+            Self::PropagatesEvent => "propagates_event",
+            Self::DriftsFrom => "drifts_from",
+            Self::ContractOn => "contract_on",
+            Self::MigratesCollection => "migrates_collection",
+            Self::MirrorsValueFrom => "mirrors_value_from",
+            Self::GuardsEnumValue => "guards_enum_value",
+            Self::ReadsField => "reads_field",
+            Self::WritesField => "writes_field",
+            Self::DerivesFieldFrom => "derives_field_from",
+            Self::FiltersOnField => "filters_on_field",
+            Self::IndexesField => "indexes_field",
+            Self::BackfillsField => "backfills_field",
+            Self::DeployedAs => "deployed_as",
+            Self::ReadsEnv => "reads_env",
+            Self::BackedBy => "backed_by",
+            Self::BuiltBy => "built_by",
+            Self::UsesBroker => "uses_broker",
+            Self::UsesDatabase => "uses_database",
+            Self::DefinesAgentNode => "defines_agent_node",
+            Self::GraphTransitionsTo => "graph_transitions_to",
+            Self::ComposesAgent => "composes_agent",
+            Self::SpawnsSubagent => "spawns_subagent",
+            Self::BindsTool => "binds_tool",
+            Self::InvokesLlm => "invokes_llm",
+            Self::ProducesAiContract => "produces_ai_contract",
+            Self::UsesPrompt => "uses_prompt",
+            Self::FetchesPromptFrom => "fetches_prompt_from",
+            Self::RetrievesFrom => "retrieves_from",
+            Self::Embeds => "embeds",
+            Self::IndexesVector => "indexes_vector",
+            Self::CallsMcpTool => "calls_mcp_tool",
+            Self::ExposesMcpTool => "exposes_mcp_tool",
+        }
+    }
+
     pub const fn as_u8(self) -> u8 {
         self as u8
     }

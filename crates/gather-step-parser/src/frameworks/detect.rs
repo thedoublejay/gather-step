@@ -51,14 +51,7 @@ pub enum Framework {
 pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     let mut frameworks = FxHashSet::default();
     let manifest = read_manifest_json(repo_root);
-    if has_dependency_in_manifest(manifest.as_ref(), &["@nestjs/core"])
-        || (has_dependency_in_manifest(manifest.as_ref(), &["@nestjs/cli"])
-            && (has_any_file(repo_root, &["nest-cli.json"])
-                || manifest_script_contains_value(
-                    manifest.as_ref(),
-                    &["nest build", "nest start"],
-                )))
-    {
+    if is_nestjs(repo_root) {
         frameworks.insert(Framework::NestJs);
     }
     if has_dependency_in_manifest(manifest.as_ref(), &["@nestjs/mongoose", "mongoose"]) {
@@ -160,10 +153,15 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
 /// dependency section. The presence of `@nestjs/common` or `@nestjs/microservices`
 /// alone is NOT sufficient: those can appear in libraries that expose types
 /// without being `NestJS` applications themselves. `@nestjs/core` is the
-/// runtime framework marker.
+/// runtime framework marker; `@nestjs/common` is accepted only when route or
+/// message decorators are present in source.
 #[must_use]
 pub fn is_nestjs(repo_root: &Path) -> bool {
     if has_any_dependency(repo_root, &["@nestjs/core"]) {
+        return true;
+    }
+
+    if has_any_dependency(repo_root, &["@nestjs/common"]) && has_nestjs_source_markers(repo_root) {
         return true;
     }
 
@@ -307,7 +305,8 @@ pub fn is_fastapi(repo_root: &Path) -> bool {
 }
 
 /// Returns `true` when a LangChain-style AI dependency is present in the Node
-/// manifest, marking the repo as an AI TypeScript/JavaScript service.
+/// manifest, or when a MongoDB client dependency can exercise the Atlas vector
+/// search APIs handled by the same augmenter.
 #[must_use]
 pub fn is_ai_typescript(repo_root: &Path) -> bool {
     let Some(manifest) = read_manifest_json(repo_root) else {
@@ -322,6 +321,19 @@ pub fn is_ai_typescript(repo_root: &Path) -> bool {
             "langchain",
             "@langchain/openai",
             "@langchain/langgraph",
+            "openai",
+            "@openai/agents",
+            "@anthropic-ai/sdk",
+            "@google/generative-ai",
+            "@google/genai",
+            "@aws-sdk/client-bedrock-runtime",
+            "@aws-sdk/client-bedrock-agent-runtime",
+            "llamaindex",
+            "llama-index",
+            "ai",
+            "mongodb",
+            "mongoose",
+            "@mongodb-js/atlas-vector-search",
             "@modelcontextprotocol/sdk",
             "@nestjs-mcp/server",
         ],
@@ -331,7 +343,16 @@ pub fn is_ai_typescript(repo_root: &Path) -> bool {
     // Prefix-match: any sibling in the scoped families also marks the repo.
     has_dependency_with_prefix(
         Some(&manifest),
-        &["@langchain/", "@modelcontextprotocol/", "@nestjs-mcp/"],
+        &[
+            "@langchain/",
+            "@openai/",
+            "@anthropic-ai/",
+            "@ai-sdk/",
+            "@aws-sdk/client-bedrock",
+            "@mongodb-js/",
+            "@modelcontextprotocol/",
+            "@nestjs-mcp/",
+        ],
     )
 }
 
@@ -525,6 +546,63 @@ fn has_any_file(repo_root: &Path, paths: &[&str]) -> bool {
     paths.iter().any(|path| repo_root.join(path).exists())
 }
 
+fn has_nestjs_source_markers(repo_root: &Path) -> bool {
+    const MARKERS: &[&str] = &[
+        "@Controller(",
+        "@RequestMapping(",
+        "@Get(",
+        "@Post(",
+        "@Put(",
+        "@Patch(",
+        "@Delete(",
+        "@MessagePattern(",
+        "@EventPattern(",
+    ];
+    let src = repo_root.join("src");
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                let name = entry.file_name();
+                if matches!(
+                    name.to_str(),
+                    Some("node_modules" | "dist" | "build" | "coverage" | ".git")
+                ) {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file()
+                || metadata.len() > 1_048_576
+                || !path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| matches!(ext, "ts" | "tsx" | "js" | "jsx"))
+            {
+                continue;
+            }
+            let Ok(source) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if MARKERS.iter().any(|marker| source.contains(marker)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -606,6 +684,20 @@ mod tests {
             r#"{ "name": "types-lib", "dependencies": { "@nestjs/common": "^11.0.0" } }"#,
         );
         assert!(!is_nestjs(&dir.path));
+    }
+
+    #[test]
+    fn is_nestjs_detects_common_with_controller_source_marker() {
+        let dir = TempDir::new("nest-common-controller");
+        dir.write(
+            "package.json",
+            r#"{ "name": "service-a", "dependencies": { "@nestjs/common": "^11.0.0" } }"#,
+        );
+        dir.write(
+            "src/controller.ts",
+            "import { Controller, Get } from '@nestjs/common';\n@Controller('items')\nexport class ItemsController { @Get() list() {} }\n",
+        );
+        assert!(is_nestjs(&dir.path));
     }
 
     #[test]
@@ -880,6 +972,23 @@ dependencies = [
             r#"{ "dependencies": { "@modelcontextprotocol/server-everything": "^1.0.0" } }"#,
         );
         assert!(is_ai_typescript(&dir.path));
+    }
+
+    #[test]
+    fn is_ai_typescript_detects_mongodb_atlas_clients() {
+        let mongodb_dir = TempDir::new("ai-ts-mongodb");
+        mongodb_dir.write(
+            "package.json",
+            r#"{ "dependencies": { "mongodb": "^6.0.0" } }"#,
+        );
+        assert!(is_ai_typescript(&mongodb_dir.path));
+
+        let atlas_dir = TempDir::new("ai-ts-atlas");
+        atlas_dir.write(
+            "package.json",
+            r#"{ "dependencies": { "@mongodb-js/atlas-vector-search": "^0.1.0" } }"#,
+        );
+        assert!(is_ai_typescript(&atlas_dir.path));
     }
 
     #[test]

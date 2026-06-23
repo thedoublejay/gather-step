@@ -561,9 +561,7 @@ impl RepoIndexer {
             .source_files
             .into_iter()
             .map(|file| {
-                let key = gather_step_core::PathId::from_path(&file.path)
-                    .as_bytes()
-                    .to_vec();
+                let key = gather_step_core::PathId::from_path(&file.path).into_bytes();
                 (key, file)
             })
             .collect::<rustc_hash::FxHashMap<_, _>>();
@@ -1063,9 +1061,7 @@ impl RepoIndexer {
             // Key on raw OsStr bytes so two byte-distinct non-UTF-8 filenames
             // are never collapsed to the same entry under to_string_lossy.
             .map(|file| {
-                let key = gather_step_core::PathId::from_path(&file.path)
-                    .as_bytes()
-                    .to_vec();
+                let key = gather_step_core::PathId::from_path(&file.path).into_bytes();
                 (key, file)
             })
             .collect::<rustc_hash::FxHashMap<_, _>>();
@@ -1248,11 +1244,9 @@ impl RepoIndexer {
                 let file_path_str =
                     normalize_path_separators(&file.path.to_string_lossy()).into_owned();
                 // Lossless identity bytes for the SQLite BLOB column.
-                let path_id_bytes = gather_step_core::PathId::from_path(&file.path)
-                    .as_bytes()
-                    .to_vec();
+                let path_id_bytes = gather_step_core::PathId::from_path(&file.path).into_bytes();
                 // Arc<[u8]> backed by PathId bytes: used as the identity key in
-                // file_positions and node_to_file.  Two byte-distinct non-UTF-8
+                // file_positions and node_to_file. Two byte-distinct non-UTF-8
                 // filenames that are equal under to_string_lossy are distinct here.
                 let file_path_arc: Arc<[u8]> = Arc::from(path_id_bytes.clone().into_boxed_slice());
                 // Use the original PathBuf (not a lossy round-trip through String)
@@ -1617,9 +1611,8 @@ impl RepoIndexer {
                             max_file_parse_path.clone_from(&file_path_str);
                         }
                         // Lossless identity bytes for SQLite BLOB column.
-                        let path_id_bytes = gather_step_core::PathId::from_path(&file.path)
-                            .as_bytes()
-                            .to_vec();
+                        let path_id_bytes =
+                            gather_step_core::PathId::from_path(&file.path).into_bytes();
                         let source_path = file.path.clone();
                         call_sites_total += call_sites.len();
                         import_bindings_total += import_bindings.len();
@@ -2500,9 +2493,7 @@ fn deployment_output_to_batch(
     FileBatch {
         repo: repo.to_owned(),
         file_path: file_path.to_owned(),
-        path_id_bytes: gather_step_core::PathId::from_path(Path::new(file_path))
-            .as_bytes()
-            .to_vec(),
+        path_id_bytes: gather_step_core::PathId::from_path(Path::new(file_path)).into_bytes(),
         nodes,
         edges,
         value_mirror_candidates: vec![],

@@ -16,6 +16,7 @@ use crate::frameworks::nestjs::{
     resolve_topic_decorator_argument,
 };
 use crate::path_guard::canonicalize_existing_file_under;
+use crate::top_level_split::split_top_level;
 use crate::traverse::classify_language;
 use crate::tree_sitter::{ParsedFile, SymbolCapture};
 use rustc_hash::FxHashMap;
@@ -714,39 +715,6 @@ fn detect_transport(qualified_hint: &str) -> &'static str {
     } else {
         "kafka"
     }
-}
-
-fn split_top_level(input: &str, separator: char) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut start = 0_usize;
-    let mut braces = 0_i32;
-    let mut brackets = 0_i32;
-    let mut parens = 0_i32;
-    let mut in_string: Option<char> = None;
-    for (offset, ch) in input.char_indices() {
-        match in_string {
-            Some(quote) if ch == quote => in_string = None,
-            Some(_) => {}
-            None => match ch {
-                '"' | '\'' | '`' => in_string = Some(ch),
-                '{' => braces += 1,
-                '}' => braces -= 1,
-                '[' => brackets += 1,
-                ']' => brackets -= 1,
-                '(' => parens += 1,
-                ')' => parens -= 1,
-                _ if ch == separator && braces == 0 && brackets == 0 && parens == 0 => {
-                    result.push(input[start..offset].trim());
-                    start = offset + ch.len_utf8();
-                }
-                _ => {}
-            },
-        }
-    }
-    if start < input.len() {
-        result.push(input[start..].trim());
-    }
-    result
 }
 
 #[cfg(test)]
