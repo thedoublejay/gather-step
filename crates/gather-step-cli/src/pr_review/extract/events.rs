@@ -30,7 +30,10 @@ type EventMap = FxHashMap<(String, String), EventDelta>;
 
 /// Extract added / removed / changed event deltas by diffing virtual event nodes
 /// in `baseline` against those in `review`.
-pub fn extract_event_deltas<S: GraphStore>(baseline: &S, review: &S) -> Result<EventDeltas> {
+pub fn extract_event_deltas<B: GraphStore, R: GraphStore>(
+    baseline: &B,
+    review: &R,
+) -> Result<EventDeltas> {
     let baseline_map = build_event_map(baseline)?;
     let review_map = build_event_map(review)?;
 

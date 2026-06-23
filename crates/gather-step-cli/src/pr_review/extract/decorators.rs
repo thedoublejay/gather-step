@@ -58,9 +58,9 @@ const INTERESTING_DECORATORS: &[&str] = &[
 type DecoratorKey = (String, String, String, String);
 
 /// Extract added / removed / changed decorator deltas.
-pub fn extract_decorator_deltas<S: GraphStore>(
-    baseline: &S,
-    review: &S,
+pub fn extract_decorator_deltas<B: GraphStore, R: GraphStore>(
+    baseline: &B,
+    review: &R,
 ) -> Result<DecoratorDeltas> {
     let baseline_map = build_decorator_map(baseline)?;
     let review_map = build_decorator_map(review)?;

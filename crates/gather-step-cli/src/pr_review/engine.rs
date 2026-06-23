@@ -218,13 +218,13 @@ impl ReviewEngineImpl for OverlayEngine {
             registry_path: artifact_root.registry_path.clone(),
             storage_root: artifact_root.storage_root.clone(),
             engine: self.name(),
-            // Routes and Symbols can use graph-only overlay; the others need
-            // search/metadata stores not yet wired to the overlay.
+            // Routes, Symbols, Events, and Decorators are graph-only surfaces
+            // and reach parity with temp-index via the overlay (see parity.rs
+            // fixtures). The remaining surfaces need search/metadata stores not
+            // yet wired to the overlay.
             unsupported_surfaces: vec![
                 UnsupportedSurface::PayloadContracts,
                 UnsupportedSurface::AiContracts,
-                UnsupportedSurface::Events,
-                UnsupportedSurface::Decorators,
                 UnsupportedSurface::ContractAlignments,
                 UnsupportedSurface::Deployment,
             ],
@@ -376,8 +376,10 @@ mod tests {
 
     // ── OverlayEngine ─────────────────────────────────────────────────────────
 
-    /// `OverlayEngine::materialize` returns a snapshot with `PayloadContracts`
-    /// and `Events` in `unsupported_surfaces`.
+    /// `OverlayEngine::materialize` returns a snapshot whose metadata-backed
+    /// surfaces (`PayloadContracts`, `AiContracts`, `ContractAlignments`,
+    /// `Deployment`) are unsupported, while the graph-only surfaces
+    /// (`Routes`, `Symbols`, `Events`, `Decorators`) are supported.
     #[test]
     fn overlay_engine_marks_unsupported_surfaces() {
         let cache_tmp = TempDir::new("cache-overlay");
@@ -418,20 +420,23 @@ mod tests {
             "overlay must mark AiContracts unsupported"
         );
         assert!(
-            surfaces.contains(&UnsupportedSurface::Events),
-            "overlay must mark Events unsupported"
-        );
-        assert!(
-            surfaces.contains(&UnsupportedSurface::Decorators),
-            "overlay must mark Decorators unsupported"
-        );
-        assert!(
             surfaces.contains(&UnsupportedSurface::ContractAlignments),
             "overlay must mark ContractAlignments unsupported"
         );
         assert!(
             surfaces.contains(&UnsupportedSurface::Deployment),
             "overlay must mark Deployment unsupported"
+        );
+
+        // Events and Decorators are graph-only surfaces and now reach parity
+        // through the overlay — they must NOT be flagged unsupported.
+        assert!(
+            !surfaces.contains(&UnsupportedSurface::Events),
+            "overlay must support Events (graph-only surface)"
+        );
+        assert!(
+            !surfaces.contains(&UnsupportedSurface::Decorators),
+            "overlay must support Decorators (graph-only surface)"
         );
     }
 }

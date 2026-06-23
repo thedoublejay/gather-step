@@ -404,6 +404,7 @@ mod tests {
         RiskSeverity, RouteDelta, RouteDeltas, SafetyMetadata, SymbolDeltas,
     };
     use crate::pr_review::{
+        extract::decorators::extract_decorator_deltas, extract::events::extract_event_deltas,
         extract::routes::extract_route_deltas, overlay::store::DiffOverlayStore,
     };
 
@@ -747,6 +748,215 @@ mod tests {
         assert!(
             diff.is_match(),
             "overlay route deltas must match temp-index route deltas: {:?}",
+            diff.differences
+        );
+    }
+
+    // ── Event + decorator fixture helpers ────────────────────────────────────
+
+    fn topic_node(name: &str) -> NodeData {
+        // `external_id` carries a `service__topic` shape so `event_name_for_node`
+        // resolves to the last `__`-delimited segment.
+        let external_id = format!("svc__{name}");
+        let mut node = virtual_node(
+            NodeKind::Topic,
+            "__virtual__",
+            "__virtual__",
+            name.to_owned(),
+            format!("topic::{name}"),
+        );
+        node.external_id = Some(external_id);
+        node
+    }
+
+    fn publishes_edge(producer: &NodeData, topic: &NodeData, owner_file: &NodeData) -> EdgeData {
+        EdgeData {
+            source: producer.id,
+            target: topic.id,
+            kind: EdgeKind::Publishes,
+            metadata: EdgeMetadata {
+                confidence: Some(900),
+                ..EdgeMetadata::default()
+            },
+            owner_file: owner_file.id,
+            is_cross_file: true,
+        }
+    }
+
+    fn insert_topic_with_producer(
+        store: &GraphStoreDb,
+        repo: &str,
+        file: &str,
+        producer_name: &str,
+        topic_name: &str,
+    ) {
+        let f = file_node(repo, file);
+        let producer = handler_node(repo, file, producer_name, 5);
+        let topic = topic_node(topic_name);
+        let e = publishes_edge(&producer, &topic, &f);
+        store
+            .bulk_insert(&[f, producer, topic], &[e])
+            .expect("bulk insert should succeed");
+    }
+
+    fn decorator_node(repo: &str, file: &str, name: &str, line: u32) -> NodeData {
+        let qn = format!("{repo}::{name}");
+        NodeData {
+            id: node_id(repo, file, NodeKind::Decorator, &qn),
+            kind: NodeKind::Decorator,
+            repo: repo.to_owned(),
+            file_path: file.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(qn),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: Some(SourceSpan {
+                line_start: line,
+                line_len: 1,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+            ai_role: None,
+        }
+    }
+
+    fn uses_decorator_edge(
+        target: &NodeData,
+        decorator: &NodeData,
+        owner_file: &NodeData,
+    ) -> EdgeData {
+        EdgeData {
+            source: target.id,
+            target: decorator.id,
+            kind: EdgeKind::UsesDecorator,
+            metadata: EdgeMetadata::default(),
+            owner_file: owner_file.id,
+            is_cross_file: false,
+        }
+    }
+
+    fn insert_decorated_symbol(
+        store: &GraphStoreDb,
+        repo: &str,
+        file: &str,
+        target_name: &str,
+        decorator_name: &str,
+        line: u32,
+    ) {
+        let f = file_node(repo, file);
+        let target = handler_node(repo, file, target_name, line);
+        let decorator = decorator_node(repo, file, decorator_name, line);
+        let e = uses_decorator_edge(&target, &decorator, &f);
+        store
+            .bulk_insert(&[f, target, decorator], &[e])
+            .expect("bulk insert should succeed");
+    }
+
+    // ── Graph-backed fixture: events ─────────────────────────────────────────
+
+    #[test]
+    fn overlay_engine_matches_temp_index_on_event_fixture() {
+        let (_baseline_tmp, baseline) = open_store("ev-baseline");
+        let (_review_tmp, review) = open_store("ev-review");
+
+        // Baseline publishes `orders` and `shipments`.
+        insert_topic_with_producer(
+            &baseline,
+            "api",
+            "src/orders.rs",
+            "publish_orders",
+            "orders",
+        );
+        insert_topic_with_producer(
+            &baseline,
+            "api",
+            "src/ship.rs",
+            "publish_shipments",
+            "shipments",
+        );
+
+        // Review drops `shipments`, keeps `orders`, adds `invoices`.
+        insert_topic_with_producer(&review, "api", "src/orders.rs", "publish_orders", "orders");
+        insert_topic_with_producer(&review, "api", "src/inv.rs", "publish_invoices", "invoices");
+
+        let overlay = DiffOverlayStore::from_graphs(&baseline, &review).expect("build overlay");
+
+        let mut temp_index_report = empty_report();
+        temp_index_report.events =
+            extract_event_deltas(&baseline, &review).expect("temp-index event deltas");
+
+        let mut overlay_report = empty_report();
+        overlay_report.events =
+            extract_event_deltas(&baseline, &overlay).expect("overlay event deltas");
+
+        let diff = compare_for_parity(&temp_index_report, &overlay_report);
+        assert!(
+            diff.is_match(),
+            "overlay event deltas must match temp-index event deltas: {:?}",
+            diff.differences
+        );
+    }
+
+    // ── Graph-backed fixture: decorators ─────────────────────────────────────
+
+    #[test]
+    fn overlay_engine_matches_temp_index_on_decorator_fixture() {
+        let (_baseline_tmp, baseline) = open_store("dec-baseline");
+        let (_review_tmp, review) = open_store("dec-review");
+
+        // Baseline guards `listOrders` with @Permission and `deleteOrder` with @Audit.
+        insert_decorated_symbol(
+            &baseline,
+            "api",
+            "src/orders.rs",
+            "listOrders",
+            "Permission",
+            10,
+        );
+        insert_decorated_symbol(
+            &baseline,
+            "api",
+            "src/orders.rs",
+            "deleteOrder",
+            "Audit",
+            40,
+        );
+
+        // Review drops the @Audit on deleteOrder, keeps @Permission on listOrders,
+        // and adds @Authenticated on createOrder.
+        insert_decorated_symbol(
+            &review,
+            "api",
+            "src/orders.rs",
+            "listOrders",
+            "Permission",
+            10,
+        );
+        insert_decorated_symbol(
+            &review,
+            "api",
+            "src/orders.rs",
+            "createOrder",
+            "Authenticated",
+            30,
+        );
+
+        let overlay = DiffOverlayStore::from_graphs(&baseline, &review).expect("build overlay");
+
+        let mut temp_index_report = empty_report();
+        temp_index_report.decorators =
+            extract_decorator_deltas(&baseline, &review).expect("temp-index decorator deltas");
+
+        let mut overlay_report = empty_report();
+        overlay_report.decorators =
+            extract_decorator_deltas(&baseline, &overlay).expect("overlay decorator deltas");
+
+        let diff = compare_for_parity(&temp_index_report, &overlay_report);
+        assert!(
+            diff.is_match(),
+            "overlay decorator deltas must match temp-index decorator deltas: {:?}",
             diff.differences
         );
     }
