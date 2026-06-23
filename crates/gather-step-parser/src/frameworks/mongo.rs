@@ -254,10 +254,11 @@ fn collect_lookup_fields(value: &Value, out: &mut std::collections::BTreeSet<Str
 fn collect_field_references(value: &Value, out: &mut std::collections::BTreeSet<String>) {
     match value {
         Value::String(text) => {
-            if let Some(field) = text.strip_prefix('$') {
-                if !field.is_empty() && !field.starts_with('$') {
-                    out.insert(field.to_owned());
-                }
+            if let Some(field) = text.strip_prefix('$')
+                && !field.is_empty()
+                && !field.starts_with('$')
+            {
+                out.insert(field.to_owned());
             }
         }
         Value::Object(map) => {
