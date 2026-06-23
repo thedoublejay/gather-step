@@ -17,8 +17,9 @@
 //! consumer was also removed in the same PR it does not count.
 
 use anyhow::Result;
-use gather_step_core::{EdgeKind, NodeId, NodeKind};
+use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::GraphStore;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::pr_review::delta_report::{
     EventDelta, RemovedSurfaceConsumer, RemovedSurfaceRisk, RiskSeverity, RouteDelta, SymbolDelta,
@@ -41,6 +42,10 @@ const AI_SURFACE_KINDS: &[(NodeKind, &str)] = &[
 /// of these from a surviving route/handler strips an access guard and is flagged
 /// as a High-severity `security_decorator` risk. Extend this set as new guards
 /// are registered.
+///
+/// `useguards` is the primary NestJS enforcement mechanism — `@UseGuards(
+/// AuthGuard, RolesGuard)` is what actually wires authn/authz onto a handler —
+/// so dropping it removes auth entirely and must be caught here.
 const ENFORCEMENT_DECORATORS: &[&str] = &[
     "roles",
     "permission",
@@ -49,7 +54,17 @@ const ENFORCEMENT_DECORATORS: &[&str] = &[
     "audit",
     "rolesallowed",
     "requirespermission",
+    "useguards",
+    "auth",
+    "authorized",
+    "requireauth",
 ];
+
+/// Auth-*weakening* decorator names (case-insensitive). These mark a surface as
+/// intentionally unguarded (`@Public`, `@SkipAuth`). *Adding* one of these to a
+/// surviving surface is the inverse of removing an enforcement decorator — it
+/// opens up a previously-guarded surface — and is flagged High.
+const AUTH_WEAKENING_DECORATORS: &[&str] = &["public", "skipauth"];
 
 /// Real symbol kinds (non-virtual) whose direct removal we scan for surviving
 /// cross-repo callers. Mirrors the kinds the shared-symbol fallback matches.
@@ -258,13 +273,15 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
         }
     }
 
-    // ── Removed enforcement decorators (v5.4 H2) ─────────────────────────────
+    // ── Auth-decorator changes on surviving surfaces (v5.4 H2) ───────────────
     // When a PR strips an authorization/enforcement decorator (@Roles,
-    // @Permission, @Audit, …) off a route/handler that still exists, the access
-    // guard is silently gone — flag it High. A fully-removed surface is already
-    // covered by route/symbol removal risks, so the FP gate requires the
-    // decorated surface to survive in review.
-    risks.extend(removed_enforcement_decorator_risks(baseline, review)?);
+    // @UseGuards, @Permission, …) off a handler that still exists — or *adds* an
+    // auth-weakening decorator (@Public, @SkipAuth) — the access guard changed
+    // silently; flag it High. Surfaces are matched baseline↔review with a
+    // rename-tolerant key so a rename-disguised guard drop is still caught, and
+    // a guard hoisted to the enclosing class suppresses the per-method risk. A
+    // fully-removed surface is covered by route/symbol removal risks instead.
+    risks.extend(auth_decorator_change_risks(baseline, review)?);
 
     // ── Removed symbols with direct cross-repo consumers (v5.4 H5) ───────────
     // When a PR removes a symbol that another repo calls/references *directly*
@@ -367,58 +384,116 @@ fn is_enforcement_decorator(name: &str) -> bool {
         .any(|&n| n.eq_ignore_ascii_case(name))
 }
 
-/// Flag every enforcement decorator that was removed from a surface still
-/// present in review.
+/// Returns `true` if the decorator name marks a surface as intentionally
+/// unguarded (`@Public`, `@SkipAuth`).
+fn is_auth_weakening_decorator(name: &str) -> bool {
+    AUTH_WEAKENING_DECORATORS
+        .iter()
+        .any(|&n| n.eq_ignore_ascii_case(name))
+}
+
+/// A decorated surface and the decorators attached to it in one snapshot.
+struct DecoratedSurface {
+    surface: NodeData,
+    /// Original-cased names of the decorators on this surface.
+    decorators: Vec<String>,
+}
+
+/// Flag auth-decorator changes on surfaces that survive baseline→review:
 ///
-/// A decorator node is "removed" when its node ID exists in `baseline` but not
-/// in `review`. The decorated surface is resolved via the incoming
-/// `UsesDecorator` edge (target → decorator); the risk is only emitted when that
-/// target survives in review (a fully-removed surface is covered elsewhere).
-fn removed_enforcement_decorator_risks<S: GraphStore>(
+/// * an **enforcement** decorator (`@Roles`, `@UseGuards`, …) present in
+///   baseline but absent in review → guard dropped (H2-1);
+/// * an **auth-weakening** decorator (`@Public`, `@SkipAuth`) absent in baseline
+///   but present in review → surface opened up (H2-2 inverse).
+///
+/// Surfaces are paired with a rename-tolerant key (`surface_match_key`), so a
+/// rename that also drops a guard is still caught — node ids change on rename
+/// and would defeat an id-based survival gate. A dropped enforcement decorator
+/// is suppressed when the surviving surface *or its enclosing class* still
+/// carries any enforcement decorator in review (H2-3: a hoist to a class-level
+/// guard is not a regression).
+fn auth_decorator_change_risks<S: GraphStore>(
     baseline: &S,
     review: &S,
 ) -> Result<Vec<RemovedSurfaceRisk>> {
+    let baseline_surfaces = decorated_surfaces(baseline)?;
+    let review_surfaces = decorated_surfaces(review)?;
+
+    // Index *all* non-virtual Function/Class nodes in each snapshot by their
+    // rename-tolerant match key — a surface that lost (or gained) its only
+    // decorator must still be matchable, so the index cannot be restricted to
+    // decorated nodes. A key with a single node pairs unambiguously; ambiguous
+    // keys (>1 node) are dropped so a rename never pairs the wrong surface.
+    let review_by_key = surface_index(review)?;
+    let baseline_by_key = surface_index(baseline)?;
+
     let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
 
-    for node in baseline.nodes_by_type(NodeKind::Decorator)? {
-        if !is_enforcement_decorator(&node.name) {
-            continue;
-        }
-        // Removed = present in baseline, absent in review.
-        if review.get_node(node.id)?.is_some() {
-            continue;
-        }
-
-        // Resolve the decorated surface via the incoming UsesDecorator edge.
-        let Some(target) = decorated_surface(baseline, node.id)? else {
+    // H2-1 / H2-3 — enforcement decorator dropped from a surviving surface.
+    for base in &baseline_surfaces {
+        let Some(review_surface) = single_match(&review_by_key, &base.surface) else {
+            // No (or ambiguous) surviving counterpart → fully-removed surface,
+            // covered by the route/symbol removal passes.
             continue;
         };
-        // FP gate: only flag when the decorated surface still exists in review.
-        if review.get_node(target.id)?.is_none() {
-            continue;
+
+        let review_decorators = auth_decorator_names_on(review, review_surface.id)?;
+        let review_enforcement: FxHashSet<String> = review_decorators
+            .iter()
+            .filter(|d| is_enforcement_decorator(d.as_str()))
+            .map(|d| d.to_ascii_lowercase())
+            .collect();
+        // Enclosing-class enforcement decorators in review (H2-3 hoist).
+        let class_has_enforcement =
+            enclosing_class_has_enforcement_decorator(review, review_surface.id)?;
+
+        for dec in &base.decorators {
+            if !is_enforcement_decorator(dec) {
+                continue;
+            }
+            if review_enforcement.contains(&dec.to_ascii_lowercase()) {
+                continue;
+            }
+            // Hoist suppression: the surface (any enforcement decorator) or its
+            // enclosing class still guards it in review → not a regression.
+            if !review_enforcement.is_empty() || class_has_enforcement {
+                continue;
+            }
+            risks.push(auth_decorator_risk(
+                review_surface,
+                &format!("@{dec} removed from surviving surface"),
+                &format!("@{dec}"),
+            ));
         }
+    }
 
-        let surface_qn = target
-            .qualified_name
-            .clone()
-            .unwrap_or_else(|| target.name.clone());
-        let surface_file = Some(target.file_path.clone()).filter(|s| !s.is_empty());
-        let detail = match &surface_file {
-            Some(file) => format!(
-                "@{} removed from surviving surface {surface_qn} ({file})",
-                node.name
-            ),
-            None => format!("@{} removed from surviving surface {surface_qn}", node.name),
+    // H2-2 inverse — auth-weakening decorator added to a surviving surface.
+    // Driven from review so a surface that had *no* auth decorator in baseline
+    // but gained `@Public` / `@SkipAuth` is caught.
+    for rev in &review_surfaces {
+        let Some(base_surface) = single_match(&baseline_by_key, &rev.surface) else {
+            // No (or ambiguous) baseline counterpart → newly-added surface, not
+            // a weakening of an existing one.
+            continue;
         };
-
-        risks.push(RemovedSurfaceRisk {
-            kind: "security_decorator".to_owned(),
-            identity: format!("@{}::{surface_qn}", node.name),
-            repo: (target.repo != "__virtual__").then(|| target.repo.clone()),
-            surviving_consumers: Vec::new(),
-            severity: RiskSeverity::High,
-            detail: Some(detail),
-        });
+        let base_weakening: FxHashSet<String> = auth_decorator_names_on(baseline, base_surface.id)?
+            .into_iter()
+            .filter(|d| is_auth_weakening_decorator(d))
+            .map(|d| d.to_ascii_lowercase())
+            .collect();
+        for dec in &rev.decorators {
+            if !is_auth_weakening_decorator(dec) {
+                continue;
+            }
+            if base_weakening.contains(&dec.to_ascii_lowercase()) {
+                continue;
+            }
+            risks.push(auth_decorator_risk(
+                &rev.surface,
+                &format!("@{dec} added to surviving surface"),
+                &format!("@{dec}"),
+            ));
+        }
     }
 
     risks.sort_by(|a, b| a.identity.cmp(&b.identity));
@@ -426,20 +501,145 @@ fn removed_enforcement_decorator_risks<S: GraphStore>(
     Ok(risks)
 }
 
-/// Resolve the surface a decorator is attached to by walking the incoming
-/// `UsesDecorator` edge (target → decorator). Returns the target node.
-fn decorated_surface<S: GraphStore>(
-    store: &S,
-    decorator_id: NodeId,
-) -> Result<Option<gather_step_core::NodeData>> {
-    for edge in store.get_incoming(decorator_id)? {
-        if edge.kind == EdgeKind::UsesDecorator
-            && let Some(source) = store.get_node(edge.source)?
-        {
-            return Ok(Some(source));
+/// Index every non-virtual `Function` / `Class` node in `store` by its
+/// rename-tolerant [`surface_match_key`].
+fn surface_index<S: GraphStore>(store: &S) -> Result<FxHashMap<String, Vec<NodeData>>> {
+    let mut by_key: FxHashMap<String, Vec<NodeData>> = FxHashMap::default();
+    for kind in [NodeKind::Function, NodeKind::Class] {
+        for node in store.nodes_by_type(kind)? {
+            if node.is_virtual {
+                continue;
+            }
+            by_key
+                .entry(surface_match_key(&node))
+                .or_default()
+                .push(node);
         }
     }
-    Ok(None)
+    Ok(by_key)
+}
+
+/// Return the single surface in `index` matching `surface`'s key, or `None` when
+/// the key is missing or ambiguous (>1 node).
+fn single_match<'a>(
+    index: &'a FxHashMap<String, Vec<NodeData>>,
+    surface: &NodeData,
+) -> Option<&'a NodeData> {
+    match index.get(&surface_match_key(surface)).map(Vec::as_slice) {
+        Some([only]) => Some(only),
+        _ => None,
+    }
+}
+
+/// Build a `security_decorator` risk for a changed auth decorator on `surface`.
+/// `detail_prefix` describes the change (e.g. `"@Roles removed from surviving
+/// surface"`); `identity_prefix` is the decorator label (e.g. `"@Roles"`).
+fn auth_decorator_risk(
+    surface: &NodeData,
+    detail_prefix: &str,
+    identity_prefix: &str,
+) -> RemovedSurfaceRisk {
+    let surface_qn = surface
+        .qualified_name
+        .clone()
+        .unwrap_or_else(|| surface.name.clone());
+    let surface_file = Some(surface.file_path.clone()).filter(|s| !s.is_empty());
+    let detail = match &surface_file {
+        Some(file) => format!("{detail_prefix} {surface_qn} ({file})"),
+        None => format!("{detail_prefix} {surface_qn}"),
+    };
+    RemovedSurfaceRisk {
+        kind: "security_decorator".to_owned(),
+        identity: format!("{identity_prefix}::{surface_qn}"),
+        repo: (surface.repo != "__virtual__").then(|| surface.repo.clone()),
+        surviving_consumers: Vec::new(),
+        severity: RiskSeverity::High,
+        detail: Some(detail),
+    }
+}
+
+/// Rename-tolerant key for pairing a surface across snapshots. Keyed on
+/// `(repo, file_path, kind)` — *not* the name — so a renamed handler in the
+/// same file still pairs, as long as it is the only decorated surface of its
+/// kind in that file (ambiguous keys are dropped by the caller). Prefers the
+/// stable `external_id` when present.
+fn surface_match_key(surface: &NodeData) -> String {
+    surface.external_id.clone().unwrap_or_else(|| {
+        format!(
+            "{}\0{}\0{:?}",
+            surface.repo, surface.file_path, surface.kind
+        )
+    })
+}
+
+/// Enumerate every surface carrying at least one enforcement or auth-weakening
+/// decorator in `store`, resolved via outgoing `UsesDecorator` edges
+/// (surface → decorator).
+fn decorated_surfaces<S: GraphStore>(store: &S) -> Result<Vec<DecoratedSurface>> {
+    let mut surfaces: Vec<DecoratedSurface> = Vec::new();
+
+    for kind in [NodeKind::Function, NodeKind::Class] {
+        for surface in store.nodes_by_type(kind)? {
+            if surface.is_virtual {
+                continue;
+            }
+            let decorators = auth_decorator_names_on(store, surface.id)?;
+            if decorators.is_empty() {
+                continue;
+            }
+            surfaces.push(DecoratedSurface {
+                surface,
+                decorators,
+            });
+        }
+    }
+
+    Ok(surfaces)
+}
+
+/// Names of the enforcement / auth-weakening decorators attached to `surface_id`
+/// via outgoing `UsesDecorator` edges (surface → decorator). Non-auth decorators
+/// (`@ApiTags`, …) are filtered out.
+fn auth_decorator_names_on<S: GraphStore>(store: &S, surface_id: NodeId) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for edge in store.get_outgoing(surface_id)? {
+        if edge.kind != EdgeKind::UsesDecorator {
+            continue;
+        }
+        let Some(dec) = store.get_node(edge.target)? else {
+            continue;
+        };
+        if is_enforcement_decorator(&dec.name) || is_auth_weakening_decorator(&dec.name) {
+            names.push(dec.name);
+        }
+    }
+    Ok(names)
+}
+
+/// `true` if the enclosing class of `surface_id` (reached via the incoming
+/// `Defines` edge from a `Class` node) carries any enforcement decorator in
+/// `store`. Used to suppress the per-method risk when a guard was hoisted to a
+/// still-effective class-level decorator (H2-3).
+fn enclosing_class_has_enforcement_decorator<S: GraphStore>(
+    store: &S,
+    surface_id: NodeId,
+) -> Result<bool> {
+    for edge in store.get_incoming(surface_id)? {
+        if edge.kind != EdgeKind::Defines {
+            continue;
+        }
+        let Some(parent) = store.get_node(edge.source)? else {
+            continue;
+        };
+        if parent.kind != NodeKind::Class {
+            continue;
+        }
+        let class_decorators = auth_decorator_names_on(store, parent.id)?;
+        if class_decorators.iter().any(|d| is_enforcement_decorator(d)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Flag every removed real symbol that a *different repo* still consumes via a
@@ -448,9 +648,10 @@ fn decorated_surface<S: GraphStore>(
 /// A symbol node is "removed" when its ID exists in `baseline` but not in
 /// `review`. Virtual stubs are skipped (their removals are covered by the route
 /// / event / shared-symbol passes), as are symbols already reported by the
-/// shared-symbol removal pass (`symbols_removed`). A risk is only
-/// emitted when at least one *surviving cross-repo* consumer remains — same-repo
-/// consumers and consumers via virtual stubs do not qualify.
+/// shared-symbol removal pass (`symbols_removed`, matched on `qualified_name`
+/// alone — the stub's `repo` is `"__virtual__"`, not the defining repo). A risk
+/// is only emitted when at least one *surviving cross-repo* consumer remains —
+/// same-repo consumers and consumers via virtual stubs do not qualify.
 fn removed_symbol_cross_repo_consumer_risks<S: GraphStore>(
     baseline: &S,
     review: &S,
@@ -468,12 +669,13 @@ fn removed_symbol_cross_repo_consumer_risks<S: GraphStore>(
             if review.get_node(node.id)?.is_some() {
                 continue;
             }
-            // FP gate: the shared-symbol pass already covers these by qn.
+            // FP gate: the shared-symbol pass already covers these. De-dup on
+            // `qualified_name` alone — a removed shared symbol's `SymbolDelta`
+            // carries `repo == "__virtual__"` (the stub's repo), not the real
+            // defining repo, so a `repo`-qualified match would miss it and the
+            // same removal would be reported by both passes (duplicate High).
             let qn = node.qualified_name.as_deref().unwrap_or(&node.name);
-            if symbols_removed
-                .iter()
-                .any(|s| s.qualified_name == qn && s.repo == node.repo)
-            {
+            if symbols_removed.iter().any(|s| s.qualified_name == qn) {
                 continue;
             }
 
@@ -708,6 +910,28 @@ mod tests {
             span: Some(SourceSpan {
                 line_start: 3,
                 line_len: 1,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+            ai_role: None,
+        }
+    }
+
+    fn class_node(repo: &str, file: &str, name: &str) -> NodeData {
+        NodeData {
+            id: node_id(repo, file, NodeKind::Class, name),
+            kind: NodeKind::Class,
+            repo: repo.to_owned(),
+            file_path: file.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(format!("{repo}::{name}")),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: Some(SourceSpan {
+                line_start: 1,
+                line_len: 20,
                 column_start: 0,
                 column_len: 0,
             }),
@@ -1018,6 +1242,261 @@ mod tests {
         assert!(
             !risks.iter().any(|r| r.kind == "security_decorator"),
             "a fully-removed surface must not raise a security_decorator risk"
+        );
+    }
+
+    /// H2-1: a renamed handler that *also* drops `@Roles` gets a new node id, so
+    /// an id-based survival gate would treat it as fully removed and skip it.
+    /// The rename-tolerant `(repo, file, kind)` match must still flag the drop.
+    #[test]
+    fn renamed_handler_with_dropped_guard_is_flagged() {
+        let (_td_b, baseline) = open_store("rename-drop-baseline");
+        let (_td_r, review) = open_store("rename-drop-review");
+
+        // Baseline: guarded `list` handler.
+        let handler = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let decorator = decorator_node("api", "src/orders.controller.ts", "Roles");
+        let owner = file_node("api", "src/orders.controller.ts");
+        let uses_edge = edge(&handler, &decorator, EdgeKind::UsesDecorator, &owner);
+        baseline
+            .bulk_insert(&[handler, decorator, owner], &[uses_edge])
+            .expect("baseline insert");
+
+        // Review: same file/kind, renamed to `listAll`, guard gone. The renamed
+        // handler is the *only* function in the file, so the key is unambiguous.
+        let renamed = function_node(
+            "api",
+            "src/orders.controller.ts",
+            "OrdersController::listAll",
+        );
+        let review_owner = file_node("api", "src/orders.controller.ts");
+        review
+            .bulk_insert(&[renamed, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        let dec_risks: Vec<_> = risks
+            .iter()
+            .filter(|r| r.kind == "security_decorator")
+            .collect();
+        assert_eq!(
+            dec_risks.len(),
+            1,
+            "a rename that drops the guard must still flag one risk"
+        );
+        assert_eq!(dec_risks[0].severity, RiskSeverity::High);
+        // The risk is reported against the surviving (renamed) surface.
+        assert_eq!(
+            dec_risks[0].identity,
+            "@Roles::api::OrdersController::listAll"
+        );
+    }
+
+    /// H2-2: `@UseGuards` is the primary NestJS enforcement decorator; dropping
+    /// it from a surviving handler must raise a High `security_decorator` risk.
+    #[test]
+    fn removed_use_guards_on_surviving_surface_is_high_risk() {
+        let (_td_b, baseline) = open_store("useguards-removed-baseline");
+        let (_td_r, review) = open_store("useguards-removed-review");
+
+        let handler = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let decorator = decorator_node("api", "src/orders.controller.ts", "UseGuards");
+        let owner = file_node("api", "src/orders.controller.ts");
+        let uses_edge = edge(&handler, &decorator, EdgeKind::UsesDecorator, &owner);
+        baseline
+            .bulk_insert(&[handler.clone(), decorator, owner], &[uses_edge])
+            .expect("baseline insert");
+
+        let review_owner = file_node("api", "src/orders.controller.ts");
+        review
+            .bulk_insert(&[handler, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        let dec_risks: Vec<_> = risks
+            .iter()
+            .filter(|r| r.kind == "security_decorator")
+            .collect();
+        assert_eq!(dec_risks.len(), 1, "dropping @UseGuards must flag one risk");
+        assert_eq!(dec_risks[0].severity, RiskSeverity::High);
+        assert_eq!(
+            dec_risks[0].identity,
+            "@UseGuards::api::OrdersController::list"
+        );
+    }
+
+    /// H2-2 inverse: *adding* `@Public` to a surviving surface that previously
+    /// carried no auth-weakening decorator opens it up → High risk.
+    #[test]
+    fn added_public_on_surviving_surface_is_high_risk() {
+        let (_td_b, baseline) = open_store("public-added-baseline");
+        let (_td_r, review) = open_store("public-added-review");
+
+        // Baseline: plain handler, no auth decorators at all.
+        let handler = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let owner = file_node("api", "src/orders.controller.ts");
+        baseline
+            .bulk_insert(&[handler.clone(), owner], &[])
+            .expect("baseline insert");
+
+        // Review: same handler now decorated `@Public`.
+        let decorator = decorator_node("api", "src/orders.controller.ts", "Public");
+        let review_owner = file_node("api", "src/orders.controller.ts");
+        let uses_edge = edge(&handler, &decorator, EdgeKind::UsesDecorator, &review_owner);
+        review
+            .bulk_insert(&[handler, decorator, review_owner], &[uses_edge])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        let dec_risks: Vec<_> = risks
+            .iter()
+            .filter(|r| r.kind == "security_decorator")
+            .collect();
+        assert_eq!(dec_risks.len(), 1, "adding @Public must flag one risk");
+        assert_eq!(dec_risks[0].severity, RiskSeverity::High);
+        assert_eq!(
+            dec_risks[0].identity,
+            "@Public::api::OrdersController::list"
+        );
+        let detail = dec_risks[0].detail.as_deref().expect("detail must be set");
+        assert!(detail.contains("added"), "detail describes the addition");
+    }
+
+    /// H2-3: dropping a method-level `@Roles` after hoisting it to a still-
+    /// effective class-level guard is not a regression → no risk.
+    #[test]
+    fn method_guard_hoisted_to_class_is_not_flagged() {
+        let (_td_b, baseline) = open_store("hoist-baseline");
+        let (_td_r, review) = open_store("hoist-review");
+
+        // Baseline: method-level @Roles, class is undecorated.
+        let class_b = class_node("api", "src/orders.controller.ts", "OrdersController");
+        let handler_b = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let method_dec = decorator_node("api", "src/orders.controller.ts", "Roles");
+        let owner_b = file_node("api", "src/orders.controller.ts");
+        // class Defines method; method UsesDecorator @Roles.
+        let defines_b = edge(&class_b, &handler_b, EdgeKind::Defines, &owner_b);
+        let uses_b = edge(&handler_b, &method_dec, EdgeKind::UsesDecorator, &owner_b);
+        baseline
+            .bulk_insert(
+                &[class_b.clone(), handler_b.clone(), method_dec, owner_b],
+                &[defines_b, uses_b],
+            )
+            .expect("baseline insert");
+
+        // Review: method-level @Roles gone; hoisted to a class-level @Roles.
+        let class_dec = decorator_node("api", "src/orders.controller.ts", "Roles");
+        let owner_r = file_node("api", "src/orders.controller.ts");
+        let defines_r = edge(&class_b, &handler_b, EdgeKind::Defines, &owner_r);
+        let class_uses = edge(&class_b, &class_dec, EdgeKind::UsesDecorator, &owner_r);
+        review
+            .bulk_insert(
+                &[class_b, handler_b, class_dec, owner_r],
+                &[defines_r, class_uses],
+            )
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        assert!(
+            !risks.iter().any(|r| r.kind == "security_decorator"),
+            "a guard hoisted to a still-effective class-level decorator is not a regression"
+        );
+    }
+
+    /// H5-3: a removed shared symbol whose `SymbolDelta.repo` is `"__virtual__"`
+    /// (not the real defining repo) must be reported by exactly ONE pass — the
+    /// shared-symbol pass — not also by the direct cross-repo-consumer pass.
+    #[test]
+    fn shared_symbol_removal_is_not_double_reported() {
+        let (_td_b, baseline) = open_store("dedup-baseline");
+        let (_td_r, review) = open_store("dedup-review");
+
+        // A real Function in `service-a` plus its SharedSymbol stub. In
+        // production both carry the *same* `qualified_name`; build the real node
+        // inline so its qn is exactly `OrderContract` (not repo-prefixed).
+        let real = NodeData {
+            id: node_id(
+                "service-a",
+                "src/contract.ts",
+                NodeKind::Function,
+                "OrderContract",
+            ),
+            kind: NodeKind::Function,
+            repo: "service-a".to_owned(),
+            file_path: "src/contract.ts".to_owned(),
+            name: "OrderContract".to_owned(),
+            qualified_name: Some("OrderContract".to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: Some(SourceSpan {
+                line_start: 1,
+                line_len: 3,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+            ai_role: None,
+        };
+        let stub = shared_symbol_node("service-a", "OrderContract");
+        // Cross-repo consumer survives, reachable both via the stub (UsesShared)
+        // and via a direct call to the real symbol (Calls).
+        let caller = function_node("service-b", "src/order.ts", "checkout");
+        let owner = file_node("service-b", "src/order.ts");
+        let shared_edge = edge(&caller, &stub, EdgeKind::UsesShared, &owner);
+        let call_edge = edge(&caller, &real, EdgeKind::Calls, &owner);
+        baseline
+            .bulk_insert(
+                &[real, stub, caller.clone(), owner],
+                &[shared_edge, call_edge],
+            )
+            .expect("baseline insert");
+
+        let review_owner = file_node("service-b", "src/order.ts");
+        review
+            .bulk_insert(&[caller, review_owner], &[])
+            .expect("review insert");
+
+        // The delta reports the removed shared symbol with repo "__virtual__" —
+        // the stub's repo, NOT the defining repo "service-a".
+        let removed_symbol = SymbolDelta {
+            kind: "shared_symbol".to_owned(),
+            repo: "__virtual__".to_owned(),
+            qualified_name: "OrderContract".to_owned(),
+            file: None,
+            line: None,
+            signature: None,
+            visibility: None,
+            is_virtual: true,
+            impact: None,
+        };
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[removed_symbol], &[])
+            .expect("should succeed");
+
+        // Exactly one risk for OrderContract: the shared_symbol pass. The
+        // cross_repo_consumer pass must de-dup on qualified_name alone.
+        let order_risks: Vec<_> = risks
+            .iter()
+            .filter(|r| r.identity == "OrderContract")
+            .collect();
+        assert_eq!(
+            order_risks.len(),
+            1,
+            "a removed shared symbol must be reported once, not by both passes"
+        );
+        assert_eq!(order_risks[0].kind, "shared_symbol");
+        assert!(
+            !risks.iter().any(|r| r.kind == "cross_repo_consumer"),
+            "the cross_repo_consumer pass must not re-report the shared symbol"
         );
     }
 
