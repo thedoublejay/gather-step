@@ -58,11 +58,12 @@
 //! dwarfed by the full PR-branch reindex `pr-review` performs in the same run,
 //! so the cost is bounded in practice.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use anyhow::Result;
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::GraphStore;
+use rustc_hash::FxHashMap;
 
 use crate::pr_review::delta_report::{RemovedSurfaceRisk, RiskSeverity};
 
@@ -429,8 +430,8 @@ fn canonical_value_label(value_node: &NodeData) -> String {
 /// canonical value labels as the risk output ([`canonical_value_label`]), so
 /// "shared values" between two enums is an exact canonical-form comparison.
 /// Drives H3 hand-mirror correspondence.
-fn enum_value_sets_by_qn<S: GraphStore>(store: &S) -> Result<HashMap<String, BTreeSet<String>>> {
-    let mut out: HashMap<String, BTreeSet<String>> = HashMap::new();
+fn enum_value_sets_by_qn<S: GraphStore>(store: &S) -> Result<FxHashMap<String, BTreeSet<String>>> {
+    let mut out: FxHashMap<String, BTreeSet<String>> = FxHashMap::default();
     for value_node in store.nodes_by_type(NodeKind::ValueMirror)? {
         let label = canonical_value_label(&value_node);
         for edge in store.get_incoming(value_node.id)? {
@@ -451,6 +452,12 @@ fn enum_value_sets_by_qn<S: GraphStore>(store: &S) -> Result<HashMap<String, BTr
 /// and lowercase the result, yielding a stem for hand-mirror name comparison.
 /// `OrderStatusEnum` → `orderstatus`, `OrderStatusType` → `orderstatus`.
 fn hand_mirror_name_stem(enum_qn: &str) -> String {
+    // One-shot owned lowercase: the stem is returned as an owned `String` and
+    // matched against suffixes, so an in-place or compare-only variant won't do.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "owned lowercase stem is the function's return value"
+    )]
     let lower = enum_qn.to_ascii_lowercase();
     for suffix in HAND_MIRROR_NAME_SUFFIXES {
         if lower.len() > suffix.len()
@@ -471,7 +478,7 @@ fn hand_mirror_name_stem(enum_qn: &str) -> String {
 fn enums_hand_mirror_correspond(
     owner_qn: &str,
     surface_qn: &str,
-    enum_value_sets: &HashMap<String, BTreeSet<String>>,
+    enum_value_sets: &FxHashMap<String, BTreeSet<String>>,
 ) -> bool {
     let (Some(owner_values), Some(surface_values)) = (
         enum_value_sets.get(owner_qn),

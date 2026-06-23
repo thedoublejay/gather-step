@@ -27,6 +27,10 @@ pub struct ThreeWayDiff<K, T> {
 ///
 /// Iteration order is unspecified (the inputs are hash maps); callers sort the
 /// resulting lists to obtain deterministic output.
+#[expect(
+    clippy::implicit_hasher,
+    reason = "callers always build FxHashMap; generalizing the hasher adds no value"
+)]
 pub fn three_way_diff<K, T>(
     baseline: FxHashMap<K, T>,
     mut review: FxHashMap<K, T>,
