@@ -37,6 +37,20 @@ const AI_SURFACE_KINDS: &[(NodeKind, &str)] = &[
     (NodeKind::AgentGraph, "ai_agent_graph"),
 ];
 
+/// Enforcement / authorization decorator names (case-insensitive). Removing one
+/// of these from a surviving route/handler strips an access guard and is flagged
+/// as a High-severity `security_decorator` risk. Extend this set as new guards
+/// are registered.
+const ENFORCEMENT_DECORATORS: &[&str] = &[
+    "roles",
+    "permission",
+    "permissions",
+    "authenticated",
+    "audit",
+    "rolesallowed",
+    "requirespermission",
+];
+
 /// Incoming edge kinds that mark a consumer of an AI surface node.
 const AI_CONSUMER_EDGE_KINDS: &[EdgeKind] = &[
     EdgeKind::UsesPrompt,
@@ -234,6 +248,14 @@ pub fn extract_removed_surface_risks<S: GraphStore>(
         }
     }
 
+    // ── Removed enforcement decorators (v5.4 H2) ─────────────────────────────
+    // When a PR strips an authorization/enforcement decorator (@Roles,
+    // @Permission, @Audit, …) off a route/handler that still exists, the access
+    // guard is silently gone — flag it High. A fully-removed surface is already
+    // covered by route/symbol removal risks, so the FP gate requires the
+    // decorated surface to survive in review.
+    risks.extend(removed_enforcement_decorator_risks(baseline, review)?);
+
     // ── Value-mirror risks (v5.1 Task 5) ─────────────────────────────────────
     // Cross-repo precision layer over the value-mirror graph (Task 4): the
     // add-and-forget completeness check (`value_mirror_incomplete`) and the
@@ -314,6 +336,88 @@ fn severity_for_consumers(
         }
     }
     RiskSeverity::Medium
+}
+
+/// Returns `true` if the decorator name is an enforcement/authorization guard.
+fn is_enforcement_decorator(name: &str) -> bool {
+    ENFORCEMENT_DECORATORS
+        .iter()
+        .any(|&n| n.eq_ignore_ascii_case(name))
+}
+
+/// Flag every enforcement decorator that was removed from a surface still
+/// present in review.
+///
+/// A decorator node is "removed" when its node ID exists in `baseline` but not
+/// in `review`. The decorated surface is resolved via the incoming
+/// `UsesDecorator` edge (target → decorator); the risk is only emitted when that
+/// target survives in review (a fully-removed surface is covered elsewhere).
+fn removed_enforcement_decorator_risks<S: GraphStore>(
+    baseline: &S,
+    review: &S,
+) -> Result<Vec<RemovedSurfaceRisk>> {
+    let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
+
+    for node in baseline.nodes_by_type(NodeKind::Decorator)? {
+        if !is_enforcement_decorator(&node.name) {
+            continue;
+        }
+        // Removed = present in baseline, absent in review.
+        if review.get_node(node.id)?.is_some() {
+            continue;
+        }
+
+        // Resolve the decorated surface via the incoming UsesDecorator edge.
+        let Some(target) = decorated_surface(baseline, node.id)? else {
+            continue;
+        };
+        // FP gate: only flag when the decorated surface still exists in review.
+        if review.get_node(target.id)?.is_none() {
+            continue;
+        }
+
+        let surface_qn = target
+            .qualified_name
+            .clone()
+            .unwrap_or_else(|| target.name.clone());
+        let surface_file = Some(target.file_path.clone()).filter(|s| !s.is_empty());
+        let detail = match &surface_file {
+            Some(file) => format!(
+                "@{} removed from surviving surface {surface_qn} ({file})",
+                node.name
+            ),
+            None => format!("@{} removed from surviving surface {surface_qn}", node.name),
+        };
+
+        risks.push(RemovedSurfaceRisk {
+            kind: "security_decorator".to_owned(),
+            identity: format!("@{}::{surface_qn}", node.name),
+            repo: (target.repo != "__virtual__").then(|| target.repo.clone()),
+            surviving_consumers: Vec::new(),
+            severity: RiskSeverity::High,
+            detail: Some(detail),
+        });
+    }
+
+    risks.sort_by(|a, b| a.identity.cmp(&b.identity));
+
+    Ok(risks)
+}
+
+/// Resolve the surface a decorator is attached to by walking the incoming
+/// `UsesDecorator` edge (target → decorator). Returns the target node.
+fn decorated_surface<S: GraphStore>(
+    store: &S,
+    decorator_id: NodeId,
+) -> Result<Option<gather_step_core::NodeData>> {
+    for edge in store.get_incoming(decorator_id)? {
+        if edge.kind == EdgeKind::UsesDecorator
+            && let Some(source) = store.get_node(edge.source)?
+        {
+            return Ok(Some(source));
+        }
+    }
+    Ok(None)
 }
 
 /// Map event kind string back to `NodeKind`.
@@ -496,6 +600,29 @@ mod tests {
             metadata: EdgeMetadata::default(),
             owner_file: owner.id,
             is_cross_file: true,
+        }
+    }
+
+    fn decorator_node(repo: &str, file: &str, name: &str) -> NodeData {
+        let qn = format!("{repo}::{name}");
+        NodeData {
+            id: node_id(repo, file, NodeKind::Decorator, &qn),
+            kind: NodeKind::Decorator,
+            repo: repo.to_owned(),
+            file_path: file.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(qn),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: Some(SourceSpan {
+                line_start: 3,
+                line_len: 1,
+                column_start: 0,
+                column_len: 0,
+            }),
+            is_virtual: false,
+            ai_role: None,
         }
     }
 
@@ -705,5 +832,102 @@ mod tests {
             "consumer also removed must not appear in surviving list"
         );
         assert_eq!(risks[0].severity, RiskSeverity::Low);
+    }
+
+    /// Removing `@Roles` from a route/handler that still exists → one High
+    /// `security_decorator` risk.
+    #[test]
+    fn removed_enforcement_decorator_on_surviving_surface_is_high_risk() {
+        let (_td_b, baseline) = open_store("dec-removed-baseline");
+        let (_td_r, review) = open_store("dec-removed-review");
+
+        let handler = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let decorator = decorator_node("api", "src/orders.controller.ts", "Roles");
+        let owner = file_node("api", "src/orders.controller.ts");
+        // target (handler) → UsesDecorator → decorator.
+        let uses_edge = edge(&handler, &decorator, EdgeKind::UsesDecorator, &owner);
+
+        baseline
+            .bulk_insert(&[handler.clone(), decorator, owner], &[uses_edge])
+            .expect("baseline insert");
+
+        // Handler survives in review; the decorator is gone.
+        let review_owner = file_node("api", "src/orders.controller.ts");
+        review
+            .bulk_insert(&[handler, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        let dec_risks: Vec<_> = risks
+            .iter()
+            .filter(|r| r.kind == "security_decorator")
+            .collect();
+        assert_eq!(dec_risks.len(), 1, "exactly one security_decorator risk");
+        assert_eq!(dec_risks[0].severity, RiskSeverity::High);
+        assert_eq!(dec_risks[0].identity, "@Roles::api::OrdersController::list");
+        let detail = dec_risks[0].detail.as_deref().expect("detail must be set");
+        assert!(detail.contains("@Roles"), "detail names the decorator");
+        assert!(
+            detail.contains("OrdersController::list"),
+            "detail names the surface"
+        );
+    }
+
+    /// Removing a non-enforcement decorator (`@ApiTags`) → no `security_decorator` risk.
+    #[test]
+    fn removed_non_enforcement_decorator_produces_no_risk() {
+        let (_td_b, baseline) = open_store("dec-nonenf-baseline");
+        let (_td_r, review) = open_store("dec-nonenf-review");
+
+        let handler = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let decorator = decorator_node("api", "src/orders.controller.ts", "ApiTags");
+        let owner = file_node("api", "src/orders.controller.ts");
+        let uses_edge = edge(&handler, &decorator, EdgeKind::UsesDecorator, &owner);
+
+        baseline
+            .bulk_insert(&[handler.clone(), decorator, owner], &[uses_edge])
+            .expect("baseline insert");
+
+        let review_owner = file_node("api", "src/orders.controller.ts");
+        review
+            .bulk_insert(&[handler, review_owner], &[])
+            .expect("review insert");
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        assert!(
+            !risks.iter().any(|r| r.kind == "security_decorator"),
+            "a non-enforcement decorator must not raise a security_decorator risk"
+        );
+    }
+
+    /// Removing the whole route (handler + decorator both gone) → no
+    /// `security_decorator` risk (covered by route/symbol removal).
+    #[test]
+    fn removed_decorator_with_removed_surface_is_not_security_flagged() {
+        let (_td_b, baseline) = open_store("dec-surface-gone-baseline");
+        let (_td_r, review) = open_store("dec-surface-gone-review");
+
+        let handler = function_node("api", "src/orders.controller.ts", "OrdersController::list");
+        let decorator = decorator_node("api", "src/orders.controller.ts", "Roles");
+        let owner = file_node("api", "src/orders.controller.ts");
+        let uses_edge = edge(&handler, &decorator, EdgeKind::UsesDecorator, &owner);
+
+        baseline
+            .bulk_insert(&[handler, decorator, owner], &[uses_edge])
+            .expect("baseline insert");
+
+        // Review is empty — the whole surface (handler + decorator) was removed.
+
+        let risks = extract_removed_surface_risks(&baseline, &review, &[], &[], &[])
+            .expect("should succeed");
+
+        assert!(
+            !risks.iter().any(|r| r.kind == "security_decorator"),
+            "a fully-removed surface must not raise a security_decorator risk"
+        );
     }
 }
