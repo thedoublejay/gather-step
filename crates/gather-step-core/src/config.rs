@@ -167,7 +167,8 @@ const MAX_YAML_ANCHORS: usize = 32;
 const MAX_YAML_ALIASES: usize = 64;
 
 /// Guard raw YAML against size and alias expansion attacks *before* it reaches
-/// the parser. Shared by every YAML parse site in the workspace.
+/// the parser, using the default 1 MiB byte cap. Used by the workspace config
+/// and the deploy / manifest / pnpm parse sites.
 pub fn guard_yaml_source(input: &str, path: &str) -> Result<(), ConfigError> {
     if input.len() as u64 > MAX_CONFIG_BYTES {
         return Err(ConfigError::Validation {
@@ -178,6 +179,13 @@ pub fn guard_yaml_source(input: &str, path: &str) -> Result<(), ConfigError> {
             ),
         });
     }
+    guard_yaml_aliases(input, path)
+}
+
+/// The alias-expansion half of [`guard_yaml_source`], without any byte cap. For
+/// callers (e.g. local config) that enforce their own size limit but still need
+/// the "billion laughs" defense.
+pub fn guard_yaml_aliases(input: &str, path: &str) -> Result<(), ConfigError> {
     let (anchors, aliases) = count_yaml_anchors_aliases(input);
     if anchors > MAX_YAML_ANCHORS || aliases > MAX_YAML_ALIASES {
         return Err(ConfigError::Validation {
@@ -211,7 +219,18 @@ fn count_yaml_anchors_aliases(input: &str) -> (usize, usize) {
         }
         prev_structural = matches!(
             c,
-            b' ' | b'\t' | b'\n' | b'\r' | b':' | b'-' | b'[' | b']' | b'{' | b'}' | b','
+            b' ' | b'\t'
+                | b'\n'
+                | b'\r'
+                | b':'
+                | b'-'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b','
+                | b'|'
+                | b'>'
         );
     }
     (anchors, aliases)
@@ -600,6 +619,18 @@ mod tests {
             guard_yaml_source(&bomb, "<t>"),
             Err(ConfigError::Validation { .. })
         ));
+
+        // Byte cap: oversize input is rejected before parsing.
+        let oversize = "a".repeat(1024 * 1024 + 1);
+        assert!(matches!(
+            guard_yaml_source(&oversize, "<t>"),
+            Err(ConfigError::Validation { .. })
+        ));
+
+        // Quoted globs (`"*.rs"`) and unquoted glob list items are not miscounted
+        // as YAML aliases — the doc-comment exemption the scanner promises.
+        let globs = "patterns:\n  - \"*.rs\"\n  - \"*.ts\"\n  - *.py\n  - \"*\"\n";
+        assert!(guard_yaml_source(globs, "<t>").is_ok());
     }
 
     #[test]

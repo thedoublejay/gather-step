@@ -165,6 +165,15 @@ pub fn parse_deployment_artifact_with_kind(
     content: &str,
     artifact_kind: DeploymentArtifactKind,
 ) -> Result<DeploymentParseOutput, DeploymentParseError> {
+    // Guard once at the single entry so every artifact kind and every internal
+    // YAML parse below (pre-check, multi-doc deserializer, helm probe, parse_yaml)
+    // inherits the alias-expansion / size guard on this untrusted repo content.
+    if let Err(error) = gather_step_core::config::guard_yaml_source(content, path) {
+        return Err(DeploymentParseError::Guard {
+            path: path.to_owned(),
+            reason: error.to_string(),
+        });
+    }
     if artifact_kind_uses_yaml_parser(artifact_kind)
         && looks_like_templated_yaml(content)
         && serde_norway::from_str::<Value>(content).is_err()
@@ -1206,12 +1215,8 @@ fn workflow_needs(value: &Value) -> BTreeSet<String> {
 }
 
 fn parse_yaml(content: &str, path: &str) -> Result<Value, DeploymentParseError> {
-    if let Err(error) = gather_step_core::config::guard_yaml_source(content, path) {
-        return Err(DeploymentParseError::Guard {
-            path: path.to_owned(),
-            reason: error.to_string(),
-        });
-    }
+    // YAML safety guard is applied once at the public entry
+    // (`parse_deployment_artifact_with_kind`), which all parse paths funnel through.
     serde_norway::from_str(content).map_err(|source| {
         if looks_like_templated_yaml(content) {
             DeploymentParseError::Templated {
@@ -1407,6 +1412,24 @@ mod tests {
         DeploymentArtifactKind, DeploymentParseError, compose_env_file_refs, detect_artifact_kind,
         is_dotenv_style, parse_deployment_artifact, parse_deployment_artifact_with_kind,
     };
+
+    #[test]
+    fn yaml_alias_bomb_is_rejected_before_parsing() {
+        use std::fmt::Write as _;
+
+        // A k8s-kind alias bomb must be rejected at the entry guard, before the
+        // multi-doc deserializer (the DoS path S1 closes), for every artifact kind.
+        let mut bomb = String::from("apiVersion: v1\nkind: ConfigMap\ndata: &a [x, x, x, x, x]\n");
+        for i in 0..40 {
+            let _ = writeln!(bomb, "k{i}: &b{i} [*a, *a, *a, *a, *a, *a]");
+        }
+        let error = parse_deployment_artifact("backend", "k8s/deploy.yaml", &bomb)
+            .expect_err("alias bomb must be rejected");
+        assert!(
+            matches!(error, DeploymentParseError::Guard { .. }),
+            "got {error:?}"
+        );
+    }
 
     #[test]
     fn dockerfile_parser_extracts_env_names_without_values() {

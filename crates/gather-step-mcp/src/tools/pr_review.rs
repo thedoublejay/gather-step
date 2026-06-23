@@ -68,7 +68,9 @@ pub struct PrReviewInput {
     pub base: String,
     /// Head ref (branch, tag, SHA, "HEAD", …).
     pub head: String,
-    /// Path to a gather-step config file, absolute or relative to the workspace root.
+    /// Path to a gather-step config file. Resolved relative to the workspace
+    /// root and must point at a file **inside** the workspace — the MCP boundary
+    /// rejects paths outside it (stricter than the CLI's `--config`).
     #[serde(default)]
     pub config: Option<String>,
     /// Override the OS cache root used for review artifacts, absolute or relative
@@ -93,8 +95,9 @@ pub struct PrReviewInput {
 /// Input parameters for the `pr_review_set` MCP tool.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct PrReviewSetInput {
-    /// Path to a PR-set manifest, absolute or relative to the workspace root.
-    /// Required unless `from_gh` is set.
+    /// Path to a PR-set manifest. Resolved relative to the workspace root and
+    /// must point at a file **inside** the workspace (the MCP boundary rejects
+    /// paths outside it). Required unless `from_gh` is set.
     #[serde(default)]
     pub pr_set: Option<String>,
     /// Resolve a PR-set manifest from GitHub search results and run it.
@@ -111,7 +114,9 @@ pub struct PrReviewSetInput {
     /// when resolving `from_gh`.
     #[serde(default)]
     pub allow_unknown_repos: Option<bool>,
-    /// Path to a gather-step config file, absolute or relative to the workspace root.
+    /// Path to a gather-step config file. Resolved relative to the workspace
+    /// root and must point at a file **inside** the workspace (the MCP boundary
+    /// rejects paths outside it; stricter than the CLI's `--config`).
     #[serde(default)]
     pub config: Option<String>,
     /// Override the OS cache root used for review artifacts, absolute or relative
@@ -228,6 +233,20 @@ pub fn run_pr_review_set(
     workspace: &std::path::Path,
     input: &PrReviewSetInput,
 ) -> Result<PrReviewSetResponse, String> {
+    // Validate the request shape before resolving the binary, so an invalid
+    // request fails with the intended error even when no sibling binary exists
+    // (e.g. under `cargo test`, where the test executable has no `gather-step`
+    // sibling).
+    match (input.pr_set.is_some(), input.from_gh.is_some()) {
+        (true, true) => {
+            return Err("pr_review_set accepts exactly one of `pr_set` or `from_gh`.".to_owned());
+        }
+        (false, false) => {
+            return Err("pr_review_set requires either `pr_set` or `from_gh`.".to_owned());
+        }
+        _ => {}
+    }
+
     let binary = resolve_binary()?;
 
     let mut cmd = Command::new(&binary);
