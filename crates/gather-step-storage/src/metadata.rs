@@ -118,7 +118,7 @@ fn encode_resolution_input(input: &ResolutionInput) -> Vec<u8> {
             })
             .collect(),
     };
-    crate::bitcode_blob::wrap(bitcode::encode(&stored))
+    crate::bitcode_blob::wrap(&bitcode::encode(&stored))
 }
 
 /// Decode a [`ResolutionInput`] from compact bitcode bytes produced by

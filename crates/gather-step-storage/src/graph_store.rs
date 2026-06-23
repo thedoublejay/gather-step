@@ -1625,7 +1625,7 @@ impl GraphStoreDb {
     }
 
     fn encode_stored_node(node: &StoredNode) -> Vec<u8> {
-        crate::bitcode_blob::wrap(bitcode::encode(node))
+        crate::bitcode_blob::wrap(&bitcode::encode(node))
     }
 
     fn decode_stored_node(bytes: &[u8]) -> Result<StoredNode, GraphStoreError> {
@@ -1635,7 +1635,7 @@ impl GraphStoreDb {
     }
 
     fn encode_edge(edge: &EdgeData) -> Vec<u8> {
-        crate::bitcode_blob::wrap(bitcode::encode(&StoredEdge {
+        crate::bitcode_blob::wrap(&bitcode::encode(&StoredEdge {
             source: edge.source,
             target: edge.target,
             kind: edge.kind,

@@ -13,12 +13,12 @@ pub(crate) enum BitcodeBlobError {
     ChecksumMismatch,
 }
 
-pub(crate) fn wrap(payload: Vec<u8>) -> Vec<u8> {
-    let checksum = blake3::hash(&payload);
+pub(crate) fn wrap(payload: &[u8]) -> Vec<u8> {
+    let checksum = blake3::hash(payload);
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     out.push(BITCODE_BLOB_SCHEMA);
     out.extend_from_slice(checksum.as_bytes());
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(payload);
     out
 }
 
@@ -46,7 +46,7 @@ pub(crate) fn unwrap(bytes: &[u8]) -> Result<&[u8], BitcodeBlobError> {
 mod tests {
     #[test]
     fn checked_blob_rejects_tampered_payload() {
-        let mut wrapped = super::wrap(bitcode::encode(&"payload"));
+        let mut wrapped = super::wrap(&bitcode::encode(&"payload"));
         let last = wrapped.last_mut().expect("payload byte should exist");
         *last ^= 0xff;
 
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn checked_blob_rejects_wrong_schema_byte() {
-        let mut wrapped = super::wrap(bitcode::encode(&"payload"));
+        let mut wrapped = super::wrap(&bitcode::encode(&"payload"));
         wrapped[0] = 2;
 
         assert!(matches!(

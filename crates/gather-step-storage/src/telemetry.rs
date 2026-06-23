@@ -16,7 +16,7 @@ pub const TELEMETRY_SCHEMA_VERSION: i64 = 1;
 const MAX_RUN_ROWS: i64 = 10_000;
 const RETENTION_DAYS: i64 = 90;
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS run_log (
     run_id          TEXT PRIMARY KEY,
     started_at_ms   INTEGER NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS run_errors (
 );
 CREATE INDEX IF NOT EXISTS idx_run_errors_run_id ON run_errors(run_id);
 CREATE INDEX IF NOT EXISTS idx_run_errors_occurred_at ON run_errors(occurred_at_ms DESC);
-"#;
+";
 
 #[derive(Debug, Error)]
 pub enum TelemetryError {
@@ -193,13 +193,13 @@ impl TelemetryStore {
                 finish.nodes_created,
                 finish.warn_count,
                 finish.error_count,
-                if finish.recovery_event { 1_i64 } else { 0_i64 },
+                i64::from(finish.recovery_event),
                 extra_json,
                 &run.run_id,
             ],
         )?;
         if let Some(event) = &finish.error {
-            self.record_error_with_connection(&connection, &run.run_id, event, ended_at)?;
+            Self::record_error_with_connection(&connection, &run.run_id, event, ended_at)?;
         }
         Ok(())
     }
@@ -227,7 +227,7 @@ impl TelemetryStore {
             message: message.to_owned(),
             context_json: None,
         };
-        self.record_error_with_connection(&connection, &run.run_id, &event, ended_at)
+        Self::record_error_with_connection(&connection, &run.run_id, &event, ended_at)
     }
 
     pub fn list_runs(
@@ -293,7 +293,6 @@ impl TelemetryStore {
     }
 
     fn record_error_with_connection(
-        &self,
         connection: &Connection,
         run_id: &str,
         event: &TelemetryErrorEvent,
