@@ -148,7 +148,7 @@ pub fn parse_js_value(source: &str) -> Option<Value> {
 
 /// Recursive-descent parser for the JS-literal subset. Deliberately rejects
 /// anything it cannot faithfully turn into a `serde_json::Value` rather than
-/// guessing, so the detectors never run on a mis-materialized value.
+/// guessing, so the detectors never run on an incorrectly materialized value.
 struct LiteralParser<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
 }
