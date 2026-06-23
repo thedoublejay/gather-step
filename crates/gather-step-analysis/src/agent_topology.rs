@@ -280,13 +280,6 @@ fn missing_agent_node(id: NodeId) -> NodeData {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, node_id,
     };
@@ -294,33 +287,7 @@ mod tests {
     use rustc_hash::FxHashSet;
 
     use super::{resolve_agent_targets, trace_agent};
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-agent-topology-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     fn ai_node(
         repo: &str,
@@ -384,7 +351,7 @@ mod tests {
     // Tracing from the graph reaches every AI node and edge.
     #[test]
     fn trace_agent_follows_graph_llm_and_contract_edges() {
-        let temp = TempDb::new("reach");
+        let temp = TempDb::new("agent-topology", "reach");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let repo = "agent_repo";
         let file = "src/agent.ts";
@@ -490,7 +457,7 @@ mod tests {
     // truncation because deeper AI hops exist.
     #[test]
     fn trace_agent_respects_max_depth() {
-        let temp = TempDb::new("depth");
+        let temp = TempDb::new("agent-topology", "depth");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let repo = "agent_repo";
         let file = "src/agent.ts";
@@ -550,7 +517,7 @@ mod tests {
     // because the consumer has it via `trace.target`.
     #[test]
     fn trace_agent_cap_never_leaves_dangling_edges() {
-        let temp = TempDb::new("cap");
+        let temp = TempDb::new("agent-topology", "cap");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let repo = "agent_repo";
         let file = "src/agent.ts";
@@ -641,7 +608,7 @@ mod tests {
     // name suffix, and ranks exact matches first.
     #[test]
     fn resolve_agent_targets_matches_qn_and_suffix() {
-        let temp = TempDb::new("resolve");
+        let temp = TempDb::new("agent-topology", "resolve");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let repo = "agent_repo";
         let file = "src/agent.ts";
@@ -683,7 +650,7 @@ mod tests {
     // A target with no node in the graph yields an empty trace, not an error.
     #[test]
     fn trace_agent_missing_target_is_empty() {
-        let temp = TempDb::new("missing");
+        let temp = TempDb::new("agent-topology", "missing");
         let store = GraphStoreDb::open(temp.path()).expect("store should open");
         let ghost = node_id("nope", "nope.ts", NodeKind::AgentGraph, "ghost");
 

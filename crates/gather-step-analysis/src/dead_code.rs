@@ -424,13 +424,6 @@ fn is_test_file(file_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id, virtual_node,
     };
@@ -439,37 +432,11 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{ConfidenceBand, DetectorBasis, find_dead_code};
-
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-dead-code-{name}-{}-{id}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     #[test]
     fn finds_unreachable_file_from_route_root() {
-        let temp_db = TempDb::new("dead-code");
+        let temp_db = TempDb::new("dead-code", "dead-code");
         let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
         let route_file = file_node("service-a", "src/routes/items.ts");
         let route = symbol_node(
@@ -519,7 +486,7 @@ mod tests {
 
     #[test]
     fn cross_repo_consumed_file_is_not_flagged_dead() {
-        let temp_db = TempDb::new("xrepo-consumed-root");
+        let temp_db = TempDb::new("dead-code", "xrepo-consumed-root");
         let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
 
         // service-b serves a route that a foreign repo (service-a) consumes.
@@ -617,7 +584,7 @@ mod tests {
 
     #[test]
     fn genuine_orphan_is_still_flagged_with_cross_repo_root_seeding() {
-        let temp_db = TempDb::new("orphan-with-xrepo");
+        let temp_db = TempDb::new("dead-code", "orphan-with-xrepo");
         let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
 
         // A live route-serving handler consumed cross-repo coexists with a
@@ -701,7 +668,7 @@ mod tests {
 
     #[test]
     fn finds_unused_exported_symbol_without_downstream_usage() {
-        let temp_db = TempDb::new("unused-export");
+        let temp_db = TempDb::new("dead-code", "unused-export");
         let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
         let file = file_node("service-a", "src/lib.ts");
         let module = module_node("service-a", "src/lib.ts");
@@ -786,7 +753,7 @@ mod tests {
 
     #[test]
     fn finds_zombie_dependencies_from_manifest_when_package_is_never_imported() {
-        let temp_db = TempDb::new("zombie-deps");
+        let temp_db = TempDb::new("dead-code", "zombie-deps");
         let store = GraphStoreDb::open(temp_db.path()).expect("open graph");
         let file = file_node("service-a", "src/app.ts");
         let used_module = module_import_node("service-a", "src/app.ts", "@nestjs/common");

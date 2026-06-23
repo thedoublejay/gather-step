@@ -370,50 +370,17 @@ fn is_validation_edge(kind: EdgeKind, node: &gather_step_core::NodeData) -> bool
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env, fs,
-        path::{Path, PathBuf},
-        process,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, Visibility, node_id,
     };
     use gather_step_storage::{GraphStore, GraphStoreDb};
 
     use super::{BoundaryRole, ImpactMap, all_weak_edges, impact_weight, shared_contract_impact};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDb {
-        path: PathBuf,
-    }
-
-    impl TempDb {
-        fn new(name: &str) -> Self {
-            let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = env::temp_dir().join(format!(
-                "gather-step-impact-{name}-{}-{counter}.redb",
-                process::id()
-            ));
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDb {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_utils::TempDb;
 
     #[test]
     fn shared_contract_impact_ranks_specific_edges_first() {
-        let temp = TempDb::new("ranking");
+        let temp = TempDb::new("impact", "ranking");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -481,7 +448,7 @@ mod tests {
 
     #[test]
     fn impact_marks_producer_role_for_event_edges() {
-        let temp = TempDb::new("roles");
+        let temp = TempDb::new("impact", "roles");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
         let contract = node(
             "shared_contracts",
@@ -523,7 +490,7 @@ mod tests {
 
     #[test]
     fn impact_depth_always_beats_specificity() {
-        let temp = TempDb::new("depth-first");
+        let temp = TempDb::new("impact", "depth-first");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
         let contract = node(
             "shared_contracts",
@@ -603,7 +570,7 @@ mod tests {
 
     #[test]
     fn impact_prefers_validator_and_producer_over_type_only_consumer() {
-        let temp = TempDb::new("validator-producer");
+        let temp = TempDb::new("impact", "validator-producer");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
         let contract = node(
             "shared_contracts",
@@ -675,7 +642,7 @@ mod tests {
         // must be dropped so the structural picture isn't diluted. A second
         // repo whose evidence is *only* CoChangesWith is kept as weak
         // fallback (covered by a separate test).
-        let temp = TempDb::new("co-change-demote-when-structural");
+        let temp = TempDb::new("impact", "co-change-demote-when-structural");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
         let contract = node(
             "shared_contracts",
@@ -759,7 +726,7 @@ mod tests {
         // unconditionally (which the earlier implementation did) removes the
         // only remaining signal and leaves `shared_contract_impact` empty
         // for co-change-only downstreams.
-        let temp = TempDb::new("co-change-keep-when-sole");
+        let temp = TempDb::new("impact", "co-change-keep-when-sole");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
         let contract = node(
             "shared_contracts",
@@ -864,7 +831,7 @@ mod tests {
     /// both serialization/validation bonuses.
     #[test]
     fn depth_always_dominates_specificity() {
-        let temp = TempDb::new("depth-dominates");
+        let temp = TempDb::new("impact", "depth-dominates");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -972,7 +939,7 @@ mod tests {
     /// that only imports a type, when both are at the same depth.
     #[test]
     fn validator_producer_outranks_type_only_consumer() {
-        let temp = TempDb::new("validator-producer-vs-type");
+        let temp = TempDb::new("impact", "validator-producer-vs-type");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -1100,7 +1067,7 @@ mod tests {
     ///    only walked structural edges for that repo's path).
     #[test]
     fn structural_first_pass_surfaces_structural_repo_before_co_change_only_repo() {
-        let temp = TempDb::new("structural-first-two-pass");
+        let temp = TempDb::new("impact", "structural-first-two-pass");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -1209,7 +1176,7 @@ mod tests {
     fn evidence_band_is_structural_for_declared_edges_and_advisory_for_co_change_only() {
         use super::EvidenceBand;
 
-        let temp = TempDb::new("evidence-band");
+        let temp = TempDb::new("impact", "evidence-band");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -1304,7 +1271,7 @@ mod tests {
     fn evidence_band_is_structural_when_mixed_with_co_change_edge() {
         use super::EvidenceBand;
 
-        let temp = TempDb::new("evidence-band-mixed");
+        let temp = TempDb::new("impact", "evidence-band-mixed");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -1377,7 +1344,7 @@ mod tests {
     #[test]
     fn co_change_only_fallback_surfaces_under_advisory_band_not_structural() {
         use super::EvidenceBand;
-        let temp = TempDb::new("co-change-advisory-band-only");
+        let temp = TempDb::new("impact", "co-change-advisory-band-only");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
@@ -1458,7 +1425,7 @@ mod tests {
     #[test]
     fn co_change_only_repo_stays_advisory_alongside_structural_repo() {
         use super::EvidenceBand;
-        let temp = TempDb::new("co-change-stays-advisory");
+        let temp = TempDb::new("impact", "co-change-stays-advisory");
         let store = GraphStoreDb::open(temp.path()).expect("graph should open");
 
         let contract = node(
