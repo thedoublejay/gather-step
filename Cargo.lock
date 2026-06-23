@@ -1175,6 +1175,7 @@ dependencies = [
  "dirs",
  "gather-step-analysis",
  "gather-step-core",
+ "gather-step-deploy",
  "gather-step-git",
  "gather-step-mcp",
  "gather-step-output",

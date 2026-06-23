@@ -145,8 +145,11 @@ fn build_deployment_map<S: GraphStore>(store: &S) -> Result<DeploymentMap> {
             continue;
         };
 
-        // Infer artifact kind from file_path.
-        let kind = deployment_kind_from_path(&node.file_path);
+        // Infer artifact kind from file_path (content is unavailable here, so
+        // the deploy crate's path-only heuristic is used).
+        let kind = gather_step_deploy::detect_artifact_kind_from_path(&node.file_path)
+            .as_str()
+            .to_owned();
 
         // Resolve the associated service name by walking incoming DeployedAs edges.
         let service = resolve_service_for_deployment(store, node.id)?;
@@ -600,39 +603,6 @@ fn decode_workflow_job_qn(qn: Option<&str>) -> Option<(String, String, String)> 
         return None;
     }
     Some((repo, workflow, job))
-}
-
-/// Infer deployment artifact kind from a file path — mirrors the heuristics
-/// in `gather-step-deploy::detect_artifact_kind` without depending on that crate.
-fn deployment_kind_from_path(file_path: &str) -> String {
-    let mut normalized = file_path.replace('\\', "/");
-    normalized.make_ascii_lowercase();
-    let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);
-
-    if normalized.contains("/.github/workflows/") || normalized.starts_with(".github/workflows/") {
-        return "github_actions".to_owned();
-    }
-    if file_name.eq_ignore_ascii_case("dockerfile") || file_name.starts_with("dockerfile.") {
-        return "dockerfile".to_owned();
-    }
-    if file_name.eq_ignore_ascii_case("docker-compose.yml")
-        || file_name.eq_ignore_ascii_case("docker-compose.yaml")
-        || file_name.eq_ignore_ascii_case("compose.yml")
-        || file_name.eq_ignore_ascii_case("compose.yaml")
-    {
-        return "compose".to_owned();
-    }
-    if file_name.eq_ignore_ascii_case("kustomization.yaml")
-        || file_name.eq_ignore_ascii_case("kustomization.yml")
-    {
-        return "kustomize".to_owned();
-    }
-    let p = std::path::Path::new(&normalized);
-    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") {
-        return "kubernetes".to_owned();
-    }
-    "unknown".to_owned()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
