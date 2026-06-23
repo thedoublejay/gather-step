@@ -283,12 +283,12 @@ fn expand_workspace_pattern(workspace_root: &Path, pattern: &str) -> Vec<PathBuf
 /// direct child directory.
 fn expand_segments(base: &Path, segments: &[&str]) -> Vec<PathBuf> {
     let Some((head, tail)) = segments.split_first() else {
-        // We've consumed all segments — base itself is the match.
-        return if canonicalize_existing_dir_under(base, base).is_some() {
-            vec![base.to_path_buf()]
-        } else {
-            Vec::new()
-        };
+        // We've consumed all segments — base itself is the match. Return the
+        // canonicalized path so wildcard-expanded members match the explicit
+        // pattern branch (which canonicalizes via `canonicalize_existing_dir_under`).
+        return canonicalize_existing_dir_under(base, base)
+            .map(|dir| vec![dir])
+            .unwrap_or_default();
     };
 
     if *head == "*" || head.contains('*') {

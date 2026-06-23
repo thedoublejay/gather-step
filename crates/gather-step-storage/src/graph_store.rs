@@ -3945,7 +3945,12 @@ mod tests {
             source,
             target,
             kind: EdgeKind::Calls,
-            metadata: EdgeMetadata::default(),
+            // Persisted edges get their `access_mechanism` derived from the kind
+            // (K15) when unset, so the expected value must match the stored one.
+            metadata: EdgeMetadata {
+                access_mechanism: Some(EdgeKind::Calls.access_mechanism()),
+                ..EdgeMetadata::default()
+            },
             owner_file,
             is_cross_file: false,
         }
@@ -4360,7 +4365,7 @@ mod tests {
                 resolver: Some(ResolverStrategy::SecondPass.as_str().to_owned()),
                 guard_has_default: None,
                 enum_qn: None,
-                access_mechanism: None,
+                access_mechanism: Some(EdgeKind::Calls.access_mechanism()),
             },
             ..original.clone()
         };
@@ -4829,7 +4834,10 @@ mod tests {
             source: file.id,
             target: author_new.id,
             kind: EdgeKind::OwnedBy,
-            metadata: EdgeMetadata::default(),
+            metadata: EdgeMetadata {
+                access_mechanism: Some(EdgeKind::OwnedBy.access_mechanism()),
+                ..EdgeMetadata::default()
+            },
             owner_file: file.id,
             is_cross_file: false,
         };
@@ -4837,7 +4845,10 @@ mod tests {
             source: file.id,
             target: target_b.id,
             kind: EdgeKind::CoChangesWith,
-            metadata: EdgeMetadata::default(),
+            metadata: EdgeMetadata {
+                access_mechanism: Some(EdgeKind::CoChangesWith.access_mechanism()),
+                ..EdgeMetadata::default()
+            },
             owner_file: file.id,
             is_cross_file: false,
         };
