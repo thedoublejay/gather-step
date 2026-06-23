@@ -19,7 +19,7 @@
 use anyhow::Result;
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::GraphStore;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::pr_review::delta_report::{
     EventDelta, RemovedSurfaceConsumer, RemovedSurfaceRisk, RiskSeverity, RouteDelta, SymbolDelta,
@@ -43,7 +43,7 @@ const AI_SURFACE_KINDS: &[(NodeKind, &str)] = &[
 /// as a High-severity `security_decorator` risk. Extend this set as new guards
 /// are registered.
 ///
-/// `useguards` is the primary NestJS enforcement mechanism — `@UseGuards(
+/// `useguards` is the primary `NestJS` enforcement mechanism — `@UseGuards(
 /// AuthGuard, RolesGuard)` is what actually wires authn/authz onto a handler —
 /// so dropping it removes auth entirely and must be caught here.
 const ENFORCEMENT_DECORATORS: &[&str] = &[
@@ -438,10 +438,9 @@ fn auth_decorator_change_risks<S: GraphStore>(
         };
 
         let review_decorators = auth_decorator_names_on(review, review_surface.id)?;
-        let review_enforcement: FxHashSet<String> = review_decorators
+        let review_enforcement: Vec<&String> = review_decorators
             .iter()
             .filter(|d| is_enforcement_decorator(d.as_str()))
-            .map(|d| d.to_ascii_lowercase())
             .collect();
         // Enclosing-class enforcement decorators in review (H2-3 hoist).
         let class_has_enforcement =
@@ -451,7 +450,10 @@ fn auth_decorator_change_risks<S: GraphStore>(
             if !is_enforcement_decorator(dec) {
                 continue;
             }
-            if review_enforcement.contains(&dec.to_ascii_lowercase()) {
+            if review_enforcement
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(dec))
+            {
                 continue;
             }
             // Hoist suppression: the surface (any enforcement decorator) or its
@@ -476,16 +478,15 @@ fn auth_decorator_change_risks<S: GraphStore>(
             // a weakening of an existing one.
             continue;
         };
-        let base_weakening: FxHashSet<String> = auth_decorator_names_on(baseline, base_surface.id)?
+        let base_weakening: Vec<String> = auth_decorator_names_on(baseline, base_surface.id)?
             .into_iter()
             .filter(|d| is_auth_weakening_decorator(d))
-            .map(|d| d.to_ascii_lowercase())
             .collect();
         for dec in &rev.decorators {
             if !is_auth_weakening_decorator(dec) {
                 continue;
             }
-            if base_weakening.contains(&dec.to_ascii_lowercase()) {
+            if base_weakening.iter().any(|d| d.eq_ignore_ascii_case(dec)) {
                 continue;
             }
             risks.push(auth_decorator_risk(
@@ -1294,7 +1295,7 @@ mod tests {
         );
     }
 
-    /// H2-2: `@UseGuards` is the primary NestJS enforcement decorator; dropping
+    /// H2-2: `@UseGuards` is the primary `NestJS` enforcement decorator; dropping
     /// it from a surviving handler must raise a High `security_decorator` risk.
     #[test]
     fn removed_use_guards_on_surviving_surface_is_high_risk() {
