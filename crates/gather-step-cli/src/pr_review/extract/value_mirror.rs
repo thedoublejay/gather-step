@@ -80,8 +80,10 @@ const HAND_MIRROR_NAME_SUFFIXES: [&str; 3] = ["enum", "type", "status"];
 
 /// A suffix-stripped name match is only a SECONDARY signal: it links two enums
 /// solely when they ALSO share at least this many canonical values. This keeps
-/// the gate strict — a name coincidence with zero value overlap never links.
-const HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES: usize = 1;
+/// the gate strict — a name coincidence with a single shared value (e.g. two
+/// unrelated `*Status` enums both carrying `pending`) is coincidental, not a
+/// hand-copy, and must NOT link, so the threshold is ≥2.
+const HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES: usize = 2;
 
 /// Append value-mirror risks (`value_mirror_incomplete` + `value_mirror`) to
 /// `risks`, derived from the value-mirror graph diff between `baseline` (PR
@@ -430,6 +432,13 @@ fn canonical_value_label(value_node: &NodeData) -> String {
 /// canonical value labels as the risk output ([`canonical_value_label`]), so
 /// "shared values" between two enums is an exact canonical-form comparison.
 /// Drives H3 hand-mirror correspondence.
+///
+/// Best-effort beyond the capture cap: the upstream parser only emits
+/// `ValueMirror` edges for the first `VALUE_MIRROR_PER_ARRAY_CAP` (= 256,
+/// `gather_step_parser::ts_js_oxc`) elements of each enum/array, so values past
+/// the cap are absent here. Hand-mirror correspondence on enums with > 256
+/// members may therefore miss the ≥3 / ≥2 shared-value thresholds (false
+/// negative); it is not a soundness issue for the common case.
 fn enum_value_sets_by_qn<S: GraphStore>(store: &S) -> Result<FxHashMap<String, BTreeSet<String>>> {
     let mut out: FxHashMap<String, BTreeSet<String>> = FxHashMap::default();
     for value_node in store.nodes_by_type(NodeKind::ValueMirror)? {
@@ -472,9 +481,10 @@ fn hand_mirror_name_stem(enum_qn: &str) -> String {
 /// Whether two differently-named enums are a hand-mirrored copy of the same set
 /// (H3). STRICT FP gate: link when they share ≥ [`HAND_MIRROR_MIN_SHARED_VALUES`]
 /// canonical values, OR their suffix-stripped names match AND they still share
-/// ≥ [`HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES`] value (suffix-name-match is a
-/// secondary signal only — never links on a bare name coincidence). Two enums
-/// sharing 1–2 values with non-matching names are NOT linked.
+/// ≥ [`HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES`] values (suffix-name-match is a
+/// secondary signal only — never links on a bare name coincidence or a single
+/// shared value). Two enums sharing 1–2 values with non-matching names are NOT
+/// linked, and two suffix-name-matched enums sharing only 1 value are NOT linked.
 fn enums_hand_mirror_correspond(
     owner_qn: &str,
     surface_qn: &str,
@@ -1590,20 +1600,20 @@ mod tests {
         );
     }
 
-    /// H3 SECONDARY SIGNAL: two enums whose names match after stripping the
-    /// `Enum`/`Type` suffix (`StatusType` ↔ `StatusEnum` → `status`) and that
-    /// share 1 value are linked — the FE array surface IS flagged. Confirms the
-    /// suffix-name-match path activates only with value overlap present.
-    #[test]
-    fn suffix_name_match_with_value_overlap_is_flagged() {
-        let (_tb, baseline) = open_store("suffix-match-baseline");
-        let (_tr, review) = open_store("suffix-match-review");
-
-        // BE enum `StatusEnum` (authoritative).
+    /// Build the suffix-name-match fixture: a BE enum `StatusEnum` and a FE
+    /// hand-copy enum `StatusType` (DIFFERENT `enum_qn`, same `status` stem) with
+    /// a FE array referencing the FE enum's `enum_qn`. Both enums define
+    /// `shared_members`; BE then adds `cancelled` (FE untouched). The two names
+    /// collapse to the same stem, so only the secondary name-match path can link
+    /// them — exercising the [`HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES`] gate.
+    fn build_suffix_name_match(
+        baseline: &GraphStoreDb,
+        review: &GraphStoreDb,
+        shared_members: &[&str],
+    ) {
         let be_file = file_node("service-log", "src/status.ts");
         let be_enum = owner_node("service-log", "src/status.ts", "StatusEnum", NodeKind::Type);
 
-        // FE enum `StatusType` (hand-copy, different enum_qn, same stem) + array.
         let fe_enum_file = file_node("web-frontend", "src/status.ts");
         let fe_enum = owner_node(
             "web-frontend",
@@ -1619,48 +1629,86 @@ mod tests {
             NodeKind::DataField,
         );
 
-        let active = value_node("status.active");
         let cancelled = value_node("status.cancelled");
+        let shared: Vec<NodeData> = shared_members.iter().map(|v| value_node(v)).collect();
 
+        let mut base_nodes = vec![
+            be_file.clone(),
+            be_enum.clone(),
+            fe_enum_file.clone(),
+            fe_enum.clone(),
+            fe_array_file.clone(),
+            fe_array.clone(),
+        ];
+        base_nodes.extend(shared.iter().cloned());
+
+        let mut base_edges = Vec::new();
+        for member in &shared {
+            base_edges.push(defines_edge_qn(&be_enum, member, &be_file, "StatusEnum"));
+            base_edges.push(defines_edge_qn(
+                &fe_enum,
+                member,
+                &fe_enum_file,
+                "StatusType",
+            ));
+            base_edges.push(mirrors_edge_qn(
+                &fe_array,
+                member,
+                &fe_array_file,
+                "StatusType",
+            ));
+        }
         baseline
-            .bulk_insert(
-                &[
-                    be_file.clone(),
-                    be_enum.clone(),
-                    fe_enum_file.clone(),
-                    fe_enum.clone(),
-                    fe_array_file.clone(),
-                    fe_array.clone(),
-                    active.clone(),
-                ],
-                &[
-                    defines_edge_qn(&be_enum, &active, &be_file, "StatusEnum"),
-                    defines_edge_qn(&fe_enum, &active, &fe_enum_file, "StatusType"),
-                    mirrors_edge_qn(&fe_array, &active, &fe_array_file, "StatusType"),
-                ],
-            )
+            .bulk_insert(&base_nodes, &base_edges)
             .expect("baseline insert");
 
+        let mut review_nodes = base_nodes.clone();
+        review_nodes.push(cancelled.clone());
+        let mut review_edges = base_edges.clone();
+        review_edges.push(defines_edge_qn(
+            &be_enum,
+            &cancelled,
+            &be_file,
+            "StatusEnum",
+        ));
         review
-            .bulk_insert(
-                &[
-                    be_file.clone(),
-                    be_enum.clone(),
-                    fe_enum_file.clone(),
-                    fe_enum.clone(),
-                    fe_array_file.clone(),
-                    fe_array.clone(),
-                    active.clone(),
-                    cancelled.clone(),
-                ],
-                &[
-                    defines_edge_qn(&be_enum, &active, &be_file, "StatusEnum"),
-                    defines_edge_qn(&be_enum, &cancelled, &be_file, "StatusEnum"),
-                    defines_edge_qn(&fe_enum, &active, &fe_enum_file, "StatusType"),
-                    mirrors_edge_qn(&fe_array, &active, &fe_array_file, "StatusType"),
-                ],
-            )
+            .bulk_insert(&review_nodes, &review_edges)
             .expect("review insert");
+    }
+
+    /// H3 SECONDARY SIGNAL (NEGATIVE — H3-2 strict gate): two enums whose names
+    /// match after stripping the `Enum`/`Type` suffix (`StatusType` ↔
+    /// `StatusEnum` → `status`) but that share only 1 value are NOT linked. A
+    /// lone shared value (e.g. two unrelated `*Status` enums both carrying
+    /// `pending`) is coincidental, not a hand-copy, so the FE surface must NOT
+    /// be cross-flagged when the BE enum gains a member.
+    #[test]
+    fn suffix_name_match_with_one_shared_value_is_not_flagged() {
+        let (_tb, baseline) = open_store("suffix-match-1-baseline");
+        let (_tr, review) = open_store("suffix-match-1-review");
+        build_suffix_name_match(&baseline, &review, &["status.active"]);
+
+        let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
+        extend_with_value_mirror_risks(&baseline, &review, &mut risks).expect("should succeed");
+
+        assert!(
+            risks.iter().all(|r| r.detail.as_deref().is_none_or(
+                |d| !d.contains("statusOptions") && !d.contains("src/statusColumns.tsx")
+            )),
+            "suffix-name-matched enums sharing only 1 value must NOT be linked: {risks:?}"
+        );
+    }
+
+    /// H3 SECONDARY SIGNAL (POSITIVE — H3-2 strict gate): the same suffix-name
+    /// match, but sharing 2 values clears the ≥2
+    /// [`HAND_MIRROR_NAME_MATCH_MIN_SHARED_VALUES`] bar → the FE array surface IS
+    /// flagged. Confirms the suffix-name-match path still links genuinely-similar
+    /// enums at the raised threshold.
+    #[test]
+    fn suffix_name_match_with_two_shared_values_is_flagged() {
+        let (_tb, baseline) = open_store("suffix-match-2-baseline");
+        let (_tr, review) = open_store("suffix-match-2-review");
+        build_suffix_name_match(&baseline, &review, &["status.active", "status.done"]);
 
         let mut risks: Vec<RemovedSurfaceRisk> = Vec::new();
         extend_with_value_mirror_risks(&baseline, &review, &mut risks).expect("should succeed");
@@ -1672,7 +1720,7 @@ mod tests {
                         d.contains("statusOptions") || d.contains("src/statusColumns.tsx")
                     })
             }),
-            "suffix-name-matched enums sharing ≥1 value must be hand-mirror linked: {risks:?}"
+            "suffix-name-matched enums sharing ≥2 values must be hand-mirror linked: {risks:?}"
         );
     }
 }
