@@ -182,6 +182,13 @@ pub struct EdgeMetadata {
     /// enum-member-ref `MirrorsValueFrom`/`GuardsEnumValue` edges. `None` for
     /// Mode-A literal mirror edges, which keep value-only matching.
     pub enum_qn: Option<String>,
+    /// How the source reaches the target (v5.4, K15). `None` until the edge is
+    /// persisted, at which point the graph store fills it from the edge's
+    /// [`EdgeKind`](crate::EdgeKind) via [`EdgeKind::access_mechanism`]; a
+    /// detector may set it eagerly to override the kind-derived default.
+    /// `#[serde(default)]` so legacy blobs without the field still deserialize.
+    #[serde(default)]
+    pub access_mechanism: Option<crate::AccessMechanism>,
 }
 
 pub const MIGRATION_FILTERS_METADATA_PREFIX: &str = "migration_filters:";
@@ -485,6 +492,7 @@ mod tests {
                 resolver: Some(crate::ResolverStrategy::ImportMap.as_str().to_owned()),
                 guard_has_default: None,
                 enum_qn: None,
+                access_mechanism: None,
             },
             owner_file: NodeId([3; 16]),
             is_cross_file: true,

@@ -211,6 +211,7 @@ fn materialize_summary_edges<G: GraphStore>(
                     resolver: Some(ResolverStrategy::HistoryOwnership.as_str().to_owned()),
                     guard_has_default: None,
                     enum_qn: None,
+                    access_mechanism: None,
                 },
                 owner_file: file_id,
                 is_cross_file: true,
@@ -248,6 +249,7 @@ fn materialize_summary_edges<G: GraphStore>(
             resolver: Some(ResolverStrategy::CoChange.as_str().to_owned()),
             guard_has_default: None,
             enum_qn: None,
+            access_mechanism: None,
         };
         edges.push(EdgeData {
             source: src_id,

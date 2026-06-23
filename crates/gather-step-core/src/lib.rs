@@ -36,7 +36,9 @@ pub use registry::{
     WorkspaceRegistry,
 };
 pub use resolver::{ResolverStrategy, strategy_weight};
-pub use schema::{EdgeKind, NodeKind, PlanningProof, ProofHop, ProofKind, proof_sort_key};
+pub use schema::{
+    AccessMechanism, EdgeKind, NodeKind, PlanningProof, ProofHop, ProofKind, proof_sort_key,
+};
 pub use virtual_nodes::{
     VIRTUAL_NODE_REPO, VirtualNodeKind, broker_qn, canonical_route_path, canonical_topology_part,
     canonical_topology_part_or, config_map_qn, database_qn, deployment_qn, env_var_qn,
