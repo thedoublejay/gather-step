@@ -289,7 +289,7 @@ async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Status(args)) => success(status::run(&app, args)),
         Some(Command::StorageReport(args)) => success(storage_report::run(&app, args)),
         Some(Command::Doctor(args)) => success(doctor::run(&app, args)),
-        Some(Command::Log(args)) => success(log::run(&app, args)),
+        Some(Command::Log(args)) => success(log::run(&app, &args)),
         Some(Command::Generate(command)) => success(generate::run(&app, command)),
         Some(Command::Impact(args)) => success(impact::run(&app, args)),
         Some(Command::CrossRepoDeps(args)) => success(cross_repo_deps::run(&app, &args)),
@@ -375,7 +375,7 @@ fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
             )
         }
     };
-    let explicit_error_count = if error.is_some() { 1 } else { 0 };
+    let explicit_error_count = u32::from(error.is_some());
     TelemetryRunFinish {
         exit_status,
         peak_rss_bytes: capture_rss(),
@@ -403,29 +403,45 @@ fn telemetry_error_category(error: &anyhow::Error) -> &'static str {
     if graph_lock_contention(error) {
         return "graph_lock_contention";
     }
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("schema") && message.contains("version") {
+    let message = error.to_string();
+    if contains_ascii_case_insensitive(&message, "schema")
+        && contains_ascii_case_insensitive(&message, "version")
+    {
         "schema_mismatch"
-    } else if message.contains("git") {
+    } else if contains_ascii_case_insensitive(&message, "git") {
         "git_error"
-    } else if message.contains("storage") || message.contains("sqlite") || message.contains("redb")
+    } else if contains_ascii_case_insensitive(&message, "storage")
+        || contains_ascii_case_insensitive(&message, "sqlite")
+        || contains_ascii_case_insensitive(&message, "redb")
     {
         "storage_io"
-    } else if message.contains("config") {
+    } else if contains_ascii_case_insensitive(&message, "config") {
         "config_invalid"
-    } else if message.contains("network")
-        || message.contains("http")
-        || message.contains("github")
-        || message.contains("jira")
+    } else if contains_ascii_case_insensitive(&message, "network")
+        || contains_ascii_case_insensitive(&message, "http")
+        || contains_ascii_case_insensitive(&message, "github")
+        || contains_ascii_case_insensitive(&message, "jira")
     {
         "network"
-    } else if message.contains("parse") {
+    } else if contains_ascii_case_insensitive(&message, "parse") {
         "parse_failure"
-    } else if message.contains("auto-recover") || message.contains("auto recovered") {
+    } else if contains_ascii_case_insensitive(&message, "auto-recover")
+        || contains_ascii_case_insensitive(&message, "auto recovered")
+    {
         "auto_recovered"
     } else {
         "unknown"
     }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn install_telemetry_panic_hook(store: TelemetryStore, run: TelemetryRun) {

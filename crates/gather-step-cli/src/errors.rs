@@ -51,10 +51,7 @@ pub fn format_operator_error(error: &Error) -> String {
                 | GraphStoreError::StorageHeldByDaemon { .. } => {
                     return GRAPH_LOCKED_MESSAGE.to_owned();
                 }
-                GraphStoreError::Corrupt { .. } => {
-                    return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
-                }
-                GraphStoreError::BitcodeBlob(_) => {
+                GraphStoreError::Corrupt { .. } | GraphStoreError::BitcodeBlob(_) => {
                     return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
                 }
                 GraphStoreError::SchemaVersionMismatch { .. } => {

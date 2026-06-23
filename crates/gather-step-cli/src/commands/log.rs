@@ -33,7 +33,7 @@ struct LogOutput {
     records: Vec<TelemetryRunRecord>,
 }
 
-pub fn run(app: &AppContext, args: LogArgs) -> Result<()> {
+pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
     let Some(root) = super::telemetry_root() else {
         bail!("Could not locate the user data directory for telemetry.");
     };
