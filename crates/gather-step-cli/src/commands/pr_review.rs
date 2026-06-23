@@ -655,9 +655,12 @@ impl ReviewCleanupGuard {
     }
 
     fn install_signal_handler(&mut self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let state = Arc::clone(&self.state);
         let retention = self.retention;
-        self.signal_task = Some(tokio::spawn(async move {
+        self.signal_task = Some(handle.spawn(async move {
             if pr_review_shutdown_signal().await.is_ok() {
                 if let Ok(mut state) = state.lock() {
                     cleanup_review_artifacts(&mut state, retention);
