@@ -28,7 +28,7 @@ This changelog lists significant user-visible changes. The latest release is sho
 
 - **Value-mirror `detail` line is now rendered** — the field naming the mirror surface file and the missing value was computed but never printed in Markdown / PR-comment mode, which made the v5.1 value-mirror feature effectively unusable. It is now shown.
 - **`enum_qn` is part of mirror-surface identity** — surface dedup previously dropped `enum_qn`, collapsing enum-scoped surfaces and producing false negatives/positives.
-- **Enum guards match positive equality only** — `==` / `===`, no longer `!=` / `!==`, so `if (status !== Archived)` is no longer mis-captured as an enum guard.
+- **Enum guards match positive equality only** — `==` / `===`, no longer `!=` / `!==`, so `if (status !== Archived)` is no longer incorrectly captured as an enum guard.
 - **No fabricated `u64::MAX`** in the edge-summary invariant check; replaced with a lossless `usize → u64` widening.
 - **Parser correctness** — if-chain default handling, multi-key object-literal arrays, observable array-cap truncation, canonical top-level argument splitting, and canonical enum labels.
 - **Git and storage safety** — reduced-trust ref reads, history line counts computed from raw blob bytes (avoiding filter/textconv execution), checked bitcode wrappers, and reduced per-path byte allocation.
