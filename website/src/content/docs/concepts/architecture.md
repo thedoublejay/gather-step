@@ -23,7 +23,7 @@ gather-step.config.yaml
   Source Parsing (Oxc for TypeScript/JavaScript, tree-sitter for Python)
         |
         v
-  Framework-Aware Extraction (routes, events, entities, decorators, ...)
+  Framework-Aware Extraction (routes, events, entities, decorators, AI/agent surfaces, ...)
         |
         v
   Call Resolution (ImportMap -> SameModule -> Unique -> Suffix -> FuzzyName -> Fallback)

@@ -211,6 +211,37 @@ export const endpoints = {
     }
 
     #[test]
+    fn extracts_real_service_config_with_template_literal_rewrite() {
+        // Mirrors the real web-api-gateway serviceConfig shape: a template-literal
+        // `rewrite.from` (`${prefix}` + regex) that cannot be read as a string,
+        // so extraction must fall back to the single-quoted `basePathWithoutApiPrefix`.
+        let content = r"
+export const commentServiceConfig: ServiceConfig = {
+  createCommentForDocument: {
+    access: { ability: rules.READ, resource: 'comment' },
+    rolesAllowed: clientRoles,
+    method: 'POST',
+    pathMapping: {
+      basePathWithoutApiPrefix: '/document/:documentId/comments',
+      rewrite: {
+        from: `${pathPrefixV2}/document/([^/]+)/comments`,
+        to: `${commentsByEntityBasePath}/document/$1`,
+      },
+    },
+  },
+};
+";
+        let entries = extract_route_entries(content);
+        assert_eq!(
+            entries,
+            vec![(
+                "POST".to_owned(),
+                "/document/:documentId/comments".to_owned()
+            )]
+        );
+    }
+
+    #[test]
     fn falls_back_to_base_path() {
         let content = r"
 export const endpoints = {

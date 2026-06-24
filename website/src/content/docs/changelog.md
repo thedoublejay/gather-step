@@ -5,6 +5,44 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.4.0 (2026-06-23)
+
+**Hardening, observability, and detection breadth.** This release rolls up the v5.3 and v5.4 workstreams: security fixes around the MCP and external-input boundaries, correctness fixes inside the v5.1 value-mirror feature, a new local-telemetry command, and broader framework/AI detection. It is a behavioural release on top of v5.2 — no command was removed.
+
+> **Action required:** the graph and metadata schema versions were bumped (checked bitcode blobs). Run `gather-step reindex` once after upgrading; a stale index is detected and rejected rather than read incorrectly.
+
+### Added
+
+- **`gather-step log`** — inspect local run telemetry: recent index/query runs with status, duration, and warning/error counters. Flags: `--last <N>`, `--since <age>` (e.g. `7d`), `--errors-only`, and `--clear-before <age>` to prune old rows. Telemetry is local-only and privacy-preserving — runs are recorded with hashes rather than raw workspace paths or messages, and nothing is transmitted off-machine.
+- **Run telemetry store** — a local telemetry database records run and error counters and captures panic/recovery events, surfaced by `log` and by new `doctor` freshness/truncation health checks.
+- **Broader framework and AI detection** — Mongo/Atlas surfaces, gateway-proxy backend edges, and a wider set of AI/agent surfaces are now recognised during indexing.
+
+### Security
+
+- **MCP path jail** — MCP-supplied `config` / `pr_set` paths are canonicalised and rejected if they fall outside the workspace (arbitrary-file-read defense); error strings are path-free so a probed path can't echo back. The MCP boundary is intentionally stricter than the CLI, which still allows a trusted local user to pass a parent-workspace `--config`.
+- **No `$PATH` binary shadowing** — binary resolution errors instead of falling back to a bare-name `gather-step` spawn off `$PATH`.
+- **YAML alias-bomb guard** — external YAML (config, PR-set, manifest) is byte-capped and anchor/alias-bounded before parsing.
+- **`gh` query hardening** — the `--from-gh` query is length-capped and control-char-rejected before reaching the `gh` subprocess.
+
+### Fixed
+
+- **Value-mirror `detail` line is now rendered** — the field naming the mirror surface file and the missing value was computed but never printed in Markdown / PR-comment mode, which made the v5.1 value-mirror feature effectively unusable. It is now shown.
+- **`enum_qn` is part of mirror-surface identity** — surface dedup previously dropped `enum_qn`, collapsing enum-scoped surfaces and producing false negatives/positives.
+- **Enum guards match positive equality only** — `==` / `===`, no longer `!=` / `!==`, so `if (status !== Archived)` is no longer incorrectly captured as an enum guard.
+- **No fabricated `u64::MAX`** in the edge-summary invariant check; replaced with a lossless `usize → u64` widening.
+- **Parser correctness** — if-chain default handling, multi-key object-literal arrays, observable array-cap truncation, canonical top-level argument splitting, and canonical enum labels.
+- **Git and storage safety** — reduced-trust ref reads, history line counts computed from raw blob bytes (avoiding filter/textconv execution), checked bitcode wrappers, and reduced per-path byte allocation.
+
+### Changed
+
+- **Schema versions bumped** (graph + metadata) for checked bitcode blobs — a rebuild is required on mismatch (see the action note above).
+- **Dependency hygiene** — `rusqlite` / `smallvec` patch bumps, `notify` pin documented, and `cargo deny` + `cargo shear` CI coverage confirmed.
+- **Benchmark** — `mimalloc` is wired into benchmark runs, and augmentation packs no longer clone the full `ParseState`.
+
+### Release-wide
+
+- Bumped the Cargo workspace and internal crate versions and the website package metadata to `5.4.0`. Documented the previously-undocumented `log`, `cross-repo-deps`, and `who-consumes` CLI commands and the `trace_agent` and `who_consumes` MCP tools on the website, plus the v5.2 `--lock-timeout` / `--force-unlock` index flags. Removed planning/handoff docs from the source tree.
+
 ## v5.2.0 (2026-06-22)
 
 **Self-healing index locks.** A reindex could appear "stuck" with no actionable signal when an index lock was contended — the acquisition loop retried forever with no timeout, and `status` / `doctor` never revealed that a lock existed. The per-repo lock is OS-advisory (`flock`), so the kernel already releases a dead owner's lock automatically; this release fixes the two real gaps — the unbounded wait and the lack of visibility.
@@ -30,6 +68,10 @@ This changelog lists significant user-visible changes. The latest release is sho
 - **Value-mirror completeness** — `pr-review` now flags add-and-forget (`value_mirror_incomplete`) and stale-mirror (`value_mirror`) risks when an authoritative enum/union/const value diverges from an established cross-repo mirror surface.
 - **Enum-guard completeness** — a new enum member that an existing `switch` / `if` guard does not handle is flagged (`enum_guard_incomplete`), exempted when the guard has an explicit `default` / `case _`.
 - **Enum-subset object-literal arrays** — data-grid-style `valueOptions` arrays are captured as enum-ref mirror surfaces and flow through the same completeness check, scoped per referenced enum so unrelated enums sharing a string value never cross-flag.
+
+### Changed
+
+- **`DeltaReport.schema_version` is now `4`** — the new value-mirror and enum-guard risks are carried in `removed_surface_risks`.
 
 ## v5.0.0 (2026-06-21)
 

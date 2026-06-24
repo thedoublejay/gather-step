@@ -4465,6 +4465,7 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::LaunchDarkly => &[PackId::LaunchDarkly],
         Framework::FastApi => &[PackId::Fastapi],
         Framework::AiTypescript => &[PackId::AiTypescript],
+        Framework::GatewayProxy => &[PackId::GatewayProxy],
         Framework::FrontendHooks => &[PackId::FrontendHooks],
     }
 }

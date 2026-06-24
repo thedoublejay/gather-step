@@ -29,6 +29,7 @@ use gather_step_mcp::{
 use gather_step_parser::frameworks::{Framework, detect_frameworks_workspace_aware};
 use gather_step_storage::{
     EdgeCountSummary, GraphStore, IndexingOptions, RepoIndexPayload, RepoIndexer,
+    StorageCoordinator,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -381,6 +382,12 @@ impl RepoAnalyticsStatus {
         }
     }
 }
+
+/// Reclaimable free space at which the post-index finalize compacts the graph
+/// store. A cold full index grows redb's file a region past the live data
+/// (~hundreds of MB on a large workspace); a warm reindex frees little and
+/// stays under this gate, skipping the full-file rewrite.
+const GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
 pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let total_start = Instant::now();
@@ -979,6 +986,56 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     );
     drop(indexer);
 
+    // Reclaim redb free pages left by the bulk write. A cold full index grows
+    // the graph file a region past the live data and redb never shrinks it in
+    // place, so without this a fresh index ships at roughly double its
+    // compacted size. Gated on reclaimable bytes (the redb analogue of the
+    // metadata store's post-index VACUUM gate) so a warm reindex that freed
+    // little skips the full-file rewrite. Best-effort: the index is already
+    // durable, so a compaction failure is logged, not fatal.
+    match StorageCoordinator::open(&storage_root) {
+        Ok(mut storage) => {
+            let graph_path = storage.graph().path().to_path_buf();
+            let before_bytes = fs::metadata(&graph_path).map_or(0, |meta| meta.len());
+            let compaction =
+                storage.compact_graph_if_reclaimable(GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES);
+            // Drop the handle before measuring: redb reports a transient
+            // post-compaction size while the database is open, but the file
+            // settles to its closed-state size once the handle is released.
+            drop(storage);
+            match compaction {
+                Ok(true) => {
+                    let after_bytes =
+                        fs::metadata(&graph_path).map_or(before_bytes, |meta| meta.len());
+                    info!(
+                        before_bytes,
+                        after_bytes, "Stage timing: post-index graph compaction complete.",
+                    );
+                    output.line(format!(
+                        "  compacted graph index ({before_bytes} -> {after_bytes} bytes)"
+                    ));
+                }
+                Ok(false) => {
+                    info!(
+                        "Post-index graph compaction skipped; reclaimable space below threshold."
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "Post-index graph compaction failed; index is durable, continuing.",
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Could not reopen storage for post-index graph compaction; continuing.",
+            );
+        }
+    }
+
     // Wipe review artifacts AFTER `drop(indexer)` (which fsyncs the new
     // baseline) but BEFORE precompute. Order matters:
     //   1. drop(indexer)            → new workspace index is durable
@@ -1526,6 +1583,7 @@ fn framework_label(framework: Framework) -> String {
         Framework::LaunchDarkly => "launchdarkly",
         Framework::FastApi => "fastapi",
         Framework::AiTypescript => "ai_typescript",
+        Framework::GatewayProxy => "gateway_proxy",
         Framework::FrontendHooks => "frontend_hooks",
     }
     .to_owned()

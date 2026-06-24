@@ -150,7 +150,7 @@ pub(crate) fn parse_ts_js_with_oxc_with_status(
 
     let status = if parsed.panicked {
         TsJsParseStatus::Unrecoverable
-    } else if parsed.errors.is_empty() {
+    } else if parsed.diagnostics.is_empty() {
         TsJsParseStatus::Parsed
     } else {
         TsJsParseStatus::Recovered
@@ -3043,7 +3043,7 @@ pub(crate) fn parse_ts_js_for_status(file: &FileEntry, source: &str) -> TsJsPars
         .parse();
     if parsed.panicked {
         TsJsParseStatus::Unrecoverable
-    } else if parsed.errors.is_empty() {
+    } else if parsed.diagnostics.is_empty() {
         TsJsParseStatus::Parsed
     } else {
         TsJsParseStatus::Recovered

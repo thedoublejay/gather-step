@@ -119,6 +119,7 @@ fn framework_label(framework: Framework) -> String {
         Framework::LaunchDarkly => "launchdarkly",
         Framework::FastApi => "fastapi",
         Framework::AiTypescript => "ai_typescript",
+        Framework::GatewayProxy => "gateway_proxy",
         Framework::FrontendHooks => "frontend_hooks",
     }
     .to_owned()

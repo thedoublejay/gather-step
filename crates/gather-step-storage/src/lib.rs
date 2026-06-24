@@ -241,6 +241,21 @@ impl StorageCoordinator {
             .and_then(GraphStoreDb::compact)
     }
 
+    /// Gated, looped variant of [`Self::compact_graph`] for the post-index
+    /// finalize: compacts only when at least `threshold_bytes` of reclaimable
+    /// free space exists, so a warm reindex does not pay a full-file rewrite.
+    /// Should only be called when no read or write transactions are open.
+    pub fn compact_graph_if_reclaimable(
+        &mut self,
+        threshold_bytes: u64,
+    ) -> Result<bool, GraphStoreError> {
+        let path = self.graph().path().to_path_buf();
+        self.stores
+            .graph_mut()
+            .ok_or(GraphStoreError::CompactionRequiresExclusiveHandle { path })
+            .and_then(|graph| graph.compact_if_reclaimable(threshold_bytes))
+    }
+
     /// Rebuild the Tantivy search index for `repo` from canonical graph state.
     ///
     /// Returns [`ReconcileOutcome::Full`] when the search index is consistent

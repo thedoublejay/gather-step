@@ -135,6 +135,7 @@ export default defineConfig({
           items: [
             { slug: 'concepts/polyrepo-graph' },
             { slug: 'concepts/event-topology' },
+            { slug: 'concepts/ai-flow' },
             { slug: 'concepts/context-packs' },
             { slug: 'concepts/deterministic-indexing' },
             { slug: 'concepts/language-support' },

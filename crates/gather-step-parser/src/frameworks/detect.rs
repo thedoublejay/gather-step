@@ -36,6 +36,10 @@ pub enum Framework {
     FastApi,
     /// LangChain-style TypeScript/JavaScript AI pack (v5).
     AiTypescript,
+    /// Config-driven proxy-gateway pack: extracts proxy routes and
+    /// `ConsumesApiFrom` edges from `src/serviceConfigs` definitions. Detected
+    /// by [`is_gateway_proxy`].
+    GatewayProxy,
     /// Always-active pack for detecting cross-package frontend hook boundary
     /// edges.  Does not require a per-repo detection predicate.
     FrontendHooks,
@@ -143,6 +147,9 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     }
     if is_ai_typescript(repo_root) {
         frameworks.insert(Framework::AiTypescript);
+    }
+    if is_gateway_proxy(repo_root) {
+        frameworks.insert(Framework::GatewayProxy);
     }
     // FrontendHooks detection is always active for any repo: cross-package hook
     // imports can appear in any TypeScript/JavaScript codebase regardless of
@@ -797,6 +804,25 @@ mod tests {
         assert!(detected.contains(&Framework::FrontendHooks));
         // FrontendHooks is always-on, so total is NestJs + FrontendHooks.
         assert_eq!(detected.len(), 2);
+    }
+
+    #[test]
+    fn detect_frameworks_includes_gateway_proxy_for_service_configs() {
+        // A proxy-gateway repo is identified by a `src/serviceConfigs` directory
+        // (see `is_gateway_proxy`). Such a repo must auto-activate the
+        // gateway-proxy pack so its config-driven routes are extracted during
+        // indexing — without it, `gateway_proxy::augment` never runs.
+        let dir = TempDir::new("detect-gateway");
+        dir.write("package.json", r#"{ "name": "web-api-gateway" }"#);
+        dir.write(
+            "src/serviceConfigs/comment.service.ts",
+            "export const commentServiceConfig = {};\n",
+        );
+        let detected = detect_frameworks(&dir.path);
+        assert!(
+            detected.contains(&Framework::GatewayProxy),
+            "a repo with src/serviceConfigs/ must detect the gateway-proxy pack"
+        );
     }
 
     #[test]

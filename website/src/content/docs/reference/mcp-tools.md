@@ -11,7 +11,7 @@ In normal use, engineers do not call these tools manually. An MCP-aware assistan
 
 - **Orientation**: understand what is indexed before deeper queries
 - **Search and traversal**: find symbols and walk local call relationships
-- **Topology and impact**: trace routes, events, deployments, and cross-repo blast radius
+- **Topology and impact**: trace routes, events, AI/agent flows, deployments, and cross-repo blast radius
 - **PR review**: build a disposable review index for a PR branch and return a structured delta report
 - **Contracts**: inspect payload shape and producer-consumer drift
 - **Context retrieval**: return short summaries, combined context, and task-shaped packs
@@ -89,6 +89,12 @@ Used automatically when the assistant needs the route surface for a known HTTP m
 
 Used automatically when the assistant needs a fuller request-path trace than `trace_route`, especially for debugging or implementation planning.
 
+### `trace_agent`
+
+> "Trace this AI agent's forward flow — its graph, nodes, LLM calls, tools, prompts, vector indexes, and MCP tools."
+
+Used automatically when the assistant needs to walk an AI/agent surface forward from a target node: the agent graph and its nodes, the LLM calls they make, and the tools, prompts, vector indexes, and MCP tools they reach. This is the traversal entry point for the AI-flow layer introduced in v5.0 — see [AI & Agent Flow](/concepts/ai-flow/) for the node and edge model.
+
 ### `event_blast_radius`
 
 > "If this event changes, what downstream code is likely affected?"
@@ -106,6 +112,12 @@ Used automatically for event-topology audits, dead-path investigation, and integ
 > "What other repositories does this repo depend on through shared graph surfaces?"
 
 Used automatically when the assistant needs repo-level dependency structure before a refactor, migration, or deployment-isolation discussion.
+
+### `who_consumes`
+
+> "Which repos consume what this symbol's file produces?"
+
+Used automatically when the assistant needs the downstream consumers of a producer symbol — directly, or across a transport boundary (route, event, or shared type) — before changing or removing it.
 
 ### `where_deployed`
 
@@ -170,7 +182,7 @@ Used automatically when the user asks to review a pull request, do a structural 
 | `no_baseline_check` | bool | no | Suppress the warning emitted when the workspace HEAD does not match `base`. |
 | `timeout_secs` | integer | no | Child-process timeout in seconds, capped by the server. |
 
-**Returns.** A JSON `DeltaReport` (`schema_version: 3`) with these top-level sections:
+**Returns.** A JSON `DeltaReport` (`schema_version: 4`) with these top-level sections:
 
 - `metadata` — base/head SHAs, checkout mode, indexed repos, elapsed time, warnings (e.g., baseline-vs-base mismatch).
 - `safety` — review storage path, run id, cleanup policy, cache key, config hash.

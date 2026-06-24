@@ -949,6 +949,52 @@ impl GraphStoreDb {
         self.db.compact().map_err(GraphStoreError::storage)
     }
 
+    /// Bytes the on-disk file holds beyond live data — i.e. free pages
+    /// reclaimable by [`Self::compact`]. Computed as the file length minus
+    /// redb's reported allocated-page bytes. A from-scratch bulk index leaves a
+    /// large gap here because redb grows the backing file in regions and never
+    /// shrinks it in place.
+    pub fn reclaimable_bytes(&self) -> Result<u64, GraphStoreError> {
+        let write_txn = self.db.begin_write().map_err(GraphStoreError::storage)?;
+        let stats = write_txn.stats().map_err(GraphStoreError::storage)?;
+        write_txn.abort().map_err(GraphStoreError::storage)?;
+        let file_len = std::fs::metadata(&self.path).map_or(0, |meta| meta.len());
+        let page_size = u64::try_from(stats.page_size()).unwrap_or(0);
+        let allocated = stats.allocated_pages().saturating_mul(page_size);
+        Ok(file_len.saturating_sub(allocated))
+    }
+
+    /// Compact only when at least `threshold_bytes` of reclaimable free space
+    /// exists, looping [`Self::compact`] until redb reports no further progress.
+    ///
+    /// Mirrors the metadata store's gated post-index `VACUUM`: a warm reindex
+    /// that changed little stays below the threshold and skips the full-file
+    /// rewrite, while a cold full index (which leaves redb's file grown a region
+    /// past the live data) is reclaimed. `redb` compacts incrementally, so a
+    /// single call can leave reclaimable space behind — hence the bounded loop.
+    /// Returns whether any compaction ran.
+    pub fn compact_if_reclaimable(
+        &mut self,
+        threshold_bytes: u64,
+    ) -> Result<bool, GraphStoreError> {
+        /// Bounded compaction passes — guards against a pathological
+        /// non-converging loop while letting redb fully reclaim in practice.
+        const MAX_PASSES: u32 = 8;
+
+        if self.reclaimable_bytes()? < threshold_bytes {
+            return Ok(false);
+        }
+        let mut compacted = false;
+        for _ in 0..MAX_PASSES {
+            if self.compact()? {
+                compacted = true;
+            } else {
+                break;
+            }
+        }
+        Ok(compacted)
+    }
+
     /// Increment the bulk-mode reference count and return the new count.
     ///
     /// When the count transitions from `0 → 1`, the next write
@@ -4293,6 +4339,90 @@ mod tests {
             .expect("type lookup should succeed");
 
         assert_eq!(functions.len(), 1_000);
+    }
+
+    #[test]
+    fn compact_if_reclaimable_reclaims_after_bulk_delete() {
+        let mut store = test_store("compact-reclaim");
+
+        // Build a sizable graph spread across many owner files so the on-disk
+        // file grows well past a single page region.
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let mut files = Vec::new();
+        for f in 0..200_u16 {
+            let file_path = format!("src/m{f}.ts");
+            let file = node("svc", &file_path, NodeKind::File, &file_path, 0);
+            files.push(file.clone());
+            nodes.push(file.clone());
+            let mut locals = Vec::new();
+            for s in 0..40_u16 {
+                let fn_node = node(
+                    "svc",
+                    &file_path,
+                    NodeKind::Function,
+                    &format!("fn_{f}_{s}"),
+                    s,
+                );
+                locals.push(fn_node.clone());
+                nodes.push(fn_node);
+            }
+            for s in 0..locals.len() {
+                let source = locals[s].id;
+                let target = locals[(s + 1) % locals.len()].id;
+                edges.push(edge(source, target, file.id));
+            }
+        }
+        store.bulk_insert(&nodes, &edges).expect("bulk insert");
+
+        // Free a large fraction of the graph, leaving the file high-water mark
+        // far above the live data.
+        for file in files.iter().take(190) {
+            store
+                .delete_edges_for_owner(file.id)
+                .expect("owner edge delete");
+        }
+
+        let reclaimable = store.reclaimable_bytes().expect("reclaimable");
+        assert!(
+            reclaimable > 0,
+            "deleting most of the graph must leave reclaimable free space"
+        );
+        let before = std::fs::metadata(store.path()).expect("stat").len();
+        let compacted = store.compact_if_reclaimable(1).expect("gated compaction");
+        let after = std::fs::metadata(store.path()).expect("stat").len();
+
+        assert!(
+            compacted,
+            "compaction must run when reclaimable space exists"
+        );
+        assert!(
+            after < before,
+            "file must shrink after compaction: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn compact_if_reclaimable_skips_when_below_threshold() {
+        let mut store = test_store("compact-skip");
+        let file = node("svc", "src/a.ts", NodeKind::File, "src/a.ts", 0);
+        let a = node("svc", "src/a.ts", NodeKind::Function, "a", 0);
+        store.bulk_insert(&[file, a], &[]).expect("insert");
+
+        let before = std::fs::metadata(store.path()).expect("stat").len();
+        let compacted = store
+            .compact_if_reclaimable(u64::MAX)
+            .expect("gated compaction");
+        let after = std::fs::metadata(store.path()).expect("stat").len();
+
+        assert!(
+            !compacted,
+            "compaction must skip when reclaimable space is below the threshold"
+        );
+        assert_eq!(
+            before, after,
+            "file must be untouched when compaction skips"
+        );
     }
 
     #[test]
