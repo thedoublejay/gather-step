@@ -168,6 +168,7 @@ in that surface category.
 | `routes` | Added / removed / changed HTTP routes. Removed routes carry downstream impact summaries. |
 | `symbols` | Added / removed / changed exported symbols. Flags `signature_changed` and `visibility_changed`. |
 | `payload_contracts` | Field-level diffs: added, removed, type-changed, optional-required flips |
+| `ai_contracts` | Added / removed / changed AI structured-output contracts, keyed by source symbol: schema-field diffs plus AI-facet changes (`provider`, `model`, `temperature`, `inference_kind`, `schema_format`) |
 | `events` | Producer/consumer set diffs across `Topic`, `Queue`, `Subject`, `Stream`, and `Event` virtual nodes |
 | `decorators` | Permission, audit, and authorization decorator changes |
 | `contract_alignments` | Cross-repo clusters of related payload contracts with confidence scores |
@@ -179,15 +180,31 @@ in that surface category.
 
 `removed_surface_risks` contains the most actionable findings. Each entry has:
 
-- `kind` — `route`, `symbol`, or `event`
+- `kind` — `route`, `symbol`, or `event` for a removed surface; or one of the cross-repo mirror/guard kinds below
 - `surface` — the canonical name of the removed surface
 - `severity` — `high`, `medium`, or `low`
 - `reason` — a human-readable explanation
+- `detail` — for mirror/guard kinds, names the mirror or guard surface (repo + file) and the specific value involved
 - `surviving_consumers` — graph nodes that still reference the removed surface
 
 A `high`-severity removal means at least one consumer of the surface is in a
 different repo and has no apparent migration. These entries should be reviewed
 before merge.
+
+In addition to removed surfaces, `removed_surface_risks` carries cross-repo
+**mirror** and **guard** completeness kinds — cases where a value is
+hand-mirrored across repos with no graph edge, so a change on one side would
+otherwise go unflagged:
+
+- `value_mirror_incomplete` — add-and-forget: a PR adds a new authoritative
+  enum/union/const value that an established cross-repo mirror surface (e.g. an
+  allowlist array or a frontend category map) does not yet mirror.
+- `value_mirror` — a PR changes or removes an authoritative value that an
+  un-updated mirror still carries.
+- `enum_guard_incomplete` — a PR adds a new enum member, but an established
+  `switch`/`if` guard that already handles other members of the same enum gains
+  no case for the new value. Exempted when the guard has an explicit
+  `default:` / `case _:`.
 
 ### Interpreting `deployment`
 

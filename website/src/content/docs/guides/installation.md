@@ -73,7 +73,7 @@ from the `main` branch, or work directly from a local checkout.
 
 ### Prerequisites
 
-- **Rust `1.94.1`** — the exact version pinned in `gather-step/rust-toolchain.toml`.
+- **Rust `1.96.0`** — the exact version pinned in `gather-step/rust-toolchain.toml`.
   `rustup` will install and switch to it automatically when you run any Cargo
   command inside the workspace directory. If you do not have `rustup`, install
   it from [rustup.rs](https://rustup.rs) before continuing.

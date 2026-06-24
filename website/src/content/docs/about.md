@@ -41,6 +41,7 @@ The documentation site is intentionally limited to implemented behavior. The cur
 - caller and callee traversal
 - route tracing for request flows
 - event tracing and downstream event blast radius
+- AI/agent flow tracing via `trace_agent`: agent graphs, LLM calls, prompts, tools, vector indexes, and MCP surfaces
 - cross-repo dependency and impact tracing
 - static projection-impact tracing for source fields, derived fields, filters, indexes, and backfills
 - shared type usage lookup
@@ -49,7 +50,7 @@ The documentation site is intentionally limited to implemented behavior. The cur
 - QA planning evidence export via `gather-step qa-evidence`: canonical rows, structured citations, existing-test signals, feature-flag gaps, and scan-limit gaps
 - repo-level overview, ownership, dead-code, and convention analysis
 - derived outputs such as assistant rules and ownership files
-- cross-repo PR review via `gather-step pr-review`: structured surface delta (routes, symbols, payload contracts, events, deployment, removal risks) across any two refs, local-first
+- cross-repo PR review via `gather-step pr-review`: structured surface delta (routes, symbols, payload contracts, AI contracts, events, deployment, removal and cross-repo mirror/guard risks) across any two refs, local-first
 - deployment-topology indexing: Dockerfiles, Compose services, Kubernetes manifests, env vars, secrets, config maps, and GitHub Actions deploy jobs mapped to service nodes in the graph
 
 ## Operating Model

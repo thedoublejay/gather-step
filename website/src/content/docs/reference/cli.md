@@ -37,14 +37,18 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`compact`](#compact) — Compact generated storage without deleting indexed state.
 - [`status`](#status) — Summarize indexed repos, graph shape, and semantic health.
 - [`doctor`](#doctor) — Surface broken graph assumptions, dangling edges, and semantic-link problems.
+- [`log`](#log) — Inspect local run telemetry (recent index/query runs, warnings, errors).
 - [`search`](#search) — Search the indexed symbol graph by name.
 - [`trace crud`](#trace-crud) — Trace a route-backed CRUD flow end-to-end.
 - [`events trace`](#events-trace) — Show producers and consumers for an event-like target.
 - [`events blast-radius`](#events-blast-radius) — Trace transitive downstream impact from an event-like target.
 - [`events orphans`](#events-orphans) — List event-like targets that have only producers or only consumers.
 - [`impact`](#impact) — Summarize which repos are touched by a symbol's cross-repo virtual targets.
+- [`cross-repo-deps`](#cross-repo-deps) — List repositories connected to a repo through shared virtual nodes.
+- [`who-consumes`](#who-consumes) — Find which repos consume what a symbol's file produces.
 - [`projection-impact`](#projection-impact) — Trace static source-to-projection field impact.
 - [`deployment-topology`](#deployment-topology) — Query indexed deployment artifacts, env vars, and shared runtime infrastructure.
+- [`storage-report`](#storage-report) — Report on-disk storage usage and compaction opportunities.
 - [`pack`](#pack) — Return a bounded context pack for a target symbol.
 - [`qa-evidence`](#qa-evidence) — Emit canonical code-evidence metadata for downstream QA planning.
 - [`conventions`](#conventions) — Derive repeated structural conventions from the indexed graph.
@@ -106,7 +110,8 @@ Builds the complete workspace index: parses source files, constructs the code gr
 
 ```bash
 gather-step [GLOBAL FLAGS] index [--config <PATH>] [--registry <PATH>] [--storage <PATH>] \
-  [--depth <LEVEL>] [--artifact-path <PATH>] [--release-gate] [--auto-recover] [--watch]
+  [--depth <LEVEL>] [--artifact-path <PATH>] [--release-gate] [--auto-recover] [--watch] \
+  [--lock-timeout <SECS>] [--force-unlock]
 ```
 
 | Flag | Type | Default | Description |
@@ -119,6 +124,8 @@ gather-step [GLOBAL FLAGS] index [--config <PATH>] [--registry <PATH>] [--storag
 | `--release-gate` | bool flag | false | Require a clean git worktree and enforce release-gate index summary invariants. |
 | `--auto-recover` | bool flag | false | Delete generated index state before rebuilding. Use when state is corrupt or uses an unsupported schema. |
 | `--watch` | bool flag | false | Enter watch mode after indexing completes. In interactive human mode, the CLI prompts for this when the flag is omitted. |
+| `--lock-timeout <SECS>` | u64 | 300 | Max seconds to wait for a contended per-repo index lock before reporting it as held and exiting non-zero. `0` waits indefinitely (pre-5.2 behaviour). |
+| `--force-unlock` | bool flag | false | Do not wait for a contended index lock — report it immediately with owner (pid, host, age) and recovery instructions. A held lock is never broken automatically: the per-repo lock is OS-advisory, so a dead owner's lock is already released by the kernel; this flag surfaces the holder rather than racing it. |
 
 **Example**
 
@@ -297,6 +304,32 @@ gather-step --workspace /path/to/workspace doctor --json
 
 ---
 
+### `log`
+
+Prints recent run telemetry recorded in the local telemetry store: index/query runs with their status, duration, and any warning or error counters. Telemetry is local-only and privacy-preserving — runs are recorded with hashes rather than raw workspace paths or messages. Nothing is transmitted off-machine.
+
+```bash
+gather-step [GLOBAL FLAGS] log [--last <N>] [--since <AGE>] [--errors-only] [--clear-before <AGE>]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--last <N>` | usize | 20 | Maximum number of run rows to show. |
+| `--since <AGE>` | duration | — | Only show runs newer than an age such as `7d` or `12h`. |
+| `--errors-only` | bool flag | false | Only show runs that recorded an error or a non-success status. |
+| `--clear-before <AGE>` | duration | — | Delete telemetry rows older than an age such as `90d`. Maintenance only; does not print runs. |
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace log --last 50 --errors-only
+gather-step --workspace /path/to/workspace log --clear-before 90d
+```
+
+**When to use** — to inspect why a recent index or query run was slow or failed, or to prune the local telemetry store.
+
+---
+
 ### `search`
 
 Runs a prefix and fuzzy name search over the indexed symbol graph and returns ranked hits. Supports filtering by repo (via global `--repo`), node kind, and result count.
@@ -459,6 +492,58 @@ gather-step --workspace /path/to/workspace impact OrderCreatedDto
 **Output shape (`--json`)** — emits one line with `event: "impact_completed"` and `matches` array items each containing `source_repo`, `source_file`, `source_symbol`, and a `virtual_targets` list of touched cross-repo surfaces.
 
 **When to use** — to quickly understand the blast radius of modifying a shared DTO or service class.
+
+---
+
+### `cross-repo-deps`
+
+Lists the repositories connected to a target repo through shared virtual nodes — the cross-repo edges that meet at routes, topics, queues, shared types, and other virtual surfaces. This is the CLI surface of the `cross_repo_deps` MCP tool, exposed so agent wrappers and scripts can shell out without going through MCP.
+
+```bash
+gather-step [GLOBAL FLAGS] cross-repo-deps [<REPO>]
+```
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `<REPO>` | string (positional) | every configured repo | Repo to inspect. When omitted, reports cross-repo connections for every configured repo. |
+
+The command also accepts the `cross_repo_deps` alias for parity with the MCP tool name.
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace cross-repo-deps backend_standard --json
+```
+
+**Output shape (`--json`)** — emits connected-repo groups keyed by the shared virtual node that links them, each with the repos on either side of the edge.
+
+**When to use** — to scope which other repos a change in one repo can reach before editing a shared surface.
+
+---
+
+### `who-consumes`
+
+Searches for a symbol by name and reports which repos consume what that symbol's file produces — directly, or across a transport boundary (route, event, shared type). This is the CLI surface of the `who_consumes` MCP tool.
+
+```bash
+gather-step [GLOBAL FLAGS] who-consumes <SYMBOL>
+```
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `<SYMBOL>` | string (positional) | required | Symbol name to search for. The command reports the repos that consume what it produces. |
+
+The command also accepts the `who_consumes` alias for parity with the MCP tool name.
+
+**Example**
+
+```bash
+gather-step --workspace /path/to/workspace who-consumes OrderCreatedDto --json
+```
+
+**Output shape (`--json`)** — emits the producing file and the set of consuming repos, with the boundary (direct, route, event, or shared type) that connects each consumer.
+
+**When to use** — to find downstream consumers of a producer symbol before changing or removing it.
 
 ---
 

@@ -44,7 +44,7 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 - Local-first CLI and stdio MCP server
 - Multi-repo indexing into `WORKSPACE/.gather-step/`
 - Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
-- Route, event, shared-symbol, payload-contract, projection-impact, and deployment-topology graph surfaces
+- Route, event, shared-symbol, payload-contract, projection-impact, deployment-topology, and AI/agent-flow graph surfaces
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
 - Evidence-only QA planning manifests for downstream test-plan workflows
 - Workspace health commands such as `status`, `doctor`, and `watch`
@@ -72,6 +72,10 @@ Gather Step treats a workspace as one system. A Kafka producer in repo A and a c
 ### Event-Driven Topology
 
 It is designed to surface producer-to-consumer relationships across event-driven systems, including frameworks and patterns commonly used in TypeScript backends and service architectures.
+
+### AI & Agent Flow Awareness
+
+LLM/agent/RAG/MCP code is modeled as first-class graph surfaces alongside routes, events, and contracts: agent graphs and nodes, LLM calls, tools, prompts, vector indexes, and MCP tools. The `trace_agent` MCP tool walks an agent's forward flow from a target node, so AI pipelines are inspectable the same way request paths and event flows are.
 
 ### Task-Shaped Context Packs
 
@@ -101,7 +105,7 @@ Source repositories are never modified.
 
 ## Requirements
 
-- Rust `1.94.1` for source builds
+- Rust `1.96.0` for source builds
 - A workspace root containing the repos you want to index. `gather-step init` can generate `gather-step.config.yaml`.
 
 Minimal config:
@@ -167,6 +171,8 @@ gather-step --workspace /path/to/workspace search createOrder
 gather-step --workspace /path/to/workspace trace crud --method POST --path /orders
 gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace impact CreateOrderInput
+gather-step --workspace /path/to/workspace who-consumes CreateOrderInput
+gather-step --workspace /path/to/workspace cross-repo-deps backend_standard
 gather-step --workspace /path/to/workspace projection-impact --target subtaskIds
 gather-step --workspace /path/to/workspace deployment-topology where-deployed --service api
 gather-step --workspace /path/to/workspace pack createOrder --mode planning
@@ -178,6 +184,7 @@ gather-step --workspace /path/to/workspace generate agents-md
 gather-step --workspace /path/to/workspace generate codeowners
 gather-step --workspace /path/to/workspace setup-mcp --scope local
 gather-step --workspace /path/to/workspace compact
+gather-step --workspace /path/to/workspace log --last 50 --errors-only
 gather-step --workspace /path/to/workspace watch
 gather-step --workspace /path/to/workspace pr-review --base main --head feature/my-branch --json
 ```
@@ -245,6 +252,8 @@ Reference:
 
 Concepts:
 - [Polyrepo graph](website/src/content/docs/concepts/polyrepo-graph.md)
+- [Event topology](website/src/content/docs/concepts/event-topology.md)
+- [AI & agent flow](website/src/content/docs/concepts/ai-flow.md)
 - [Context packs](website/src/content/docs/concepts/context-packs.md)
 
 ## Development
