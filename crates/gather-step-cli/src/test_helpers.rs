@@ -129,6 +129,8 @@ pub(crate) fn indexed_fixture(name: &str, run_id: &str) -> (StorageContext, Temp
 /// to `run_rendered`, not by `app.workspace_paths()`.
 pub(crate) fn test_app(workspace_path: PathBuf) -> AppContext {
     AppContext {
+        data_dir: workspace_path.join(".gather-step"),
+        data_dir_source: crate::app::DataDirSource::Default,
         workspace_path,
         repo_filter: None,
         json_output: true,

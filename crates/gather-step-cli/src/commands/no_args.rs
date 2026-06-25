@@ -38,6 +38,8 @@ mod tests {
 
         let app = AppContext {
             workspace_path: temp.path().to_path_buf(),
+            data_dir: temp.path().join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             repo_filter: None,
             json_output: false,
             no_interactive: false,

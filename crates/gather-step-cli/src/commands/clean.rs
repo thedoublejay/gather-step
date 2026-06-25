@@ -272,6 +272,8 @@ mod tests {
 
     fn app(workspace_path: PathBuf) -> AppContext {
         AppContext {
+            data_dir: workspace_path.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             workspace_path,
             repo_filter: None,
             json_output: false,

@@ -874,6 +874,8 @@ mod tests {
     fn app(workspace_root: &Path) -> AppContext {
         AppContext {
             workspace_path: workspace_root.to_path_buf(),
+            data_dir: workspace_root.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             repo_filter: None,
             json_output: false,
             no_interactive: true,

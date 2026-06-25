@@ -3666,6 +3666,8 @@ mod tests {
     fn make_app(workspace: &Path) -> AppContext {
         AppContext {
             workspace_path: workspace.to_path_buf(),
+            data_dir: workspace.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             repo_filter: None,
             json_output: false,
             no_interactive: true,
