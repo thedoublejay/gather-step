@@ -1,0 +1,10 @@
+# Configuration for `cargo audit` (RUSTSEC advisory-db scan of Cargo.lock).
+# CI gates on `cargo deny check`; this file only affects `cargo audit` runs.
+[advisories]
+ignore = [
+    # proc-macro-error2 is unmaintained (not a vulnerability). It is pulled
+    # only by `defmt`, an off-by-default optional feature of `jiff`, so it is
+    # never compiled here — `cargo deny` does not even detect it. It lingers in
+    # Cargo.lock, which is all `cargo audit` scans. Revisit if jiff drops it.
+    "RUSTSEC-2026-0173",
+]
