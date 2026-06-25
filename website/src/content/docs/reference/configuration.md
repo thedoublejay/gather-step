@@ -246,3 +246,28 @@ Depth values are accepted as lowercase strings in YAML. The numeric aliases `1`,
 The files under `.gather-step/` are generated and should not be committed to version control. The `.gather-step/` directory itself is created automatically during `index` and managed by the `clean` command.
 
 For workspace setup instructions, see the [workspace setup guide](/guides/workspace-setup/).
+
+## Relocating generated state with `GATHER_STEP_DATA_DIR`
+
+Set the `GATHER_STEP_DATA_DIR` environment variable to move the entire generated-state base directory — registry, storage, graph, advisory locks, and the daemon socket/pid — somewhere other than `<workspace>/.gather-step`. This is primarily a **development convenience**: it lets a dev build of gather-step run against a throwaway index without locking or overwriting the index your editor's MCP server is using.
+
+```bash
+export GATHER_STEP_DATA_DIR=/tmp/gs-dev
+gather-step index            # writes /tmp/gs-dev/{registry.json,storage/…}
+gather-step status           # Data dir: /tmp/gs-dev (source: GATHER_STEP_DATA_DIR)
+```
+
+| Path | With `GATHER_STEP_DATA_DIR=<dir>` |
+|---|---|
+| Registry | `<dir>/registry.json` |
+| Storage root | `<dir>/storage` |
+| Graph / locks / daemon socket | under `<dir>/storage` and `<dir>` |
+| Config (`gather-step.config.yaml`) | **unchanged** — stays in the workspace |
+
+Notes:
+
+- **Precedence** is `--storage` / `--registry` flag &gt; `GATHER_STEP_DATA_DIR` &gt; the `<workspace>/.gather-step` default. An empty value is treated as unset.
+- The config file is **not** relocated — it describes the workspace, not generated state.
+- The override applies only to the **primary workspace** of the invocation. A `pr-review` baseline supplied via `--config` keeps its own `<that-workspace>/.gather-step`.
+- `status` and `doctor` print the active `Data dir` and its source so you can confirm which index you are hitting.
+- A daemon runs over a Unix socket at `<dir>/daemon.sock`; if the resolved path exceeds the portable `AF_UNIX` limit (~92 bytes), the daemon refuses to bind with an actionable error. Keep the override path reasonably short.
