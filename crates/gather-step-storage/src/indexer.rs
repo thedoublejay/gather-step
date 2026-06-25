@@ -1230,14 +1230,7 @@ impl RepoIndexer {
                         .into_iter()
                         .map(|record| AiContractStoreRecord { record }),
                 );
-                for finding in scan_parsed_file(&parsed) {
-                    tracing::warn!(
-                        rule = finding.rule_id,
-                        file = %parsed.file.path.display(),
-                        path = %finding.path,
-                        "mongo query safety finding"
-                    );
-                }
+                report_mongo_findings(&parsed);
 
                 let ParsedFile {
                     file,
@@ -1600,14 +1593,7 @@ impl RepoIndexer {
                                 .into_iter()
                                 .map(|record| AiContractStoreRecord { record }),
                         );
-                        for finding in scan_parsed_file(&parsed) {
-                            tracing::warn!(
-                                rule = finding.rule_id,
-                                file = %parsed.file.path.display(),
-                                path = %finding.path,
-                                "mongo query safety finding"
-                            );
-                        }
+                        report_mongo_findings(&parsed);
 
                         let ParsedFile {
                             file,
@@ -2562,6 +2548,42 @@ fn read_indexable_manifest(repo_root: &Path) -> Option<String> {
     fs::read_to_string(repo_root.join("package.json")).ok()
 }
 
+/// Whether a path's Mongo findings are noise rather than live-code signal:
+/// already-run migrations and archived scripts over known-shape data nobody
+/// edits. (v5.4.1 detector noise reduction.)
+fn mongo_findings_path_is_excluded(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let in_excluded_dir = path.components().any(|component| {
+        matches!(component, Component::Normal(segment)
+            if segment.eq_ignore_ascii_case("migrations")
+                || segment.eq_ignore_ascii_case("archived"))
+    });
+    let is_migration_file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".migration.ts"));
+    in_excluded_dir || is_migration_file
+}
+
+/// Emit Mongo query-safety findings for a parsed file. Routed at `debug` level
+/// (these used to `warn!`-spew on every index) and skipped for non-live paths.
+/// Single source of truth so the full-index and incremental paths cannot drift.
+fn report_mongo_findings(parsed: &ParsedFile) {
+    if mongo_findings_path_is_excluded(&parsed.file.path) {
+        return;
+    }
+    for finding in scan_parsed_file(parsed) {
+        tracing::debug!(
+            rule = finding.rule_id,
+            file = %parsed.file.path.display(),
+            path = %finding.path,
+            confidence = finding.confidence,
+            message = %finding.message,
+            "mongo query safety finding"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![expect(clippy::needless_raw_string_hashes)]
@@ -2591,7 +2613,26 @@ mod tests {
 
     use super::{
         DeploymentIndexingOptions, IndexingOptions, RepoIndexer, is_path_alias_config_path,
+        mongo_findings_path_is_excluded,
     };
+
+    #[test]
+    fn mongo_findings_excludes_migrations_and_archived_paths() {
+        // Already-run migrations / archived scripts are noise, not live code.
+        assert!(mongo_findings_path_is_excluded(Path::new(
+            "src/migrations/0001-init.ts"
+        )));
+        assert!(mongo_findings_path_is_excluded(Path::new(
+            "repo/src/archived/old-script.ts"
+        )));
+        assert!(mongo_findings_path_is_excluded(Path::new(
+            "src/db/backfill.migration.ts"
+        )));
+        // Live service code is still scanned.
+        assert!(!mongo_findings_path_is_excluded(Path::new(
+            "src/services/alert.service.ts"
+        )));
+    }
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
