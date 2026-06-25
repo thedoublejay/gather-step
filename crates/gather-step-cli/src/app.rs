@@ -462,6 +462,17 @@ pub enum DataDirSource {
     Env,
 }
 
+impl DataDirSource {
+    /// Stable label for status/doctor output (human + JSON).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Env => DATA_DIR_ENV,
+        }
+    }
+}
+
 /// Name of the environment variable that relocates the generated-state base
 /// directory (registry, storage, graph, locks, daemon socket/pid) for the
 /// current invocation's primary workspace. See the v5.4.1 dev-isolation design.

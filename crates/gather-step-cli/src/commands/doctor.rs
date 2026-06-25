@@ -26,6 +26,8 @@ pub struct DoctorArgs {}
 struct DoctorOutput {
     event: &'static str,
     ok: bool,
+    data_dir: String,
+    data_dir_source: &'static str,
     issue_count: usize,
     graph_health: GraphHealthOutput,
     pack_metrics: PackDoctorOutput,
@@ -103,10 +105,18 @@ pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<Ren
     let storage = ctx
         .open_storage_coordinator()
         .with_context(|| format!("opening {}", ctx.storage_root().display()))?;
-    execute(&registry, &storage, app.repo_filter.as_deref())
+    execute(
+        &app.data_dir,
+        app.data_dir_source,
+        &registry,
+        &storage,
+        app.repo_filter.as_deref(),
+    )
 }
 
 pub(crate) fn execute(
+    data_dir: &std::path::Path,
+    data_dir_source: crate::app::DataDirSource,
     registry: &RegistryStore,
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
@@ -140,6 +150,8 @@ pub(crate) fn execute(
     let payload = DoctorOutput {
         event: "doctor_completed",
         ok: issue_count == 0,
+        data_dir: data_dir.display().to_string(),
+        data_dir_source: data_dir_source.label(),
         issue_count,
         graph_health,
         pack_metrics,
@@ -149,6 +161,10 @@ pub(crate) fn execute(
     };
 
     let mut lines = Vec::new();
+    lines.push(format!(
+        "Data dir: {} (source: {})",
+        payload.data_dir, payload.data_dir_source
+    ));
     if payload.ok {
         lines.push("Doctor checks passed.".to_owned());
         lines.push(format_graph_health_line(&payload.graph_health));

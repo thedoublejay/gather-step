@@ -105,6 +105,7 @@ pub fn dispatch_request_with_runtime(
                     &app.workspace_path,
                     &runtime.registry_path,
                     storage.root(),
+                    app.data_dir_source,
                     &registry,
                     &storage,
                     app.repo_filter.as_deref(),
@@ -147,7 +148,13 @@ pub fn dispatch_request_with_runtime(
                 let registry = RegistryStore::open(&runtime.registry_path)
                     .with_context(|| format!("opening {}", runtime.registry_path.display()))?;
                 let storage = runtime.storage();
-                doctor::execute(&registry, &storage, app.repo_filter.as_deref())
+                doctor::execute(
+                    &app.data_dir,
+                    app.data_dir_source,
+                    &registry,
+                    &storage,
+                    app.repo_filter.as_deref(),
+                )
             } else {
                 doctor::run_rendered(&app, &StorageContext::workspace_read_only(&app))
             }
