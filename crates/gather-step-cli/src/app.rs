@@ -77,6 +77,12 @@ pub fn telemetry_recovery_event() -> bool {
 #[derive(Clone, Debug)]
 pub struct AppContext {
     pub workspace_path: PathBuf,
+    /// Generated-state base directory (registry, storage, graph, locks, daemon
+    /// socket/pid). Equals `<workspace_path>/.gather-step` unless overridden by
+    /// `GATHER_STEP_DATA_DIR`. Resolved once in [`AppContext::from_cli`].
+    pub data_dir: PathBuf,
+    /// Where [`AppContext::data_dir`] came from.
+    pub data_dir_source: DataDirSource,
     pub repo_filter: Option<String>,
     pub json_output: bool,
     pub no_interactive: bool,
@@ -166,8 +172,12 @@ impl AppContext {
         let workspace_path = path_safety::canonical_workspace_root(&raw)
             .with_context(|| format!("canonicalizing workspace root {}", raw.display()))?;
 
+        let (data_dir, data_dir_source) = resolve_data_dir(&workspace_path);
+
         Ok(Self {
             workspace_path,
+            data_dir,
+            data_dir_source,
             repo_filter: cli.repo.clone(),
             json_output: cli.json,
             no_interactive: cli.no_interactive,
@@ -216,20 +226,7 @@ impl AppContext {
 
     #[must_use]
     pub fn workspace_paths(&self) -> WorkspacePaths {
-        let config_path = self.workspace_path.join("gather-step.config.yaml");
-        let registry_path = self
-            .workspace_path
-            .join(".gather-step")
-            .join("registry.json");
-        let storage_root = self.workspace_path.join(".gather-step").join("storage");
-        let graph_path = storage_root.join("graph.redb");
-
-        WorkspacePaths {
-            config_path,
-            registry_path,
-            storage_root,
-            graph_path,
-        }
+        workspace_paths_for(&self.workspace_path, &self.data_dir)
     }
 }
 
@@ -432,9 +429,166 @@ fn absolutize(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Derive the generated-state paths for a workspace from its resolved
+/// generated-state base directory (`data_dir`).
+///
+/// `config_path` stays workspace-relative — `gather-step.config.yaml` is user
+/// config, not index state, and is never relocated by `GATHER_STEP_DATA_DIR`.
+/// Everything else (registry, storage, graph, and the lock tree under
+/// `storage/locks`) hangs off `data_dir`. This is the single source of truth
+/// for the layout; both [`AppContext::workspace_paths`] and the pr-review
+/// baseline resolver go through it.
+#[must_use]
+pub fn workspace_paths_for(workspace_path: &Path, data_dir: &Path) -> WorkspacePaths {
+    let config_path = workspace_path.join("gather-step.config.yaml");
+    let registry_path = data_dir.join("registry.json");
+    let storage_root = data_dir.join("storage");
+    let graph_path = storage_root.join("graph.redb");
+
+    WorkspacePaths {
+        config_path,
+        registry_path,
+        storage_root,
+        graph_path,
+    }
+}
+
+/// Where the resolved generated-state base directory came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataDirSource {
+    /// `<workspace>/.gather-step` — no override set.
+    Default,
+    /// The `GATHER_STEP_DATA_DIR` environment variable.
+    Env,
+}
+
+impl DataDirSource {
+    /// Stable label for status/doctor output (human + JSON).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Env => DATA_DIR_ENV,
+        }
+    }
+}
+
+/// Name of the environment variable that relocates the generated-state base
+/// directory (registry, storage, graph, locks, daemon socket/pid) for the
+/// current invocation's primary workspace. See the v5.4.1 dev-isolation design.
+pub const DATA_DIR_ENV: &str = "GATHER_STEP_DATA_DIR";
+
+/// Resolve the generated-state base directory for `workspace_path`, honoring
+/// `GATHER_STEP_DATA_DIR`.
+///
+/// Precedence is completed by callers: explicit `--storage`/`--registry` flags
+/// override the returned base, which overrides the `<workspace>/.gather-step`
+/// default. Resolving the env value here (once, at `AppContext` construction)
+/// keeps [`AppContext::workspace_paths`] a pure function over `data_dir`.
+#[must_use]
+pub fn resolve_data_dir(workspace_path: &Path) -> (PathBuf, DataDirSource) {
+    let env_value = env::var(DATA_DIR_ENV).ok();
+    resolve_data_dir_from(env_value.as_deref(), workspace_path)
+}
+
+/// Pure core of [`resolve_data_dir`]: resolve from an explicit env value rather
+/// than reading the process environment, so it is testable without env races.
+///
+/// An empty value is treated as unset (mirrors the `CI` handling in
+/// [`AppContext::from_cli`] and the XDG/Docker/uv convention). A set value is
+/// absolutized (relative values resolve against the current directory) and its
+/// longest existing prefix canonicalized — this resolves a symlinked ancestor
+/// (e.g. macOS `/tmp` -> `/private/tmp`) before the symlink guard walks it.
+fn resolve_data_dir_from(
+    env_value: Option<&str>,
+    workspace_path: &Path,
+) -> (PathBuf, DataDirSource) {
+    match env_value.filter(|value| !value.is_empty()) {
+        Some(value) => {
+            let raw = PathBuf::from(value);
+            let absolute = absolutize(&raw).unwrap_or(raw);
+            let resolved = path_safety::canonicalize_existing_prefix(&absolute).unwrap_or(absolute);
+            (resolved, DataDirSource::Env)
+        }
+        None => (workspace_path.join(".gather-step"), DataDirSource::Default),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ColorModeArg, build_env_filter, color_enabled_for};
+    use std::path::Path;
+
+    use super::{
+        ColorModeArg, DataDirSource, build_env_filter, color_enabled_for, resolve_data_dir_from,
+        workspace_paths_for,
+    };
+
+    #[test]
+    fn workspace_paths_default_layout_is_unchanged() {
+        let ws = Path::new("/tmp/ws");
+        let data_dir = ws.join(".gather-step");
+        let paths = workspace_paths_for(ws, &data_dir);
+        assert_eq!(paths.config_path, ws.join("gather-step.config.yaml"));
+        assert_eq!(
+            paths.registry_path,
+            ws.join(".gather-step").join("registry.json")
+        );
+        assert_eq!(paths.storage_root, ws.join(".gather-step").join("storage"));
+        assert_eq!(
+            paths.graph_path,
+            ws.join(".gather-step").join("storage").join("graph.redb")
+        );
+    }
+
+    #[test]
+    fn workspace_paths_relocate_under_data_dir() {
+        let ws = Path::new("/tmp/ws");
+        let data_dir = Path::new("/tmp/dev");
+        let paths = workspace_paths_for(ws, data_dir);
+        // Config stays workspace-relative — it is user config, not index state.
+        assert_eq!(paths.config_path, ws.join("gather-step.config.yaml"));
+        assert_eq!(paths.registry_path, data_dir.join("registry.json"));
+        assert_eq!(paths.storage_root, data_dir.join("storage"));
+        assert_eq!(
+            paths.graph_path,
+            data_dir.join("storage").join("graph.redb")
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_defaults_to_dot_gather_step_when_unset() {
+        let ws = Path::new("/tmp/ws");
+        let (dir, source) = resolve_data_dir_from(None, ws);
+        assert_eq!(dir, ws.join(".gather-step"));
+        assert_eq!(source, DataDirSource::Default);
+    }
+
+    #[test]
+    fn resolve_data_dir_treats_empty_env_value_as_unset() {
+        let ws = Path::new("/tmp/ws");
+        let (dir, source) = resolve_data_dir_from(Some(""), ws);
+        assert_eq!(dir, ws.join(".gather-step"));
+        assert_eq!(source, DataDirSource::Default);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_data_dir_canonicalizes_symlinked_prefix_of_env_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(tmp.path()).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // The data-dir leaf does not exist yet; the symlinked existing ancestor
+        // (`link`) must resolve to its real target (mirrors macOS /tmp).
+        let env_value = link.join("gs-dev");
+        let (dir, source) =
+            resolve_data_dir_from(Some(env_value.to_str().unwrap()), Path::new("/tmp/ws"));
+        assert_eq!(dir, real.join("gs-dev"));
+        assert_eq!(source, DataDirSource::Env);
+    }
 
     #[test]
     fn default_filter_suppresses_tantivy_segment_manager_warnings() {

@@ -5,6 +5,26 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.4.1 (2026-06-25)
+
+**Developer isolation and quieter Mongo diagnostics.** A point release on top of v5.4.0 — no command was removed and the index schema is unchanged.
+
+### Added
+
+- **`GATHER_STEP_DATA_DIR`** relocates the entire generated-state base (registry, storage, graph, advisory locks, daemon socket/pid) so a dev build can run a throwaway, fully isolated index without locking or overwriting the index your editor's MCP server uses. Precedence is `--storage`/`--registry` flag > `GATHER_STEP_DATA_DIR` > the `<workspace>/.gather-step` default; an empty value is treated as unset; the override applies only to the primary workspace. The config file is never relocated. See the [configuration reference](/reference/configuration/#relocating-generated-state-with-gather_step_data_dir).
+- **`status` and `doctor` now report the active data dir and its source** (`default` / `GATHER_STEP_DATA_DIR`), in both human and `--json` output, so you can confirm which index you are hitting.
+- **Mongo query-safety findings are now persisted** to a queryable `mongo_findings` table (additive — no reindex required) and summarized in `doctor` (`--json` carries the full list), instead of being logged and discarded during indexing.
+
+### Changed
+
+- The daemon socket/pid, the `clean` deletion guard, and the `pr-review` baseline + seed all honor `GATHER_STEP_DATA_DIR`, so isolation is complete across CLI, daemon, and review flows. A bind-time guard rejects an over-deep data dir whose socket path would exceed the portable `AF_UNIX` limit.
+- Mongo safety findings are routed at `debug` level (was `warn`) and skipped for non-live paths (`migrations`/`archived`/`*.migration.ts`), removing the bulk of indexing console noise. Set `GATHER_STEP_LOG=debug` to see them inline.
+
+### Fixed
+
+- The Mongo null-parent-path detector no longer flags array-positional operators (`$[elem]`, `$[]`, positional `$`) — those target existing array elements, so the null-parent reasoning did not apply. This eliminated the bulk of the false positives on real repositories.
+- `pr-review` seeded its review index from, and diffed its baseline against, `<workspace>/.gather-step` regardless of `GATHER_STEP_DATA_DIR`; under an override it would read the production index the isolation is meant to protect. Both now follow the resolved data dir for the primary workspace.
+
 ## v5.4.0 (2026-06-23)
 
 **Hardening, observability, and detection breadth.** This release rolls up the v5.3 and v5.4 workstreams: security fixes around the MCP and external-input boundaries, correctness fixes inside the v5.1 value-mirror feature, a new local-telemetry command, and broader framework/AI detection. It is a behavioural release on top of v5.2 — no command was removed.

@@ -182,19 +182,34 @@ fn confirm_destructive_clean_io(
 }
 
 fn validate_generated_path_override(app: &AppContext, path: &Path, label: &str) -> Result<PathBuf> {
-    let canonical_workspace = path_safety::canonical_workspace_root(&app.workspace_path)
-        .with_context(|| {
-            format!(
-                "canonicalizing workspace root `{}`",
-                app.workspace_path.display()
-            )
-        })?;
-    let generated_root = canonical_workspace.join(".gather-step");
+    // The override must stay inside the active generated-state base. With the
+    // default layout that base is `<workspace>/.gather-step` and we keep the
+    // historical "must resolve inside the workspace" containment. With
+    // GATHER_STEP_DATA_DIR the base lives outside the workspace, so containment
+    // follows the resolved data_dir instead.
+    let (containment_root, generated_root) = match app.data_dir_source {
+        crate::app::DataDirSource::Default => {
+            let canonical_workspace = path_safety::canonical_workspace_root(&app.workspace_path)
+                .with_context(|| {
+                    format!(
+                        "canonicalizing workspace root `{}`",
+                        app.workspace_path.display()
+                    )
+                })?;
+            let generated_root = canonical_workspace.join(".gather-step");
+            (canonical_workspace, generated_root)
+        }
+        crate::app::DataDirSource::Env => {
+            let base = path_safety::canonicalize_existing_prefix(&app.data_dir)
+                .with_context(|| format!("canonicalizing data dir `{}`", app.data_dir.display()))?;
+            (base.clone(), base)
+        }
+    };
 
-    let resolved = path_safety::canonicalize_inside_workspace(path, &canonical_workspace)
+    let resolved = path_safety::canonicalize_inside_workspace(path, &containment_root)
         .with_context(|| {
             format!(
-                "`clean --{label}` path `{}` must resolve inside the workspace",
+                "`clean --{label}` path `{}` must resolve inside the generated-state base",
                 path.display()
             )
         })?;
@@ -272,6 +287,8 @@ mod tests {
 
     fn app(workspace_path: PathBuf) -> AppContext {
         AppContext {
+            data_dir: workspace_path.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             workspace_path,
             repo_filter: None,
             json_output: false,
@@ -316,6 +333,50 @@ mod tests {
         reset_index_state(&registry_path, &storage_root).expect("reset should succeed");
         assert!(!storage_root.exists());
         assert!(!registry_path.exists());
+    }
+
+    fn app_with_data_dir(
+        workspace_path: PathBuf,
+        data_dir: PathBuf,
+        data_dir_source: crate::app::DataDirSource,
+    ) -> AppContext {
+        AppContext {
+            data_dir,
+            data_dir_source,
+            workspace_path,
+            repo_filter: None,
+            json_output: false,
+            no_interactive: true,
+            stdin_is_tty: false,
+            stdout_is_tty: false,
+            stderr_is_tty: false,
+            ci_env_set: true,
+            color_mode: ColorModeArg::Auto,
+            show_banner: false,
+            multi_progress: MultiProgress::new(),
+        }
+    }
+
+    #[test]
+    fn clean_override_validates_against_env_data_dir_when_set() {
+        let ws_tmp = TestDir::new("env-ws");
+        let dev_tmp = TestDir::new("env-dev");
+        let ws = fs::canonicalize(ws_tmp.path()).unwrap();
+        let dev = fs::canonicalize(dev_tmp.path()).unwrap();
+        let app = app_with_data_dir(ws.clone(), dev.clone(), crate::app::DataDirSource::Env);
+
+        // A path inside the env data dir is accepted (containment follows
+        // data_dir, which lives outside the workspace).
+        let inside = dev.join("storage");
+        let resolved = validate_generated_path_override(&app, &inside, "storage")
+            .expect("path inside env data dir should be accepted");
+        assert_eq!(resolved, dev.join("storage"));
+
+        // The workspace's default .gather-step is OUTSIDE the env data dir and
+        // must be rejected — the override can't escape the active data dir.
+        let outside = ws.join(".gather-step").join("storage");
+        validate_generated_path_override(&app, &outside, "storage")
+            .expect_err("path outside env data dir should be rejected");
     }
 
     #[test]

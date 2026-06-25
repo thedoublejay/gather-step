@@ -976,6 +976,8 @@ mod tests {
         std::fs::write(&registry, b"{}").unwrap();
 
         let app = AppContext {
+            data_dir: ws.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             workspace_path: ws,
             repo_filter: None,
             json_output: true,

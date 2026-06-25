@@ -529,6 +529,17 @@ CREATE INDEX IF NOT EXISTS idx_ai_contracts_repo_file
     ON ai_contracts(repo, file_path);
 CREATE INDEX IF NOT EXISTS idx_ai_contracts_source_type_confidence
     ON ai_contracts(source_type_name, confidence DESC, repo, file_path);
+
+CREATE TABLE IF NOT EXISTS mongo_findings (
+    repo        TEXT NOT NULL,
+    file_path   TEXT NOT NULL,
+    rule_id     TEXT NOT NULL,
+    confidence  REAL NOT NULL,
+    query_path  TEXT NOT NULL,
+    message     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mongo_findings_repo
+    ON mongo_findings(repo, file_path);
 ";
 
 const UPSERT_FILE_STATE_SQL: &str = r"
@@ -795,6 +806,16 @@ pub trait MetadataStore {
         &self,
         query: AiContractQuery,
     ) -> Result<Vec<AiContractStoreRecord>, MetadataStoreError>;
+    fn replace_mongo_findings_for_files(
+        &self,
+        repo: &str,
+        file_paths: &[String],
+        records: &[MongoFindingStoreRecord],
+    ) -> Result<(), MetadataStoreError>;
+    fn mongo_findings_by_repo(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<MongoFindingStoreRecord>, MetadataStoreError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -954,6 +975,20 @@ pub struct PayloadContractQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiContractStoreRecord {
     pub record: AiContractRecord,
+}
+
+/// A persisted Mongo query-safety finding (one detector hit at a query path in
+/// a source file). Stored per repo+file so a re-index of a file replaces its
+/// findings rather than accumulating duplicates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MongoFindingStoreRecord {
+    pub repo: String,
+    pub file_path: String,
+    pub rule_id: String,
+    pub confidence: f64,
+    /// The query path within the file where the finding was located.
+    pub query_path: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -3562,6 +3597,67 @@ impl MetadataStore for MetadataStoreDb {
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    fn replace_mongo_findings_for_files(
+        &self,
+        repo: &str,
+        file_paths: &[String],
+        records: &[MongoFindingStoreRecord],
+    ) -> Result<(), MetadataStoreError> {
+        self.with_write_txn(|tx| {
+            for file_path in file_paths {
+                tx.execute(
+                    "DELETE FROM mongo_findings WHERE repo = ?1 AND file_path = ?2",
+                    params![repo, file_path],
+                )?;
+            }
+            for record in records {
+                tx.execute(
+                    r"
+                    INSERT INTO mongo_findings(
+                        repo, file_path, rule_id, confidence, query_path, message
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    ",
+                    params![
+                        record.repo,
+                        record.file_path,
+                        record.rule_id,
+                        record.confidence,
+                        record.query_path,
+                        record.message,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn mongo_findings_by_repo(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<MongoFindingStoreRecord>, MetadataStoreError> {
+        let connection = self.read_connection()?;
+        let mut statement = connection.prepare(
+            r"
+            SELECT repo, file_path, rule_id, confidence, query_path, message
+            FROM mongo_findings
+            WHERE repo = ?1
+            ORDER BY rule_id ASC, file_path ASC, query_path ASC
+            ",
+        )?;
+        let rows = statement.query_map(params![repo], |row| {
+            Ok(MongoFindingStoreRecord {
+                repo: row.get(0)?,
+                file_path: row.get(1)?,
+                rule_id: row.get(2)?,
+                confidence: row.get(3)?,
+                query_path: row.get(4)?,
+                message: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
 }
 
 fn decode_node_id_blob(bytes: &[u8]) -> Result<NodeId, rusqlite::Error> {
@@ -3660,7 +3756,8 @@ mod tests {
         AiContractQuery, AiContractStoreRecord, CONTEXT_PACK_RETENTION_SECONDS, CoChangePairRecord,
         CommitFileChangeKind, CommitFileDeltaRecord, CommitRecord, ContextPackRecord,
         FileAnalytics, FileIndexState, MetadataStore, MetadataStoreDb, MetadataStoreError,
-        PayloadContractQuery, PayloadContractStoreRecord, SQLITE_PAGE_SIZE_BYTES,
+        MongoFindingStoreRecord, PayloadContractQuery, PayloadContractStoreRecord,
+        SQLITE_PAGE_SIZE_BYTES,
     };
 
     static NEXT_TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
@@ -3679,6 +3776,7 @@ mod tests {
         "file_analytics",
         "file_dependencies",
         "file_index_state",
+        "mongo_findings",
         "pack_call_log",
         "payload_contracts",
         "pull_requests",
@@ -4445,6 +4543,35 @@ mod tests {
             ..AiContractQuery::default()
         })?;
         assert!(after.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn mongo_findings_round_trip_through_metadata_store() -> Result<(), MetadataStoreError> {
+        let (_db_path, store) = open_store("mongo-findings")?;
+        let record = MongoFindingStoreRecord {
+            repo: "alert".to_owned(),
+            file_path: "src/services/alert.service.ts".to_owned(),
+            rule_id: "GS-MONGO-NULL-PARENT-PATH".to_owned(),
+            confidence: 0.6,
+            query_path: "$.$set.meta.flags.active".to_owned(),
+            message: "dotted path has no parent guard".to_owned(),
+        };
+
+        store.replace_mongo_findings_for_files(
+            "alert",
+            &["src/services/alert.service.ts".to_owned()],
+            std::slice::from_ref(&record),
+        )?;
+        assert_eq!(store.mongo_findings_by_repo("alert")?, vec![record]);
+
+        // Re-running the same file replaces rather than accumulating.
+        store.replace_mongo_findings_for_files(
+            "alert",
+            &["src/services/alert.service.ts".to_owned()],
+            &[],
+        )?;
+        assert!(store.mongo_findings_by_repo("alert")?.is_empty());
         Ok(())
     }
 

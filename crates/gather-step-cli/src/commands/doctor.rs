@@ -9,7 +9,7 @@ use gather_step_core::EdgeKind;
 use gather_step_core::NodeKind;
 use gather_step_core::RegistryStore;
 use gather_step_parser::resolve::{ResolutionInput, is_non_actionable_unresolved_call};
-use gather_step_storage::{GraphStore, SearchStore, StorageCoordinator};
+use gather_step_storage::{GraphStore, MetadataStore, SearchStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::json;
 
@@ -26,12 +26,16 @@ pub struct DoctorArgs {}
 struct DoctorOutput {
     event: &'static str,
     ok: bool,
+    data_dir: String,
+    data_dir_source: &'static str,
     issue_count: usize,
     graph_health: GraphHealthOutput,
     pack_metrics: PackDoctorOutput,
     repos: Vec<RepoDoctorOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     quality_advisories: Vec<QualityAdvisory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mongo_findings: Vec<MongoFindingOutput>,
     locks: Vec<LockOutput>,
 }
 
@@ -87,6 +91,39 @@ struct PackDoctorOutput {
     unresolved_packs: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct MongoFindingOutput {
+    repo: String,
+    file: String,
+    rule_id: String,
+    confidence: f64,
+    query_path: String,
+    message: String,
+}
+
+/// Collect persisted Mongo query-safety findings across the doctored repos.
+/// Surfaced here so the detectors reach a queryable surface instead of
+/// console spew during indexing.
+fn collect_mongo_findings(
+    storage: &StorageCoordinator,
+    repo_names: &[String],
+) -> Result<Vec<MongoFindingOutput>> {
+    let mut out = Vec::new();
+    for repo in repo_names {
+        for record in storage.metadata().mongo_findings_by_repo(repo)? {
+            out.push(MongoFindingOutput {
+                repo: record.repo,
+                file: record.file_path,
+                rule_id: record.rule_id,
+                confidence: record.confidence,
+                query_path: record.query_path,
+                message: record.message,
+            });
+        }
+    }
+    Ok(out)
+}
+
 pub fn run(app: &AppContext, _args: DoctorArgs) -> Result<()> {
     daemon_proxy::run_read_only_command(
         app,
@@ -103,10 +140,18 @@ pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<Ren
     let storage = ctx
         .open_storage_coordinator()
         .with_context(|| format!("opening {}", ctx.storage_root().display()))?;
-    execute(&registry, &storage, app.repo_filter.as_deref())
+    execute(
+        &app.data_dir,
+        app.data_dir_source,
+        &registry,
+        &storage,
+        app.repo_filter.as_deref(),
+    )
 }
 
 pub(crate) fn execute(
+    data_dir: &std::path::Path,
+    data_dir_source: crate::app::DataDirSource,
     registry: &RegistryStore,
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
@@ -136,19 +181,34 @@ pub(crate) fn execute(
     let repo_names: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
     let quality_advisories = collect_quality_advisories(storage, &repo_names)
         .context("collecting code-quality advisories")?;
+    let mongo_findings =
+        collect_mongo_findings(storage, &repo_names).context("collecting Mongo safety findings")?;
     let locks = collect_locks(storage, registry);
     let payload = DoctorOutput {
         event: "doctor_completed",
         ok: issue_count == 0,
+        data_dir: data_dir.display().to_string(),
+        data_dir_source: data_dir_source.label(),
         issue_count,
         graph_health,
         pack_metrics,
         repos,
         quality_advisories,
+        mongo_findings,
         locks,
     };
 
     let mut lines = Vec::new();
+    lines.push(format!(
+        "Data dir: {} (source: {})",
+        payload.data_dir, payload.data_dir_source
+    ));
+    if !payload.mongo_findings.is_empty() {
+        lines.push(format!(
+            "Mongo safety findings: {} (run with --json for details)",
+            payload.mongo_findings.len()
+        ));
+    }
     if payload.ok {
         lines.push("Doctor checks passed.".to_owned());
         lines.push(format_graph_health_line(&payload.graph_health));

@@ -208,6 +208,12 @@ fn detect_null_parent_path(set_doc: &Value, path: &str, findings: &mut Vec<Mongo
         let Some((parent, _)) = field.rsplit_once('.') else {
             continue;
         };
+        // Array-positional operators (`$[elem]`, `$[]`, positional `$`) target
+        // array elements that exist by virtue of matching the query/arrayFilter,
+        // so the null-parent reasoning does not apply — skip rather than flag.
+        if has_array_positional_operator(field) {
+            continue;
+        }
         // Only a sibling assignment that establishes the parent object is a real
         // guard. An `$ifNull`/`$cond` on the assigned value guards the value, not
         // the parent path's existence, so it does not suppress the finding.
@@ -224,6 +230,15 @@ fn detect_null_parent_path(set_doc: &Value, path: &str, findings: &mut Vec<Mongo
             path: format!("{path}.{field}"),
         });
     }
+}
+
+/// Whether any segment of a dotted update key is an array-positional operator:
+/// the all/filtered positional `$[]` / `$[elem]` (segment starts with `$[`) or
+/// the matched-element positional `$` (segment is exactly `$`).
+fn has_array_positional_operator(field: &str) -> bool {
+    field
+        .split('.')
+        .any(|segment| segment == "$" || segment.starts_with("$["))
 }
 
 fn sibling_assigns_parent(map: &serde_json::Map<String, Value>, parent: &str) -> bool {
@@ -312,6 +327,29 @@ mod detector_tests {
         let guarded_sibling =
             json!({ "$set": { "meta": { "flags": {} }, "meta.flags.active": true } });
         assert!(!rule_ids(&guarded_sibling).contains(&RULE_NULL_PARENT_PATH));
+    }
+
+    #[test]
+    fn does_not_flag_null_parent_for_array_positional_operators() {
+        // Filtered positional `$[elem]`: the array element exists by matching
+        // the arrayFilter, so the null-parent reasoning does not apply.
+        let filtered = json!({ "$set": { "companyData.customFields.$[elem].originalValue": 1 } });
+        assert!(!rule_ids(&filtered).contains(&RULE_NULL_PARENT_PATH));
+
+        // All-positional `$[]`.
+        let all_positional = json!({ "$set": { "tags.$[].value": 1 } });
+        assert!(!rule_ids(&all_positional).contains(&RULE_NULL_PARENT_PATH));
+
+        // Trailing positional `$` operator.
+        let positional = json!({ "$set": { "organizations.$": 1 } });
+        assert!(!rule_ids(&positional).contains(&RULE_NULL_PARENT_PATH));
+    }
+
+    #[test]
+    fn still_flags_plain_dotted_path_without_array_operator() {
+        // A plain dotted path (no array operator) is still the flagged pattern.
+        let plain = json!({ "$set": { "automation.organizationScope.deleted": true } });
+        assert!(rule_ids(&plain).contains(&RULE_NULL_PARENT_PATH));
     }
 
     #[test]

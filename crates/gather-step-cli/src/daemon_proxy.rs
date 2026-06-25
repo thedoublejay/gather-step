@@ -58,7 +58,7 @@ fn inject_freshness(app: &AppContext, rendered: &mut RenderedCommand) {
 }
 
 fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<RenderedCommand> {
-    let client = match DaemonClient::try_connect(&app.workspace_path) {
+    let client = match DaemonClient::try_connect(&app.data_dir, &app.workspace_path) {
         Ok(Some(client)) => client,
         Ok(None) => return None,
         Err(error) => {
@@ -111,7 +111,13 @@ fn try_daemon_after_lock(
     error: &Error,
 ) -> Option<RenderedCommand> {
     let daemon_workspace = daemon_workspace_from_graph_lock(error)?;
-    let client = match DaemonClient::try_connect(&daemon_workspace) {
+    // The lock holder is a foreign workspace discovered from the lock error, not
+    // the current invocation's primary workspace, so GATHER_STEP_DATA_DIR does
+    // not apply: look under its own default `.gather-step`. If that holder is
+    // itself running under an env override we cannot learn its data dir here and
+    // degrade gracefully to None (preserving the lock-contention failure).
+    let daemon_data_dir = daemon_workspace.join(".gather-step");
+    let client = match DaemonClient::try_connect(&daemon_data_dir, &daemon_workspace) {
         Ok(Some(client)) => client,
         Ok(None) => {
             warn!(
@@ -270,6 +276,8 @@ mod tests {
     fn app(workspace_root: &Path) -> AppContext {
         AppContext {
             workspace_path: workspace_root.to_path_buf(),
+            data_dir: workspace_root.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             repo_filter: None,
             json_output: false,
             no_interactive: true,

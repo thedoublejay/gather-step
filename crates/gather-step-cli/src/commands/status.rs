@@ -24,6 +24,8 @@ pub struct StatusArgs {}
 struct StatusOutput {
     event: &'static str,
     workspace: String,
+    data_dir: String,
+    data_dir_source: &'static str,
     registry_path: String,
     storage_root: String,
     pack_cache: PackCacheStatusOutput,
@@ -160,6 +162,7 @@ pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<Ren
         ctx.workspace_root(),
         ctx.registry_path(),
         ctx.storage_root(),
+        app.data_dir_source,
         &registry,
         &storage,
         app.repo_filter.as_deref(),
@@ -170,6 +173,7 @@ pub(crate) fn execute(
     workspace_path: &std::path::Path,
     registry_path: &std::path::Path,
     storage_root: &std::path::Path,
+    data_dir_source: crate::app::DataDirSource,
     registry: &RegistryStore,
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
@@ -253,9 +257,16 @@ pub(crate) fn execute(
 
     let locks = collect_locks(storage_root, registry);
 
+    // The data dir is the parent of the storage root (`<data_dir>/storage`).
+    // It can live outside the workspace under GATHER_STEP_DATA_DIR, so show it
+    // absolutely rather than relativizing.
+    let data_dir = storage_root.parent().unwrap_or(storage_root);
+
     let payload = StatusOutput {
         event: "status_completed",
         workspace: relativize_to_workspace(workspace_path, workspace_path),
+        data_dir: data_dir.display().to_string(),
+        data_dir_source: data_dir_source.label(),
         registry_path: relativize_to_workspace(registry_path, workspace_path),
         storage_root: relativize_to_workspace(storage_root, workspace_path),
         pack_cache: pack_cache_status(storage.metadata())
@@ -272,6 +283,10 @@ pub(crate) fn execute(
 
     let mut lines = vec![
         format!("Workspace: {}", payload.workspace),
+        format!(
+            "Data dir: {} (source: {})",
+            payload.data_dir, payload.data_dir_source
+        ),
         format!("Registry: {}", payload.registry_path),
         format!("Storage: {}", payload.storage_root),
         format!(
@@ -466,6 +481,8 @@ mod tests {
     fn app_for(workspace: &Path) -> AppContext {
         AppContext {
             workspace_path: workspace.to_path_buf(),
+            data_dir: workspace.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             repo_filter: None,
             json_output: false,
             no_interactive: false,
@@ -547,6 +564,16 @@ mod tests {
             payload["locks"].is_array(),
             "status payload should always carry a locks array, got {:?}",
             payload["locks"]
+        );
+        // The data dir is surfaced; a default-source test app reports "default".
+        assert_eq!(
+            payload["data_dir_source"].as_str(),
+            Some("default"),
+            "status payload should surface the data_dir source"
+        );
+        assert!(
+            payload["data_dir"].as_str().is_some_and(|s| !s.is_empty()),
+            "status payload should surface a non-empty data_dir path"
         );
         for repo in repos {
             let freshness = repo["freshness"]

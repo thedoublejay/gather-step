@@ -123,23 +123,44 @@ pub fn canonicalize_inside_workspace(
         canonical_root.join(input)
     };
 
-    // Try a direct canonicalize first (works when the path exists).
-    match std::fs::canonicalize(&absolute) {
-        Ok(canonical) => {
-            if canonical.starts_with(canonical_root) {
-                return Ok(canonical);
-            }
-            return Err(PathSafetyError::PathEscape {
-                path: absolute,
-                workspace_root: canonical_root.to_path_buf(),
-            });
-        }
+    let resolved = canonicalize_existing_prefix(&absolute)?;
+    if resolved.starts_with(canonical_root) {
+        Ok(resolved)
+    } else {
+        Err(PathSafetyError::PathEscape {
+            path: absolute,
+            workspace_root: canonical_root.to_path_buf(),
+        })
+    }
+}
+
+/// Resolve `absolute` to a real path by canonicalizing its longest existing
+/// ancestor and re-appending the not-yet-existing tail (lexically normalized).
+///
+/// Unlike [`canonicalize_inside_workspace`] this performs **no** containment
+/// check — it resolves a user-provided directory (e.g. `GATHER_STEP_DATA_DIR`)
+/// whose leaf may not exist yet and which has no enclosing root to validate
+/// against. Resolving the existing prefix is what turns a symlinked ancestor
+/// (such as macOS `/tmp` -> `/private/tmp`) into its real target before the
+/// symlink guard walks it.
+///
+/// `absolute` is expected to be an absolute path; callers should
+/// [`absolutize`](crate::app) relative values first.
+///
+/// # Errors
+///
+/// Returns [`PathSafetyError::Io`] if a path component cannot be read for a
+/// reason other than "not found".
+pub(crate) fn canonicalize_existing_prefix(absolute: &Path) -> Result<PathBuf, PathSafetyError> {
+    // Try a direct canonicalize first (works when the whole path exists).
+    match std::fs::canonicalize(absolute) {
+        Ok(canonical) => return Ok(canonical),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             // Fall through to the partial-canonicalization path below.
         }
         Err(source) => {
             return Err(PathSafetyError::Io {
-                path: absolute,
+                path: absolute.to_path_buf(),
                 source,
             });
         }
@@ -151,37 +172,21 @@ pub fn canonicalize_inside_workspace(
     let mut remaining = Vec::new();
     loop {
         if components.is_empty() {
-            // Nothing exists — fall back to the root itself.
+            // No existing ancestor at all — return the lexically-normalized
+            // input as a best effort.  Unreachable for absolute paths because
+            // the filesystem root always canonicalizes.
             let suffix: PathBuf = remaining.iter().rev().collect();
-            let joined = canonical_root.join(suffix);
-            let result = lexically_normalize(&joined);
-            if result.starts_with(canonical_root) {
-                return Ok(result);
-            }
-            return Err(PathSafetyError::PathEscape {
-                path: absolute,
-                workspace_root: canonical_root.to_path_buf(),
-            });
+            return Ok(lexically_normalize(&suffix));
         }
 
         let candidate: PathBuf = components.iter().collect();
         match std::fs::canonicalize(&candidate) {
             Ok(canonical_prefix) => {
                 // Append remaining components lexically, then normalize away
-                // any `..` / `.` before checking the root prefix.  Without
-                // this normalization a suffix like `missing/../../../escape`
-                // would pass the `starts_with` check while resolving outside
-                // the workspace.
+                // any `..` / `.` so a suffix like `missing/../../escape`
+                // resolves correctly rather than slipping through unchecked.
                 let suffix: PathBuf = remaining.iter().rev().collect();
-                let joined = canonical_prefix.join(suffix);
-                let result = lexically_normalize(&joined);
-                if result.starts_with(canonical_root) {
-                    return Ok(result);
-                }
-                return Err(PathSafetyError::PathEscape {
-                    path: absolute,
-                    workspace_root: canonical_root.to_path_buf(),
-                });
+                return Ok(lexically_normalize(&canonical_prefix.join(suffix)));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 remaining.push(components.pop().expect("components is non-empty"));
@@ -387,6 +392,31 @@ mod tests {
         let root = PathBuf::from("/tmp/ws");
         let outside = PathBuf::from("/etc/passwd");
         relative_to_workspace(&outside, &root).unwrap_err();
+    }
+
+    #[test]
+    fn canonicalize_existing_prefix_returns_existing_path_canonicalized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let resolved = super::canonicalize_existing_prefix(&base).unwrap();
+        assert_eq!(resolved, base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_existing_prefix_resolves_symlinked_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(tmp.path()).unwrap();
+        let real = base.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // `link/storage` does not exist yet; the symlinked existing ancestor
+        // `link` must be resolved to its real target before re-appending.
+        let query = link.join("storage");
+        let resolved = super::canonicalize_existing_prefix(&query).unwrap();
+        assert_eq!(resolved, real.join("storage"));
     }
 
     #[test]

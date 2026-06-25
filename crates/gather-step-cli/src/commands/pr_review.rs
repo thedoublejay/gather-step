@@ -905,7 +905,9 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             || app.workspace_path.clone(),
             |path| std::fs::canonicalize(&path).unwrap_or(path),
         );
-    let baseline_workspace_paths = workspace_paths_for_root(&baseline_workspace_path);
+    let baseline_data_dir = baseline_data_dir(app, &baseline_workspace_path);
+    let baseline_workspace_paths =
+        crate::app::workspace_paths_for(&baseline_workspace_path, &baseline_data_dir);
 
     let config_override_bytes: Option<Vec<u8>> = if let Some(path) = config_override_path.as_ref() {
         Some(
@@ -1347,7 +1349,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         // If the workspace has a normal index with a matching config hash,
         // copy it into the review artifact root so the indexer only needs to
         // update changed repos rather than rebuild from scratch.
-        match pick_seed_source(&baseline_workspace_path, &cache_key_struct.config_hash) {
+        match pick_seed_source(
+            &baseline_data_dir,
+            &baseline_workspace_path,
+            &cache_key_struct.config_hash,
+        ) {
             Ok(Some(seed)) => {
                 tracing::info!("Seeding the review artifact from the baseline workspace index.");
                 if let Err(e) = seed_artifact_root(&seed, &artifact_root) {
@@ -2339,17 +2345,24 @@ fn baseline_index_warnings(
     warnings
 }
 
+/// Default-base workspace paths for an arbitrary root. Delegates to the single
+/// layout source of truth ([`crate::app::workspace_paths_for`]) so it cannot
+/// drift from `AppContext::workspace_paths`. Test-only: production code resolves
+/// the baseline base via [`baseline_data_dir`] + `workspace_paths_for`.
+#[cfg(test)]
 fn workspace_paths_for_root(workspace_path: &Path) -> WorkspacePaths {
-    let config_path = workspace_path.join("gather-step.config.yaml");
-    let registry_path = workspace_path.join(".gather-step").join("registry.json");
-    let storage_root = workspace_path.join(".gather-step").join("storage");
-    let graph_path = storage_root.join("graph.redb");
+    crate::app::workspace_paths_for(workspace_path, &workspace_path.join(".gather-step"))
+}
 
-    WorkspacePaths {
-        config_path,
-        registry_path,
-        storage_root,
-        graph_path,
+/// Generated-state base for a pr-review workspace. `GATHER_STEP_DATA_DIR`
+/// applies only to the invocation's primary workspace; any other workspace
+/// (e.g. a `--config` baseline checkout) keeps its own `<that-ws>/.gather-step`.
+fn baseline_data_dir(app: &AppContext, workspace_path: &Path) -> PathBuf {
+    if app.data_dir_source == crate::app::DataDirSource::Env && workspace_path == app.workspace_path
+    {
+        app.data_dir.clone()
+    } else {
+        workspace_path.join(".gather-step")
     }
 }
 
@@ -3666,6 +3679,8 @@ mod tests {
     fn make_app(workspace: &Path) -> AppContext {
         AppContext {
             workspace_path: workspace.to_path_buf(),
+            data_dir: workspace.join(".gather-step"),
+            data_dir_source: crate::app::DataDirSource::Default,
             repo_filter: None,
             json_output: false,
             no_interactive: true,
