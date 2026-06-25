@@ -9,7 +9,7 @@ use gather_step_core::EdgeKind;
 use gather_step_core::NodeKind;
 use gather_step_core::RegistryStore;
 use gather_step_parser::resolve::{ResolutionInput, is_non_actionable_unresolved_call};
-use gather_step_storage::{GraphStore, SearchStore, StorageCoordinator};
+use gather_step_storage::{GraphStore, MetadataStore, SearchStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::json;
 
@@ -32,6 +32,8 @@ struct DoctorOutput {
     repos: Vec<RepoDoctorOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     quality_advisories: Vec<QualityAdvisory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mongo_findings: Vec<MongoFindingOutput>,
     locks: Vec<LockOutput>,
 }
 
@@ -87,6 +89,39 @@ struct PackDoctorOutput {
     unresolved_packs: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct MongoFindingOutput {
+    repo: String,
+    file: String,
+    rule_id: String,
+    confidence: f64,
+    query_path: String,
+    message: String,
+}
+
+/// Collect persisted Mongo query-safety findings across the doctored repos.
+/// Surfaced here so the detectors reach a queryable surface instead of
+/// console spew during indexing.
+fn collect_mongo_findings(
+    storage: &StorageCoordinator,
+    repo_names: &[String],
+) -> Result<Vec<MongoFindingOutput>> {
+    let mut out = Vec::new();
+    for repo in repo_names {
+        for record in storage.metadata().mongo_findings_by_repo(repo)? {
+            out.push(MongoFindingOutput {
+                repo: record.repo,
+                file: record.file_path,
+                rule_id: record.rule_id,
+                confidence: record.confidence,
+                query_path: record.query_path,
+                message: record.message,
+            });
+        }
+    }
+    Ok(out)
+}
+
 pub fn run(app: &AppContext, _args: DoctorArgs) -> Result<()> {
     daemon_proxy::run_read_only_command(
         app,
@@ -136,6 +171,8 @@ pub(crate) fn execute(
     let repo_names: Vec<String> = repos.iter().map(|repo| repo.repo.clone()).collect();
     let quality_advisories = collect_quality_advisories(storage, &repo_names)
         .context("collecting code-quality advisories")?;
+    let mongo_findings =
+        collect_mongo_findings(storage, &repo_names).context("collecting Mongo safety findings")?;
     let locks = collect_locks(storage, registry);
     let payload = DoctorOutput {
         event: "doctor_completed",
@@ -145,10 +182,17 @@ pub(crate) fn execute(
         pack_metrics,
         repos,
         quality_advisories,
+        mongo_findings,
         locks,
     };
 
     let mut lines = Vec::new();
+    if !payload.mongo_findings.is_empty() {
+        lines.push(format!(
+            "Mongo safety findings: {} (run with --json for details)",
+            payload.mongo_findings.len()
+        ));
+    }
     if payload.ok {
         lines.push("Doctor checks passed.".to_owned());
         lines.push(format_graph_health_line(&payload.graph_health));

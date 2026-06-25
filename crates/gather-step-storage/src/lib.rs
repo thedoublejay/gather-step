@@ -51,7 +51,7 @@ pub use metadata::{
     AiContractQuery, AiContractStoreRecord, CoChangePairRecord, CommitFileChangeKind,
     CommitFileDeltaRecord, CommitRecord, ContextPackRecord, ContextPackStats, FileAnalytics,
     FileIndexState, MetadataReadOnly, MetadataStore, MetadataStoreDb, MetadataStoreError,
-    PackCallLogEntry, PayloadContractQuery, PayloadContractStoreRecord,
+    MongoFindingStoreRecord, PackCallLogEntry, PayloadContractQuery, PayloadContractStoreRecord,
 };
 pub use pack_store::{PackBlob, PackStore};
 pub use reconcile::{
