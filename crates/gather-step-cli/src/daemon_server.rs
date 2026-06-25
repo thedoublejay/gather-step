@@ -376,16 +376,30 @@ fn parse_pack_mode(mode: &str) -> Result<PackModeArg> {
     }
 }
 
-fn daemon_dir(workspace_path: &Path) -> PathBuf {
-    workspace_path.join(".gather-step")
+fn daemon_socket_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("daemon.sock")
 }
 
-fn daemon_socket_path(workspace_path: &Path) -> PathBuf {
-    daemon_dir(workspace_path).join("daemon.sock")
+fn daemon_pid_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("daemon.pid")
 }
 
-fn daemon_pid_path(workspace_path: &Path) -> PathBuf {
-    daemon_dir(workspace_path).join("daemon.pid")
+/// Portable-safe `AF_UNIX` path length. `sockaddr_un.sun_path` is 104 bytes on
+/// macOS and 108 on Linux; 92 is the limit portable applications target. A
+/// deep `GATHER_STEP_DATA_DIR` can push `<data_dir>/daemon.sock` past it, so we
+/// check before `bind()` to turn a cryptic errno into an actionable error.
+const MAX_SOCKET_PATH_LEN: usize = 92;
+
+fn check_socket_path_len(socket_path: &Path) -> Result<()> {
+    let len = socket_path.as_os_str().len();
+    if len > MAX_SOCKET_PATH_LEN {
+        anyhow::bail!(
+            "daemon socket path is {len} bytes, over the {MAX_SOCKET_PATH_LEN}-byte portable \
+             limit: `{}`. Use a shorter GATHER_STEP_DATA_DIR.",
+            socket_path.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -414,9 +428,12 @@ impl DaemonServer {
     fn bind_internal(app: &AppContext, runtime: Option<Arc<DaemonRuntime>>) -> Result<Self> {
         use std::os::unix::fs::DirBuilderExt as _;
 
-        let daemon_dir = daemon_dir(&app.workspace_path);
-        let socket_path = daemon_socket_path(&app.workspace_path);
-        let pid_path = daemon_pid_path(&app.workspace_path);
+        let daemon_dir = app.data_dir.clone();
+        let socket_path = daemon_socket_path(&app.data_dir);
+        let pid_path = daemon_pid_path(&app.data_dir);
+        // Reject a socket path that would overflow the AF_UNIX limit before we
+        // create any state, so an over-deep GATHER_STEP_DATA_DIR fails cleanly.
+        check_socket_path_len(&socket_path)?;
         // Create the daemon directory with mode 0o700 atomically: the kernel
         // applies the mode before any other process can observe the directory,
         // eliminating the TOCTOU window that `create_dir_all` + `set_permissions`
@@ -838,12 +855,57 @@ mod tests {
     use indicatif::MultiProgress;
     use tokio_util::sync::CancellationToken;
 
-    use super::{DaemonServer, daemon_pid_path, daemon_socket_path};
+    use super::{DaemonServer, check_socket_path_len, daemon_pid_path, daemon_socket_path};
     use crate::{
         app::{AppContext, ColorModeArg},
         daemon_client::DaemonClient,
-        daemon_protocol::{DaemonRequest, DaemonResponse},
+        daemon_protocol::{DaemonPidFile, DaemonRequest, DaemonResponse},
     };
+
+    #[test]
+    fn try_connect_keys_on_data_dir_not_workspace() {
+        let workspace = TestWorkspace::new("datadir-key");
+        // A dev data dir distinct from the default `<ws>/.gather-step`.
+        let dev_data_dir = workspace.path().join("dev-data");
+        fs::create_dir_all(&dev_data_dir).unwrap();
+        // try_connect only stats the markers and reads the pid, so fabricating
+        // them is enough to exercise the lookup-keys-on-data-dir behaviour.
+        DaemonPidFile::for_current_process(workspace.path())
+            .write_to_path(&dev_data_dir.join("daemon.pid"))
+            .unwrap();
+        fs::write(dev_data_dir.join("daemon.sock"), b"").unwrap();
+
+        // Discovered via the dev data dir, with the workspace as its identity.
+        assert!(
+            DaemonClient::try_connect(&dev_data_dir, workspace.path())
+                .unwrap()
+                .is_some()
+        );
+        // NOT discovered via the default base — a prod client never crosses
+        // into the dev daemon even though they share a workspace_root.
+        let default_base = workspace.path().join(".gather-step");
+        assert!(
+            DaemonClient::try_connect(&default_base, workspace.path())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn check_socket_path_len_rejects_overlong_path_with_actionable_error() {
+        let long = PathBuf::from(format!("/{}/daemon.sock", "x".repeat(120)));
+        let err = check_socket_path_len(&long).expect_err("overlong socket path must be rejected");
+        assert!(
+            err.to_string().contains("GATHER_STEP_DATA_DIR"),
+            "error should point at the env var, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_socket_path_len_accepts_short_path() {
+        check_socket_path_len(Path::new("/tmp/gs/daemon.sock"))
+            .expect("a short socket path must be accepted");
+    }
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -913,12 +975,13 @@ mod tests {
         let Some(daemon) = bind_daemon_or_skip(&app)? else {
             return Ok(());
         };
-        let socket_path = daemon_socket_path(workspace.path());
-        let pid_path = daemon_pid_path(workspace.path());
+        let socket_path = daemon_socket_path(&app.data_dir);
+        let pid_path = daemon_pid_path(&app.data_dir);
         let cancel = CancellationToken::new();
         let daemon_task = tokio::spawn(daemon.serve_until_cancelled(cancel.clone()));
 
-        let client = DaemonClient::try_connect(workspace.path())?.expect("daemon should connect");
+        let client = DaemonClient::try_connect(&app.data_dir, workspace.path())?
+            .expect("daemon should connect");
         let rendered = client.call(&DaemonRequest::Status { repo_filter: None })?;
         assert!(rendered.error.is_none());
         assert!(rendered.payload.is_some());
@@ -937,7 +1000,7 @@ mod tests {
         let Some(daemon) = bind_daemon_or_skip(&app)? else {
             return Ok(());
         };
-        let socket_path = daemon_socket_path(workspace.path());
+        let socket_path = daemon_socket_path(&app.data_dir);
         let cancel = CancellationToken::new();
         let daemon_task = tokio::spawn(daemon.serve_until_cancelled(cancel.clone()));
 
@@ -969,8 +1032,8 @@ mod tests {
         let Some(daemon) = bind_daemon_or_skip(&app)? else {
             return Ok(());
         };
-        let socket_path = daemon_socket_path(workspace.path());
-        let pid_path = daemon_pid_path(workspace.path());
+        let socket_path = daemon_socket_path(&app.data_dir);
+        let pid_path = daemon_pid_path(&app.data_dir);
         let cancel = CancellationToken::new();
         let daemon_task = tokio::spawn(daemon.serve_until_cancelled(cancel.clone()));
         let _idle_client = std::os::unix::net::UnixStream::connect(&socket_path)?;

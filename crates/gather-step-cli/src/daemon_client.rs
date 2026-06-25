@@ -19,10 +19,15 @@ pub struct DaemonClient {
 const DAEMON_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl DaemonClient {
-    pub fn try_connect(workspace_root: &Path) -> Result<Option<Self>> {
-        let daemon_dir = workspace_root.join(".gather-step");
-        let pid_path = daemon_dir.join("daemon.pid");
-        let socket_path = daemon_dir.join("daemon.sock");
+    /// Discover a running daemon. The socket/pid live under `data_dir` (the
+    /// generated-state base, which `GATHER_STEP_DATA_DIR` may have relocated),
+    /// while `workspace_root` is the daemon's identity — a daemon only matches
+    /// when its pid file records the same workspace. Lookup keys on `data_dir`
+    /// so a dev daemon (custom data dir) and a prod daemon (default) never
+    /// cross, even though they share a `workspace_root`.
+    pub fn try_connect(data_dir: &Path, workspace_root: &Path) -> Result<Option<Self>> {
+        let pid_path = data_dir.join("daemon.pid");
+        let socket_path = data_dir.join("daemon.sock");
         if !pid_path.exists() || !socket_path.exists() {
             return Ok(None);
         }
