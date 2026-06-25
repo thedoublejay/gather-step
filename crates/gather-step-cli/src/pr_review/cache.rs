@@ -220,22 +220,25 @@ pub struct SeedSource {
     pub storage_root: PathBuf,
 }
 
-/// Decide whether the workspace's normal index is safe to seed from.
+/// Decide whether the baseline's normal index is safe to seed from.
 ///
-/// The seed is safe when all three conditions hold:
-/// 1. `<workspace>/.gather-step/storage/graph.redb` exists.
-/// 2. `<workspace>/.gather-step/registry.json` exists.
+/// `data_dir` is the baseline's generated-state base (which
+/// `GATHER_STEP_DATA_DIR` may have relocated away from
+/// `<workspace>/.gather-step`); `workspace_root` supplies the workspace-relative
+/// config file. The seed is safe when all three conditions hold:
+/// 1. `<data_dir>/storage/graph.redb` exists.
+/// 2. `<data_dir>/registry.json` exists.
 /// 3. The workspace config file (`gather-step.config.yaml`) has a content hash
 ///    that matches `review_config_hash` — i.e. the schema has not changed.
 ///
 /// Returns `Some(SeedSource)` when seedable, `None` otherwise.
 pub fn pick_seed_source(
+    data_dir: &Path,
     workspace_root: &Path,
     review_config_hash: &str,
 ) -> Result<Option<SeedSource>> {
-    let gs_dir = workspace_root.join(".gather-step");
-    let storage_root = gs_dir.join("storage");
-    let registry_path = gs_dir.join("registry.json");
+    let storage_root = data_dir.join("storage");
+    let registry_path = data_dir.join("registry.json");
     let graph_path = storage_root.join("graph.redb");
 
     // Conditions 1 + 2: required on-disk artifacts.
@@ -685,14 +688,48 @@ mod tests {
     }
 
     #[test]
+    fn pick_seed_source_reads_index_from_data_dir_not_workspace() {
+        let ws_tmp = TempDir::new("seed-datadir-ws");
+        let data_tmp = TempDir::new("seed-datadir-dd");
+        let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
+        // Config stays workspace-relative.
+        fs::write(ws_tmp.path().join("gather-step.config.yaml"), config_bytes).unwrap();
+        // The index lives under the (relocated) data dir, NOT <ws>/.gather-step.
+        let storage = data_tmp.path().join("storage");
+        fs::create_dir_all(&storage).unwrap();
+        fs::write(storage.join("graph.redb"), b"placeholder").unwrap();
+        fs::write(data_tmp.path().join("registry.json"), b"{}").unwrap();
+
+        let config_hash = config_hash_of(config_bytes);
+
+        // Seedable via the data dir, with the workspace supplying the config.
+        let seed = pick_seed_source(data_tmp.path(), ws_tmp.path(), &config_hash)
+            .expect("pick_seed_source must not err")
+            .expect("an index under the data dir should seed");
+        assert!(seed.storage_root.starts_with(data_tmp.path()));
+
+        // NOT seedable via the workspace's default .gather-step (no index there).
+        let default_data_dir = ws_tmp.path().join(".gather-step");
+        assert!(
+            pick_seed_source(&default_data_dir, ws_tmp.path(), &config_hash)
+                .expect("pick_seed_source must not err")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn pick_seed_source_returns_some_when_workspace_indexed() {
         let ws_tmp = TempDir::new("seed-ws1");
         let config_bytes = b"repos:\n  - name: myrepo\n    path: myrepo\n";
         write_indexed_workspace(ws_tmp.path(), config_bytes);
 
         let config_hash = config_hash_of(config_bytes);
-        let result =
-            pick_seed_source(ws_tmp.path(), &config_hash).expect("pick_seed_source must not err");
+        let result = pick_seed_source(
+            &ws_tmp.path().join(".gather-step"),
+            ws_tmp.path(),
+            &config_hash,
+        )
+        .expect("pick_seed_source must not err");
 
         assert!(
             result.is_some(),
@@ -711,8 +748,12 @@ mod tests {
 
         // Use a hash computed from different bytes.
         let mismatched_hash = config_hash_of(b"repos:\n  - name: other\n    path: other\n");
-        let result = pick_seed_source(ws_tmp.path(), &mismatched_hash)
-            .expect("pick_seed_source must not err");
+        let result = pick_seed_source(
+            &ws_tmp.path().join(".gather-step"),
+            ws_tmp.path(),
+            &mismatched_hash,
+        )
+        .expect("pick_seed_source must not err");
 
         assert!(
             result.is_none(),
@@ -728,8 +769,12 @@ mod tests {
         fs::write(ws_tmp.path().join("gather-step.config.yaml"), config_bytes).unwrap();
 
         let config_hash = config_hash_of(config_bytes);
-        let result =
-            pick_seed_source(ws_tmp.path(), &config_hash).expect("pick_seed_source must not err");
+        let result = pick_seed_source(
+            &ws_tmp.path().join(".gather-step"),
+            ws_tmp.path(),
+            &config_hash,
+        )
+        .expect("pick_seed_source must not err");
 
         assert!(
             result.is_none(),

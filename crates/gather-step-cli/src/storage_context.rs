@@ -215,7 +215,14 @@ pub(crate) fn validate_review_paths_disjoint(
         });
     }
 
-    let generated_state_root = canonicalize_for_guard(&workspace_root.join(".gather-step"))?;
+    // The generated-state base is the parent of the (canonicalized) baseline
+    // storage path, i.e. `<base>/storage` -> `<base>`. Deriving it from the
+    // storage path rather than `<workspace_root>/.gather-step` keeps this guard
+    // correct when GATHER_STEP_DATA_DIR relocates the base outside the
+    // workspace, with no behaviour change for the default layout.
+    let generated_state_root = c_ws_stor
+        .parent()
+        .map_or_else(|| c_ws_stor.clone(), Path::to_path_buf);
     for candidate in [&c_rev_root, &c_rev_reg, &c_rev_stor] {
         if candidate.starts_with(&generated_state_root) {
             return Err(ReviewSafetyError::WorkspaceGeneratedStateOverlap {
