@@ -3776,6 +3776,7 @@ mod tests {
         "file_analytics",
         "file_dependencies",
         "file_index_state",
+        "mongo_findings",
         "pack_call_log",
         "payload_contracts",
         "pull_requests",
