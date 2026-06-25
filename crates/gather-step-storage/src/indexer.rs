@@ -47,7 +47,7 @@ use crate::{
     incremental::{TrackedPath, snapshot_repo_files, snapshot_selected_repo_files},
     metadata::{
         AiContractStoreRecord, FileIndexState, MetadataStoreDb, MetadataStoreError,
-        PayloadContractStoreRecord,
+        MongoFindingStoreRecord, PayloadContractStoreRecord,
     },
     reconcile_changed_files_with_mode,
 };
@@ -402,6 +402,7 @@ pub struct RepoIndexPayload {
     pub unresolved_inputs: Vec<gather_step_parser::resolve::ResolutionInput>,
     pub payload_records: Vec<PayloadContractStoreRecord>,
     pub ai_records: Vec<AiContractStoreRecord>,
+    pub mongo_records: Vec<MongoFindingStoreRecord>,
     pub file_states: Vec<FileIndexState>,
     /// Display strings for the indexed files.  Used by the reconcile path
     /// (graph-store lookups, dependency writes) which keys on the lossy
@@ -552,6 +553,7 @@ impl RepoIndexer {
                 unresolved_inputs: Vec::new(),
                 payload_records: Vec::new(),
                 ai_records: Vec::new(),
+                mongo_records: Vec::new(),
                 file_states: Vec::new(),
                 indexed_file_paths: Vec::new(),
                 indexed_path_ids: Vec::new(),
@@ -702,6 +704,7 @@ impl RepoIndexer {
             &payload.file_states,
         )?;
         write_ai_contracts(self.storage.metadata(), repo, &payload.ai_records)?;
+        write_mongo_findings(self.storage.metadata(), repo, &payload.mongo_records)?;
 
         stats.files_parsed = stats
             .files_parsed
@@ -1173,6 +1176,7 @@ impl RepoIndexer {
         let mut resolution_inputs = Vec::new();
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
+        let mut mongo_records = Vec::<MongoFindingStoreRecord>::new();
         let mut files = Vec::new();
         // Keyed by `Arc<[u8]>` of PathId bytes so two byte-distinct non-UTF-8
         // filenames are never collapsed to the same map entry.
@@ -1230,14 +1234,7 @@ impl RepoIndexer {
                         .into_iter()
                         .map(|record| AiContractStoreRecord { record }),
                 );
-                for finding in scan_parsed_file(&parsed) {
-                    tracing::warn!(
-                        rule = finding.rule_id,
-                        file = %parsed.file.path.display(),
-                        path = %finding.path,
-                        "mongo query safety finding"
-                    );
-                }
+                mongo_records.extend(report_mongo_findings(&parsed));
 
                 let ParsedFile {
                     file,
@@ -1400,6 +1397,7 @@ impl RepoIndexer {
             unresolved_inputs: resolution.unresolved,
             payload_records,
             ai_records,
+            mongo_records,
             file_states,
             indexed_file_paths,
             indexed_path_ids,
@@ -1462,6 +1460,7 @@ impl RepoIndexer {
         let mut value_mirror_candidates: Vec<gather_step_parser::ValueMirrorCandidate> = Vec::new();
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
+        let mut mongo_records = Vec::<MongoFindingStoreRecord>::new();
         // Slim per-file metadata retained for reconcile and the metadata store.
         let mut file_states: Vec<FileIndexState> = Vec::new();
         let mut indexed_file_paths: Vec<String> = Vec::new();
@@ -1600,14 +1599,7 @@ impl RepoIndexer {
                                 .into_iter()
                                 .map(|record| AiContractStoreRecord { record }),
                         );
-                        for finding in scan_parsed_file(&parsed) {
-                            tracing::warn!(
-                                rule = finding.rule_id,
-                                file = %parsed.file.path.display(),
-                                path = %finding.path,
-                                "mongo query safety finding"
-                            );
-                        }
+                        mongo_records.extend(report_mongo_findings(&parsed));
 
                         let ParsedFile {
                             file,
@@ -1935,6 +1927,7 @@ impl RepoIndexer {
             &file_states,
         )?;
         write_ai_contracts(self.storage.metadata(), repo, &ai_records)?;
+        write_mongo_findings(self.storage.metadata(), repo, &mongo_records)?;
         let metadata_elapsed = metadata_start.elapsed();
         info!(
             repo,
@@ -2562,6 +2555,82 @@ fn read_indexable_manifest(repo_root: &Path) -> Option<String> {
     fs::read_to_string(repo_root.join("package.json")).ok()
 }
 
+/// Whether a path's Mongo findings are noise rather than live-code signal:
+/// already-run migrations and archived scripts over known-shape data nobody
+/// edits. (v5.4.1 detector noise reduction.)
+fn mongo_findings_path_is_excluded(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let in_excluded_dir = path.components().any(|component| {
+        matches!(component, Component::Normal(segment)
+            if segment.eq_ignore_ascii_case("migrations")
+                || segment.eq_ignore_ascii_case("archived"))
+    });
+    let is_migration_file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".migration.ts"));
+    in_excluded_dir || is_migration_file
+}
+
+/// Emit Mongo query-safety findings for a parsed file. Routed at `debug` level
+/// (these used to `warn!`-spew on every index) and skipped for non-live paths.
+/// Single source of truth so the full-index and incremental paths cannot drift.
+fn report_mongo_findings(parsed: &ParsedFile) -> Vec<MongoFindingStoreRecord> {
+    if mongo_findings_path_is_excluded(&parsed.file.path) {
+        return Vec::new();
+    }
+    let file_path = parsed.file.path.display().to_string();
+    scan_parsed_file(parsed)
+        .into_iter()
+        .map(|finding| {
+            tracing::debug!(
+                rule = finding.rule_id,
+                file = %file_path,
+                path = %finding.path,
+                confidence = finding.confidence,
+                message = %finding.message,
+                "mongo query safety finding"
+            );
+            MongoFindingStoreRecord {
+                // `repo` is stamped at persist time by `write_mongo_findings`.
+                repo: String::new(),
+                file_path: file_path.clone(),
+                rule_id: finding.rule_id.to_owned(),
+                confidence: finding.confidence,
+                query_path: finding.path,
+                message: finding.message,
+            }
+        })
+        .collect()
+}
+
+/// Persist Mongo findings for a repo, stamping each record with `repo` and
+/// replacing prior rows for the affected files (mirrors `write_ai_contracts`).
+fn write_mongo_findings(
+    store: &MetadataStoreDb,
+    repo: &str,
+    mongo_records: &[MongoFindingStoreRecord],
+) -> Result<(), MetadataStoreError> {
+    if mongo_records.is_empty() {
+        return Ok(());
+    }
+    let mut file_paths: Vec<String> = mongo_records
+        .iter()
+        .map(|record| record.file_path.clone())
+        .collect();
+    file_paths.sort();
+    file_paths.dedup();
+    let records: Vec<MongoFindingStoreRecord> = mongo_records
+        .iter()
+        .cloned()
+        .map(|mut record| {
+            repo.clone_into(&mut record.repo);
+            record
+        })
+        .collect();
+    store.replace_mongo_findings_for_files(repo, &file_paths, &records)
+}
+
 #[cfg(test)]
 mod tests {
     #![expect(clippy::needless_raw_string_hashes)]
@@ -2591,7 +2660,26 @@ mod tests {
 
     use super::{
         DeploymentIndexingOptions, IndexingOptions, RepoIndexer, is_path_alias_config_path,
+        mongo_findings_path_is_excluded,
     };
+
+    #[test]
+    fn mongo_findings_excludes_migrations_and_archived_paths() {
+        // Already-run migrations / archived scripts are noise, not live code.
+        assert!(mongo_findings_path_is_excluded(Path::new(
+            "src/migrations/0001-init.ts"
+        )));
+        assert!(mongo_findings_path_is_excluded(Path::new(
+            "repo/src/archived/old-script.ts"
+        )));
+        assert!(mongo_findings_path_is_excluded(Path::new(
+            "src/db/backfill.migration.ts"
+        )));
+        // Live service code is still scanned.
+        assert!(!mongo_findings_path_is_excluded(Path::new(
+            "src/services/alert.service.ts"
+        )));
+    }
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -2853,6 +2941,51 @@ export async function compareItems(a: string, b: string) {
                 .iter()
                 .any(|node| node.external_id.as_deref() == Some("__llm__openai__gpt-4.1-mini")),
             "converged LlmModel node should be persisted"
+        );
+    }
+
+    #[test]
+    fn indexes_mongo_findings_into_metadata_store() {
+        let repo_root = TestDir::new("mongo-repo");
+        let storage_root = TestDir::new("mongo-storage");
+        fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
+        fs::write(
+            repo_root.path().join("package.json"),
+            r#"{ "name": "mongo-service", "dependencies": { "mongoose": "^8.0.0" } }"#,
+        )
+        .expect("package.json fixture should write");
+        // An unguarded dotted `$set` update doc — the canonical
+        // GS-MONGO-NULL-PARENT-PATH case the extractor recognizes.
+        fs::write(
+            repo_root.path().join("src/repo.ts"),
+            r"
+export async function run(model: any) {
+    await model.updateOne(
+        { _id: '123' },
+        { $set: { 'meta.flags.active': true } }
+    );
+}
+",
+        )
+        .expect("repo fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("mongo-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let findings = indexer
+            .storage()
+            .metadata()
+            .mongo_findings_by_repo("mongo-service")
+            .expect("mongo findings query should succeed");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "GS-MONGO-NULL-PARENT-PATH"
+                    && f.file_path.ends_with("repo.ts")),
+            "the unguarded dotted $set must be persisted and queryable, got: {findings:?}"
         );
     }
 
