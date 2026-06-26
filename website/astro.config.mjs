@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import sitemap from '@astrojs/sitemap';
 
 const siteUrl = 'https://gatherstep.dev';
 const siteTitle = 'Gather Step';
@@ -12,6 +13,15 @@ const socialImage = `${siteUrl}/og_card.webp`;
 export default defineConfig({
   site: siteUrl,
   integrations: [
+    // Declared before Starlight so Starlight uses this configured instance.
+    // A build-time `lastmod` gives crawlers a freshness signal the default
+    // Starlight sitemap omits.
+    sitemap({
+      serialize(item) {
+        item.lastmod = new Date().toISOString();
+        return item;
+      },
+    }),
     starlight({
       title: siteTitle,
       description: siteDescription,
@@ -105,6 +115,7 @@ export default defineConfig({
       },
       disable404Route: true,
       components: {
+        Head: './src/components/starlight/Head.astro',
         Header: './src/components/starlight/Header.astro',
         Footer: './src/components/starlight/Footer.astro',
         MobileMenuFooter: './src/components/starlight/MobileMenuFooter.astro',

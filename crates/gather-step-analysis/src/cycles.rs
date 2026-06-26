@@ -16,6 +16,27 @@ pub struct Cycle {
     pub cross_repo: bool,
 }
 
+/// True when every member of a cycle is a method of the *same* class (shares an
+/// identical `Class.` prefix), i.e. intra-class method recursion like
+/// `Factory.create <-> Factory.createMany`. That is not an architectural
+/// dependency cycle between distinct components, so it is excluded from results.
+/// A cycle with any prefix-less member (a bare function) is never treated as
+/// single-class.
+fn is_single_class_cycle(labels: &[String]) -> bool {
+    let mut class: Option<&str> = None;
+    for label in labels {
+        let Some((prefix, _)) = label.rsplit_once('.') else {
+            return false;
+        };
+        match class {
+            None => class = Some(prefix),
+            Some(existing) if existing != prefix => return false,
+            _ => {}
+        }
+    }
+    class.is_some()
+}
+
 pub fn find_cycles<S: GraphStore>(
     store: &S,
     edge_kinds: Option<&[EdgeKind]>,
@@ -43,7 +64,6 @@ pub fn find_cycles<S: GraphStore>(
 
     let count = node_ids.len();
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); count];
-    let mut self_loop = vec![false; count];
     for (source_index, node_id) in node_ids.iter().enumerate() {
         for edge in store.get_outgoing(*node_id)? {
             if let Some(kinds) = edge_kinds
@@ -54,9 +74,6 @@ pub fn find_cycles<S: GraphStore>(
             let Some(&target_index) = index_of.get(&edge.target.as_bytes()) else {
                 continue;
             };
-            if target_index == source_index {
-                self_loop[source_index] = true;
-            }
             adjacency[source_index].push(target_index);
         }
     }
@@ -65,12 +82,21 @@ pub fn find_cycles<S: GraphStore>(
 
     let mut cycles = Vec::new();
     for scc in sccs {
-        let is_cycle = scc.len() > 1 || (scc.len() == 1 && self_loop[scc[0]]);
-        if !is_cycle {
+        // Only multi-node strongly-connected components are architectural
+        // dependency cycles. A single-node SCC with a self-edge is direct
+        // recursion (or a call that resolves back to its own definition), not
+        // a cycle between distinct components, and only adds noise.
+        if scc.len() < 2 {
             continue;
         }
         let mut nodes: Vec<String> = scc.iter().map(|&i| labels[i].clone()).collect();
         nodes.sort();
+        // Intra-class method recursion (every member shares one `Class.` prefix)
+        // is not an architectural dependency cycle; skip it to keep the advisory
+        // focused on cross-component cycles.
+        if is_single_class_cycle(&nodes) {
+            continue;
+        }
         let mut cycle_repos: Vec<String> = scc.iter().map(|&i| repos[i].clone()).collect();
         cycle_repos.sort();
         cycle_repos.dedup();
@@ -226,6 +252,104 @@ mod tests {
             find_cycles(&store, Some(&[EdgeKind::Calls]))
                 .expect("cycles")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn ignores_single_node_self_loop() {
+        // A function that calls itself (direct recursion) or whose call edge
+        // resolves back to the same node is NOT an architectural dependency
+        // cycle. Reporting it as one floods doctor with self-recursion noise.
+        let temp = TempDb::new("cycles", "self-loop");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let file = NodeData {
+            kind: NodeKind::File,
+            ..func("web", "src/a.ts")
+        };
+        let a = func("web", "a");
+        store
+            .bulk_insert(&[file.clone(), a.clone()], &[calls(a.id, a.id, file.id)])
+            .expect("write");
+
+        assert!(
+            find_cycles(&store, Some(&[EdgeKind::Calls]))
+                .expect("cycles")
+                .is_empty(),
+            "single-node self-loops must not be reported as cycles"
+        );
+    }
+
+    #[test]
+    fn ignores_intra_class_method_cycle() {
+        // Two methods on the same class calling each other (`Factory.create`
+        // <-> `Factory.createMany`) is intra-class recursion, not a dependency
+        // cycle between distinct components.
+        let temp = TempDb::new("cycles", "intra-class");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let file = NodeData {
+            kind: NodeKind::File,
+            ..func("web", "src/a.ts")
+        };
+        let create = NodeData {
+            qualified_name: Some("Factory.create".to_owned()),
+            ..func("web", "create")
+        };
+        let create_many = NodeData {
+            qualified_name: Some("Factory.createMany".to_owned()),
+            ..func("web", "createMany")
+        };
+        store
+            .bulk_insert(
+                &[file.clone(), create.clone(), create_many.clone()],
+                &[
+                    calls(create.id, create_many.id, file.id),
+                    calls(create_many.id, create.id, file.id),
+                ],
+            )
+            .expect("write");
+
+        assert!(
+            find_cycles(&store, Some(&[EdgeKind::Calls]))
+                .expect("cycles")
+                .is_empty(),
+            "intra-class method cycles must not be reported"
+        );
+    }
+
+    #[test]
+    fn flags_cross_class_cycle() {
+        // A cycle that spans two distinct classes IS an architectural cycle and
+        // must still be reported.
+        let temp = TempDb::new("cycles", "cross-class");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let file = NodeData {
+            kind: NodeKind::File,
+            ..func("web", "src/a.ts")
+        };
+        let producer = NodeData {
+            qualified_name: Some("AzureBus.send".to_owned()),
+            ..func("web", "send")
+        };
+        let consumer = NodeData {
+            qualified_name: Some("Kafka.sendMessage".to_owned()),
+            ..func("web", "sendMessage")
+        };
+        store
+            .bulk_insert(
+                &[file.clone(), producer.clone(), consumer.clone()],
+                &[
+                    calls(producer.id, consumer.id, file.id),
+                    calls(consumer.id, producer.id, file.id),
+                ],
+            )
+            .expect("write");
+
+        assert_eq!(
+            find_cycles(&store, Some(&[EdgeKind::Calls]))
+                .expect("cycles")
+                .len(),
+            1,
+            "cross-class cycles must still be reported"
         );
     }
 
