@@ -5,6 +5,25 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.5.0 (2026-06-26)
+
+**Higher-signal `doctor` advisories and a hardened docs site.** A behavioural release on top of v5.4.1 — no command was removed and the index schema is unchanged.
+
+### Changed
+
+- **Dependency-cycle advisories (`GS-GRAPH-DEPENDENCY-CYCLE`) now report only architectural cycles.** Single-node self-loops (direct recursion, or a call that resolves back to its own definition) and intra-class method cycles (for example `Factory.create` ↔ `Factory.createMany`) are no longer reported; cross-component cycles are unaffected. This removes the bulk of the previous false positives.
+- **Shared-component fork detection (`GS-FE-SHARED-COMPONENT-FORK`) is component-scoped.** It now matches only PascalCase component names defined in real component modules, excluding Storybook stories (`*.stories.*`), tests (`*.test.*` / `*.spec.*`), Figma snapshots (`*.figma.*`), mocks (`*.mock.*`), and the MSW service worker — eliminating generic-identifier false positives such as `handleChange`, `render`, and `constructor`.
+- **Mock-in-production detection (`GS-FE-MOCK-IN-PRODUCTION`) recognizes Python test files** (`*_test.py`, `test_*.py`), so a Python test importing fixtures is no longer flagged as a production leak.
+- **`doctor`'s search self-probe samples a real code symbol** (function / class / type) instead of a file-named node such as a workflow YAML or a `Module` like `jest.config.ts`, removing spurious `search projection did not return sample indexed symbol` issues.
+- **Truncated context packs are informational, not a health failure.** Pack truncation is a soft richness limit, so the count is still surfaced (graph-health line and `--json`) but no longer flips workspace health to `degraded` or fails `doctor`.
+
+### Docs / website
+
+- Added a Cloudflare Pages `_headers` baseline — `Content-Security-Policy`, `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy` — bringing gatherstep.dev in line with the security-header baseline used across the other sites.
+- The sitemap now emits `lastmod`.
+- Documentation pages now carry `TechArticle` and `BreadcrumbList` JSON-LD in addition to the existing root `WebSite` / `SoftwareApplication` / `Person` data.
+- Refreshed the website (Astro / Starlight) and Cargo dependency locks.
+
 ## v5.4.1 (2026-06-25)
 
 **Developer isolation and quieter Mongo diagnostics.** A point release on top of v5.4.0 — no command was removed and the index schema is unchanged.
