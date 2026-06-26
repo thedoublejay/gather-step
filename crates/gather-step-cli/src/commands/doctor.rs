@@ -309,8 +309,10 @@ fn summarize_graph_health(
     // registered path is not a git repository). That is informational, not a
     // graph degradation, so it is reported in `unknown_repos` but never flips
     // `degraded` / fails `doctor`.
-    let degraded =
-        !stale_repos.is_empty() || !never_indexed_repos.is_empty() || truncated_packs > 0;
+    // Truncated packs are a soft richness limit (a precomputed pack was trimmed
+    // to its budget), not a correctness fault, so they are reported for
+    // visibility but never flip `degraded` / fail `doctor`.
+    let degraded = !stale_repos.is_empty() || !never_indexed_repos.is_empty();
     let mut reasons = Vec::new();
     if !stale_repos.is_empty() {
         reasons.push(format!(
@@ -323,9 +325,6 @@ fn summarize_graph_health(
             "{} repo(s) have never been indexed",
             never_indexed_repos.len()
         ));
-    }
-    if truncated_packs > 0 {
-        reasons.push(format!("{truncated_packs} context pack(s) are truncated"));
     }
 
     GraphHealthOutput {
@@ -344,8 +343,16 @@ fn format_graph_health_line(health: &GraphHealthOutput) -> String {
     if health.degraded {
         format!("Graph health: degraded ({})", health.reasons.join("; "))
     } else {
+        let truncated = if health.truncated_packs > 0 {
+            format!(
+                "; {} context pack(s) truncated (informational)",
+                health.truncated_packs
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Graph health: fresh ({} of {} repo(s))",
+            "Graph health: fresh ({} of {} repo(s)){truncated}",
             health.fresh_repos, health.total_repos
         )
     }
@@ -503,7 +510,7 @@ fn inspect_repo(
         ));
     }
 
-    if let Some(sample) = nodes.iter().find(|node| node.kind.is_search_indexable()) {
+    if let Some(sample) = select_probe_node(&nodes) {
         let search_hits = storage
             .search()
             .search(&sample.name, 10)
@@ -534,6 +541,24 @@ fn inspect_repo(
         dangling_edges,
         semantic_health,
     })
+}
+
+/// Pick a representative node for the search self-probe. Prefer a real code
+/// symbol, whose name round-trips through search, over file-/path-named nodes
+/// like `Module` (`jest.config.ts`), `WorkflowJob` or `Deployment` (their slashy
+/// names do not reliably surface in top-N search and would make the probe
+/// false-positive).
+fn select_probe_node(nodes: &[gather_step_core::NodeData]) -> Option<&gather_step_core::NodeData> {
+    nodes
+        .iter()
+        .find(|node| {
+            node.kind.is_search_indexable()
+                && matches!(
+                    node.kind,
+                    NodeKind::Function | NodeKind::Class | NodeKind::Type
+                )
+        })
+        .or_else(|| nodes.iter().find(|node| node.kind.is_search_indexable()))
 }
 
 pub(crate) fn count_actionable_unresolved_inputs(inputs: &[ResolutionInput]) -> usize {
@@ -800,9 +825,82 @@ mod tests {
     }
 
     #[test]
-    fn truncated_packs_are_degraded() {
+    fn truncated_packs_are_informational_not_degraded() {
+        // Pack truncation is a soft richness limit, not a correctness fault, so
+        // it must not flip workspace health to degraded. The count is still
+        // surfaced for visibility.
         let health = super::summarize_graph_health(vec![freshness("backend", "fresh")], None, 3);
-        assert!(health.degraded);
+        assert!(!health.degraded);
         assert_eq!(health.truncated_packs, 3);
+        assert!(
+            health.reasons.is_empty(),
+            "truncated packs must not appear as a degradation reason"
+        );
+    }
+
+    #[test]
+    fn fresh_health_line_surfaces_truncated_pack_count() {
+        // Even when not degraded, the truncated count must stay visible so the
+        // soft richness limit is not silently lost from human output.
+        let health = super::summarize_graph_health(vec![freshness("backend", "fresh")], None, 3);
+        let line = super::format_graph_health_line(&health);
+        assert!(line.contains("fresh"), "got: {line}");
+        assert!(line.contains("3 context pack(s) truncated"), "got: {line}");
+    }
+
+    fn probe_node(kind: gather_step_core::NodeKind, name: &str) -> gather_step_core::NodeData {
+        gather_step_core::NodeData {
+            id: gather_step_core::node_id("repo", "f", kind, name),
+            kind,
+            repo: "repo".to_owned(),
+            file_path: "f".to_owned(),
+            name: name.to_owned(),
+            qualified_name: None,
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        }
+    }
+
+    #[test]
+    fn probe_prefers_code_symbol_over_path_named_structural_node() {
+        use gather_step_core::NodeKind;
+        // A repo's first search-indexable node is often a path-named WorkflowJob
+        // whose name does not round-trip through search; the self-probe must
+        // pick a real code symbol instead so it does not false-positive.
+        let nodes = vec![
+            probe_node(NodeKind::WorkflowJob, ".github/workflows/cd.yml"),
+            probe_node(NodeKind::Function, "handleRequest"),
+        ];
+        let sample = super::select_probe_node(&nodes).expect("a probe node");
+        assert_eq!(sample.name, "handleRequest");
+    }
+
+    #[test]
+    fn probe_prefers_identifier_symbol_over_file_named_module() {
+        use gather_step_core::NodeKind;
+        // `Module` nodes are named after their file (`jest.config.ts`), whose
+        // path-like name does not round-trip through search just like a
+        // WorkflowJob's. Prefer a real identifier symbol instead.
+        let nodes = vec![
+            probe_node(NodeKind::Module, "jest.config.ts"),
+            probe_node(NodeKind::Function, "computeTotals"),
+        ];
+        let sample = super::select_probe_node(&nodes).expect("a probe node");
+        assert_eq!(sample.name, "computeTotals");
+    }
+
+    #[test]
+    fn probe_falls_back_to_any_searchable_node() {
+        use gather_step_core::NodeKind;
+        let nodes = vec![probe_node(
+            NodeKind::WorkflowJob,
+            ".github/workflows/cd.yml",
+        )];
+        let sample = super::select_probe_node(&nodes).expect("a probe node");
+        assert_eq!(sample.kind, NodeKind::WorkflowJob);
     }
 }

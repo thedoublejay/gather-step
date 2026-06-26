@@ -41,6 +41,33 @@ fn is_component_like(node: &NodeData) -> bool {
     matches!(node.kind, NodeKind::Function | NodeKind::Class)
 }
 
+// Stories, tests, figma snapshots, mocks and the MSW worker frequently live
+// under `shared/components/` but are not reusable components. Treating their
+// exports as "shared" produces the dominant false positives (story `Template`,
+// test `constructor`, figma `noop`).
+const NON_COMPONENT_FILE_MARKERS: &[&str] = &[
+    ".stories.",
+    "/stories/",
+    ".test.",
+    ".spec.",
+    ".figma.",
+    ".mock.",
+    "mockServiceWorker",
+];
+
+fn is_component_module(file_path: &str) -> bool {
+    !NON_COMPONENT_FILE_MARKERS
+        .iter()
+        .any(|marker| file_path.contains(marker))
+}
+
+// Component identity is PascalCase. Bare handler/lifecycle names
+// (`handleChange`, `render`, `noop`, `constructor`) collide across unrelated
+// files and are not component forks.
+fn is_component_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
 pub fn analyze_shared_component_reuse<S: GraphStore>(
     store: &S,
     repo: &str,
@@ -49,7 +76,11 @@ pub fn analyze_shared_component_reuse<S: GraphStore>(
 
     let mut shared: BTreeMap<String, String> = BTreeMap::new();
     for node in &nodes {
-        if is_component_like(node) && is_design_system_path(&node.file_path) {
+        if is_component_like(node)
+            && is_design_system_path(&node.file_path)
+            && is_component_module(&node.file_path)
+            && is_component_name(&node.name)
+        {
             shared
                 .entry(node.name.clone())
                 .or_insert_with(|| node.file_path.clone());
@@ -58,7 +89,10 @@ pub fn analyze_shared_component_reuse<S: GraphStore>(
 
     let mut opportunities = Vec::new();
     for node in &nodes {
-        if !is_component_like(node) || is_design_system_path(&node.file_path) {
+        if !is_component_like(node)
+            || is_design_system_path(&node.file_path)
+            || !is_component_module(&node.file_path)
+        {
             continue;
         }
         if let Some(shared_file) = shared.get(&node.name) {
@@ -142,6 +176,56 @@ mod tests {
         assert_eq!(
             opportunities[0].shared_file,
             "packages/ui/components/Button.tsx"
+        );
+    }
+
+    #[test]
+    fn ignores_story_test_and_figma_targets_under_shared() {
+        // Storybook/test/figma files living under `shared/components/` are not
+        // reusable components. A local symbol matching one of their exports must
+        // not be reported as a fork (the dominant false-positive source).
+        let temp = TempDb::new("shared-component", "non-component-target");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let story_export = node(
+            "web",
+            "src/v2/shared/components/Button/stories/Loading.tsx",
+            "Loading",
+            0,
+        );
+        let local = node("web", "src/admin/loader.jsx", "Loading", 1);
+        store
+            .bulk_insert(&[story_export, local], &[])
+            .expect("write");
+
+        assert!(
+            analyze_shared_component_reuse(&store, "web")
+                .expect("analyze")
+                .is_empty(),
+            "story/test/figma targets must not count as shared components"
+        );
+    }
+
+    #[test]
+    fn ignores_generic_non_component_symbol_names() {
+        // Bare handler / lifecycle names (`handleChange`, `render`, `noop`,
+        // `constructor`) collide constantly and are not component identities.
+        // Only component-shaped (PascalCase) names should match.
+        let temp = TempDb::new("shared-component", "generic-name");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let shared = node(
+            "web",
+            "src/v2/shared/components/CommentBox/CommentInput.tsx",
+            "handleChange",
+            0,
+        );
+        let local = node("web", "src/admin/hooks/useFilter.tsx", "handleChange", 1);
+        store.bulk_insert(&[shared, local], &[]).expect("write");
+
+        assert!(
+            analyze_shared_component_reuse(&store, "web")
+                .expect("analyze")
+                .is_empty(),
+            "generic camelCase names must not be reported as component forks"
         );
     }
 

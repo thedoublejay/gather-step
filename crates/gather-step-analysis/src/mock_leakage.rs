@@ -18,7 +18,16 @@ const MOCK_MARKERS: &[&str] = &[
     ".stub.",
 ];
 
-const TEST_MARKERS: &[&str] = &[".test.", ".spec.", "/__tests__/", "/tests/", "/test/"];
+// `_test.` covers the Python/Go `*_test.py` / `*_test.go` suffix in addition to
+// the JS `.test.` convention; the `test_*` prefix is handled separately below.
+const TEST_MARKERS: &[&str] = &[
+    ".test.",
+    ".spec.",
+    "_test.",
+    "/__tests__/",
+    "/tests/",
+    "/test/",
+];
 
 #[must_use]
 pub fn is_mock_path(file_path: &str) -> bool {
@@ -27,7 +36,14 @@ pub fn is_mock_path(file_path: &str) -> bool {
 
 #[must_use]
 pub fn is_test_path(file_path: &str) -> bool {
-    TEST_MARKERS.iter().any(|marker| file_path.contains(marker))
+    if TEST_MARKERS.iter().any(|marker| file_path.contains(marker)) {
+        return true;
+    }
+    // Python `test_*.py` modules are named by basename prefix, not extension.
+    file_path
+        .rsplit('/')
+        .next()
+        .is_some_and(|basename| basename.starts_with("test_"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +166,51 @@ mod tests {
             find_mock_leakage(&store, "web")
                 .expect("analyze")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn python_suffix_test_file_importing_a_fixture_is_not_flagged() {
+        // Python test files use `_test.py` / `test_*.py`, not the JS `.test.`
+        // convention. Without Python markers, a test importing fixtures is
+        // wrongly flagged as a production mock leak.
+        let temp = TempDb::new("mock-leakage", "py-suffix-test");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let spec = module("api", "app/routes/parse/parse_details_test.py");
+        let fixture = module("api", "tests/fixtures/__init__.py");
+        store
+            .bulk_insert(
+                &[spec.clone(), fixture.clone()],
+                &[imports(spec.id, fixture.id, spec.id)],
+            )
+            .expect("write");
+
+        assert!(
+            find_mock_leakage(&store, "api")
+                .expect("analyze")
+                .is_empty(),
+            "Python `_test.py` files must be recognized as tests"
+        );
+    }
+
+    #[test]
+    fn python_prefix_test_file_importing_a_fixture_is_not_flagged() {
+        let temp = TempDb::new("mock-leakage", "py-prefix-test");
+        let store = GraphStoreDb::open(temp.path()).expect("store");
+        let spec = module("api", "app/routes/parse/test_parse_details.py");
+        let fixture = module("api", "tests/fixtures/__init__.py");
+        store
+            .bulk_insert(
+                &[spec.clone(), fixture.clone()],
+                &[imports(spec.id, fixture.id, spec.id)],
+            )
+            .expect("write");
+
+        assert!(
+            find_mock_leakage(&store, "api")
+                .expect("analyze")
+                .is_empty(),
+            "Python `test_*.py` files must be recognized as tests"
         );
     }
 
