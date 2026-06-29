@@ -3090,7 +3090,7 @@ fn import_path_exists_inside_allowed_roots(repo_root: &Path, candidate: &Path) -
     let canonical_repo_root = match fs::canonicalize(repo_root) {
         Ok(path) => path,
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 repo_root = %repo_root.display(),
                 error = %error,
                 "failed to canonicalize repo root while checking import path; result will not be cached"
@@ -3103,7 +3103,7 @@ fn import_path_exists_inside_allowed_roots(repo_root: &Path, candidate: &Path) -
         match fs::canonicalize(&workspace_root) {
             Ok(canonical_workspace_root) => allowed_roots.push(canonical_workspace_root),
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     workspace_root = %workspace_root.display(),
                     error = %error,
                     "failed to canonicalize workspace root while checking import path; result will not be cached"
@@ -3144,7 +3144,7 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
     let canonical_repo_root = match fs::canonicalize(repo_root) {
         Ok(path) => Some(path),
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 repo_root = %repo_root.display(),
                 error = %error,
                 "failed to canonicalize repo root while resolving sibling package import"
@@ -3157,7 +3157,7 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     dir = %root.display(),
                     error = %error,
                     "failed to enumerate ancestor while resolving sibling package import; skipping"
@@ -3170,7 +3170,7 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             match entry {
                 Ok(entry) => package_dirs.push(entry.path()),
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         dir = %root.display(),
                         error = %error,
                         "skipping unreadable entry while resolving sibling package import"
@@ -3200,7 +3200,7 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             let raw = match fs::read_to_string(&manifest_path) {
                 Ok(raw) => raw,
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         manifest_path = %manifest_path.display(),
                         error = %error,
                         "failed to read package.json while resolving sibling package import; skipping"
@@ -3211,7 +3211,7 @@ fn resolve_sibling_package_import(repo_root: &Path, source: &str) -> Option<Path
             let manifest = match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(manifest) => manifest,
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         manifest_path = %manifest_path.display(),
                         error = %error,
                         "failed to parse package.json while resolving sibling package import; skipping"
@@ -3274,7 +3274,7 @@ fn resolve_python_sibling_package_import(
     let canonical_repo_root = match fs::canonicalize(repo_root) {
         Ok(path) => Some(path),
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 repo_root = %repo_root.display(),
                 error = %error,
                 "failed to canonicalize repo root while resolving Python sibling import"
@@ -3292,7 +3292,7 @@ fn resolve_python_sibling_package_import(
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     dir = %root.display(),
                     error = %error,
                     "failed to enumerate ancestor while resolving Python sibling import; skipping"
@@ -3305,7 +3305,7 @@ fn resolve_python_sibling_package_import(
             match entry {
                 Ok(entry) => package_dirs.push(entry.path()),
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         dir = %root.display(),
                         error = %error,
                         "skipping unreadable entry while resolving Python sibling import"
@@ -4021,7 +4021,7 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
     let entries = match fs::read_dir(workspace_root) {
         Ok(entries) => entries,
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 workspace_root = %workspace_root.display(),
                 error = %error,
                 "failed to enumerate workspace root while resolving external repo identity; cross-repo edge will be unresolved"
@@ -4033,7 +4033,7 @@ fn external_repo_file_identity(repo_root: &Path, resolved: &Path) -> Option<(Str
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     workspace_root = %workspace_root.display(),
                     error = %error,
                     "skipping unreadable entry while resolving external repo identity"
@@ -4079,7 +4079,7 @@ fn python_project_name_from_pyproject(pyproject_path: &Path) -> Option<String> {
     let text = match fs::read_to_string(pyproject_path) {
         Ok(text) => text,
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 pyproject = %pyproject_path.display(),
                 error = %error,
                 "failed to read pyproject.toml while deriving repo name; falling back to directory basename"
@@ -4090,7 +4090,7 @@ fn python_project_name_from_pyproject(pyproject_path: &Path) -> Option<String> {
     let value = match text.parse::<toml::Value>() {
         Ok(value) => value,
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 pyproject = %pyproject_path.display(),
                 error = %error,
                 "failed to parse pyproject.toml while deriving repo name; falling back to directory basename"
@@ -4158,7 +4158,7 @@ fn load_configured_workspace_repo_identities(
     let canonical_config_root = match fs::canonicalize(&config_root) {
         Ok(path) => path,
         Err(error) => {
-            tracing::warn!(
+            tracing::debug!(
                 config_root = %config_root.display(),
                 error = %error,
                 "failed to canonicalize gather-step config root; falling back to directory-basename heuristic"
@@ -4854,11 +4854,11 @@ mod tests {
         }
     }
 
-    fn capture_warnings(run: impl FnOnce()) -> String {
+    fn capture_logs_at(level: tracing::Level, run: impl FnOnce()) -> String {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let writer = CapturedLogs(Arc::clone(&logs));
         let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(level)
             .with_writer(writer)
             .without_time()
             .finish();
@@ -4870,6 +4870,10 @@ mod tests {
             .expect("log capture lock should not be poisoned")
             .clone();
         String::from_utf8(bytes).expect("captured logs should be utf-8")
+    }
+
+    fn capture_warnings(run: impl FnOnce()) -> String {
+        capture_logs_at(tracing::Level::WARN, run)
     }
 
     #[test]
@@ -6436,7 +6440,7 @@ class Outer:
     }
 
     #[test]
-    fn malformed_sibling_package_manifest_emits_warning() {
+    fn malformed_sibling_package_manifest_is_skipped_without_warning() {
         let temp_dir = TestDir::new("workspace-package-malformed-manifest");
         let api_root = temp_dir.path().join("apps/api");
         fs::create_dir_all(api_root.join("src")).expect("api dir should exist");
@@ -6447,13 +6451,24 @@ class Outer:
         )
         .expect("malformed manifest should write");
 
-        let logs = capture_warnings(|| {
+        // A sibling whose manifest fails to parse is a best-effort resolution
+        // miss, not an operator-actionable problem: resolution skips it and the
+        // diagnostic is logged at debug, never warn.
+        let warnings = capture_warnings(|| {
             assert!(resolve_sibling_package_import(&api_root, "contracts").is_none());
         });
-
         assert!(
-            logs.contains("failed to parse package.json while resolving sibling package import"),
-            "expected malformed package.json warning, got {logs}"
+            !warnings.contains("failed to parse package.json"),
+            "a malformed sibling manifest must not warn, got {warnings}"
+        );
+
+        let debug_logs = capture_logs_at(tracing::Level::DEBUG, || {
+            assert!(resolve_sibling_package_import(&api_root, "contracts").is_none());
+        });
+        assert!(
+            debug_logs
+                .contains("failed to parse package.json while resolving sibling package import"),
+            "the skipped candidate should still be recorded at debug, got {debug_logs}"
         );
     }
 
