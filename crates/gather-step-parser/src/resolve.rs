@@ -821,7 +821,7 @@ impl<'a> SymbolIndex<'a> {
             match parse_file_with_context("", self.repo_root, &file, &[], &self.path_aliases) {
                 Ok(parsed) => parsed,
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         source_file = %source_file.display(),
                         resolved_path = %resolved_path.display(),
                         error = %error,
