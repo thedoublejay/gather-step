@@ -5,6 +5,25 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.6.0 (2026-06-29)
+
+**Automatic, self-healing MCP registration.** Indexing a workspace now wires gather-step into your AI clients for you — no manual `setup-mcp` step — and a stale registration repairs itself on the next index. A behavioural release on top of v5.5.0: no command was removed and the index schema is unchanged.
+
+### Added
+
+- **`init`, `index`, and `reindex` auto-register the gather-step MCP server** for both Claude (workspace-local `.mcp.json`) and Codex (`~/.codex/config.toml`) on success. The write is idempotent and self-healing: an outdated entry — for example the legacy `mcp serve` form or a stale workspace path — is rewritten to the canonical `gather-step --workspace <ws> serve` invocation, while an already-correct entry is left untouched (no spurious file churn).
+- **Opt out with `--no-mcp-setup` or `GATHER_STEP_NO_MCP_SETUP=1`** when you would rather manage client config yourself.
+
+### Changed
+
+- **`setup-mcp` is quiet on no-op runs**, reporting `… already up to date` instead of `Updated …` when the existing entry already matches the canonical form.
+- Refreshed Cargo dependency locks.
+
+### Fixed
+
+- **Parallel read queries no longer fail with `graph_locked` under load.** The graph store is single-process, so concurrent read-only queries opening it directly could collide. Read opens now retry with bounded backoff (≈2.5s) so contending readers serialize instead of erroring. A lock held by a long-lived daemon is deliberately not retried — it never releases on its own — so that path still fails fast.
+- **A version-skewed daemon now produces an actionable error.** The daemon records its build version in its pid file; when a query can't be served because the running daemon is a different gather-step version, the error names both versions and tells you to restart the daemon, instead of the generic "another process is using this workspace".
+
 ## v5.5.0 (2026-06-26)
 
 **Higher-signal `doctor` advisories and a hardened docs site.** A behavioural release on top of v5.4.1 — no command was removed and the index schema is unchanged.

@@ -136,9 +136,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.9.1"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
 dependencies = [
  "rustversion",
 ]
@@ -373,9 +373,9 @@ checksum = "49e78e506b9d7633710dab98996f22f95f3d0f488e8f1aa162830556ed9fc14d"
 
 [[package]]
 name = "camino"
-version = "1.2.3"
+version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce8d3bd5823c7504d3f579f13e7b2f3da252fcb938c594d5680ee508bf846f"
+checksum = "5f2d30e4173c4026932d51d31d6b0613b1fd3014bf3f9f8943d4ba139c437ba0"
 
 [[package]]
 name = "cast"
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-analysis"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "gather-step-core",
  "gather-step-parser",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-bench"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-core"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "bitcode",
  "blake3",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-deploy"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "gather-step-core",
  "pretty_assertions",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-git"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "blake3",
  "gather-step-core",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-mcp"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-output"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "chrono",
  "gather-step-analysis",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-parser"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-storage"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "bitcode",
  "blake3",
@@ -2353,9 +2353,9 @@ dependencies = [
 
 [[package]]
 name = "glam"
-version = "0.33.1"
+version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "898f5a568a84989b6c0f8caa50a93074b97dbdc58fc6d9543157bb4562758933"
+checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
 
 [[package]]
 name = "globset"

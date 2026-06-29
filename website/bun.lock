@@ -5,9 +5,9 @@
     "": {
       "name": "gather-step-website",
       "dependencies": {
-        "@astrojs/sitemap": "^3.7.2",
-        "@astrojs/starlight": "^0.41.0",
-        "astro": "^7.0.2",
+        "@astrojs/sitemap": "^3.7.3",
+        "@astrojs/starlight": "^0.41.1",
+        "astro": "^7.0.3",
       },
     },
   },
