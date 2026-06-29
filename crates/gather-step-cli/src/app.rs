@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use console::{set_colors_enabled, set_colors_enabled_stderr, style};
+use gather_step_core::GatherStepConfig;
 use indicatif::{MultiProgress, ProgressDrawTarget};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::{
@@ -20,7 +21,10 @@ use tracing_subscriber::{
     prelude::*,
 };
 
-use crate::{commands::Cli, path_safety};
+use crate::{
+    commands::{Cli, Command},
+    path_safety,
+};
 
 const BANNER: &str = include_str!("../assets/banner.txt");
 static TELEMETRY_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -183,20 +187,48 @@ fn env_flag_enabled(name: &str) -> bool {
 
 impl AppContext {
     pub fn from_cli(cli: &Cli, multi_progress: MultiProgress) -> Result<Self> {
-        // absolutize first so we have an absolute path to canonicalize, even
-        // when the user passes a relative path like ".".
-        let raw = absolutize(&cli.workspace)
-            .with_context(|| format!("resolving workspace path {}", cli.workspace.display()))?;
-        let workspace_path = path_safety::canonical_workspace_root(&raw)
-            .with_context(|| format!("canonicalizing workspace root {}", raw.display()))?;
+        let cwd = path_safety::canonical_workspace_root(&absolutize(Path::new("."))?)
+            .context("canonicalizing the current directory")?;
+
+        let (workspace_path, workspace_source) = match cli.workspace.as_deref() {
+            Some(explicit) => {
+                // absolutize first so we have an absolute path to canonicalize,
+                // even for a relative value like ".".
+                let raw = absolutize(explicit)
+                    .with_context(|| format!("resolving workspace path {}", explicit.display()))?;
+                let root = path_safety::canonical_workspace_root(&raw)
+                    .with_context(|| format!("canonicalizing workspace root {}", raw.display()))?;
+                (root, WorkspaceSource::Explicit)
+            }
+            None => resolve_default_workspace(&cwd, cli.command.as_ref()),
+        };
 
         let (data_dir, data_dir_source) = resolve_data_dir(&workspace_path);
+
+        // With no explicit workspace and no `--repo`, scope to the configured
+        // repo that contains the current directory, so a query run inside a
+        // repo subtree returns that repo's results rather than the whole
+        // workspace.
+        let auto_repo =
+            if cli.repo.is_none() && !matches!(workspace_source, WorkspaceSource::Explicit) {
+                infer_repo_from_cwd(&workspace_path, &cwd)
+            } else {
+                None
+            };
+        let repo_filter = cli.repo.clone().or_else(|| auto_repo.clone());
+
+        emit_workspace_notice(
+            &cwd,
+            &workspace_path,
+            workspace_source,
+            auto_repo.as_deref(),
+        );
 
         Ok(Self {
             workspace_path,
             data_dir,
             data_dir_source,
-            repo_filter: cli.repo.clone(),
+            repo_filter,
             json_output: cli.json,
             no_interactive: cli.no_interactive,
             no_mcp_setup: cli.no_mcp_setup || env_flag_enabled("GATHER_STEP_NO_MCP_SETUP"),
@@ -492,6 +524,100 @@ impl DataDirSource {
     }
 }
 
+/// How the active workspace root was chosen when no `--workspace` was passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceSource {
+    /// An explicit `--workspace <path>`.
+    Explicit,
+    /// The current directory (no index found in an ancestor).
+    CurrentDir,
+    /// Walked up from the current directory to the nearest indexed ancestor.
+    DiscoveredAncestor,
+}
+
+/// Resolve the workspace root when no `--workspace` was given: prefer the
+/// current directory, but when it holds no index of its own, walk up to the
+/// nearest indexed ancestor (git/cargo style) so a command run from a subtree
+/// targets the real workspace instead of an empty local data dir.
+///
+/// Creation/destructive commands (`init`, `clean`) never walk up — they operate
+/// where invoked. Discovery is also skipped when `GATHER_STEP_DATA_DIR` pins the
+/// data dir, since the index location is then explicit.
+fn resolve_default_workspace(cwd: &Path, command: Option<&Command>) -> (PathBuf, WorkspaceSource) {
+    if command_allows_discovery(command)
+        && env::var_os(DATA_DIR_ENV).is_none_or(|value| value.is_empty())
+        && !is_indexed_root(cwd)
+        && let Some(ancestor) = nearest_indexed_ancestor(cwd)
+    {
+        return (ancestor, WorkspaceSource::DiscoveredAncestor);
+    }
+    (cwd.to_path_buf(), WorkspaceSource::CurrentDir)
+}
+
+fn command_allows_discovery(command: Option<&Command>) -> bool {
+    !matches!(command, Some(Command::Init(_) | Command::Clean(_)))
+}
+
+/// A directory is an indexed workspace root when it carries a registry under its
+/// default generated-state base. The empty `.gather-step` a stray subdir run
+/// might create has no registry, so it is never mistaken for an index.
+fn is_indexed_root(dir: &Path) -> bool {
+    dir.join(".gather-step").join("registry.json").is_file()
+}
+
+fn nearest_indexed_ancestor(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .skip(1)
+        .find(|&dir| is_indexed_root(dir))
+        .map(Path::to_path_buf)
+}
+
+/// Find the configured repo whose root contains `cwd`, returning its name. When
+/// repos nest, the deepest (longest) matching root wins. Best-effort: a missing
+/// or malformed config yields `None`.
+fn infer_repo_from_cwd(workspace_root: &Path, cwd: &Path) -> Option<String> {
+    let config_path = workspace_root.join("gather-step.config.yaml");
+    let config = GatherStepConfig::from_yaml_file(&config_path).ok()?;
+    config
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            let root = repo.resolve_root(workspace_root);
+            let root = path_safety::canonical_workspace_root(&root).unwrap_or(root);
+            cwd.starts_with(&root)
+                .then(|| (root.components().count(), repo.name.clone()))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, name)| name)
+}
+
+/// Emit a one-line stderr notice when a command was redirected to a discovered
+/// ancestor workspace, so the redirect is never silent. Written to stderr so
+/// `--json` stdout stays clean.
+fn emit_workspace_notice(
+    cwd: &Path,
+    workspace: &Path,
+    source: WorkspaceSource,
+    auto_repo: Option<&str>,
+) {
+    if source != WorkspaceSource::DiscoveredAncestor {
+        return;
+    }
+    let _ = writeln!(
+        io::stderr(),
+        "gather-step: no index in {}; using discovered workspace {}",
+        cwd.display(),
+        workspace.display(),
+    );
+    if let Some(repo) = auto_repo {
+        let _ = writeln!(
+            io::stderr(),
+            "gather-step: scoping to repo '{repo}' (matches current directory; pass --repo to override)",
+        );
+    }
+}
+
 /// Name of the environment variable that relocates the generated-state base
 /// directory (registry, storage, graph, locks, daemon socket/pid) for the
 /// current invocation's primary workspace. See the v5.4.1 dev-isolation design.
@@ -538,8 +664,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        ColorModeArg, DataDirSource, build_env_filter, color_enabled_for, resolve_data_dir_from,
-        workspace_paths_for,
+        ColorModeArg, DataDirSource, build_env_filter, color_enabled_for, infer_repo_from_cwd,
+        is_indexed_root, nearest_indexed_ancestor, resolve_data_dir_from, workspace_paths_for,
     };
 
     #[test]
@@ -588,6 +714,50 @@ mod tests {
         let (dir, source) = resolve_data_dir_from(Some(""), ws);
         assert_eq!(dir, ws.join(".gather-step"));
         assert_eq!(source, DataDirSource::Default);
+    }
+
+    #[test]
+    fn nearest_indexed_ancestor_walks_up_to_a_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let gs = root.join(".gather-step");
+        std::fs::create_dir_all(&gs).unwrap();
+        std::fs::write(gs.join("registry.json"), "{}").unwrap();
+        let sub = root.join("packages").join("web");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        assert!(is_indexed_root(&root));
+        // An empty `.gather-step` with no registry is not an indexed root.
+        let empty = sub.join(".gather-step");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(!is_indexed_root(&sub));
+
+        assert_eq!(nearest_indexed_ancestor(&sub), Some(root.clone()));
+        // No ancestor of the root itself is indexed (in a fresh temp tree).
+        assert_eq!(nearest_indexed_ancestor(&root), None);
+    }
+
+    #[test]
+    fn infer_repo_from_cwd_picks_the_repo_containing_the_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo_dir = root.join("services").join("api");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(
+            root.join("gather-step.config.yaml"),
+            "repos:\n  - name: api\n    path: services/api\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            infer_repo_from_cwd(&root, &repo_dir),
+            Some("api".to_owned())
+        );
+        let nested = repo_dir.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(infer_repo_from_cwd(&root, &nested), Some("api".to_owned()));
+        // The workspace root itself sits under no configured repo.
+        assert_eq!(infer_repo_from_cwd(&root, &root), None);
     }
 
     #[cfg(unix)]
