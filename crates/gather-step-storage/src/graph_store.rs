@@ -20,6 +20,12 @@ use crate::StorageDaemonMetadata;
 
 type EdgeIdBytes = [u8; 16];
 type NodeIdBytes = [u8; 16];
+
+/// Bounded retry budget for a contended read-only graph open. Six attempts with
+/// exponential backoff from 40ms (≈40+80+160+320+640+1280 = ~2.5s total) absorb
+/// a burst of parallel readers without stalling a genuinely stuck open.
+const READ_OPEN_LOCK_RETRIES: u32 = 6;
+const READ_OPEN_LOCK_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(40);
 #[cfg(any(test, feature = "test-support"))]
 type AttributedEdge = (EdgeData, String, bool, NodeKind, String, bool, NodeKind);
 type StringId = u32;
@@ -741,6 +747,33 @@ impl GraphStoreDb {
             store.validate_schema_version()?;
         }
         Ok(store)
+    }
+
+    /// Open the graph for a read-only command, retrying briefly while the
+    /// database is held by another *transient* gather-step process.
+    ///
+    /// redb is single-process: a concurrent reader holding the file open makes
+    /// `open` fail with [`GraphStoreError::StorageHeld`]. Such holders are
+    /// short-lived (a parallel CLI query), so a bounded backoff lets contending
+    /// reads serialize instead of failing outright — this is what fixes
+    /// `graph_locked` under parallel read load. A lock held by a long-lived
+    /// daemon instead surfaces as [`GraphStoreError::StorageHeldByDaemon`] and is
+    /// deliberately NOT retried: that holder never releases on its own, so we
+    /// fail fast and let the caller route to the daemon (or report a version
+    /// skew) rather than stall for the whole backoff budget.
+    pub fn open_read_retrying(path: impl AsRef<Path>) -> Result<Self, GraphStoreError> {
+        let path = path.as_ref();
+        let mut attempt: u32 = 0;
+        loop {
+            match Self::open(path) {
+                Ok(store) => return Ok(store),
+                Err(GraphStoreError::StorageHeld { .. }) if attempt < READ_OPEN_LOCK_RETRIES => {
+                    std::thread::sleep(READ_OPEN_LOCK_BASE_BACKOFF * 2u32.saturating_pow(attempt));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn write_schema_version(&self) -> Result<(), GraphStoreError> {
@@ -4116,6 +4149,31 @@ mod tests {
             err,
             super::GraphStoreError::StorageHeld { path } if path == graph_path
         ));
+    }
+
+    #[test]
+    fn open_read_retrying_opens_when_uncontended() {
+        let graph_path = temp_db_path("read-retry-uncontended");
+        let store =
+            GraphStoreDb::open_read_retrying(&graph_path).expect("uncontended read open succeeds");
+        drop(store);
+    }
+
+    #[test]
+    fn open_read_retrying_succeeds_after_transient_holder_releases() {
+        let (_workspace, _storage, graph_path) = temp_workspace_graph_path("read-retry-release");
+        // Hold the graph open so the next open hits StorageHeld, then release it
+        // partway through the retry window.
+        let holder = GraphStoreDb::open(&graph_path).expect("first graph open should succeed");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            drop(holder);
+        });
+
+        let store = GraphStoreDb::open_read_retrying(&graph_path)
+            .expect("read open should succeed once the transient holder releases");
+        drop(store);
+        release.join().expect("release thread should finish");
     }
 
     #[test]

@@ -486,6 +486,7 @@ mod tests {
             repo_filter: None,
             json_output: false,
             no_interactive: false,
+            no_mcp_setup: true,
             stdin_is_tty: true,
             stdout_is_tty: true,
             stderr_is_tty: true,

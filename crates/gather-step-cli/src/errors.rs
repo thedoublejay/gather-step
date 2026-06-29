@@ -1,8 +1,10 @@
-use std::io::ErrorKind;
+use std::{io::ErrorKind, path::Path};
 
 use anyhow::Error;
 use gather_step_core::ConfigError;
-use gather_step_storage::{GraphStoreError, MetadataStoreError, SearchStoreError};
+use gather_step_storage::{
+    GraphStoreError, MetadataStoreError, SearchStoreError, StorageDaemonMetadata,
+};
 
 const SCHEMA_VERSION_MISMATCH_MESSAGE: &str = "Index schema version mismatch — built by a different gather-step release. Next step: run `gather-step index --auto-recover` to rebuild, or `gather-step clean && gather-step index`.";
 
@@ -47,9 +49,11 @@ pub fn format_operator_error(error: &Error) -> String {
         }
         if let Some(graph_error) = cause.downcast_ref::<GraphStoreError>() {
             match graph_error {
-                GraphStoreError::StorageHeld { .. }
-                | GraphStoreError::StorageHeldByDaemon { .. } => {
+                GraphStoreError::StorageHeld { .. } => {
                     return GRAPH_LOCKED_MESSAGE.to_owned();
+                }
+                GraphStoreError::StorageHeldByDaemon { path, pid, .. } => {
+                    return daemon_lock_message(path, *pid);
                 }
                 GraphStoreError::Corrupt { .. } | GraphStoreError::BitcodeBlob(_) => {
                     return "Your index is corrupt or incomplete. Run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`.".to_owned();
@@ -102,6 +106,28 @@ pub fn format_operator_error(error: &Error) -> String {
     }
 
     full
+}
+
+/// Build the operator message for a graph lock held by a long-lived daemon.
+///
+/// When the daemon's recorded build version differs from this CLI's, the read
+/// could not be proxied because of that skew — so the message names both
+/// versions and tells the operator to restart the daemon, instead of the
+/// generic "another process is using this workspace". A matching version (or an
+/// unreadable pid file) falls back to the generic guidance.
+fn daemon_lock_message(graph_path: &Path, pid: u32) -> String {
+    let cli_version = env!("CARGO_PKG_VERSION");
+    let daemon_version = StorageDaemonMetadata::read_for_graph_path(graph_path)
+        .and_then(|metadata| metadata.version);
+    match daemon_version.as_deref() {
+        Some(version) if version == cli_version => GRAPH_LOCKED_MESSAGE.to_owned(),
+        Some(version) => format!(
+            "This workspace is held by a gather-step daemon (pid {pid}) running version {version}, but this CLI is version {cli_version}. That version skew is why the query could not be served. Restart the daemon so both match: stop `gather-step serve`/`watch` and start it again."
+        ),
+        None => format!(
+            "This workspace is held by an older gather-step daemon (pid {pid}) that predates version reporting; this CLI is version {cli_version}. Restart the daemon to clear the skew: stop `gather-step serve`/`watch` and start it again."
+        ),
+    }
 }
 
 fn format_config_error(error: &ConfigError) -> String {
