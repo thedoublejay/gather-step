@@ -104,6 +104,7 @@ pub struct TelemetryRunRecord {
     pub started_at_ms: i64,
     pub ended_at_ms: Option<i64>,
     pub command: String,
+    pub cli_version: String,
     pub exit_status: String,
     pub duration_ms: Option<i64>,
     pub peak_rss_bytes: Option<u64>,
@@ -239,7 +240,8 @@ impl TelemetryStore {
         let connection = self.connection()?;
         let mut sql = String::from(
             "SELECT run_id, started_at_ms, ended_at_ms, command, exit_status,
-                    duration_ms, peak_rss_bytes, warn_count, error_count, recovery_event
+                    duration_ms, peak_rss_bytes, warn_count, error_count, recovery_event,
+                    cli_version
              FROM run_log",
         );
         let mut clauses = Vec::new();
@@ -331,6 +333,7 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
         started_at_ms: row.get(1)?,
         ended_at_ms: row.get(2)?,
         command: row.get(3)?,
+        cli_version: row.get(10)?,
         exit_status: row.get(4)?,
         duration_ms: row.get(5)?,
         peak_rss_bytes: peak_rss_bytes.and_then(i64_to_u64),
