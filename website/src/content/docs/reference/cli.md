@@ -23,7 +23,8 @@ These flags apply to every command. Pass them before the subcommand name.
 | `--workspace <PATH>` | path | `.` (current directory) | Workspace root path. All default config, registry, and storage paths are derived from this value. |
 | `--repo <NAME>` | string | — | Restrict the command to one configured repo name. The name must match a repo listed in the config. |
 | `-v, --verbose` | count | 0 (warn level) | Increase log verbosity. Pass once for `info`, twice for `debug`, three or more times for `trace`. Overridden by the `GATHER_STEP_LOG` environment variable. |
-| `--json` | bool flag | false | Emit newline-delimited JSON to stdout instead of human-readable text. Tracing logs are still written to stderr in JSON format when this flag is set. |
+| `--log-file <PATH>` | path | — | Divert the log stream off stderr into a file (appended, RFC 3339 timestamps, no ANSI). Parent directories are created automatically. Use this to keep a `--json` run's stderr clean while retaining diagnostics. Progress bars still render to stderr under the usual TTY/CI/`--json` rules. |
+| `--json` | bool flag | false | Emit newline-delimited JSON to stdout instead of human-readable text. Tracing logs are still written to stderr in JSON format when this flag is set (use `--log-file` to divert them to a file instead). |
 | `--color <auto\|always\|never>` | enum | `auto` | Control ANSI color for command output after CLI parsing. `auto` respects TTY detection, `NO_COLOR`, `FORCE_COLOR`, and `TERM=dumb`; `--json` disables color in stdout payloads. Clap-rendered help and parse errors are emitted before command setup and follow Clap's own terminal color behavior. |
 | `--no-banner` | bool flag | false | Suppress the startup banner printed to stderr. The banner is also suppressed when `--json` is active or when stderr is not a TTY. |
 | `--no-interactive` | bool flag | false | Disable interactive prompts and use command defaults. Use this for scripts and CI. |

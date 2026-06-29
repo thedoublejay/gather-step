@@ -143,6 +143,13 @@ pub struct Cli {
     pub repo: Option<String>,
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true, help = "Increase logging verbosity")]
     pub verbose: u8,
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        help = "Divert log output to a file (appended) instead of stderr; keeps stdout/stderr clean for --json runs"
+    )]
+    pub log_file: Option<std::path::PathBuf>,
     #[arg(long, global = true, help = "Emit newline-delimited JSON output")]
     pub json: bool,
     #[arg(
