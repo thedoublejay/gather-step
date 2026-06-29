@@ -13,6 +13,11 @@ pub struct StorageDaemonMetadata {
     pub pid: u32,
     pub started_at_epoch_ms: u128,
     pub workspace_root: String,
+    /// gather-step build version of the daemon process. `None` when read from a
+    /// pid file written by a release that predates this field, which callers
+    /// treat as an unknown (and therefore skewed) version.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 impl StorageDaemonMetadata {
@@ -26,6 +31,7 @@ impl StorageDaemonMetadata {
             pid: std::process::id(),
             started_at_epoch_ms,
             workspace_root: workspace_root.display().to_string(),
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }
     }
 
