@@ -81,12 +81,13 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
     table.load_preset(UTF8_BORDERS_ONLY);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     table.set_header(vec![
-        "Started", "Command", "Status", "Duration", "RSS", "Warn", "Err", "Recovery",
+        "Started", "Command", "Version", "Status", "Duration", "RSS", "Warn", "Err", "Recovery",
     ]);
     for record in &output.records {
         table.add_row(vec![
             Cell::new(format_ms(record.started_at_ms)),
             Cell::new(&record.command),
+            Cell::new(&record.cli_version),
             Cell::new(&record.exit_status),
             Cell::new(format_duration(record.duration_ms)),
             Cell::new(format_bytes(record.peak_rss_bytes)),
