@@ -135,6 +135,7 @@ pub(crate) fn test_app(workspace_path: PathBuf) -> AppContext {
         repo_filter: None,
         json_output: true,
         no_interactive: true,
+        no_mcp_setup: true,
         stdin_is_tty: false,
         stdout_is_tty: false,
         stderr_is_tty: false,

@@ -281,6 +281,7 @@ mod tests {
             repo_filter: None,
             json_output: false,
             no_interactive: true,
+            no_mcp_setup: true,
             stdin_is_tty: false,
             stdout_is_tty: false,
             stderr_is_tty: false,

@@ -124,6 +124,10 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     about = "Workspace indexing and code graph CLI",
     styles = cli_styles()
 )]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these are independent global CLI toggles, not a state machine"
+)]
 pub struct Cli {
     #[arg(long, global = true, default_value = ".", help = "Workspace root path")]
     pub workspace: std::path::PathBuf,
@@ -153,6 +157,12 @@ pub struct Cli {
         help = "Disable interactive prompts (forces all defaults)"
     )]
     pub no_interactive: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Do not auto-register the gather-step MCP server on init/index/reindex (also GATHER_STEP_NO_MCP_SETUP=1)"
+    )]
+    pub no_mcp_setup: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -238,6 +248,19 @@ fn success(result: Result<()>) -> Result<CliOutcome> {
     result.map(|()| CliOutcome::Success)
 }
 
+/// Map a command result to `Success` and, on success, best-effort auto-register
+/// the gather-step MCP server. Hooked into `init`/`index`/`reindex` so the graph
+/// becomes reachable from Claude and Codex without a manual `setup-mcp`, and so
+/// a stale registration self-heals on the next index. Centralized here rather
+/// than inside each command so `init`'s internal `index::run` call does not
+/// trigger a second registration pass.
+fn success_with_mcp_setup(app: &AppContext, result: Result<()>) -> Result<CliOutcome> {
+    if result.is_ok() {
+        setup_mcp::ensure_registration(app);
+    }
+    success(result)
+}
+
 /// Run the dispatched subcommand and return the user-visible outcome.
 pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     let command_name = command_telemetry_name(cli.command.as_ref());
@@ -275,11 +298,13 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
 
 async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     match cli.command {
-        Some(Command::Init(args)) => success(init::run(&app, args).await),
-        Some(Command::Index(args)) => success(index::run(&app, args).await),
+        Some(Command::Init(args)) => success_with_mcp_setup(&app, init::run(&app, args).await),
+        Some(Command::Index(args)) => success_with_mcp_setup(&app, index::run(&app, args).await),
         Some(Command::Clean(args)) => success(clean::run(&app, args)),
         Some(Command::Compact(args)) => success(compact::run(&app, args)),
-        Some(Command::Reindex(args)) => success(reindex::run(&app, args).await),
+        Some(Command::Reindex(args)) => {
+            success_with_mcp_setup(&app, reindex::run(&app, args).await)
+        }
         Some(Command::Serve(args)) => success(serve::run(&app, args).await),
         Some(Command::Watch(args)) => success(watch::run(&app, args).await),
         Some(Command::Tui(args)) => success(tui::run(&app, args)),

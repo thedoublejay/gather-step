@@ -86,6 +86,9 @@ pub struct AppContext {
     pub repo_filter: Option<String>,
     pub json_output: bool,
     pub no_interactive: bool,
+    /// When set, init/index/reindex skip auto-registering the gather-step MCP
+    /// server. Sourced from `--no-mcp-setup` or `GATHER_STEP_NO_MCP_SETUP`.
+    pub no_mcp_setup: bool,
     pub stdin_is_tty: bool,
     pub stdout_is_tty: bool,
     pub stderr_is_tty: bool,
@@ -163,6 +166,21 @@ impl Output {
     }
 }
 
+/// Treat an environment variable as a boolean opt-in flag. Returns `true` when
+/// the variable is set to any value other than a recognized falsey token
+/// (`""`, `0`, `false`, `no`, `off`), so `GATHER_STEP_NO_MCP_SETUP=1` and
+/// `=true` both disable the behavior while `=0`/`=false` keep it on.
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        let value = value.trim();
+        !(value.is_empty()
+            || value.eq_ignore_ascii_case("0")
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("no")
+            || value.eq_ignore_ascii_case("off"))
+    })
+}
+
 impl AppContext {
     pub fn from_cli(cli: &Cli, multi_progress: MultiProgress) -> Result<Self> {
         // absolutize first so we have an absolute path to canonicalize, even
@@ -181,6 +199,7 @@ impl AppContext {
             repo_filter: cli.repo.clone(),
             json_output: cli.json,
             no_interactive: cli.no_interactive,
+            no_mcp_setup: cli.no_mcp_setup || env_flag_enabled("GATHER_STEP_NO_MCP_SETUP"),
             stdin_is_tty: std::io::stdin().is_terminal(),
             stdout_is_tty: std::io::stdout().is_terminal(),
             stderr_is_tty: std::io::stderr().is_terminal(),

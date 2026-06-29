@@ -159,6 +159,75 @@ fn codex_merge_preserves_other_servers_and_comments() {
 }
 
 #[test]
+fn write_settings_reports_change_then_noop_when_already_canonical() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().to_path_buf();
+    let settings_path = workspace.join(".mcp.json");
+
+    assert!(
+        write_settings(&settings_path, &workspace).expect("first write"),
+        "first write should report a change"
+    );
+    assert!(
+        !write_settings(&settings_path, &workspace).expect("second write"),
+        "second write should be a no-op once the entry is canonical"
+    );
+}
+
+#[test]
+fn write_codex_reports_change_then_noop_when_already_canonical() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join(".codex/config.toml");
+
+    assert!(
+        write_codex_config(&config_path, &workspace).expect("first write"),
+        "first write should report a change"
+    );
+    assert!(
+        !write_codex_config(&config_path, &workspace).expect("second write"),
+        "second write should be a no-op once the entry is canonical"
+    );
+}
+
+#[test]
+fn write_codex_heals_legacy_mcp_serve_form() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join(".codex/config.toml");
+    std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config parent");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[mcp_servers.gather-step]\ncommand = \"/opt/homebrew/bin/gather-step\"\nargs = [\"--workspace\", \"{}\", \"mcp\", \"serve\"]\n",
+            workspace.to_str().unwrap()
+        ),
+    )
+    .expect("seed config");
+
+    assert!(
+        write_codex_config(&config_path, &workspace).expect("heal write"),
+        "a stale `mcp serve` entry should be rewritten"
+    );
+
+    let body = std::fs::read_to_string(&config_path).expect("config body");
+    let value: toml::Value = toml::from_str(&body).expect("config toml");
+    assert_eq!(
+        value["mcp_servers"]["gather-step"]["command"]
+            .as_str()
+            .unwrap(),
+        "gather-step"
+    );
+    let args: Vec<&str> = value["mcp_servers"]["gather-step"]["args"]
+        .as_array()
+        .expect("args array")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(args, ["--workspace", workspace.to_str().unwrap(), "serve"]);
+}
+
+#[test]
 fn codex_non_table_mcp_servers_returns_error_and_preserves_file() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().to_path_buf();
