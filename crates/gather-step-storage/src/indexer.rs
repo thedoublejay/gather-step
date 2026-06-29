@@ -2176,23 +2176,65 @@ fn record_deployment_parse_skip(
         }
         DeploymentParseError::Yaml { .. } => {
             skips.malformed_artifact = skips.malformed_artifact.saturating_add(1);
-            warn!(
-                repo,
-                path = %file_path,
-                error = %error,
-                "skipping malformed deployment artifact during indexing",
-            );
+            if deployment_artifact_path_is_non_live(file_path) {
+                debug!(
+                    repo,
+                    path = %file_path,
+                    error = %error,
+                    "skipping malformed deployment artifact under a test/fixture path during indexing",
+                );
+            } else {
+                warn!(
+                    repo,
+                    path = %file_path,
+                    error = %error,
+                    "skipping malformed deployment artifact during indexing",
+                );
+            }
         }
         DeploymentParseError::Guard { .. } => {
             skips.malformed_artifact = skips.malformed_artifact.saturating_add(1);
-            warn!(
-                repo,
-                path = %file_path,
-                error = %error,
-                "skipping deployment artifact rejected by the YAML safety guard during indexing",
-            );
+            if deployment_artifact_path_is_non_live(file_path) {
+                debug!(
+                    repo,
+                    path = %file_path,
+                    error = %error,
+                    "skipping deployment artifact rejected by the YAML safety guard under a test/fixture path during indexing",
+                );
+            } else {
+                warn!(
+                    repo,
+                    path = %file_path,
+                    error = %error,
+                    "skipping deployment artifact rejected by the YAML safety guard during indexing",
+                );
+            }
         }
     }
+}
+
+/// Whether a deployment artifact lives under a test/fixture path, where a
+/// malformed file is intentional sample data rather than a real config error.
+/// Such parse failures route to `debug` instead of `warn` so indexing stays
+/// quiet — the artifact is skipped either way, and still counted in the skip
+/// summary. Mirrors the v5.4.1 non-live path exclusion for Mongo findings.
+fn deployment_artifact_path_is_non_live(file_path: &str) -> bool {
+    const NON_LIVE_SEGMENTS: [&str; 9] = [
+        "__fixtures__",
+        "fixtures",
+        "__tests__",
+        "tests",
+        "test",
+        "testdata",
+        "__mocks__",
+        "mocks",
+        "node_modules",
+    ];
+    file_path.split(['/', '\\']).any(|segment| {
+        NON_LIVE_SEGMENTS
+            .iter()
+            .any(|marker| segment.eq_ignore_ascii_case(marker))
+    })
 }
 
 fn append_compose_env_file_edges(
@@ -2659,7 +2701,8 @@ mod tests {
     use crate::{GraphStore, MetadataStore, SearchStore};
 
     use super::{
-        DeploymentIndexingOptions, IndexingOptions, RepoIndexer, is_path_alias_config_path,
+        DeploymentIndexingOptions, IndexingOptions, RepoIndexer,
+        deployment_artifact_path_is_non_live, is_path_alias_config_path,
         mongo_findings_path_is_excluded,
     };
 
@@ -2679,6 +2722,31 @@ mod tests {
         assert!(!mongo_findings_path_is_excluded(Path::new(
             "src/services/alert.service.ts"
         )));
+    }
+
+    #[test]
+    fn deployment_non_live_paths_are_recognized() {
+        // Intentionally-broken sample manifests under test/fixture trees.
+        assert!(deployment_artifact_path_is_non_live(
+            "plugins/example-plugin/src/lib/__fixtures__/repo/kustomize/apps/services/broken/overlays/staging/kustomization.yaml"
+        ));
+        assert!(deployment_artifact_path_is_non_live(
+            "src/__tests__/fixtures/deployment.yaml"
+        ));
+        assert!(deployment_artifact_path_is_non_live(
+            "node_modules/pkg/k8s.yaml"
+        ));
+        // Case-insensitive and Windows separators.
+        assert!(deployment_artifact_path_is_non_live(
+            "repo\\Tests\\overlay\\kustomization.yaml"
+        ));
+        // Real deployment manifests still warn.
+        assert!(!deployment_artifact_path_is_non_live(
+            "deploy/overlays/production/kustomization.yaml"
+        ));
+        assert!(!deployment_artifact_path_is_non_live(
+            "k8s/base/deployment.yaml"
+        ));
     }
 
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);

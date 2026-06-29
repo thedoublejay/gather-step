@@ -129,8 +129,12 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     reason = "these are independent global CLI toggles, not a state machine"
 )]
 pub struct Cli {
-    #[arg(long, global = true, default_value = ".", help = "Workspace root path")]
-    pub workspace: std::path::PathBuf,
+    #[arg(
+        long,
+        global = true,
+        help = "Workspace root path (default: current directory, or the nearest indexed ancestor)"
+    )]
+    pub workspace: Option<std::path::PathBuf>,
     #[arg(
         long,
         global = true,
@@ -551,7 +555,7 @@ mod tests {
             ".gather-step/storage",
         ]);
 
-        assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
+        assert_eq!(cli.workspace, Some(std::path::PathBuf::from("/tmp/ws")));
         assert_eq!(cli.repo.as_deref(), Some("backend_standard"));
         assert_eq!(cli.json, true);
 
@@ -718,7 +722,7 @@ mod tests {
             "level2",
         ]);
 
-        assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
+        assert_eq!(cli.workspace, Some(std::path::PathBuf::from("/tmp/ws")));
 
         let Some(Command::Reindex(args)) = cli.command else {
             unreachable!("expected reindex command");
@@ -757,7 +761,7 @@ mod tests {
             "--yes",
         ]);
 
-        assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
+        assert_eq!(cli.workspace, Some(std::path::PathBuf::from("/tmp/ws")));
 
         let Some(Command::Clean(args)) = cli.command else {
             unreachable!("expected clean command");
@@ -785,7 +789,7 @@ mod tests {
             "state/storage",
         ]);
 
-        assert_eq!(cli.workspace, std::path::PathBuf::from("/tmp/ws"));
+        assert_eq!(cli.workspace, Some(std::path::PathBuf::from("/tmp/ws")));
 
         let Some(Command::Compact(args)) = cli.command else {
             unreachable!("expected compact command");

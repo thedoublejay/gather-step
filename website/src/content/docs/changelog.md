@@ -5,6 +5,18 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.7.0 (2026-06-29)
+
+**Run from anywhere in the workspace, and quieter indexing.** A behavioural release on top of v5.6.0: no command was removed and the index schema is unchanged.
+
+### Added
+
+- **Subdirectory workspace discovery.** When you run a command without `--workspace` from a directory that has no index of its own, gather-step now walks up to the nearest indexed ancestor and uses it — instead of treating an empty local `.gather-step` as the workspace. A one-line notice on stderr reports the redirect (so `--json` stdout stays clean), and `--repo` is auto-set to the configured repo that contains the current directory, so a query from inside a repo subtree returns that repo's results. An explicit `--repo` always wins. `init` and `clean` (which create or remove state) never walk up, and `GATHER_STEP_DATA_DIR` opts out of discovery.
+
+### Changed
+
+- **Malformed deployment artifacts under test/fixture paths no longer warn.** Intentionally-broken sample manifests under `__fixtures__`, `fixtures`, `tests`, `testdata`, `__mocks__`, or `node_modules` are routed to `debug` during indexing instead of `warn`; real deployment manifests still warn, and the skip-summary count is unchanged.
+
 ## v5.6.0 (2026-06-29)
 
 **Automatic, self-healing MCP registration.** Indexing a workspace now wires gather-step into your AI clients for you — no manual `setup-mcp` step — and a stale registration repairs itself on the next index. A behavioural release on top of v5.5.0: no command was removed and the index schema is unchanged.
