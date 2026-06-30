@@ -1058,3 +1058,43 @@ fn query_latency_budget() {
     );
     drop(ctx);
 }
+
+#[test]
+fn log_file_diverts_tracing_off_stderr() {
+    let temp = stage_fixture_workspace("log-file");
+    // A nested path also exercises automatic parent-directory creation.
+    let log_path = temp.path().join("logs").join("run.log");
+
+    let output = gather_step()
+        .arg("--workspace")
+        .arg(temp.path())
+        .arg("--verbose")
+        .arg("--log-file")
+        .arg(&log_path)
+        .arg("index")
+        .output()
+        .expect("command should run");
+
+    assert!(
+        output.status.success(),
+        "index failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Tracing was diverted into the file (parent directory created on demand).
+    let logged = fs::read_to_string(&log_path).expect("log file should be created");
+    assert!(
+        logged.contains("INFO"),
+        "log file should capture the diverted tracing output, got:\n{logged}"
+    );
+
+    // ...so stderr carries no tracing level lines.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for level in ["INFO", "WARN", "ERROR", "DEBUG"] {
+        assert!(
+            !stderr.contains(level),
+            "stderr should be free of `{level}` log lines when --log-file is set, got:\n{stderr}"
+        );
+    }
+}

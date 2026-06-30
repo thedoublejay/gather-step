@@ -5,6 +5,19 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.8.0 (2026-06-29)
+
+**Quieter indexing and version-aware telemetry.** A behavioural release on top of v5.7.0: no command was removed and the index schema is unchanged.
+
+### Added
+
+- **`--log-file <PATH>` global flag.** Diverts the entire log stream off stderr into a file (appended, RFC 3339 timestamps, no ANSI), leaving stdout and stderr clean. This is the recommended way to keep a `--json` run's stderr free of log lines without losing the diagnostics — point `--log-file` at a path and parse stdout as usual. Parent directories are created automatically, and progress bars still render to stderr under the usual TTY/CI/`--json` rules.
+- **`gather-step log` now shows a `Version` column** (and a `cli_version` field in `--json` output), reporting the gather-step version that produced each run. The version was already recorded per run — it is now surfaced so you can tell which release a given warning, error, or run came from. Telemetry rows are stamped with the producing version and appended per run, so a version bump never rewrites earlier rows.
+
+### Changed
+
+- **Best-effort import-resolution diagnostics no longer warn.** Recoverable, non-actionable resolution steps — failing to canonicalize a repo/workspace root, enumerate an ancestor directory, or read/parse a sibling `package.json`/`pyproject.toml` while resolving a JS/TS or Python sibling-package import, plus re-export targets that fail to re-parse and repo-name fallbacks — are now logged at `debug` instead of `warn`. These fire repeatedly while indexing a multi-repo workspace (notably during `pr-review`, which indexes a fresh worktree) and flooded stderr without indicating a real problem. Genuine warnings — ambiguous sibling matches, parse timeouts, ordinal saturation, and malformed `gather-step.config.yaml` — still warn. As a side effect, these steps no longer inflate the telemetry `warn_count`.
+
 ## v5.7.0 (2026-06-29)
 
 **Run from anywhere in the workspace, and quieter indexing.** A behavioural release on top of v5.6.0: no command was removed and the index schema is unchanged.

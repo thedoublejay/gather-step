@@ -3,7 +3,7 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
@@ -292,6 +292,41 @@ pub fn init_tracing(cli: &Cli) -> Result<MultiProgress> {
     let env_filter = build_env_filter(cli.verbose)?;
     configure_console_colors(cli);
 
+    // `--log-file` diverts the entire tracing stream off stderr into a file
+    // (RFC 3339 timestamps, no ANSI), leaving stdout and stderr clean. This is
+    // the recommended way to keep `--json` runs' stderr free of log lines.
+    // Progress bars still render to stderr under the usual TTY/CI/json rules,
+    // since they are written by indicatif directly, not through tracing.
+    if let Some(path) = &cli.log_file {
+        let writer = open_log_file_writer(path)?;
+        let stderr_is_tty = io::stderr().is_terminal();
+        let ci_env_set = std::env::var("CI").is_ok_and(|v| !v.is_empty());
+        let multi = if stderr_is_tty && !ci_env_set && !cli.json {
+            MultiProgress::new()
+        } else {
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        };
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_timer(ChronoLocal::rfc_3339())
+            .with_target(false)
+            .with_ansi(false);
+        if cli.json {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(TelemetryCounterLayer)
+                .with(fmt_layer.json())
+                .init();
+        } else {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(TelemetryCounterLayer)
+                .with(fmt_layer)
+                .init();
+        }
+        return Ok(multi);
+    }
+
     if cli.json {
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_writer(io::stderr)
@@ -434,6 +469,64 @@ impl Write for MultiProgressLineWriter {
 impl Drop for MultiProgressLineWriter {
     fn drop(&mut self) {
         let _ = self.flush();
+    }
+}
+
+/// Open (creating parent directories and appending if it already exists) the
+/// `--log-file` target and wrap it in a `MakeWriter` that serializes writes
+/// from concurrent tracing threads through a shared mutex.
+fn open_log_file_writer(path: &Path) -> Result<LogFileWriter> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating log-file directory {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening log file {}", path.display()))?;
+    Ok(LogFileWriter {
+        file: Arc::new(Mutex::new(file)),
+    })
+}
+
+#[derive(Clone)]
+struct LogFileWriter {
+    file: Arc<Mutex<std::fs::File>>,
+}
+
+impl<'a> MakeWriter<'a> for LogFileWriter {
+    type Writer = LogFileHandle;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogFileHandle {
+            file: self.file.clone(),
+        }
+    }
+}
+
+struct LogFileHandle {
+    file: Arc<Mutex<std::fs::File>>,
+}
+
+impl Write for LogFileHandle {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // A poisoned mutex means another thread panicked mid-write; drop this
+        // line rather than propagate, since tracing has no path to surface it.
+        match self.file.lock() {
+            Ok(mut file) => file.write(buf),
+            Err(_) => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.file.lock() {
+            Ok(mut file) => file.flush(),
+            Err(_) => Ok(()),
+        }
     }
 }
 
