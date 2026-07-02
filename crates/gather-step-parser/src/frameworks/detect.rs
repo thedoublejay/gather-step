@@ -527,16 +527,33 @@ fn has_dependency_in_pyproject(manifest: &toml::Value, packages: &[&str]) -> boo
         return true;
     }
 
-    manifest
-        .get("tool")
-        .and_then(|tool| tool.get("poetry"))
+    let poetry = manifest.get("tool").and_then(|tool| tool.get("poetry"));
+
+    let poetry_dependencies = poetry
         .and_then(|poetry| poetry.get("dependencies"))
         .and_then(toml::Value::as_table)
-        .is_some_and(|dependencies| {
-            dependencies
-                .keys()
-                .any(|dependency| package_name_matches(dependency, packages))
+        .is_some_and(|dependencies| poetry_table_contains(dependencies, packages));
+    if poetry_dependencies {
+        return true;
+    }
+
+    poetry
+        .and_then(|poetry| poetry.get("group"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|groups| {
+            groups.values().any(|group| {
+                group
+                    .get("dependencies")
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|dependencies| poetry_table_contains(dependencies, packages))
+            })
         })
+}
+
+fn poetry_table_contains(dependencies: &toml::Table, packages: &[&str]) -> bool {
+    dependencies
+        .keys()
+        .any(|dependency| package_name_matches(dependency, packages))
 }
 
 fn dependency_array_contains(dependencies: &[toml::Value], packages: &[&str]) -> bool {
@@ -547,14 +564,27 @@ fn dependency_array_contains(dependencies: &[toml::Value], packages: &[&str]) ->
 }
 
 fn requirements_contains_dependency(repo_root: &Path, packages: &[&str]) -> bool {
-    let requirements_path = repo_root.join("requirements.txt");
-    let Ok(metadata) = fs::symlink_metadata(&requirements_path) else {
+    if requirements_file_contains(&repo_root.join("requirements.txt"), packages) {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(repo_root.join("requirements")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.extension().and_then(|ext| ext.to_str()) == Some("txt")
+            && requirements_file_contains(&path, packages)
+    })
+}
+
+fn requirements_file_contains(path: &Path, packages: &[&str]) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return false;
     }
-    let Ok(raw) = fs::read_to_string(requirements_path) else {
+    let Ok(raw) = fs::read_to_string(path) else {
         return false;
     };
     raw.lines().any(|line| {
@@ -574,9 +604,29 @@ fn dependency_name(spec: &str) -> &str {
 }
 
 fn package_name_matches(name: &str, packages: &[&str]) -> bool {
+    let normalized = normalize_package_name(name);
     packages
         .iter()
-        .any(|package| name.eq_ignore_ascii_case(package))
+        .any(|package| normalized == normalize_package_name(package))
+}
+
+/// PEP 503 name normalization: lowercase and collapse runs of `-`, `_`, `.`
+/// into a single `-`, so `Confluent_Kafka` and `confluent-kafka` compare equal.
+fn normalize_package_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len());
+    let mut prev_separator = false;
+    for ch in name.chars() {
+        if matches!(ch, '-' | '_' | '.') {
+            if !prev_separator {
+                normalized.push('-');
+                prev_separator = true;
+            }
+        } else {
+            normalized.push(ch.to_ascii_lowercase());
+            prev_separator = false;
+        }
+    }
+    normalized
 }
 
 fn manifest_script_contains(repo_root: &Path, needles: &[&str]) -> bool {
@@ -667,7 +717,7 @@ fn has_nestjs_source_markers(repo_root: &Path) -> bool {
 mod tests {
     use std::{
         env, fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         process,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1017,6 +1067,98 @@ dependencies = [
         requirements_dir.write("requirements.txt", "aiokafka==0.10.0\nrequests\n");
         assert!(is_python_kafka(&requirements_dir.path));
         assert!(is_python_http(&requirements_dir.path));
+    }
+
+    #[test]
+    fn python_dependency_detected_across_manifest_shapes() {
+        struct Case {
+            name: &'static str,
+            files: &'static [(&'static str, &'static str)],
+            detect: fn(&Path) -> bool,
+            expected: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "pep621-project-dependencies",
+                files: &[(
+                    "pyproject.toml",
+                    "[project]\ndependencies = [\"fastapi>=0.115\"]\n",
+                )],
+                detect: is_fastapi,
+                expected: true,
+            },
+            Case {
+                name: "pep621-optional-dependencies",
+                files: &[(
+                    "pyproject.toml",
+                    "[project]\nname = \"svc\"\n[project.optional-dependencies]\nweb = [\"fastapi[standard]>=0.100; python_version>\\\"3.9\\\"\"]\n",
+                )],
+                detect: is_fastapi,
+                expected: true,
+            },
+            Case {
+                name: "poetry-dependencies",
+                files: &[(
+                    "pyproject.toml",
+                    "[tool.poetry.dependencies]\npython = \"^3.11\"\nfastapi = \"^0.115\"\n",
+                )],
+                detect: is_fastapi,
+                expected: true,
+            },
+            Case {
+                name: "poetry-group-dependencies",
+                files: &[(
+                    "pyproject.toml",
+                    "[tool.poetry.group.dev.dependencies]\nfastapi = \"^0.115\"\n",
+                )],
+                detect: is_fastapi,
+                expected: true,
+            },
+            Case {
+                name: "requirements-root",
+                files: &[("requirements.txt", "fastapi==0.115.0\nuvicorn\n")],
+                detect: is_fastapi,
+                expected: true,
+            },
+            Case {
+                name: "requirements-subdir",
+                files: &[("requirements/base.txt", "fastapi==0.115.0\nuvicorn\n")],
+                detect: is_fastapi,
+                expected: true,
+            },
+            Case {
+                name: "pep503-underscore-normalization",
+                files: &[(
+                    "pyproject.toml",
+                    "[project]\ndependencies = [\"confluent_kafka>=2.3\"]\n",
+                )],
+                detect: is_python_kafka,
+                expected: true,
+            },
+            Case {
+                name: "unrelated-repo",
+                files: &[(
+                    "pyproject.toml",
+                    "[project]\ndependencies = [\"flask>=3.0\"]\n",
+                )],
+                detect: is_fastapi,
+                expected: false,
+            },
+        ];
+
+        for case in cases {
+            let dir = TempDir::new(case.name);
+            for (path, contents) in case.files {
+                dir.write(path, contents);
+            }
+            assert_eq!(
+                (case.detect)(&dir.path),
+                case.expected,
+                "manifest shape case: {}",
+                case.name
+            );
+        }
     }
 
     #[test]
