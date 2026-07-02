@@ -5,6 +5,19 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.9.0 (2026-07-02)
+
+**Honest cross-repo consumers.** A behavioural release on top of v5.8.0: no command was removed and the index schema is unchanged.
+
+### Fixed
+
+- **`who-consumes` no longer reports the whole workspace via shared metadata hubs.** Cross-repo participation seeded through *every* virtual node a file touched, and three virtual-node families have workspace-wide identity that silently linked unrelated repos: **Author** nodes (one author committing to many repos connected every file they touched to every repo they touched), **`module-import::` stubs** (every repo importing `typing` — or sharing an internal module path like `app.core.config.settings` — collapsed onto one node), and **same-path routes served by many services** (every service's `GET /healthcheck` is one route node, so foreign `Serves`/`Publishes` co-producers were counted as consumers). On a real 30+-repo workspace this made `who-consumes` on an ordinary service-client file report **all 32 repos**; the same query now reports only the repos that genuinely consume what the file's repo serves. Participation now seeds only through consumption-direction edges on genuine transport/contract virtual nodes, never through provenance (Author/Commit/PR/Review/Comment/Ticket) or module-import metadata. This sharpens every surface built on the participation map: `who-consumes` (CLI and MCP), `search` consumer-repo annotations, and `dead-code` (files are no longer kept "live" by an author or stdlib-import hub).
+
+### Changed
+
+- **Telemetry buckets user-input rejections as `invalid_input`.** Ambiguous-symbol and unknown-repo rejections embed user-controlled text (candidate file paths, repo lists), so the substring categorizer could misfile them — an ambiguity candidate list containing a file named `layout_parser.py` landed in `parse_failure`, and `unknown repo … configured repos:` landed in `config_invalid`. `gather-step log` now reports these as `invalid_input`, keeping the failure categories meaningful.
+- **Dependency refresh.** Rust: oxc 0.138, tree-sitter 0.26.10, quick_cache 0.7, plus a lockfile refresh (console, ignore, indicatif, time, and friends). Website: Astro 7.0.5, Starlight 0.41.2. CI: dtolnay/rust-toolchain pin advanced to the current master commit, taiki-e/install-action v2.82.7, crate-ci/typos v1.48.0, actions/attest-build-provenance v4.1.1.
+
 ## v5.8.0 (2026-06-29)
 
 **Quieter indexing and version-aware telemetry.** A behavioural release on top of v5.7.0: no command was removed and the index schema is unchanged.
