@@ -7,6 +7,7 @@ pub mod frontend_hooks;
 pub mod frontend_react;
 pub mod frontend_router;
 pub mod gateway_proxy;
+pub mod http_client;
 pub mod local_config;
 pub mod migration_utils;
 pub mod mongo;
