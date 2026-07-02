@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "5.8.0"
+version = "5.9.0"
 authors = ["JJ Adonis"]
 edition = "2024"
 rust-version = "1.96"
@@ -24,17 +24,17 @@ homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step = { path = "crates/gather-step-cli", version = "5.8.0" }
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "5.8.0" }
-gather-step-core = { path = "crates/gather-step-core", version = "5.8.0" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "5.8.0" }
-gather-step-git = { path = "crates/gather-step-git", version = "5.8.0" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "5.8.0" }
-gather-step-output = { path = "crates/gather-step-output", version = "5.8.0" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "5.8.0" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "5.8.0" }
+gather-step = { path = "crates/gather-step-cli", version = "5.9.0" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "5.9.0" }
+gather-step-core = { path = "crates/gather-step-core", version = "5.9.0" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "5.9.0" }
+gather-step-git = { path = "crates/gather-step-git", version = "5.9.0" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "5.9.0" }
+gather-step-output = { path = "crates/gather-step-output", version = "5.9.0" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "5.9.0" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "5.9.0" }
 
-tree-sitter = "=0.26.9"
+tree-sitter = "=0.26.10"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "=0.25.0"
@@ -81,7 +81,7 @@ rustix = { version = "1.1", features = ["process", "system"] }
 simdutf8 = "=0.1.5"
 similar = "3.1.1"
 lru = "=0.18.0"
-quick_cache = "0.6.23"
+quick_cache = "0.7.0"
 smallvec = { version = "=1.15.2", features = ["serde"] }
 camino = "1.2.3"
 aho-corasick = "1.1.4"
