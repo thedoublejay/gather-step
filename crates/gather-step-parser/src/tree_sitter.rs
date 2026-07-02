@@ -60,6 +60,17 @@ pub struct DecoratorCapture {
     pub span: Option<SourceSpan>,
 }
 
+/// A single annotated field (`name: type` or `name: type = default`) captured
+/// from a Python class body. Types are kept as raw source strings — no
+/// normalization. Used to build Pydantic/dataclass/`TypedDict` payload
+/// contracts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythonClassField {
+    pub name: String,
+    pub type_annotation: String,
+    pub has_default: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolCapture {
     pub node: NodeData,
@@ -70,6 +81,7 @@ pub struct SymbolCapture {
     pub constructor_dependencies: Vec<String>,
     pub implemented_interfaces: Vec<String>,
     pub base_classes: Vec<String>,
+    pub python_class_fields: Vec<PythonClassField>,
 }
 
 /// Same-file `FastAPI` router-prefix bindings captured at parse time so the
@@ -1062,6 +1074,7 @@ impl<'a> ParseState<'a> {
             constructor_dependencies,
             implemented_interfaces: Vec::new(),
             base_classes: Vec::new(),
+            python_class_fields: Vec::new(),
         });
         node
     }
@@ -1091,6 +1104,20 @@ impl<'a> ParseState<'a> {
             .find(|symbol| symbol.node.id == node_id)
         {
             symbol.base_classes = base_classes;
+        }
+    }
+
+    pub(crate) fn set_symbol_python_class_fields(
+        &mut self,
+        node_id: gather_step_core::NodeId,
+        python_class_fields: Vec<PythonClassField>,
+    ) {
+        if let Some(symbol) = self
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.node.id == node_id)
+        {
+            symbol.python_class_fields = python_class_fields;
         }
     }
 
@@ -1937,6 +1964,10 @@ fn visit_python(
             );
             state.set_symbol_implemented_interfaces(class_node.id, implemented_interfaces);
             state.set_symbol_base_classes(class_node.id, base_classes.clone());
+            state.set_symbol_python_class_fields(
+                class_node.id,
+                collect_python_class_fields(node, state.source),
+            );
             // Enum subclass: emit authoritative EnumMemberDef candidates.
             if base_classes.iter().any(|b| b == "Enum")
                 && let Some(body) = find_child_by_kind(node, "block")
@@ -2311,6 +2342,51 @@ fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
             (!head.is_empty()).then(|| head.to_owned())
         })
         .collect()
+}
+
+/// Capture annotated class-body fields (`name: type` / `name: type = default`)
+/// from a Python class. Only direct annotated assignments to a plain identifier
+/// are captured; methods, plain assignments, and nested classes are ignored.
+/// Types are kept raw. Consumed by Pydantic/dataclass/`TypedDict` contract
+/// inference.
+fn collect_python_class_fields(node: Node<'_>, source: &str) -> Vec<PythonClassField> {
+    let Some(body) = find_child_by_kind(node, "block") else {
+        return Vec::new();
+    };
+
+    let mut fields = Vec::new();
+    let mut cursor = body.walk();
+    for stmt in body.named_children(&mut cursor) {
+        let assignment = if stmt.kind() == "expression_statement" {
+            stmt.named_child(0).filter(|n| n.kind() == "assignment")
+        } else if stmt.kind() == "assignment" {
+            Some(stmt)
+        } else {
+            None
+        };
+        let Some(assign) = assignment else { continue };
+        let Some(type_node) = assign.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(left) = assign.child_by_field_name("left") else {
+            continue;
+        };
+        if left.kind() != "identifier" {
+            continue;
+        }
+        let name = node_text(left, source).trim().to_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let type_annotation = node_text(type_node, source).trim().to_owned();
+        fields.push(PythonClassField {
+            name,
+            type_annotation,
+            has_default: assign.child_by_field_name("right").is_some(),
+        });
+    }
+
+    fields
 }
 
 fn collect_python_base_classes(node: Node<'_>, source: &str) -> Vec<String> {
@@ -6191,6 +6267,53 @@ class Outer:
             symbol.node.name == "method"
                 && symbol.node.qualified_name.as_deref() == Some("Outer.Inner.method")
         }));
+    }
+
+    #[test]
+    fn python_class_annotated_fields_are_captured() {
+        let temp_dir = TestDir::new("python-class-fields");
+        fs::write(
+            temp_dir.path().join("models.py"),
+            r#"
+class ItemCreate:
+    name: str
+    price: float | None
+    tags: list[str] = []
+    plain = 1
+
+    def method(self, x: int) -> int:
+        return x
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "models.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        let class = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.node.name == "ItemCreate")
+            .expect("class symbol");
+        let fields = &class.python_class_fields;
+        assert_eq!(fields.len(), 3, "only annotated fields, no plain/methods");
+        assert_eq!(fields[0].name, "name");
+        assert_eq!(fields[0].type_annotation, "str");
+        assert!(!fields[0].has_default);
+        assert_eq!(fields[1].type_annotation, "float | None");
+        assert_eq!(fields[2].name, "tags");
+        assert_eq!(fields[2].type_annotation, "list[str]");
+        assert!(fields[2].has_default);
     }
 
     #[test]

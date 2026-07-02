@@ -3077,6 +3077,80 @@ def create_item():
     }
 
     #[test]
+    fn indexes_pydantic_payload_contract_onto_fastapi_route() {
+        use crate::metadata::PayloadContractQuery;
+        use gather_step_core::{PayloadSide, ref_node_id, route_qn};
+
+        let repo_root = TestDir::new("pydantic-repo");
+        let storage_root = TestDir::new("pydantic-storage");
+        fs::write(
+            repo_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\", \"pydantic>=2\"]\n",
+        )
+        .expect("pyproject fixture should write");
+        fs::write(
+            repo_root.path().join("provider.py"),
+            r#"
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+
+class ItemCreate(BaseModel):
+    name: str
+    price: float | None
+
+
+@app.post("/items", response_model=ItemCreate)
+def create_item(item: ItemCreate):
+    return item
+"#,
+        )
+        .expect("provider fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("pydantic-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let route_target = ref_node_id(NodeKind::Route, &route_qn("POST", "/items"));
+        let contracts = indexer
+            .storage()
+            .metadata()
+            .payload_contracts_for_query(PayloadContractQuery {
+                contract_target_node_id: Some(route_target),
+                ..PayloadContractQuery::default()
+            })
+            .expect("payload contract query should succeed");
+
+        let consumer = contracts
+            .iter()
+            .find(|c| c.record.side == PayloadSide::Consumer)
+            .expect("Pydantic consumer contract must be queryable for the route");
+        assert_eq!(
+            consumer.record.source_type_name.as_deref(),
+            Some("ItemCreate")
+        );
+        assert_eq!(consumer.record.contract_target_kind, NodeKind::Route);
+        let names = consumer
+            .record
+            .contract
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["name", "price"]);
+        assert!(
+            contracts
+                .iter()
+                .any(|c| c.record.side == PayloadSide::Producer),
+            "response_model= must produce a producer contract: {contracts:?}"
+        );
+    }
+
+    #[test]
     fn indexes_mongo_findings_into_metadata_store() {
         let repo_root = TestDir::new("mongo-repo");
         let storage_root = TestDir::new("mongo-storage");

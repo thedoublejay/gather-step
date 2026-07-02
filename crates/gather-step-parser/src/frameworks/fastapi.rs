@@ -29,7 +29,7 @@ pub struct FastapiAugmentation {
 
 /// HTTP-method decorator names `FastAPI` exposes on `app`/`router`. Lowercase
 /// because Python uses `@app.get`, unlike `NestJS`'s `@Get`.
-const HTTP_METHODS: &[&str] = &[
+pub(crate) const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "trace",
 ];
 

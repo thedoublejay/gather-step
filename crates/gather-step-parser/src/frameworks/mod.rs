@@ -20,6 +20,7 @@ pub mod prisma;
 pub mod profile;
 pub mod python_http;
 pub mod python_kafka;
+pub mod python_payload;
 pub mod registry;
 pub mod storybook;
 pub mod tailwind;
