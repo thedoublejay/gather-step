@@ -1582,6 +1582,8 @@ fn framework_label(framework: Framework) -> String {
         Framework::Zustand => "zustand",
         Framework::LaunchDarkly => "launchdarkly",
         Framework::FastApi => "fastapi",
+        Framework::PythonKafka => "python_kafka",
+        Framework::PythonHttp => "python_http",
         Framework::AiTypescript => "ai_typescript",
         Framework::GatewayProxy => "gateway_proxy",
         Framework::FrontendHooks => "frontend_hooks",

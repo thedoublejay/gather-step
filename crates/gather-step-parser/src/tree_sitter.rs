@@ -4463,7 +4463,11 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Redux => &[PackId::Redux],
         Framework::Zustand => &[PackId::Zustand],
         Framework::LaunchDarkly => &[PackId::LaunchDarkly],
-        Framework::FastApi => &[PackId::Fastapi],
+        // FastAPI keeps activating the Kafka pack so existing FastAPI repos
+        // stay byte-identical; the Kafka pack now also stands alone below.
+        Framework::FastApi => &[PackId::Fastapi, PackId::PythonKafka],
+        Framework::PythonKafka => &[PackId::PythonKafka],
+        Framework::PythonHttp => &[PackId::PythonHttp],
         Framework::AiTypescript => &[PackId::AiTypescript],
         Framework::GatewayProxy => &[PackId::GatewayProxy],
         Framework::FrontendHooks => &[PackId::FrontendHooks],

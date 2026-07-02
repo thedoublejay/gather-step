@@ -34,6 +34,13 @@ pub enum Framework {
     LaunchDarkly,
     /// Detection-only Python web API pack.
     FastApi,
+    /// Python Kafka producer/consumer pack, gated on `aiokafka` /
+    /// `confluent-kafka` dependencies (independent of `FastAPI`).
+    PythonKafka,
+    /// Python HTTP-client pack, gated on `requests` / `httpx` / `aiohttp`
+    /// dependencies. Detection-only for now; the augmenter lands in a later
+    /// task.
+    PythonHttp,
     /// LangChain-style TypeScript/JavaScript AI pack (v5).
     AiTypescript,
     /// Config-driven proxy-gateway pack: extracts proxy routes and
@@ -144,6 +151,12 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     }
     if has_any_python_dependency(repo_root, &["fastapi"]) {
         frameworks.insert(Framework::FastApi);
+    }
+    if is_python_kafka(repo_root) {
+        frameworks.insert(Framework::PythonKafka);
+    }
+    if is_python_http(repo_root) {
+        frameworks.insert(Framework::PythonHttp);
     }
     if is_ai_typescript(repo_root) {
         frameworks.insert(Framework::AiTypescript);
@@ -337,6 +350,18 @@ pub fn is_launchdarkly(repo_root: &Path) -> bool {
 #[must_use]
 pub fn is_fastapi(repo_root: &Path) -> bool {
     has_any_python_dependency(repo_root, &["fastapi"])
+}
+
+/// Returns `true` when a Python Kafka client is present in dependency metadata.
+#[must_use]
+pub fn is_python_kafka(repo_root: &Path) -> bool {
+    has_any_python_dependency(repo_root, &["aiokafka", "confluent-kafka"])
+}
+
+/// Returns `true` when a Python HTTP client is present in dependency metadata.
+#[must_use]
+pub fn is_python_http(repo_root: &Path) -> bool {
+    has_any_python_dependency(repo_root, &["requests", "httpx", "aiohttp"])
 }
 
 /// Returns `true` when a LangChain-style AI dependency is present in the Node
@@ -654,8 +679,8 @@ mod tests {
 
     use super::{
         Framework, detect_frameworks, detect_frameworks_workspace_aware, is_ai_typescript,
-        is_drizzle, is_fastapi, is_mongoose, is_nestjs, is_nextjs, is_prisma, is_react,
-        is_tailwind, is_typeorm,
+        is_drizzle, is_fastapi, is_mongoose, is_nestjs, is_nextjs, is_prisma, is_python_http,
+        is_python_kafka, is_react, is_tailwind, is_typeorm,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -964,6 +989,34 @@ dependencies = [
         let detected = detect_frameworks(&pyproject_dir.path);
         assert!(detected.contains(&Framework::FastApi));
         assert!(detected.contains(&Framework::FrontendHooks));
+    }
+
+    #[test]
+    fn python_kafka_and_http_are_detected_independently_of_fastapi() {
+        let dir = TempDir::new("python-kafka-http");
+        dir.write(
+            "pyproject.toml",
+            r#"
+[project]
+dependencies = [
+  "confluent-kafka>=2.3",
+  "httpx>=0.27",
+]
+"#,
+        );
+        assert!(is_python_kafka(&dir.path));
+        assert!(is_python_http(&dir.path));
+        assert!(!is_fastapi(&dir.path));
+
+        let detected = detect_frameworks(&dir.path);
+        assert!(detected.contains(&Framework::PythonKafka));
+        assert!(detected.contains(&Framework::PythonHttp));
+        assert!(!detected.contains(&Framework::FastApi));
+
+        let requirements_dir = TempDir::new("python-kafka-requirements");
+        requirements_dir.write("requirements.txt", "aiokafka==0.10.0\nrequests\n");
+        assert!(is_python_kafka(&requirements_dir.path));
+        assert!(is_python_http(&requirements_dir.path));
     }
 
     #[test]

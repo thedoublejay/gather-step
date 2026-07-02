@@ -418,4 +418,54 @@ async def publish(producer, topic, value):
         assert!(event_ids(&parsed).is_empty());
         assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 0);
     }
+
+    #[test]
+    fn python_kafka_pack_runs_without_fastapi_dependency() {
+        let dir = TestDir::new("kafka-no-fastapi");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"aiokafka>=0.10\"]\n",
+        )
+        .expect("manifest should write");
+        let frameworks: Vec<Framework> = crate::frameworks::detect::detect_frameworks(dir.path())
+            .into_iter()
+            .collect();
+        assert!(
+            !frameworks.contains(&Framework::FastApi),
+            "repo declares aiokafka but not fastapi"
+        );
+
+        let file = "producer.py";
+        fs::write(
+            dir.path().join(file),
+            r#"
+from aiokafka import AIOKafkaProducer
+
+
+async def publish(producer, value):
+    await producer.send_and_wait("document-indexed", value)
+"#,
+        )
+        .expect("fixture should write");
+        let parsed = parse_file_with_frameworks(
+            "ingestion",
+            dir.path(),
+            &crate::FileEntry {
+                path: file.into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &frameworks,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec!["__event__kafka__document-indexed".to_owned()],
+            "Kafka pack must run from an aiokafka dependency with no fastapi"
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+    }
 }

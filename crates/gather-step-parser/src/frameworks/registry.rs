@@ -80,6 +80,13 @@ pub enum PackId {
     LaunchDarkly,
     /// Detection-only `FastAPI` Python API pack.
     Fastapi,
+    /// Python Kafka producer/consumer extraction, gated on `aiokafka` /
+    /// `confluent-kafka` deps independently of `FastAPI`.
+    PythonKafka,
+    /// Python HTTP-client extraction, gated on `requests` / `httpx` /
+    /// `aiohttp` deps.  Detection-only for now; the augmenter lands in a
+    /// later task.
+    PythonHttp,
     /// LangChain-style TypeScript/JavaScript AI extraction (v5).
     AiTypescript,
     /// Shared-library / shared-lib contract detection.  This pack is always
@@ -114,6 +121,8 @@ pub(crate) enum AugGroup {
     Storybook,
     Azure,
     Fastapi,
+    PythonKafka,
+    PythonHttp,
     AiTypescript,
     SharedLib,
     GatewayProxy,
@@ -125,8 +134,11 @@ impl PackId {
     #[must_use]
     pub(crate) const fn applies_to_language(self, language: Language) -> bool {
         match self {
-            // FastAPI augments Python files (route extraction).
-            Self::Fastapi => matches!(language, Language::Python),
+            // FastAPI augments Python files (route extraction); the Python
+            // Kafka and HTTP packs likewise operate on Python files.
+            Self::Fastapi | Self::PythonKafka | Self::PythonHttp => {
+                matches!(language, Language::Python)
+            }
             Self::Nestjs
             | Self::Mongoose
             | Self::Nextjs
@@ -171,6 +183,8 @@ impl PackId {
             Self::Storybook => AugGroup::Storybook,
             Self::Azure | Self::LaunchDarkly => AugGroup::Azure,
             Self::Fastapi => AugGroup::Fastapi,
+            Self::PythonKafka => AugGroup::PythonKafka,
+            Self::PythonHttp => AugGroup::PythonHttp,
             Self::AiTypescript => AugGroup::AiTypescript,
             Self::SharedLib => AugGroup::SharedLib,
             Self::GatewayProxy => AugGroup::GatewayProxy,
@@ -282,6 +296,14 @@ impl PackRegistry {
                 PackEntry {
                     id: PackId::Fastapi,
                     detect: Some(detect::is_fastapi),
+                },
+                PackEntry {
+                    id: PackId::PythonKafka,
+                    detect: Some(detect::is_python_kafka),
+                },
+                PackEntry {
+                    id: PackId::PythonHttp,
+                    detect: Some(detect::is_python_http),
                 },
                 PackEntry {
                     id: PackId::AiTypescript,
@@ -428,14 +450,22 @@ impl PackRegistry {
                 }
             }
             AugGroup::Fastapi => {
-                let routes = fastapi::augment(parsed);
-                let kafka = python_kafka::augment(parsed);
-                let mut nodes = routes.nodes;
-                nodes.extend(kafka.nodes);
-                let mut edges = routes.edges;
-                edges.extend(kafka.edges);
-                AugmentationOutput { nodes, edges }
+                let aug = fastapi::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
             }
+            AugGroup::PythonKafka => {
+                let aug = python_kafka::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
+            }
+            // PythonHttp is registered and detected but its augmenter lands in
+            // a later task; dispatch is a no-op until then.
+            AugGroup::PythonHttp => AugmentationOutput::default(),
             AugGroup::AiTypescript => {
                 let aug = ai_typescript::augment(parsed);
                 AugmentationOutput {
@@ -689,6 +719,28 @@ mod tests {
         let registry = PackRegistry::builtin();
         let active = registry.detect(&dir.path);
         assert!(active.contains(&PackId::Fastapi));
+    }
+
+    #[test]
+    fn python_packs_apply_to_python_only() {
+        for pack_id in [PackId::PythonKafka, PackId::PythonHttp] {
+            assert!(pack_id.applies_to_language(Language::Python));
+            assert!(!pack_id.applies_to_language(Language::TypeScript));
+            assert!(!pack_id.applies_to_language(Language::JavaScript));
+        }
+    }
+
+    #[test]
+    fn builtin_registry_detects_python_kafka_without_fastapi() {
+        let dir = TempDir::new("detect-python-kafka");
+        dir.write(
+            "pyproject.toml",
+            "[project]\ndependencies = [\"aiokafka>=0.10\"]\n",
+        );
+        let registry = PackRegistry::builtin();
+        let active = registry.detect(&dir.path);
+        assert!(active.contains(&PackId::PythonKafka));
+        assert!(!active.contains(&PackId::Fastapi));
     }
 
     #[test]
