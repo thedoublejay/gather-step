@@ -27,7 +27,7 @@ use gather_step_core::{EdgeData, NodeData};
 use crate::{
     frameworks::{
         ai_typescript, azure, detect, drizzle, fastapi, frontend_hooks, frontend_react,
-        frontend_router, gateway_proxy, http_client, mongoose, nestjs, nextjs, prisma,
+        frontend_router, gateway_proxy, http_client, mongoose, nestjs, nextjs, prisma, python_http,
         python_kafka, storybook, tailwind, typeorm,
     },
     traverse::Language,
@@ -83,9 +83,9 @@ pub enum PackId {
     /// Python Kafka producer/consumer extraction, gated on `aiokafka` /
     /// `confluent-kafka` deps independently of `FastAPI`.
     PythonKafka,
-    /// Python HTTP-client extraction, gated on `requests` / `httpx` /
-    /// `aiohttp` deps.  Detection-only for now; the augmenter lands in a
-    /// later task.
+    /// Python HTTP-client consumer extraction, gated on `requests` / `httpx` /
+    /// `aiohttp` deps.  Emits `Route` + `ConsumesApiFrom` for statically
+    /// resolvable client-call URLs.
     PythonHttp,
     /// LangChain-style TypeScript/JavaScript AI extraction (v5).
     AiTypescript,
@@ -464,9 +464,13 @@ impl PackRegistry {
                     edges: aug.edges,
                 }
             }
-            // PythonHttp is registered and detected but its augmenter lands in
-            // a later task; dispatch is a no-op until then.
-            AugGroup::PythonHttp => AugmentationOutput::default(),
+            AugGroup::PythonHttp => {
+                let aug = python_http::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
+            }
             AugGroup::AiTypescript => {
                 let aug = ai_typescript::augment(parsed);
                 AugmentationOutput {

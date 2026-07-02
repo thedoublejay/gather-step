@@ -3013,6 +3013,70 @@ export async function compareItems(a: string, b: string) {
     }
 
     #[test]
+    fn indexes_python_http_consumer_and_fastapi_provider_onto_one_route() {
+        let repo_root = TestDir::new("pyhttp-repo");
+        let storage_root = TestDir::new("pyhttp-storage");
+        fs::write(
+            repo_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\", \"httpx>=0.27\"]\n",
+        )
+        .expect("pyproject fixture should write");
+        fs::write(
+            repo_root.path().join("consumer.py"),
+            r#"
+import httpx
+
+
+def create_item(payload):
+    return httpx.post("http://gateway:8000/items", json=payload)
+"#,
+        )
+        .expect("consumer fixture should write");
+        fs::write(
+            repo_root.path().join("provider.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.post("/items")
+def create_item():
+    return {}
+"#,
+        )
+        .expect("provider fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("pyhttp-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let graph = indexer.storage().graph();
+        let route = graph
+            .nodes_by_type(NodeKind::Route)
+            .expect("route nodes should load")
+            .into_iter()
+            .find(|node| node.external_id.as_deref() == Some("__route__POST__/items"))
+            .expect("consumer and provider should converge on __route__POST__/items");
+
+        let incoming = graph
+            .get_incoming(route.id)
+            .expect("incoming edges should load");
+        assert!(
+            incoming
+                .iter()
+                .any(|edge| edge.kind == EdgeKind::ConsumesApiFrom),
+            "httpx consumer should ConsumesApiFrom the shared route: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|edge| edge.kind == EdgeKind::Serves),
+            "FastAPI provider should Serve the shared route: {incoming:?}"
+        );
+    }
+
+    #[test]
     fn indexes_mongo_findings_into_metadata_store() {
         let repo_root = TestDir::new("mongo-repo");
         let storage_root = TestDir::new("mongo-storage");
