@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use gather_step_core::{NodeId, VIRTUAL_NODE_REPO};
+use gather_step_core::{EdgeKind, NodeId, NodeKind, VIRTUAL_NODE_REPO};
 use gather_step_storage::{GraphStore, GraphStoreError};
 use rustc_hash::FxHashMap;
 
@@ -79,7 +79,7 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
             let Some(target) = store.get_node(edge.target)? else {
                 continue;
             };
-            if !target.is_virtual {
+            if !target.is_virtual || is_provenance_virtual(target.kind) {
                 continue;
             }
             if let Some(producer_file) = owning_file.get(&edge.owner_file) {
@@ -94,6 +94,14 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     for (virtual_id, producer_files) in &virtual_producers {
         let mut foreign_consumer_repos = BTreeSet::<String>::new();
         for related in store.get_incoming(*virtual_id)? {
+            // Virtual identity is workspace-wide, so a foreign repo serving
+            // or publishing to an identically-named surface shares this node
+            // as a CO-PRODUCER (every service's `GET /healthcheck` collapses
+            // onto one route node). Only consumption-direction edges make it
+            // a consumer.
+            if is_producer_edge(related.kind) {
+                continue;
+            }
             if let Some(source) = store.get_node(related.source)?
                 && is_foreign_repo(&source.repo, repo)
             {
@@ -127,6 +135,11 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     // consumer's repo (on an incoming edge `owner_file` is the consumer's
     // file, so it must not be used here).
     for node in &nodes {
+        // A shared metadata stub (e.g. a `module-import::` node pinned to the
+        // first indexing repo) is not a producer surface of this repo.
+        if node.is_virtual && is_provenance_virtual(node.kind) {
+            continue;
+        }
         let Some(producer_file) = owning_file.get(&node.id) else {
             continue;
         };
@@ -199,6 +212,35 @@ fn is_foreign_repo(candidate: &str, repo: &str) -> bool {
     candidate != repo && candidate != VIRTUAL_NODE_REPO
 }
 
+/// Virtual kinds carrying provenance or import metadata rather than a
+/// consumable transport/contract surface. Their node identity hashes only the
+/// qualified name, so one author (or one `module-import::typing` stub) is
+/// shared by every repo that touches it — a hub that links repos without
+/// either consuming what the other produces. Participation never seeds
+/// through them (the "one file -> every repo in the workspace" over-match).
+/// Edge kinds whose source PRODUCES into a virtual surface (serves the route,
+/// publishes the topic/event). A foreign co-producer of an identically-named
+/// surface is not a consumer of what this repo's files feed it.
+const fn is_producer_edge(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Serves | EdgeKind::Publishes | EdgeKind::ProducesEventFor
+    )
+}
+
+const fn is_provenance_virtual(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Author
+            | NodeKind::Commit
+            | NodeKind::PR
+            | NodeKind::Review
+            | NodeKind::Comment
+            | NodeKind::Ticket
+            | NodeKind::Module
+    )
+}
+
 /// Per-repo memoized lookup over [`cross_repo_participation_by_file`].
 ///
 /// The participation primitive is computed once per *distinct* repo and cached;
@@ -247,7 +289,8 @@ mod tests {
     use std::cell::Cell;
 
     use gather_step_core::{
-        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, Visibility, node_id,
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, VIRTUAL_NODE_REPO,
+        Visibility, node_id, ref_node_id,
     };
     use gather_step_storage::{GraphStore, GraphStoreDb, GraphStoreError};
 
@@ -500,6 +543,172 @@ mod tests {
         assert!(
             !participation.contains_key("src/uses.ts"),
             "consumer file is not part of the producer repo and must not appear"
+        );
+    }
+
+    /// Route identity is workspace-wide (`__route__<METHOD>__<path>`), so
+    /// every service serving `GET /healthcheck` collapses onto one virtual
+    /// node. A foreign repo that merely SERVES the same path is a
+    /// co-producer, not a consumer, and must not seed participation.
+    #[test]
+    fn foreign_co_producer_of_shared_route_is_not_a_consumer() {
+        let temp_db = TempDb::new("xrepo-participation-unit", "route-coproducer");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let producer_file = file("producer", "src/health.py");
+        let producer_sym = symbol("producer", "src/health.py", "healthcheck");
+        let foreign_file = file("consumer", "src/health.py");
+        let foreign_sym = symbol("consumer", "src/health.py", "healthcheck");
+        let route = gather_step_core::virtual_node(
+            NodeKind::Route,
+            VIRTUAL_NODE_REPO,
+            "__route__GET__/healthcheck",
+            "GET /healthcheck",
+            "__route__GET__/healthcheck",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    producer_file.clone(),
+                    producer_sym.clone(),
+                    foreign_file.clone(),
+                    foreign_sym.clone(),
+                    route.clone(),
+                ],
+                &[
+                    defines(producer_file.id, producer_sym.id),
+                    defines(foreign_file.id, foreign_sym.id),
+                    edge(
+                        producer_file.id,
+                        producer_sym.id,
+                        route.id,
+                        EdgeKind::Serves,
+                    ),
+                    edge(foreign_file.id, foreign_sym.id, route.id, EdgeKind::Serves),
+                ],
+            )
+            .expect("fixture insert");
+
+        let participation =
+            cross_repo_participation_by_file(&store, "producer").expect("participation");
+        assert!(
+            !participation.contains_key("src/health.py"),
+            "a foreign co-producer serving the same route must not read as a consumer, got {participation:?}"
+        );
+    }
+
+    /// A virtual Author node is provenance, not a transport boundary. Its id
+    /// hashes only the redacted email, so an author who commits to two repos
+    /// is one shared node — that must not make either repo a "consumer" of
+    /// every file the author touched in the other.
+    #[test]
+    fn shared_author_node_does_not_seed_consumers() {
+        let temp_db = TempDb::new("xrepo-participation-unit", "author-hub");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let producer_file = file("producer", "src/api.py");
+        let foreign_file = file("consumer", "src/other.py");
+        let author = NodeData {
+            id: ref_node_id(NodeKind::Author, "dev@redacted"),
+            kind: NodeKind::Author,
+            repo: VIRTUAL_NODE_REPO.to_owned(),
+            file_path: "__authors__/dev@redacted".to_owned(),
+            name: "dev@redacted".to_owned(),
+            qualified_name: Some("dev@redacted".to_owned()),
+            external_id: Some("dev@redacted".to_owned()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+
+        store
+            .bulk_insert(
+                &[producer_file.clone(), foreign_file.clone(), author.clone()],
+                &[
+                    edge(
+                        producer_file.id,
+                        producer_file.id,
+                        author.id,
+                        EdgeKind::OwnedBy,
+                    ),
+                    edge(
+                        foreign_file.id,
+                        foreign_file.id,
+                        author.id,
+                        EdgeKind::OwnedBy,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let participation =
+            cross_repo_participation_by_file(&store, "producer").expect("participation");
+        assert!(
+            !participation.contains_key("src/api.py"),
+            "a shared author node must not mark the file as cross-repo consumed, got {participation:?}"
+        );
+    }
+
+    /// A `module-import::<path>` stub is keyed only by module path, so every
+    /// repo importing `typing` collapses onto one virtual node (which also
+    /// carries the first indexer's repo name, exposing it to the direct-seed
+    /// stage). Co-importing a module must not read as consumption.
+    #[test]
+    fn shared_module_import_stub_does_not_seed_consumers() {
+        let temp_db = TempDb::new("xrepo-participation-unit", "module-stub");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let producer_file = file("producer", "src/uses_typing.py");
+        let foreign_file = file("consumer", "src/also_typing.py");
+        // Mirror production: shared id, `repo` pinned to the first indexing
+        // repo, virtual.
+        let module_stub = NodeData {
+            id: ref_node_id(NodeKind::Module, "module-import::typing"),
+            kind: NodeKind::Module,
+            repo: "producer".to_owned(),
+            file_path: "src/uses_typing.py".to_owned(),
+            name: "typing".to_owned(),
+            qualified_name: Some("module-import::typing".to_owned()),
+            external_id: Some("module-import::typing".to_owned()),
+            signature: None,
+            visibility: Some(Visibility::Public),
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+
+        store
+            .bulk_insert(
+                &[
+                    producer_file.clone(),
+                    foreign_file.clone(),
+                    module_stub.clone(),
+                ],
+                &[
+                    edge(
+                        producer_file.id,
+                        producer_file.id,
+                        module_stub.id,
+                        EdgeKind::Imports,
+                    ),
+                    edge(
+                        foreign_file.id,
+                        foreign_file.id,
+                        module_stub.id,
+                        EdgeKind::Imports,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let participation =
+            cross_repo_participation_by_file(&store, "producer").expect("participation");
+        assert!(
+            !participation.contains_key("src/uses_typing.py"),
+            "co-importing a shared module stub must not mark the file as consumed, got {participation:?}"
         );
     }
 
