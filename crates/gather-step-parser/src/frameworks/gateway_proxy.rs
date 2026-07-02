@@ -45,33 +45,53 @@ pub fn augment(parsed: &ParsedFile) -> GatewayProxyAugmentation {
 
     let mut seen_qns = rustc_hash::FxHashSet::default();
 
-    for (method, path) in extract_route_entries(content) {
+    for (method, path, backend_path) in extract_route_entries_with_backend(content) {
         let qn = route_qn(&method, &path);
-        if !seen_qns.insert(qn.clone()) {
-            continue;
+        if seen_qns.insert(qn.clone()) {
+            let route_node = make_route_node(&qn, &method, &path, repo, file_path);
+            let route_id = route_node.id;
+            aug.nodes.push(route_node);
+            aug.edges.push(EdgeData {
+                source: file_node_id,
+                target: route_id,
+                kind: EdgeKind::Serves,
+                metadata: EdgeMetadata::default(),
+                owner_file: file_node_id,
+                is_cross_file: false,
+            });
+            aug.edges.push(EdgeData {
+                source: file_node_id,
+                target: route_id,
+                kind: EdgeKind::ConsumesApiFrom,
+                metadata: EdgeMetadata {
+                    confidence: Some(820),
+                    ..EdgeMetadata::default()
+                },
+                owner_file: file_node_id,
+                is_cross_file: true,
+            });
         }
-        let route_node = make_route_node(&qn, &method, &path, repo, file_path);
-        let route_id = route_node.id;
-        aug.nodes.push(route_node);
-        aug.edges.push(EdgeData {
-            source: file_node_id,
-            target: route_id,
-            kind: EdgeKind::Serves,
-            metadata: EdgeMetadata::default(),
-            owner_file: file_node_id,
-            is_cross_file: false,
-        });
-        aug.edges.push(EdgeData {
-            source: file_node_id,
-            target: route_id,
-            kind: EdgeKind::ConsumesApiFrom,
-            metadata: EdgeMetadata {
-                confidence: Some(820),
-                ..EdgeMetadata::default()
-            },
-            owner_file: file_node_id,
-            is_cross_file: true,
-        });
+
+        if let Some(backend_path) = backend_path {
+            let backend_qn = route_qn(&method, &backend_path);
+            if seen_qns.insert(backend_qn.clone()) {
+                let backend_node =
+                    make_route_node(&backend_qn, &method, &backend_path, repo, file_path);
+                let backend_id = backend_node.id;
+                aug.nodes.push(backend_node);
+                aug.edges.push(EdgeData {
+                    source: file_node_id,
+                    target: backend_id,
+                    kind: EdgeKind::ConsumesApiFrom,
+                    metadata: EdgeMetadata {
+                        confidence: Some(820),
+                        ..EdgeMetadata::default()
+                    },
+                    owner_file: file_node_id,
+                    is_cross_file: true,
+                });
+            }
+        }
     }
 
     aug
@@ -106,7 +126,22 @@ fn make_route_node(qn: &str, method: &str, path: &str, repo: &str, file_path: &s
 /// For each `method: 'METHOD'` occurrence, looks in the following lines for
 /// `from: 'PATH'` (preferred) then `basePathWithoutApiPrefix: 'PATH'`.
 /// Only emits pairs where the method is a valid HTTP verb.
+#[cfg(test)]
 fn extract_route_entries(content: &str) -> Vec<(String, String)> {
+    extract_route_entries_with_backend(content)
+        .into_iter()
+        .map(|(method, path, _)| (method, path))
+        .collect()
+}
+
+/// Like [`extract_route_entries`], but also reports the distinct backend path.
+///
+/// The public path prefers `rewrite.from` and falls back to
+/// `basePathWithoutApiPrefix`.  When `rewrite.from` supplies the public path
+/// and a `basePathWithoutApiPrefix` different from it also exists, that base
+/// path is returned as the backend path so callers can bridge the gateway's
+/// proxied route to the service that actually serves it.
+fn extract_route_entries_with_backend(content: &str) -> Vec<(String, String, Option<String>)> {
     const LOOK_AHEAD: usize = 15;
     const VALID_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
 
@@ -125,19 +160,26 @@ fn extract_route_entries(content: &str) -> Vec<(String, String)> {
         let end = (i + 1 + LOOK_AHEAD).min(lines.len());
         let window = &lines[i + 1..end];
 
-        // Prefer rewrite.from
-        let path = window
+        let from_path = window
             .iter()
             .find_map(|l| extract_quoted_value(l, "from").map(str::to_owned))
-            .or_else(|| {
-                window.iter().find_map(|l| {
-                    extract_quoted_value(l, "basePathWithoutApiPrefix").map(str::to_owned)
-                })
-            });
+            .filter(|p| !p.is_empty());
+        let base_path = window
+            .iter()
+            .find_map(|l| extract_quoted_value(l, "basePathWithoutApiPrefix").map(str::to_owned))
+            .filter(|p| !p.is_empty());
 
-        if let Some(path) = path.filter(|p| !p.is_empty()) {
-            results.push((method, path));
-        }
+        // Prefer rewrite.from
+        let Some(public_path) = from_path.clone().or_else(|| base_path.clone()) else {
+            continue;
+        };
+
+        let backend_path = match (&from_path, &base_path) {
+            (Some(_), Some(base)) if *base != public_path => Some(base.clone()),
+            _ => None,
+        };
+
+        results.push((method, public_path, backend_path));
     }
 
     results
@@ -163,7 +205,73 @@ fn extract_quoted_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{env, fs, process};
+
+    use gather_step_core::NodeId;
+
     use super::*;
+    use crate::frameworks::Framework;
+    use crate::tree_sitter::parse_file_with_frameworks;
+    use crate::{FileEntry, Language};
+
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gather-step-parser-gateway-{name}-{}-{counter}",
+                process::id()
+            ));
+            fs::create_dir_all(&path).expect("test directory should be created");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn parse_service_config(dir: &TestDir, relative: &str, source: &str) -> crate::ParsedFile {
+        let full = dir.path().join(relative);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).expect("fixture parent dir should be created");
+        }
+        fs::write(&full, source).expect("fixture source should write");
+        parse_file_with_frameworks(
+            "web-gateway",
+            dir.path(),
+            &FileEntry {
+                path: relative.into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::GatewayProxy],
+        )
+        .expect("fixture should parse")
+    }
+
+    fn route_ids_by_qn(aug: &GatewayProxyAugmentation) -> Vec<(String, NodeId)> {
+        aug.nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Route)
+            .map(|n| (n.qualified_name.clone().unwrap_or_default(), n.id))
+            .collect()
+    }
 
     // ── extract_quoted_value ──────────────────────────────────────────────────
 
@@ -309,5 +417,80 @@ export const endpoints = {
         // Two raw entries but augment should dedup on QN
         assert_eq!(entries.len(), 2); // extract_route_entries itself doesn't dedup
         // The augment() dedup is tested at the integration level
+    }
+
+    // ── augment: gateway → backend route bridge ───────────────────────────────
+
+    #[test]
+    fn emits_backend_route_consumption_when_rewrite_from_present() {
+        let dir = TestDir::new("bridge");
+        let parsed = parse_service_config(
+            &dir,
+            "src/serviceConfigs/items.service.ts",
+            r"
+export const itemsServiceConfig = {
+  getItems: {
+    method: 'GET',
+    pathMapping: {
+      basePathWithoutApiPrefix: '/items',
+      rewrite: { from: '/api/v1/items' },
+    },
+  },
+};
+",
+        );
+
+        let aug = augment(&parsed);
+        let public_qn = route_qn("GET", "/api/v1/items");
+        let backend_qn = route_qn("GET", "/items");
+
+        let routes = route_ids_by_qn(&aug);
+        assert!(
+            routes.iter().any(|(qn, _)| *qn == public_qn),
+            "public path route must still be emitted: {routes:?}"
+        );
+        let backend_id = routes
+            .iter()
+            .find(|(qn, _)| *qn == backend_qn)
+            .map(|(_, id)| *id)
+            .expect("backend path route must be emitted");
+
+        assert!(
+            aug.edges.iter().any(|e| {
+                e.kind == EdgeKind::ConsumesApiFrom
+                    && e.target == backend_id
+                    && e.source == parsed.file_node.id
+            }),
+            "a ConsumesApiFrom edge must target the backend route",
+        );
+    }
+
+    #[test]
+    fn identical_public_and_backend_path_emits_single_route() {
+        let dir = TestDir::new("identical");
+        let parsed = parse_service_config(
+            &dir,
+            "src/serviceConfigs/items.service.ts",
+            r"
+export const itemsServiceConfig = {
+  getItems: {
+    method: 'GET',
+    pathMapping: {
+      basePathWithoutApiPrefix: '/items',
+      rewrite: { from: '/items' },
+    },
+  },
+};
+",
+        );
+
+        let aug = augment(&parsed);
+        let routes = route_ids_by_qn(&aug);
+        assert_eq!(
+            routes.len(),
+            1,
+            "identical public/backend path must not self-consume: {routes:?}"
+        );
+        assert_eq!(routes[0].0, route_qn("GET", "/items"));
     }
 }
