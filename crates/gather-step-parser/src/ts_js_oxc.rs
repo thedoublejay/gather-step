@@ -2491,6 +2491,7 @@ fn single_decorator_from_oxc(
         name,
         arguments,
         raw,
+        receiver: None,
         span: Some(span_from_oxc(decorator.span, offsets)),
     }
 }

@@ -53,6 +53,10 @@ pub struct DecoratorCapture {
     pub name: String,
     pub arguments: SmallVec<[Box<str>; 2]>,
     pub raw: String,
+    /// Object the decorator is invoked on, if any: for `@router.get(...)` this
+    /// is `Some("router")`, letting route passes resolve per-router prefixes.
+    /// `None` for bare decorators like `@login_required`.
+    pub receiver: Option<String>,
     pub span: Option<SourceSpan>,
 }
 
@@ -66,6 +70,17 @@ pub struct SymbolCapture {
     pub constructor_dependencies: Vec<String>,
     pub implemented_interfaces: Vec<String>,
     pub base_classes: Vec<String>,
+}
+
+/// Same-file `FastAPI` router-prefix bindings captured at parse time so the
+/// `FastAPI` augmenter can compose full route paths. Cross-file `include_router`
+/// resolution is out of scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RouterPrefixBindings {
+    /// `var = APIRouter(prefix="…")` → `var` → prefix literal.
+    pub ctor: FxHashMap<String, String>,
+    /// `parent.include_router(var, prefix="…")` → `var` → prefix literal.
+    pub include: FxHashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +99,7 @@ pub struct ParsedFile {
     pub call_sites: Vec<EnrichedCallSite>,
     pub import_bindings: Vec<ImportBinding>,
     pub constant_strings: FxHashMap<String, String>,
+    pub router_prefixes: RouterPrefixBindings,
     pub value_mirror_candidates: Vec<crate::ts_js_oxc::ValueMirrorCandidate>,
     pub parse_ms: i64,
 }
@@ -348,6 +364,7 @@ fn parse_file_core(
             call_sites: state.call_sites,
             import_bindings: state.import_bindings,
             constant_strings: state.constant_strings,
+            router_prefixes: state.router_prefixes,
             value_mirror_candidates: state.value_mirror_candidates,
             parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
         };
@@ -456,6 +473,7 @@ fn parse_file_core(
         call_sites: state.call_sites,
         import_bindings: state.import_bindings,
         constant_strings: state.constant_strings,
+        router_prefixes: state.router_prefixes,
         value_mirror_candidates: state.value_mirror_candidates,
         parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
@@ -731,6 +749,7 @@ pub(crate) struct ParseState<'a> {
     import_bindings: Vec<ImportBinding>,
     module_cache: FxHashMap<String, gather_step_core::NodeId>,
     constant_strings: FxHashMap<String, String>,
+    router_prefixes: RouterPrefixBindings,
     value_mirror_candidates: Vec<crate::ts_js_oxc::ValueMirrorCandidate>,
     function_ordinal: u16,
     class_ordinal: u16,
@@ -753,6 +772,7 @@ struct ParseStateCheckpoint {
     import_bindings_len: usize,
     module_cache: FxHashMap<String, gather_step_core::NodeId>,
     constant_strings: FxHashMap<String, String>,
+    router_prefixes: RouterPrefixBindings,
     function_ordinal: u16,
     class_ordinal: u16,
     type_ordinal: u16,
@@ -784,6 +804,7 @@ impl<'a> ParseState<'a> {
             import_bindings: Vec::new(),
             module_cache: FxHashMap::default(),
             constant_strings: FxHashMap::default(),
+            router_prefixes: RouterPrefixBindings::default(),
             value_mirror_candidates: Vec::new(),
             function_ordinal: 0,
             class_ordinal: 0,
@@ -883,6 +904,7 @@ impl<'a> ParseState<'a> {
             import_bindings_len: self.import_bindings.len(),
             module_cache: self.module_cache.clone(),
             constant_strings: self.constant_strings.clone(),
+            router_prefixes: self.router_prefixes.clone(),
             function_ordinal: self.function_ordinal,
             class_ordinal: self.class_ordinal,
             type_ordinal: self.type_ordinal,
@@ -900,6 +922,7 @@ impl<'a> ParseState<'a> {
             .truncate(checkpoint.import_bindings_len);
         self.module_cache = checkpoint.module_cache;
         self.constant_strings = checkpoint.constant_strings;
+        self.router_prefixes = checkpoint.router_prefixes;
         self.function_ordinal = checkpoint.function_ordinal;
         self.class_ordinal = checkpoint.class_ordinal;
         self.type_ordinal = checkpoint.type_ordinal;
@@ -1209,6 +1232,18 @@ impl<'a> ParseState<'a> {
     pub(crate) fn record_constant_string(&mut self, key: String, value: String) {
         if !key.is_empty() && !value.is_empty() {
             self.constant_strings.insert(key, value);
+        }
+    }
+
+    fn record_router_ctor_prefix(&mut self, variable: String, prefix: String) {
+        if !variable.is_empty() && !prefix.is_empty() {
+            self.router_prefixes.ctor.insert(variable, prefix);
+        }
+    }
+
+    fn record_router_include_prefix(&mut self, variable: String, prefix: String) {
+        if !variable.is_empty() && !prefix.is_empty() {
+            self.router_prefixes.include.insert(variable, prefix);
         }
     }
 
@@ -1952,6 +1987,15 @@ fn visit_python(
             });
         }
         "call" => {
+            // `parent.include_router(router, prefix="/v1")` binds an app-level
+            // prefix to a router variable. Captured regardless of scope so
+            // module-level mounts (owner-less) are seen too.
+            if python_callee_name(node, state.source).as_deref() == Some("include_router")
+                && let Some(prefix) = python_prefix_kwarg(node, state.source)
+                && let Some(variable) = python_first_positional_ident(node, state.source)
+            {
+                state.record_router_include_prefix(variable, prefix);
+            }
             if let Some(owner_id) = owner
                 && let Some(function_node) = node
                     .child_by_field_name("function")
@@ -2005,6 +2049,13 @@ fn visit_python(
                     // `Status = Literal["a", "b"]` → authoritative Literal mirrors
                     let owner_id = owner.unwrap_or_else(|| state.file_node_id());
                     capture_python_literal_type(right, owner_id, state);
+                } else if right.kind() == "call"
+                    && python_callee_name(right, state.source).as_deref() == Some("APIRouter")
+                    && let Some(prefix) = python_prefix_kwarg(right, state.source)
+                {
+                    // `router = APIRouter(prefix="/items")` → router → prefix.
+                    let name = node_text(left, state.source).trim().to_owned();
+                    state.record_router_ctor_prefix(name, prefix);
                 }
             }
             recurse_children(node, |child| {
@@ -2109,7 +2160,10 @@ fn single_decorator(node: Node<'_>, source: &str) -> DecoratorCapture {
         .named_child(0)
         .or_else(|| node.child(0))
         .unwrap_or(node);
-    let (name, _) = expression_name(expression, source);
+    let (name, qualified) = expression_name(expression, source);
+    let receiver = qualified
+        .as_deref()
+        .and_then(|q| q.rsplit_once('.').map(|(head, _)| head.to_owned()));
     let arg_node = node
         .child_by_field_name("arguments")
         .or_else(|| find_child_by_kind(node, "arguments"))
@@ -2144,6 +2198,7 @@ fn single_decorator(node: Node<'_>, source: &str) -> DecoratorCapture {
         name,
         arguments,
         raw,
+        receiver,
         span: Some(span_from(node)),
     }
 }
@@ -4646,6 +4701,59 @@ fn raw_arguments(node: Node<'_>, source: &str) -> Option<String> {
             .trim()
             .to_owned(),
     )
+}
+
+/// Last-segment callee name of a Python `call` node, e.g. `APIRouter` for
+/// both `APIRouter(...)` and `fastapi.APIRouter(...)`.
+fn python_callee_name(call: Node<'_>, source: &str) -> Option<String> {
+    let function = call
+        .child_by_field_name("function")
+        .or_else(|| call.child(0))?;
+    let (name, _) = expression_name(function, source);
+    (!name.is_empty()).then_some(name)
+}
+
+/// String literal passed to the `prefix=` keyword argument of a Python call.
+/// Returns `None` when the call has no `prefix=` argument or its value is not a
+/// plain string literal (dynamic prefixes are intentionally skipped).
+fn python_prefix_kwarg(call: Node<'_>, source: &str) -> Option<String> {
+    let arguments = call
+        .child_by_field_name("arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            continue;
+        }
+        let Some(name) = child.child_by_field_name("name") else {
+            continue;
+        };
+        if node_text(name, source).trim() != "prefix" {
+            continue;
+        }
+        let value = child.child_by_field_name("value")?;
+        if value.kind() != "string" {
+            return None;
+        }
+        let literal = sanitize_string_literal(node_text(value, source));
+        return (!literal.is_empty()).then_some(literal);
+    }
+    None
+}
+
+/// First positional identifier argument of a Python call, e.g. `router` for
+/// `app.include_router(router, prefix="/v1")`.
+fn python_first_positional_ident(call: Node<'_>, source: &str) -> Option<String> {
+    let arguments = call
+        .child_by_field_name("arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return Some(node_text(child, source).trim().to_owned());
+        }
+    }
+    None
 }
 
 fn split_arguments(raw: &str) -> Vec<String> {
