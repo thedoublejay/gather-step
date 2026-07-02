@@ -3076,6 +3076,155 @@ def create_item():
         );
     }
 
+    /// Part A exit criterion / release demo: one trace walks
+    /// FE `ConsumesApiFrom` → public Route ← gateway `Serves`, gateway
+    /// `ConsumesApiFrom` → backend Route ← `FastAPI` `Serves`, across three repos.
+    #[test]
+    fn indexes_fe_gateway_fastapi_route_chain_end_to_end() {
+        use gather_step_core::{NodeId, route_qn};
+
+        let storage_root = TestDir::new("chain-storage");
+
+        // (a) TS React frontend: axios POST to the PUBLIC path.
+        let fe_root = TestDir::new("fe-repo");
+        fs::create_dir_all(fe_root.path().join("src")).expect("fe src dir should exist");
+        fs::write(
+            fe_root.path().join("package.json"),
+            r#"{ "name": "storefront-web", "dependencies": { "react": "^19.0.0", "axios": "^1.7.0" } }"#,
+        )
+        .expect("fe package.json fixture should write");
+        fs::write(
+            fe_root.path().join("src/api.ts"),
+            r#"
+import axios from 'axios';
+
+export async function createItem(payload: unknown) {
+    return axios.post('/api/v1/items', payload);
+}
+"#,
+        )
+        .expect("fe api fixture should write");
+
+        // (b) Gateway: serviceConfigs entry mapping public /api/v1/items → backend /items.
+        let gw_root = TestDir::new("gw-repo");
+        fs::create_dir_all(gw_root.path().join("src/serviceConfigs"))
+            .expect("gateway serviceConfigs dir should exist");
+        fs::write(
+            gw_root.path().join("package.json"),
+            r#"{ "name": "api-gateway" }"#,
+        )
+        .expect("gateway package.json fixture should write");
+        fs::write(
+            gw_root.path().join("src/serviceConfigs/items.service.ts"),
+            r"
+export const itemsServiceConfig = {
+  createItem: {
+    method: 'POST',
+    pathMapping: {
+      basePathWithoutApiPrefix: '/items',
+      rewrite: { from: '/api/v1/items' },
+    },
+  },
+};
+",
+        )
+        .expect("gateway serviceConfig fixture should write");
+
+        // (c) Python FastAPI backend: @app.post("/items") handler.
+        let py_root = TestDir::new("py-repo");
+        fs::write(
+            py_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\"]\n",
+        )
+        .expect("python pyproject fixture should write");
+        fs::write(
+            py_root.path().join("provider.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.post("/items")
+def create_item():
+    return {}
+"#,
+        )
+        .expect("python provider fixture should write");
+
+        // Index all three repos into ONE storage via the real index_repo path.
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("storefront-web", fe_root.path(), None)
+            .expect("frontend indexing should succeed");
+        indexer
+            .index_repo("api-gateway", gw_root.path(), None)
+            .expect("gateway indexing should succeed");
+        indexer
+            .index_repo("items-svc", py_root.path(), None)
+            .expect("python indexing should succeed");
+
+        let graph = indexer.storage().graph();
+        let repo_of = |id: NodeId| {
+            graph
+                .get_node(id)
+                .expect("edge source node should load")
+                .expect("edge source node should exist")
+                .repo
+        };
+        let find_route = |external_id: &str| {
+            graph
+                .nodes_by_type(NodeKind::Route)
+                .expect("route nodes should load")
+                .into_iter()
+                .find(|node| node.external_id.as_deref() == Some(external_id))
+                .unwrap_or_else(|| panic!("route {external_id} should exist"))
+        };
+
+        // PUBLIC route: FE ConsumesApiFrom + gateway Serves (+ gateway ConsumesApiFrom).
+        let public_route = find_route(&route_qn("POST", "/api/v1/items"));
+        let public_incoming = graph
+            .get_incoming(public_route.id)
+            .expect("public route incoming edges should load");
+        assert!(
+            public_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "storefront-web"
+            }),
+            "FE repo should ConsumesApiFrom the public route: {public_incoming:?}"
+        );
+        assert!(
+            public_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::Serves && repo_of(edge.source) == "api-gateway"
+            }),
+            "gateway repo should Serve the public route: {public_incoming:?}"
+        );
+        assert!(
+            public_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "api-gateway"
+            }),
+            "gateway repo should ConsumesApiFrom the public route: {public_incoming:?}"
+        );
+
+        // BACKEND route: gateway ConsumesApiFrom + FastAPI Serves.
+        let backend_route = find_route(&route_qn("POST", "/items"));
+        let backend_incoming = graph
+            .get_incoming(backend_route.id)
+            .expect("backend route incoming edges should load");
+        assert!(
+            backend_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "api-gateway"
+            }),
+            "gateway repo should ConsumesApiFrom the backend route: {backend_incoming:?}"
+        );
+        assert!(
+            backend_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::Serves && repo_of(edge.source) == "items-svc"
+            }),
+            "python FastAPI repo should Serve the backend route: {backend_incoming:?}"
+        );
+    }
+
     #[test]
     fn indexes_pydantic_payload_contract_onto_fastapi_route() {
         use crate::metadata::PayloadContractQuery;
