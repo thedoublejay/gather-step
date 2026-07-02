@@ -440,6 +440,17 @@ fn telemetry_error_category(error: &anyhow::Error) -> &'static str {
         return "graph_lock_contention";
     }
     let message = error.to_string();
+    // User-input rejections are checked before the substring heuristics:
+    // their messages embed user-controlled text (file paths, repo lists), so
+    // e.g. an ambiguity candidate named `layout_parser.py` would
+    // otherwise bucket as `parse_failure` and `configured repos:` as
+    // `config_invalid`.
+    if message.starts_with("invalid input:")
+        || message.starts_with("unknown repo ")
+        || contains_ascii_case_insensitive(&message, "is ambiguous")
+    {
+        return "invalid_input";
+    }
     if contains_ascii_case_insensitive(&message, "schema")
         && contains_ascii_case_insensitive(&message, "version")
     {
@@ -530,6 +541,29 @@ mod tests {
         projection_impact::EvidenceVerbosityArg, reindex::ReindexArgs, serve::ServeArgs,
         setup_mcp::McpScope, trace::TraceCommand, tui::TuiArgs, watch::WatchArgs,
     };
+
+    /// User-input rejections embed user-controlled text (candidate file
+    /// paths, repo lists), so they must bucket as `invalid_input` before the
+    /// substring heuristics can misfire on that text.
+    #[test]
+    fn telemetry_category_buckets_user_input_before_substring_heuristics() {
+        use super::telemetry_error_category;
+
+        let ambiguous = anyhow::anyhow!(
+            "invalid input: symbol `shared_client.py` is ambiguous; refine the symbol \
+             or scope it to a repo: billing:app/services/layout_parser.py (client)"
+        );
+        assert_eq!(telemetry_error_category(&ambiguous), "invalid_input");
+
+        let unknown_repo = anyhow::anyhow!("unknown repo `nope`; configured repos: billing, docs");
+        assert_eq!(telemetry_error_category(&unknown_repo), "invalid_input");
+
+        let real_parse_failure = anyhow::anyhow!("failed to parse manifest");
+        assert_eq!(
+            telemetry_error_category(&real_parse_failure),
+            "parse_failure"
+        );
+    }
 
     #[test]
     fn cli_commands_catalog_matches_visible_subcommands() {
