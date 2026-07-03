@@ -613,6 +613,7 @@ fn run_command(
         }
     }
     collect_storage_threshold_checks(&metrics.storage, &thresholds, &mut checks, &mut failures);
+    check_index_duration(metrics.parse_ms, &thresholds, &mut checks, &mut failures);
 
     let env = Environment::current();
     let date = chrono::Utc::now().to_rfc3339();
@@ -687,6 +688,7 @@ fn workspace_run_command(
         }
     }
     collect_storage_threshold_checks(&metrics.storage, &thresholds, &mut checks, &mut failures);
+    check_index_duration(metrics.parse_ms, &thresholds, &mut checks, &mut failures);
 
     let env = Environment::current();
     let date = chrono::Utc::now().to_rfc3339();
@@ -751,6 +753,44 @@ fn collect_storage_threshold_checks(
         checks,
         failures,
     );
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "storage sizes are far below 2^52 bytes; ratio needs float division"
+    )]
+    let reclaimable_ratio = if storage.graph_bytes == 0 {
+        0.0
+    } else {
+        storage.graph_reclaimable_bytes as f64 / storage.graph_bytes as f64
+    };
+    let ratio_max = thresholds.storage.reclaimable_ratio_max;
+    checks.push(format!(
+        "storage.reclaimable_ratio_max: {reclaimable_ratio:.3} <= {ratio_max}"
+    ));
+    if reclaimable_ratio > ratio_max {
+        let message = format!(
+            "FAIL: storage.reclaimable_ratio_max exceeded: {reclaimable_ratio:.3} > {ratio_max} \
+             ({} reclaimable of {} graph bytes post-compaction).",
+            storage.graph_reclaimable_bytes, storage.graph_bytes
+        );
+        print_status(&message);
+        failures.push(message);
+    }
+}
+
+fn check_index_duration(
+    parse_ms: u64,
+    thresholds: &Thresholds,
+    checks: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) {
+    let max = thresholds.latency.index_pass_ms_max;
+    checks.push(format!("latency.index_pass_ms_max: {parse_ms} <= {max}"));
+    if parse_ms > max {
+        let message = format!("FAIL: latency.index_pass_ms_max exceeded: {parse_ms} > {max}.");
+        print_status(&message);
+        failures.push(message);
+    }
 }
 
 fn check_storage_bytes(

@@ -6,8 +6,8 @@ use gather_step_core::{
     ConfigError, GatherStepConfig, RegistryError, RegistryStore, WorkspaceIndexError,
 };
 use gather_step_storage::{
-    GraphStoreError, IndexingOptions, RepoIndexer, RepoIndexerError, StorageCoordinator,
-    StorageCoordinatorError, index_workspace_with_storage,
+    GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES, GraphStoreError, IndexingOptions, RepoIndexer,
+    RepoIndexerError, StorageCoordinator, StorageCoordinatorError, index_workspace_with_storage,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,6 +26,10 @@ pub struct StorageMetrics {
     pub metadata_sidecar_bytes: u64,
     pub search_bytes: u64,
     pub total_bytes: u64,
+    /// Reclaimable free space left in `graph.redb` after the post-index
+    /// compaction pass — the input to the `reclaimable_ratio_max` guard.
+    #[serde(default)]
+    pub graph_reclaimable_bytes: u64,
 }
 
 /// Metrics collected from a single indexing pass over a fixture directory.
@@ -135,7 +139,10 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
     let graph_nodes = graph.count_nodes()?;
     let graph_edges = graph.count_edges()?;
     indexer.storage().metadata().finalize();
-    let storage = collect_storage_metrics(&storage_dir)?;
+    drop(indexer);
+    let graph_reclaimable_bytes = compact_graph_for_measurement(&storage_dir)?;
+    let mut storage = collect_storage_metrics(&storage_dir)?;
+    storage.graph_reclaimable_bytes = graph_reclaimable_bytes;
 
     Ok(IndexMetrics {
         parse_ms: elapsed_ms,
@@ -151,6 +158,17 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
         indexed_files: None,
         cross_repo_edges: None,
     })
+}
+
+/// Mirror the CLI's post-index finalize: compact the graph store when at
+/// least [`GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES`] of free space is
+/// reclaimable, then report the remaining reclaimable bytes. Runs on a fresh
+/// exclusive handle and drops it before the caller measures file sizes,
+/// because redb reports a transient post-compaction size while open.
+fn compact_graph_for_measurement(storage_dir: &Path) -> Result<u64, HarnessError> {
+    let mut storage = StorageCoordinator::open(storage_dir)?;
+    storage.compact_graph_if_reclaimable(GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES)?;
+    Ok(storage.graph().reclaimable_bytes()?)
 }
 
 /// Run a full indexing pass over every repo declared in a fixture workspace.
@@ -187,7 +205,10 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
     let graph_nodes = graph.count_nodes()?;
     let graph_edges = graph.count_edges()?;
     indexer.storage().metadata().finalize();
-    let storage = collect_storage_metrics(&storage_dir)?;
+    drop(indexer);
+    let graph_reclaimable_bytes = compact_graph_for_measurement(&storage_dir)?;
+    let mut storage = collect_storage_metrics(&storage_dir)?;
+    storage.graph_reclaimable_bytes = graph_reclaimable_bytes;
 
     Ok(IndexMetrics {
         parse_ms: elapsed_ms,
@@ -350,6 +371,7 @@ fn collect_storage_metrics(storage_dir: &Path) -> Result<StorageMetrics, Harness
         metadata_sidecar_bytes,
         search_bytes,
         total_bytes,
+        graph_reclaimable_bytes: 0,
     })
 }
 

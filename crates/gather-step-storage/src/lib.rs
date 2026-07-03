@@ -89,6 +89,14 @@ pub use watcher::{
 };
 pub use workspace_indexer::{StorageWorkspaceIndexDelegate, index_workspace_with_storage};
 
+/// Reclaimable free space at which the post-index finalize compacts the graph
+/// store. A cold full index grows redb's file a region past the live data
+/// (~hundreds of MB on a large workspace); a warm reindex frees little and
+/// stays under this gate, skipping the full-file rewrite. Shared by the CLI
+/// finalize and the bench harness so the regression gate measures the exact
+/// code path users run.
+pub const GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+
 pub struct StorageCoordinator {
     stores: WorkspaceStores,
 }
