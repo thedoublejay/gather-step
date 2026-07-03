@@ -5,6 +5,27 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.10.0 (2026-07-03)
+
+**Python route-chain extraction and faster indexing.** A behavioural release on top of v5.9.0: no command was removed and the index schema is unchanged.
+
+### Added
+
+- **Python HTTP consumers now participate in the transport graph.** `requests`, `httpx`, `aiohttp`, and common client-wrapper calls are recognized as HTTP consumers when their target is statically knowable, so Python service-to-service traffic now feeds `trace`, `who-consumes`, impact, topology, and PR review surfaces.
+- **FastAPI route identity now includes mounted router prefixes and Python payload contracts.** Nested `APIRouter` prefixes compose into the public route path, and Pydantic models, dataclasses, and typed dicts are projected as payload contracts for the same route identity.
+- **Gateway rewrites can bridge to backend routes.** Gateway proxy configuration now links public gateway routes to rewritten backend paths, including suffix-confidence matches for FE -> gateway -> FastAPI route chains.
+
+### Changed
+
+- **Indexing skips more provably-no-op work and batches edge-kind counts.** Cold-index paths now avoid unnecessary projection work, reuse parser allocation more aggressively, and write edge-kind counters in batches during bulk graph inserts.
+- **Analysis walkers reuse read sessions across a traversal.** Cross-repo and topology queries now hold one consistent graph read session through the walk instead of repeatedly opening new snapshots.
+- **Benchmark release gates now track compaction and index-duration thresholds.** The benchmark harness records the extra release-gate signals needed to catch storage compaction and cold-index regressions.
+
+### Fixed
+
+- **Python datastore calls are no longer misclassified as HTTP routes.** Plain-key Redis/database-style calls such as `get` and `delete` are excluded unless they look like real HTTP client traffic.
+- **Python dependency detection covers more project layouts.** Poetry dependency groups and nested `requirements` files are considered, and the Python Kafka pack no longer requires FastAPI to be installed.
+
 ## v5.9.0 (2026-07-02)
 
 **Honest cross-repo consumers.** A behavioural release on top of v5.8.0: no command was removed and the index schema is unchanged.
