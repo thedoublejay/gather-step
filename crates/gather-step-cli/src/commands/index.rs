@@ -1298,11 +1298,17 @@ fn worktree_is_dirty(workspace: &std::path::Path) -> Option<String> {
 }
 
 fn build_checkout_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
         .ancestors()
         .nth(2)
         .map(std::path::Path::to_path_buf)
-        .expect("gather-step-cli crate should live under the workspace root")
+        .unwrap_or_else(|| {
+            panic!(
+                "gather-step-cli crate at {} should live at least two directories under the workspace root",
+                manifest_dir.display()
+            )
+        })
 }
 
 fn release_gate_dirty_reason(workspace: &std::path::Path) -> Option<String> {
