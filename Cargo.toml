@@ -199,6 +199,4 @@ module_name_repetitions = "allow"
 [workspace.metadata.cargo-shear]
 # Only list dependencies that cargo-shear cannot detect as used. Everything else
 # should stay out of here so that genuinely unused crates surface as errors.
-ignored = [
-    "similar",
-]
+ignored = []
