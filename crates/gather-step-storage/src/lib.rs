@@ -335,7 +335,7 @@ impl StorageCoordinator {
     ) -> Result<RepoBatchResult, StorageCoordinatorError> {
         let mut changed_files = Vec::new();
         let reindex_required = if cold_index {
-            Default::default()
+            rustc_hash::FxHashSet::default()
         } else {
             let reindex_candidates = batch
                 .files
