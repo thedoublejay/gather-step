@@ -199,6 +199,10 @@ struct EdgeIndexTables<'txn> {
     edges_in: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edges_by_owner: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edge_kind_counts: redb::Table<'txn, u8, u64>,
+    /// Per-kind increments accumulated during a bulk edge loop and applied
+    /// to `edge_kind_counts` once per loop via `flush_edge_kind_counts`
+    /// (one B-tree read-modify-write per kind instead of one per edge).
+    pending_kind_counts: FxHashMap<u8, u64>,
 }
 
 const NODES: TableDefinition<NodeIdBytes, &[u8]> = TableDefinition::new("nodes");
@@ -2366,7 +2370,28 @@ impl GraphStoreDb {
             edge_kind_counts: write_txn
                 .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?,
+            pending_kind_counts: FxHashMap::default(),
         })
+    }
+
+    /// Apply the increments accumulated in `pending_kind_counts` to the
+    /// persistent `edge_kind_counts` table. Must run after every bulk edge
+    /// loop, before the tables are dropped — the guard test
+    /// `count_edges_by_kind_matches_after_mixed_bulk_insert` trips if a
+    /// caller forgets.
+    fn flush_edge_kind_counts(tables: &mut EdgeIndexTables<'_>) -> Result<(), GraphStoreError> {
+        for (key, delta) in std::mem::take(&mut tables.pending_kind_counts) {
+            let next = tables
+                .edge_kind_counts
+                .get(key)
+                .map_err(GraphStoreError::storage)?
+                .map_or(delta, |current| current.value().saturating_add(delta));
+            tables
+                .edge_kind_counts
+                .insert(key, next)
+                .map_err(GraphStoreError::storage)?;
+        }
+        Ok(())
     }
 
     fn bulk_insert_edge_with_tables(
@@ -2434,7 +2459,10 @@ impl GraphStoreDb {
                 .edges_by_owner
                 .insert(edge.owner_file.as_bytes(), edge_id)
                 .map_err(GraphStoreError::storage)?;
-            Self::increment_edge_kind_count(&mut tables.edge_kind_counts, edge.kind)?;
+            *tables
+                .pending_kind_counts
+                .entry(edge.kind.as_u8())
+                .or_insert(0) += 1;
         }
 
         let encoded = Self::encode_edge(edge);
@@ -3032,6 +3060,7 @@ impl GraphStoreDb {
             // other files, so we keep the existence check for safety.
             Self::bulk_insert_edge_with_tables(&mut tables, edge, true)?;
         }
+        Self::flush_edge_kind_counts(&mut tables)?;
         Ok(())
     }
 
@@ -3146,6 +3175,7 @@ impl GraphStoreDb {
         for edge in edges {
             Self::bulk_insert_edge_with_tables(&mut edge_tables, edge, validate_nodes)?;
         }
+        Self::flush_edge_kind_counts(&mut edge_tables)?;
 
         Ok(())
     }
@@ -5443,6 +5473,95 @@ mod tests {
                 .expect("lookup should work")
                 .map(|count| count.value()),
             Some(1)
+        );
+    }
+
+    /// Guard for the per-loop edge-kind count accumulator: mixed kinds,
+    /// an in-batch duplicate (must count once), and a second batch layered
+    /// on persisted counts must all land on the exact same values the
+    /// per-edge read-modify-write produced.
+    #[test]
+    fn count_edges_by_kind_matches_after_mixed_bulk_insert() {
+        fn edge_with_kind(
+            source: NodeId,
+            target: NodeId,
+            owner_file: NodeId,
+            kind: EdgeKind,
+        ) -> EdgeData {
+            EdgeData {
+                source,
+                target,
+                kind,
+                metadata: EdgeMetadata {
+                    access_mechanism: Some(kind.access_mechanism()),
+                    ..EdgeMetadata::default()
+                },
+                owner_file,
+                is_cross_file: false,
+            }
+        }
+
+        let store = test_store("edge-kind-accumulator");
+        let file = node("service-a", "src/foo.ts", NodeKind::File, "src/foo.ts", 0);
+        // Second-batch edges get their own owner file: `bulk_insert` replaces
+        // all prior edges of each owner, and this test layers batches instead.
+        let other_file = node("service-a", "src/bar.ts", NodeKind::File, "src/bar.ts", 0);
+        let a = node("service-a", "src/foo.ts", NodeKind::Function, "a", 0);
+        let b = node("service-a", "src/foo.ts", NodeKind::Function, "b", 1);
+        let c = node("service-a", "src/foo.ts", NodeKind::Function, "c", 2);
+        let d = node("service-a", "src/foo.ts", NodeKind::Function, "d", 3);
+
+        let a_calls_b = edge_with_kind(a.id, b.id, file.id, EdgeKind::Calls);
+        store
+            .bulk_insert(
+                &[
+                    file.clone(),
+                    other_file.clone(),
+                    a.clone(),
+                    b.clone(),
+                    c.clone(),
+                    d.clone(),
+                ],
+                &[
+                    a_calls_b.clone(),
+                    a_calls_b.clone(),
+                    edge_with_kind(a.id, c.id, file.id, EdgeKind::Calls),
+                    edge_with_kind(b.id, c.id, file.id, EdgeKind::Consumes),
+                ],
+            )
+            .expect("first batch should insert");
+
+        assert_eq!(
+            store.count_edges_by_kind(EdgeKind::Calls).expect("count"),
+            2,
+            "duplicate edge in one batch must count once"
+        );
+        assert_eq!(
+            store
+                .count_edges_by_kind(EdgeKind::Consumes)
+                .expect("count"),
+            1
+        );
+
+        store
+            .bulk_insert(
+                &[],
+                &[edge_with_kind(c.id, d.id, other_file.id, EdgeKind::Calls)],
+            )
+            .expect("second batch should insert");
+        assert_eq!(
+            store.count_edges_by_kind(EdgeKind::Calls).expect("count"),
+            3,
+            "second batch must accumulate onto persisted counts"
+        );
+
+        store
+            .delete_edge(&a_calls_b)
+            .expect("edge delete should succeed");
+        assert_eq!(
+            store.count_edges_by_kind(EdgeKind::Calls).expect("count"),
+            2,
+            "single-edge decrement path must stay consistent with batched increments"
         );
     }
 
