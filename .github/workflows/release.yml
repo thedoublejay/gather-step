@@ -16,12 +16,12 @@ jobs:
     name: Verify Release Tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
           toolchain: 1.96.0
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
@@ -78,14 +78,14 @@ jobs:
       REF_NAME: ${{ github.ref_name }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Pinned to a specific SHA (was dtolnay/rust-toolchain@master, 2026-07-02)
       # to avoid a supply-chain vector under `attestations: write` + `id-token: write`.
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
           toolchain: 1.96.0
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Build
         shell: bash
         # `--locked` ensures the release binary is built against the exact
@@ -129,19 +129,19 @@ jobs:
           cp "target/${TARGET}/release/gather-step" "dist/gather-step-${TARGET}"
           tar -C dist -czf "dist/gather-step-${REF_NAME}-${TARGET}.tar.gz" "gather-step-${TARGET}"
       - name: Upload archive artifact
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gather-step-${{ matrix.target }}
           path: dist/gather-step-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
       # Attest the archive so users can verify the downloaded release bundle.
       - name: Attest archive provenance
-        uses: actions/attest-build-provenance@v4.1.1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/gather-step-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
       # Attest the binary directly so `gh attestation verify` works on the
       # extracted binary too, not only on the archive bundle.
       - name: Attest binary provenance
-        uses: actions/attest-build-provenance@v4.1.1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: dist/gather-step-${{ matrix.target }}
 
@@ -153,12 +153,12 @@ jobs:
       contents: write
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           draft: true
           files: dist/*.tar.gz
@@ -171,12 +171,12 @@ jobs:
       contents: read
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
       - name: Checkout Homebrew tap
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: thedoublejay/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
