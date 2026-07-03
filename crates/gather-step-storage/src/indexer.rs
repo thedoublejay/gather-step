@@ -432,15 +432,14 @@ fn parse_file_catching_panic(
     file: &SourceFileEntry,
     parse: impl FnOnce() -> Result<ParsedFile, ParseError>,
 ) -> Option<Result<ParsedFile, ParseError>> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse)) {
-        Ok(result) => Some(result),
-        Err(_) => {
-            warn!(
-                path = %file.path.display(),
-                "parser panicked while indexing this file; skipping it (it will be retried on the next incremental reindex)"
-            );
-            None
-        }
+    if let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse)) {
+        Some(result)
+    } else {
+        warn!(
+            path = %file.path.display(),
+            "parser panicked while indexing this file; skipping it (it will be retried on the next incremental reindex)"
+        );
+        None
     }
 }
 
