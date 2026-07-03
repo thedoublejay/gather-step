@@ -42,7 +42,7 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     repo: &str,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, GraphStoreError> {
     let session = store.read_session()?;
-    let nodes = store.nodes_by_repo(repo)?;
+    let nodes = session.nodes_by_repo(repo)?;
 
     // file_path -> File node id for this repo.
     let mut file_ids = BTreeMap::<String, NodeId>::new();

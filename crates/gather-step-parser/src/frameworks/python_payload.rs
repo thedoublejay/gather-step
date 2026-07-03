@@ -12,8 +12,7 @@
 //! downstream changes.
 //!
 //! Out of scope (v5.10): indirect/nested inheritance (`Base -> MyBase ->
-//! Model`), cross-file model resolution, and prefix-composed route linkage
-//! (contracts attach to the bare decorator-path route only).
+//! Model`) and cross-file model resolution.
 
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeKind, PayloadContractDoc, PayloadContractRecord,
@@ -22,7 +21,7 @@ use gather_step_core::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::frameworks::fastapi::HTTP_METHODS;
+use crate::frameworks::fastapi::{HTTP_METHODS, route_method_and_path};
 use crate::payload::{InferredPayloadContract, payload_contract_node};
 use crate::top_level_split::split_top_level;
 use crate::traverse::Language;
@@ -41,7 +40,7 @@ pub fn infer(parsed: &ParsedFile) -> Vec<InferredPayloadContract> {
         if symbol.node.kind != NodeKind::Class || !is_contract_class(symbol) {
             continue;
         }
-        let fields = contract_fields(symbol);
+        let fields = contract_fields(parsed, symbol);
         if !fields.is_empty() {
             contracts.insert(symbol.node.name.clone(), fields);
         }
@@ -52,7 +51,7 @@ pub fn infer(parsed: &ParsedFile) -> Vec<InferredPayloadContract> {
 
     let mut inferred = Vec::new();
     for symbol in &parsed.symbols {
-        let Some((method, path)) = route_method_and_path(symbol) else {
+        let Some((method, path)) = route_method_and_path(symbol, &parsed.router_prefixes) else {
             continue;
         };
         let qn = route_qn(&method, &path);
@@ -96,7 +95,9 @@ fn is_contract_class(symbol: &SymbolCapture) -> bool {
             .any(|decorator| decorator.name == "dataclass")
 }
 
-fn contract_fields(symbol: &SymbolCapture) -> Vec<PayloadField> {
+fn contract_fields(parsed: &ParsedFile, symbol: &SymbolCapture) -> Vec<PayloadField> {
+    let typed_dict_total_false =
+        is_typed_dict_class(symbol) && typed_dict_total_false(parsed, symbol);
     symbol
         .python_class_fields
         .iter()
@@ -104,19 +105,14 @@ fn contract_fields(symbol: &SymbolCapture) -> Vec<PayloadField> {
         .map(|field| PayloadField {
             name: field.name.clone(),
             type_name: field.type_annotation.clone(),
-            optional: field.has_default || is_optional_annotation(&field.type_annotation),
+            optional: field_is_optional(
+                field.has_default,
+                typed_dict_total_false,
+                &field.type_annotation,
+            ),
             confidence: FIELD_CONFIDENCE,
         })
         .collect()
-}
-
-fn route_method_and_path(symbol: &SymbolCapture) -> Option<(String, String)> {
-    let decorator = symbol
-        .decorators
-        .iter()
-        .find(|decorator| HTTP_METHODS.contains(&decorator.name.as_str()))?;
-    let path = decorator.arguments.first().map(ToString::to_string)?;
-    Some((decorator.name.to_ascii_uppercase(), path))
 }
 
 /// Consumer side: the first handler parameter annotated with a contract class.
@@ -182,19 +178,28 @@ fn return_annotation(signature: &str) -> Option<&str> {
         .filter(|annotation| !annotation.is_empty())
 }
 
-/// Reduce a raw annotation to the referenced type name: drop a parameter
-/// default, then unwrap `Optional[X]` / `X | None`. Types are otherwise kept
-/// verbatim (no normalization).
+/// Reduce a raw annotation to the referenced contract type name.
 fn annotation_type_head(annotation: &str) -> String {
     let annotation = split_top_level(annotation, '=')
         .into_iter()
         .next()
         .unwrap_or("")
         .trim();
-    unwrap_optional(annotation).trim().to_owned()
+    unwrap_contract_annotation(annotation)
 }
 
-fn unwrap_optional(annotation: &str) -> &str {
+fn unwrap_contract_annotation(annotation: &str) -> String {
+    let mut current = annotation.trim().to_owned();
+    loop {
+        let next = unwrap_one_contract_annotation(&current);
+        if next == current {
+            return next.trim().to_owned();
+        }
+        current = next;
+    }
+}
+
+fn unwrap_one_contract_annotation(annotation: &str) -> String {
     let annotation = annotation.trim();
     if annotation.contains('|')
         && let Some(inner) = annotation
@@ -202,20 +207,72 @@ fn unwrap_optional(annotation: &str) -> &str {
             .map(str::trim)
             .find(|part| !part.is_empty() && *part != "None")
     {
-        return inner;
+        return inner.to_owned();
     }
     if let Some(open) = annotation.find('[') {
         let head = annotation[..open].trim();
         let head_simple = head.rsplit('.').next().unwrap_or(head);
-        if head_simple == "Optional" {
-            return annotation[open + 1..].trim_end_matches(']').trim();
+        let inner = annotation[open + 1..].trim_end_matches(']').trim();
+        if matches!(head_simple, "Optional" | "Required" | "NotRequired") {
+            return inner.to_owned();
+        }
+        if head_simple == "Annotated" {
+            return split_top_level(inner, ',')
+                .into_iter()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+        }
+        if matches!(head_simple, "list" | "List" | "Sequence") {
+            return inner.to_owned();
         }
     }
-    annotation
+    annotation.to_owned()
+}
+
+fn is_typed_dict_class(symbol: &SymbolCapture) -> bool {
+    symbol.base_classes.iter().any(|base| {
+        let head = base.rsplit('.').next().unwrap_or(base);
+        head == "TypedDict"
+    })
+}
+
+fn typed_dict_total_false(parsed: &ParsedFile, symbol: &SymbolCapture) -> bool {
+    let Some(span) = symbol.node.span.as_ref() else {
+        return false;
+    };
+    let start = span.line_start.saturating_sub(1) as usize;
+    let mut header_lines = Vec::new();
+    for line in parsed.source.lines().skip(start) {
+        header_lines.push(line);
+        if line.contains(':') {
+            break;
+        }
+    }
+    let header = header_lines.join(" ");
+    header
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .contains("total=False")
+}
+
+fn field_is_optional(has_default: bool, typed_dict_total_false: bool, annotation: &str) -> bool {
+    if is_required_annotation(annotation) {
+        return has_default;
+    }
+    has_default || typed_dict_total_false || is_optional_annotation(annotation)
 }
 
 fn is_optional_annotation(annotation: &str) -> bool {
     let annotation = annotation.trim();
+    if is_not_required_annotation(annotation) {
+        return true;
+    }
+    if let Some(inner) = generic_inner(annotation, "Annotated") {
+        return is_optional_annotation(inner);
+    }
     let head_simple = annotation
         .split(['[', ' '])
         .next()
@@ -224,6 +281,14 @@ fn is_optional_annotation(annotation: &str) -> bool {
         .next()
         .unwrap_or(annotation);
     head_simple == "Optional" || annotation.split('|').any(|part| part.trim() == "None")
+}
+
+fn is_required_annotation(annotation: &str) -> bool {
+    generic_inner(annotation, "Required").is_some()
+}
+
+fn is_not_required_annotation(annotation: &str) -> bool {
+    generic_inner(annotation, "NotRequired").is_some()
 }
 
 fn is_class_var(annotation: &str) -> bool {
@@ -236,6 +301,16 @@ fn is_class_var(annotation: &str) -> bool {
         .next()
         .unwrap_or(annotation);
     head_simple == "ClassVar"
+}
+
+fn generic_inner<'a>(annotation: &'a str, expected_head: &str) -> Option<&'a str> {
+    let annotation = annotation.trim();
+    let open = annotation.find('[')?;
+    let head = annotation[..open].trim().rsplit('.').next().unwrap_or("");
+    if head != expected_head {
+        return None;
+    }
+    Some(annotation[open + 1..].trim_end_matches(']').trim())
 }
 
 fn build(
@@ -553,6 +628,101 @@ def get_item(item_id: int) -> Item:
                 .any(|item| item.record.side == PayloadSide::Consumer),
             "int path param is not a contract consumer"
         );
+    }
+
+    #[test]
+    fn composed_fastapi_route_targets_payload_contracts() {
+        let parsed = parse(
+            r#"
+from typing import Annotated
+from fastapi import APIRouter, Body, FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+router = APIRouter(prefix="/items")
+
+
+class Item(BaseModel):
+    id: int
+
+
+@router.post("/{item_id}", response_model=list[Item])
+def update_item(item_id: int, item: Annotated[Item, Body(...)]):
+    return [item]
+
+
+app.include_router(router, prefix="/v1")
+"#,
+        );
+        let inferred = infer_payload_contracts(&parsed);
+        let composed_target = ref_node_id(NodeKind::Route, &route_qn("POST", "/v1/items/:item_id"));
+        let bare_target = ref_node_id(NodeKind::Route, &route_qn("POST", "/:item_id"));
+
+        let consumer = inferred
+            .iter()
+            .find(|item| item.record.side == PayloadSide::Consumer)
+            .expect("Annotated request body should infer a consumer contract");
+        assert_eq!(consumer.record.source_type_name.as_deref(), Some("Item"));
+        assert_eq!(consumer.record.contract_target_node_id, composed_target);
+
+        let producer = inferred
+            .iter()
+            .find(|item| item.record.side == PayloadSide::Producer)
+            .expect("list[Item] response_model should infer a producer contract");
+        assert_eq!(producer.record.source_type_name.as_deref(), Some("Item"));
+        assert_eq!(producer.record.contract_target_node_id, composed_target);
+        assert!(
+            inferred
+                .iter()
+                .all(|item| item.record.contract_target_node_id != bare_target),
+            "contracts must not attach to the unmounted decorator path: {inferred:?}"
+        );
+    }
+
+    #[test]
+    fn typeddict_total_false_and_required_wrappers_set_optionality() {
+        let parsed = parse(
+            r#"
+from typing import Annotated, NotRequired, Required, TypedDict
+from fastapi import APIRouter, Body
+
+router = APIRouter()
+
+
+class Filters(TypedDict, total=False):
+    required_id: Required[int]
+    query: str
+    explicit_optional: NotRequired[str]
+
+
+@router.post("/search")
+def search(filters: Annotated[Filters, Body(...)]):
+    return {}
+"#,
+        );
+        let inferred = infer_payload_contracts(&parsed);
+        let consumer = inferred
+            .iter()
+            .find(|item| item.record.side == PayloadSide::Consumer)
+            .expect("Annotated TypedDict body should infer a consumer contract");
+        assert_eq!(consumer.record.source_type_name.as_deref(), Some("Filters"));
+        let fields = &consumer.record.contract.fields;
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["required_id", "query", "explicit_optional"]
+        );
+        assert!(
+            !fields[0].optional,
+            "Required[T] overrides TypedDict(total=False)"
+        );
+        assert!(
+            fields[1].optional,
+            "total=False makes ordinary keys optional"
+        );
+        assert!(fields[2].optional, "NotRequired[T] keys are optional");
     }
 
     #[test]

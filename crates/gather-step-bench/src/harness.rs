@@ -131,9 +131,6 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
     let t0 = Instant::now();
     let indexer = RepoIndexer::open(&storage_dir, IndexingOptions::default())?;
     indexer.index_repo(repo_name, fixture_path, None)?;
-    let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-    let resource_peaks = resources.finish();
 
     let graph = indexer.storage().graph();
     let graph_nodes = graph.count_nodes()?;
@@ -141,6 +138,9 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
     indexer.storage().metadata().finalize();
     drop(indexer);
     let graph_reclaimable_bytes = compact_graph_for_measurement(&storage_dir)?;
+    let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let resource_peaks = resources.finish();
     let mut storage = collect_storage_metrics(&storage_dir)?;
     storage.graph_reclaimable_bytes = graph_reclaimable_bytes;
 
@@ -166,8 +166,11 @@ pub fn run_index_pass(fixture_path: &Path, repo_name: &str) -> Result<IndexMetri
 /// exclusive handle and drops it before the caller measures file sizes,
 /// because redb reports a transient post-compaction size while open.
 fn compact_graph_for_measurement(storage_dir: &Path) -> Result<u64, HarnessError> {
-    let mut storage = StorageCoordinator::open(storage_dir)?;
-    storage.compact_graph_if_reclaimable(GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES)?;
+    {
+        let mut storage = StorageCoordinator::open(storage_dir)?;
+        storage.compact_graph_if_reclaimable(GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES)?;
+    }
+    let storage = StorageCoordinator::open(storage_dir)?;
     Ok(storage.graph().reclaimable_bytes()?)
 }
 
@@ -196,9 +199,6 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
         &storage_dir,
         IndexingOptions::default(),
     )?;
-    let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-    let resource_peaks = resources.finish();
 
     let indexer = RepoIndexer::open(&storage_dir, IndexingOptions::default())?;
     let graph = indexer.storage().graph();
@@ -207,6 +207,9 @@ pub fn run_workspace_index_pass(fixture_path: &Path) -> Result<IndexMetrics, Har
     indexer.storage().metadata().finalize();
     drop(indexer);
     let graph_reclaimable_bytes = compact_graph_for_measurement(&storage_dir)?;
+    let elapsed_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let resource_peaks = resources.finish();
     let mut storage = collect_storage_metrics(&storage_dir)?;
     storage.graph_reclaimable_bytes = graph_reclaimable_bytes;
 

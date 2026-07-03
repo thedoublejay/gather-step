@@ -10,10 +10,11 @@
 //! confidence-banding goal): a call counts only when its callee is an HTTP verb
 //! (`get`/`post`/`put`/`patch`/`delete`/`head`/`options`) invoked through a
 //! recognised client receiver (`requests`/`httpx`/`aiohttp` modules, or a
-//! `client`/`session`/`http`/`api` instance), and only when the URL argument is
-//! a statically resolvable string — a quoted literal, a module-level string
-//! constant, or a `+`-concatenation of those. Dynamic URLs (f-strings,
-//! variables, keyword-only `url=`) are skipped rather than fabricated.
+//! `client`/`session`/`http`/`api` instance with a URL-shaped literal), and only
+//! when the URL argument is a statically resolvable string — a quoted literal, a
+//! module-level string constant, or a `+`-concatenation of those. Dynamic URLs
+//! (f-strings, variables, keyword-only `url=`) are skipped rather than
+//! fabricated.
 //!
 //! Known recall gaps mirror the Kafka pack: module-level calls (no owning
 //! function) are not captured, since call sites require an owner, and aliased
@@ -56,8 +57,11 @@ fn resolve_consumed_route(
     parsed: &ParsedFile,
     call_site: &EnrichedCallSite,
 ) -> Option<ConsumedRoute> {
-    let method = http_method(call_site)?;
+    let (method, receiver) = http_method_and_receiver(call_site)?;
     let (url, literal_only) = resolve_url(parsed, call_site)?;
+    if !receiver_is_http_client(parsed, receiver, &url) {
+        return None;
+    }
     Some(ConsumedRoute {
         method,
         url,
@@ -66,8 +70,8 @@ fn resolve_consumed_route(
 }
 
 /// Upper-cased HTTP method for a call site, or `None` when the call is not an
-/// HTTP-client verb invoked through a recognised client receiver.
-fn http_method(call_site: &EnrichedCallSite) -> Option<&'static str> {
+/// HTTP-client verb invoked through a dotted receiver.
+fn http_method_and_receiver(call_site: &EnrichedCallSite) -> Option<(&'static str, &str)> {
     let method = match call_site.callee_name.as_str() {
         "get" => "GET",
         "post" => "POST",
@@ -82,23 +86,59 @@ fn http_method(call_site: &EnrichedCallSite) -> Option<&'static str> {
     // has no receiver and is never an HTTP client call.
     let hint = call_site.callee_qualified_hint.as_deref()?;
     let (receiver, _operation) = hint.rsplit_once('.')?;
-    receiver_is_http_client(receiver).then_some(method)
+    Some((method, receiver))
 }
 
-/// Whether the dotted receiver path names a recognised HTTP client. Any segment
-/// matching the allowlist qualifies, so `self.client.get` and `self.http.post`
-/// are covered while `dict.get`, `queue.get`, and `os.environ.get` are not.
-fn receiver_is_http_client(receiver: &str) -> bool {
-    receiver.split('.').any(segment_is_http_client)
+/// Whether the dotted receiver path names a recognised HTTP client.
+///
+/// Imported module/client provenance is accepted directly. Generic instance
+/// names (`client`, `session`, `api`, `http`) require a URL-shaped target so
+/// data-store calls such as `redis_client.get("key")` are not fabricated into
+/// HTTP routes.
+fn receiver_is_http_client(parsed: &ParsedFile, receiver: &str, url: &str) -> bool {
+    receiver_has_http_import(parsed, receiver)
+        || receiver.split('.').any(segment_is_known_http_module)
+        || (url_looks_like_http_target(url)
+            && receiver.split('.').any(segment_is_generic_http_client))
 }
 
-fn segment_is_http_client(segment: &str) -> bool {
+fn receiver_has_http_import(parsed: &ParsedFile, receiver: &str) -> bool {
+    let root = receiver.split('.').next().unwrap_or(receiver);
+    parsed.import_bindings.iter().any(|binding| {
+        binding.local_name == root
+            && (source_is_http_client(&binding.source)
+                || binding
+                    .imported_name
+                    .as_deref()
+                    .is_some_and(imported_name_is_http_client))
+    })
+}
+
+fn source_is_http_client(source: &str) -> bool {
+    matches!(source, "requests" | "httpx" | "aiohttp")
+}
+
+fn imported_name_is_http_client(name: &str) -> bool {
+    matches!(name, "ClientSession" | "AsyncClient" | "Client")
+}
+
+fn segment_is_known_http_module(segment: &str) -> bool {
     segment.eq_ignore_ascii_case("requests")
-        || segment.eq_ignore_ascii_case("session")
+        || segment.eq_ignore_ascii_case("httpx")
+        || segment.eq_ignore_ascii_case("aiohttp")
+}
+
+fn segment_is_generic_http_client(segment: &str) -> bool {
+    segment.eq_ignore_ascii_case("session")
         || segment.eq_ignore_ascii_case("api")
-        // Substring checks cover `httpx`, `aiohttp`, `http_client`, `apiClient`.
+        // Substring checks cover `http_client`, `apiClient`, `self.client`.
         || contains_ignore_ascii_case(segment, "http")
         || contains_ignore_ascii_case(segment, "client")
+}
+
+fn url_looks_like_http_target(url: &str) -> bool {
+    let url = url.trim();
+    url.starts_with('/') || url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// Resolve the first positional argument of a client call to a static URL.
@@ -381,6 +421,23 @@ def handler(config, cache, os):
     config.get("timeout")
     cache.get("key")
     os.environ.get("PATH")
+"#,
+        );
+
+        assert!(route_ids(&parsed).is_empty());
+        assert_eq!(edge_count(&parsed, EdgeKind::ConsumesApiFrom), 0);
+    }
+
+    #[test]
+    fn datastore_receivers_with_plain_keys_are_ignored() {
+        let dir = TestDir::new("datastore-negative");
+        let parsed = parse(
+            &dir,
+            "negative.py",
+            r#"
+def handler(redis_client, db_session):
+    redis_client.get("user:123")
+    db_session.delete("orders")
 "#,
         );
 

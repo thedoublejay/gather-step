@@ -8,9 +8,9 @@
 //! already strips quotes, so the first argument is the bare path.
 //!
 //! Same-file `APIRouter(prefix="…")` and `app.include_router(router, prefix="…")`
-//! bindings are composed into a second, full-path `Route` emitted alongside the
-//! bare-path one (`app_prefix` + `router_prefix` + decorator path). Cross-file
-//! `include_router` resolution is out of scope.
+//! bindings are composed into the public route path (`app_prefix` +
+//! `router_prefix` + decorator path). Cross-file `include_router` resolution is
+//! out of scope.
 
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id, route_qn,
@@ -47,42 +47,35 @@ fn add_route(
     prefixes: &RouterPrefixBindings,
     augmentation: &mut FastapiAugmentation,
 ) {
-    let Some(decorator) = symbol
+    let Some((method, path)) = route_method_and_path(symbol, prefixes) else {
+        return;
+    };
+    let qn = route_qn(&method, &path);
+    emit_route(symbol, &qn, augmentation);
+}
+
+pub(crate) fn route_method_and_path(
+    symbol: &SymbolCapture,
+    prefixes: &RouterPrefixBindings,
+) -> Option<(String, String)> {
+    let decorator = symbol
         .decorators
         .iter()
-        .find(|decorator| HTTP_METHODS.contains(&decorator.name.as_str()))
-    else {
-        return;
-    };
+        .find(|decorator| HTTP_METHODS.contains(&decorator.name.as_str()))?;
     // A matching-named decorator with no path argument is not a route.
     // `split_arguments` already strips quotes, so this is the bare path.
-    let Some(path) = decorator.arguments.first().map(ToString::to_string) else {
-        return;
-    };
+    let mut path = decorator.arguments.first().map(ToString::to_string)?;
     let method = decorator.name.to_ascii_uppercase();
-
-    let bare_qn = route_qn(&method, &path);
-    emit_route(symbol, &bare_qn, augmentation);
-
     let Some(receiver) = decorator.receiver.as_deref() else {
-        return;
+        return Some((method, path));
     };
-    let ctor_prefix = prefixes.ctor.get(receiver);
-    let include_prefix = prefixes.include.get(receiver);
-    if ctor_prefix.is_none() && include_prefix.is_none() {
-        return;
+    if let Some(prefix) = prefixes.ctor.get(receiver) {
+        path = join_route_path(prefix, &path);
     }
-    let mut composed = path;
-    if let Some(prefix) = ctor_prefix {
-        composed = join_route_path(prefix, &composed);
+    if let Some(prefix) = prefixes.include.get(receiver) {
+        path = join_route_path(prefix, &path);
     }
-    if let Some(prefix) = include_prefix {
-        composed = join_route_path(prefix, &composed);
-    }
-    let composed_qn = route_qn(&method, &composed);
-    if composed_qn != bare_qn {
-        emit_route(symbol, &composed_qn, augmentation);
-    }
+    Some((method, path))
 }
 
 fn emit_route(
@@ -261,13 +254,10 @@ def get_item(item_id: int):
     return {}
 "#,
         );
-        assert!(
-            routes.contains(&"__route__GET__/:item_id".to_owned()),
-            "bare route should still be emitted: {routes:?}"
-        );
-        assert!(
-            routes.contains(&"__route__GET__/items/:item_id".to_owned()),
-            "APIRouter prefix should compose into the route path: {routes:?}"
+        assert_eq!(
+            routes,
+            vec!["__route__GET__/items/:item_id".to_owned()],
+            "APIRouter prefix should compose into the only public route path: {routes:?}"
         );
     }
 
@@ -289,13 +279,10 @@ def get_item(item_id: int):
 app.include_router(router, prefix="/v1")
 "#,
         );
-        assert!(
-            routes.contains(&"__route__GET__/:item_id".to_owned()),
-            "bare route should still be emitted: {routes:?}"
-        );
-        assert!(
-            routes.contains(&"__route__GET__/v1/items/:item_id".to_owned()),
-            "include_router + APIRouter prefixes should compose in order: {routes:?}"
+        assert_eq!(
+            routes,
+            vec!["__route__GET__/v1/items/:item_id".to_owned()],
+            "include_router + APIRouter prefixes should compose into the only public route path: {routes:?}"
         );
     }
 

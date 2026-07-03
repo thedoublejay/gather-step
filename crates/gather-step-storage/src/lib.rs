@@ -993,7 +993,7 @@ mod tests {
     }
 
     /// Guard for the cold-index no-op skips: the cold path (skipped reindex
-    /// probe, skipped per-file metadata DELETEs, skipped existing-node probe
+    /// probe, skipped per-file metadata delete operations, skipped existing-node probe
     /// for non-virtual nodes) must produce graph output identical to the
     /// same batch run through the warm code path on an equally-fresh store.
     /// The shared virtual route across both files exercises the one probe

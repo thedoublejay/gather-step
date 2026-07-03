@@ -3182,7 +3182,7 @@ def create_item():
                 .unwrap_or_else(|| panic!("route {external_id} should exist"))
         };
 
-        // PUBLIC route: FE ConsumesApiFrom + gateway Serves (+ gateway ConsumesApiFrom).
+        // PUBLIC route: FE ConsumesApiFrom + gateway Serves.
         let public_route = find_route(&route_qn("POST", "/api/v1/items"));
         let public_incoming = graph
             .get_incoming(public_route.id)
@@ -3193,17 +3193,18 @@ def create_item():
             }),
             "FE repo should ConsumesApiFrom the public route: {public_incoming:?}"
         );
+        let gateway_public_server = public_incoming
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Serves && repo_of(edge.source) == "api-gateway")
+            .map_or_else(
+                || panic!("gateway repo should Serve the public route: {public_incoming:?}"),
+                |edge| edge.source,
+            );
         assert!(
-            public_incoming.iter().any(|edge| {
-                edge.kind == EdgeKind::Serves && repo_of(edge.source) == "api-gateway"
+            !public_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && edge.source == gateway_public_server
             }),
-            "gateway repo should Serve the public route: {public_incoming:?}"
-        );
-        assert!(
-            public_incoming.iter().any(|edge| {
-                edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "api-gateway"
-            }),
-            "gateway repo should ConsumesApiFrom the public route: {public_incoming:?}"
+            "gateway should not consume the same public route it serves: {public_incoming:?}"
         );
 
         // BACKEND route: gateway ConsumesApiFrom + FastAPI Serves.
@@ -3211,11 +3212,22 @@ def create_item():
         let backend_incoming = graph
             .get_incoming(backend_route.id)
             .expect("backend route incoming edges should load");
-        assert!(
-            backend_incoming.iter().any(|edge| {
+        let gateway_backend_consumer = backend_incoming
+            .iter()
+            .find(|edge| {
                 edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "api-gateway"
-            }),
-            "gateway repo should ConsumesApiFrom the backend route: {backend_incoming:?}"
+            })
+            .map_or_else(
+                || {
+                    panic!(
+                        "gateway repo should ConsumesApiFrom the backend route: {backend_incoming:?}"
+                    )
+                },
+                |edge| edge.source,
+            );
+        assert_eq!(
+            gateway_backend_consumer, gateway_public_server,
+            "one gateway node should bridge the public and backend routes"
         );
         assert!(
             backend_incoming.iter().any(|edge| {

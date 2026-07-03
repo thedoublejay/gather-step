@@ -92,7 +92,7 @@ pub struct LatencyThresholds {
 }
 
 fn default_index_pass_ms_max() -> u64 {
-    300_000
+    60_000
 }
 
 /// Memory / RSS regression thresholds.
@@ -102,6 +102,23 @@ pub struct MemoryThresholds {
     pub rss_growth_max_fraction: f64,
     /// Maximum allowed absolute RSS in bytes (default 1 GiB = 1 073 741 824).
     pub rss_absolute_max_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::Thresholds;
+
+    #[test]
+    fn default_index_pass_threshold_matches_yaml() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmark/thresholds.yaml");
+        let loaded = Thresholds::load(&path).expect("benchmark thresholds should load");
+        assert_eq!(
+            Thresholds::default_thresholds().latency.index_pass_ms_max,
+            loaded.latency.index_pass_ms_max
+        );
+    }
 }
 
 /// On-disk storage regression thresholds.

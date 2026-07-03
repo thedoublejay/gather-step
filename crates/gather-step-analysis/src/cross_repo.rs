@@ -130,7 +130,7 @@ pub fn cross_repo_deps<S: GraphStore>(
     let mut dependencies = BTreeMap::<String, BTreeSet<EdgeKind>>::new();
     let mut virtual_targets = FxHashSet::default();
 
-    for node in store.nodes_by_repo(repo_name)? {
+    for node in session.nodes_by_repo(repo_name)? {
         for edge in session.outgoing(node.id)? {
             let Some(target) = session.node(edge.target)? else {
                 continue;

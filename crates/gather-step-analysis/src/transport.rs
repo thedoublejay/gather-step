@@ -72,7 +72,7 @@ pub fn transport_links_for<S: GraphStore>(
     let mut links = Vec::new();
 
     // --- Route boundary ---
-    for route_node in store.nodes_by_type(NodeKind::Route)? {
+    for route_node in session.nodes_by_type(NodeKind::Route)? {
         if !route_node.is_virtual {
             continue;
         }
@@ -111,7 +111,7 @@ pub fn transport_links_for<S: GraphStore>(
     }
 
     // --- Queue boundary ---
-    for queue_node in store.nodes_by_type(NodeKind::Queue)? {
+    for queue_node in session.nodes_by_type(NodeKind::Queue)? {
         if !queue_node.is_virtual {
             continue;
         }
@@ -150,7 +150,7 @@ pub fn transport_links_for<S: GraphStore>(
     }
 
     // --- Suffix-tolerant route linking (query-time only, additive) ---
-    append_suffix_route_links(store, session.as_ref(), repo, limit, &mut links)?;
+    append_suffix_route_links(session.as_ref(), repo, limit, &mut links)?;
 
     Ok(links)
 }
@@ -177,8 +177,7 @@ struct SuffixServer {
 /// [`Confidence::Suffix`] link. Both sides are exclusive (a route that also
 /// serves is never a consumer; a route that also consumes is never a server),
 /// so these links never coincide with an [`Confidence::Exact`] pairing.
-fn append_suffix_route_links<S: GraphStore>(
-    store: &S,
+fn append_suffix_route_links(
     session: &dyn GraphReadSession,
     repo: Option<&str>,
     limit: usize,
@@ -187,7 +186,7 @@ fn append_suffix_route_links<S: GraphStore>(
     let mut consumers: Vec<SuffixConsumer> = Vec::new();
     let mut servers: Vec<SuffixServer> = Vec::new();
 
-    for route_node in store.nodes_by_type(NodeKind::Route)? {
+    for route_node in session.nodes_by_type(NodeKind::Route)? {
         if !route_node.is_virtual {
             continue;
         }
@@ -440,6 +439,67 @@ mod tests {
         assert_eq!(link.backend_node, backend.id);
         assert_eq!(link.method, "GET");
         assert_eq!(link.canonical_path, "/orders");
+    }
+
+    #[test]
+    fn gateway_bridge_does_not_emit_gateway_self_link() {
+        let temp = TempDb::new("transport", "gateway-bridge");
+        let store = temp.open();
+
+        let fe_file = file_node("storefront-web", "src/api.ts");
+        let gw_file = file_node("api-gateway", "src/serviceConfigs/items.service.ts");
+        let be_file = file_node("items-svc", "provider.py");
+        let frontend = symbol_node("storefront-web", "src/api.ts", "createItem", 0);
+        let backend = symbol_node("items-svc", "provider.py", "create_item", 0);
+        let public_route = route_vnode("POST", "/api/v1/items");
+        let backend_route = route_vnode("POST", "/items");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    gw_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    public_route.clone(),
+                    backend_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, public_route.id, fe_file.id),
+                    serves_edge(gw_file.id, public_route.id, gw_file.id),
+                    consumes_edge(gw_file.id, backend_route.id, gw_file.id),
+                    serves_edge(backend.id, backend_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert_eq!(links.len(), 2, "expected public and backend route links");
+        assert!(
+            links.iter().any(|link| {
+                link.frontend_node == frontend.id
+                    && link.backend_node == gw_file.id
+                    && link.canonical_path == "/api/v1/items"
+                    && link.confidence == Confidence::Exact
+            }),
+            "frontend should link to gateway public route: {links:?}"
+        );
+        assert!(
+            links.iter().any(|link| {
+                link.frontend_node == gw_file.id
+                    && link.backend_node == backend.id
+                    && link.canonical_path == "/items"
+                    && link.confidence == Confidence::Exact
+            }),
+            "gateway should link to backend route: {links:?}"
+        );
+        assert!(
+            links
+                .iter()
+                .all(|link| link.frontend_node != gw_file.id || link.backend_node != gw_file.id),
+            "gateway must not link to itself on the public route: {links:?}"
+        );
     }
 
     #[test]

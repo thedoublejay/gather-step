@@ -59,17 +59,6 @@ pub fn augment(parsed: &ParsedFile) -> GatewayProxyAugmentation {
                 owner_file: file_node_id,
                 is_cross_file: false,
             });
-            aug.edges.push(EdgeData {
-                source: file_node_id,
-                target: route_id,
-                kind: EdgeKind::ConsumesApiFrom,
-                metadata: EdgeMetadata {
-                    confidence: Some(820),
-                    ..EdgeMetadata::default()
-                },
-                owner_file: file_node_id,
-                is_cross_file: true,
-            });
         }
 
         if let Some(backend_path) = backend_path {
@@ -449,6 +438,11 @@ export const itemsServiceConfig = {
             routes.iter().any(|(qn, _)| *qn == public_qn),
             "public path route must still be emitted: {routes:?}"
         );
+        let public_id = routes
+            .iter()
+            .find(|(qn, _)| *qn == public_qn)
+            .map(|(_, id)| *id)
+            .expect("public path route must be emitted");
         let backend_id = routes
             .iter()
             .find(|(qn, _)| *qn == backend_qn)
@@ -462,6 +456,15 @@ export const itemsServiceConfig = {
                     && e.source == parsed.file_node.id
             }),
             "a ConsumesApiFrom edge must target the backend route",
+        );
+        assert!(
+            aug.edges.iter().all(|e| {
+                !(e.kind == EdgeKind::ConsumesApiFrom
+                    && e.target == public_id
+                    && e.source == parsed.file_node.id)
+            }),
+            "gateway config must not consume its own public route: {:?}",
+            aug.edges
         );
     }
 
@@ -492,5 +495,12 @@ export const itemsServiceConfig = {
             "identical public/backend path must not self-consume: {routes:?}"
         );
         assert_eq!(routes[0].0, route_qn("GET", "/items"));
+        assert!(
+            aug.edges
+                .iter()
+                .all(|edge| edge.kind != EdgeKind::ConsumesApiFrom),
+            "identical public/backend path must not emit a self-consume edge: {:?}",
+            aug.edges
+        );
     }
 }

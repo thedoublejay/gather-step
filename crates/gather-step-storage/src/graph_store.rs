@@ -500,6 +500,10 @@ pub trait GraphReadSession {
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
     /// Return the incoming edges of `target` within this session's read view.
     fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+    /// Return nodes of `kind` within this session's read view.
+    fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError>;
+    /// Return nodes for `repo` within this session's read view.
+    fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError>;
 }
 
 /// Fallback read session that delegates each lookup to the store's own
@@ -521,6 +525,14 @@ impl<S: GraphStore + ?Sized> GraphReadSession for DelegatingReadSession<'_, S> {
 
     fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
         self.store.get_incoming(target)
+    }
+
+    fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError> {
+        self.store.nodes_by_type(kind)
+    }
+
+    fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError> {
+        self.store.nodes_by_repo(repo)
     }
 }
 
@@ -1538,6 +1550,47 @@ impl GraphStoreDb {
                     ids.push(raw.value());
                 }
             }
+        }
+        Self::collect_nodes_for_ids(read_txn, ids)
+    }
+
+    pub(crate) fn nodes_by_type_in_read_txn(
+        read_txn: &redb::ReadTransaction,
+        kind: NodeKind,
+    ) -> Result<Vec<NodeData>, GraphStoreError> {
+        let by_type = match read_txn.open_multimap_table(BY_TYPE) {
+            Ok(by_type) => by_type,
+            Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let values = by_type
+            .get(kind.as_u8())
+            .map_err(GraphStoreError::storage)?;
+        let mut ids = Vec::new();
+        for value in values {
+            let raw = value.map_err(GraphStoreError::storage)?;
+            ids.push(raw.value());
+        }
+        Self::collect_nodes_for_ids(read_txn, ids)
+    }
+
+    pub(crate) fn nodes_by_repo_in_read_txn(
+        read_txn: &redb::ReadTransaction,
+        repo: &str,
+    ) -> Result<Vec<NodeData>, GraphStoreError> {
+        let Some(repo_id) = Self::lookup_repo_id(read_txn, repo)? else {
+            return Ok(Vec::new());
+        };
+        let by_repo = match read_txn.open_multimap_table(BY_REPO) {
+            Ok(by_repo) => by_repo,
+            Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let values = by_repo.get(repo_id).map_err(GraphStoreError::storage)?;
+        let mut ids = Vec::new();
+        for value in values {
+            let raw = value.map_err(GraphStoreError::storage)?;
+            ids.push(raw.value());
         }
         Self::collect_nodes_for_ids(read_txn, ids)
     }
@@ -3550,6 +3603,14 @@ impl GraphReadSession for DbReadSession {
     fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
         GraphStoreDb::get_incoming_in_read_txn(&self.read_txn, target)
     }
+
+    fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError> {
+        GraphStoreDb::nodes_by_type_in_read_txn(&self.read_txn, kind)
+    }
+
+    fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError> {
+        GraphStoreDb::nodes_by_repo_in_read_txn(&self.read_txn, repo)
+    }
 }
 
 impl GraphStore for GraphStoreDb {
@@ -4396,6 +4457,22 @@ mod tests {
         assert_eq!(
             session.incoming(missing).expect("session incoming"),
             Vec::new()
+        );
+        assert_eq!(
+            session
+                .nodes_by_type(NodeKind::Function)
+                .expect("session nodes by type"),
+            store
+                .nodes_by_type(NodeKind::Function)
+                .expect("store nodes by type"),
+        );
+        assert_eq!(
+            session
+                .nodes_by_repo("service-a")
+                .expect("session nodes by repo"),
+            store
+                .nodes_by_repo("service-a")
+                .expect("store nodes by repo"),
         );
     }
 
