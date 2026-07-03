@@ -28,8 +28,8 @@ use gather_step_mcp::{
 };
 use gather_step_parser::frameworks::{Framework, detect_frameworks_workspace_aware};
 use gather_step_storage::{
-    EdgeCountSummary, GraphStore, IndexingOptions, RepoIndexPayload, RepoIndexer,
-    StorageCoordinator,
+    EdgeCountSummary, GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES, GraphStore, IndexingOptions,
+    RepoIndexPayload, RepoIndexer, StorageCoordinator,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -382,12 +382,6 @@ impl RepoAnalyticsStatus {
         }
     }
 }
-
-/// Reclaimable free space at which the post-index finalize compacts the graph
-/// store. A cold full index grows redb's file a region past the live data
-/// (~hundreds of MB on a large workspace); a warm reindex frees little and
-/// stays under this gate, skipping the full-file rewrite.
-const GRAPH_COMPACT_RECLAIMABLE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
 pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let total_start = Instant::now();
@@ -1308,7 +1302,11 @@ fn build_checkout_root() -> std::path::PathBuf {
         .ancestors()
         .nth(2)
         .map(std::path::Path::to_path_buf)
-        .expect("gather-step-cli crate should live under the workspace root")
+        .expect(concat!(
+            "gather-step-cli crate at ",
+            env!("CARGO_MANIFEST_DIR"),
+            " should live at least two directories under the workspace root"
+        ))
 }
 
 fn release_gate_dirty_reason(workspace: &std::path::Path) -> Option<String> {
@@ -1582,6 +1580,8 @@ fn framework_label(framework: Framework) -> String {
         Framework::Zustand => "zustand",
         Framework::LaunchDarkly => "launchdarkly",
         Framework::FastApi => "fastapi",
+        Framework::PythonKafka => "python_kafka",
+        Framework::PythonHttp => "python_http",
         Framework::AiTypescript => "ai_typescript",
         Framework::GatewayProxy => "gateway_proxy",
         Framework::FrontendHooks => "frontend_hooks",

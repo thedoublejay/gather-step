@@ -85,6 +85,14 @@ pub struct LatencyThresholds {
     pub p95_ms_max: u64,
     /// Maximum allowed p99 latency in milliseconds.
     pub p99_ms_max: u64,
+    /// Maximum allowed wall-clock duration of a full bench index pass in
+    /// milliseconds.
+    #[serde(default = "default_index_pass_ms_max")]
+    pub index_pass_ms_max: u64,
+}
+
+fn default_index_pass_ms_max() -> u64 {
+    60_000
 }
 
 /// Memory / RSS regression thresholds.
@@ -94,6 +102,23 @@ pub struct MemoryThresholds {
     pub rss_growth_max_fraction: f64,
     /// Maximum allowed absolute RSS in bytes (default 1 GiB = 1 073 741 824).
     pub rss_absolute_max_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::Thresholds;
+
+    #[test]
+    fn default_index_pass_threshold_matches_yaml() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmark/thresholds.yaml");
+        let loaded = Thresholds::load(&path).expect("benchmark thresholds should load");
+        assert_eq!(
+            Thresholds::default_thresholds().latency.index_pass_ms_max,
+            loaded.latency.index_pass_ms_max
+        );
+    }
 }
 
 /// On-disk storage regression thresholds.
@@ -107,6 +132,15 @@ pub struct StorageThresholds {
     pub search_bytes_max: u64,
     /// Maximum allowed total generated storage size in bytes.
     pub total_bytes_max: u64,
+    /// Maximum allowed reclaimable fraction of the graph file after the
+    /// post-index compaction pass (`0.25` = 25 %). Trips on write-path bloat
+    /// at any absolute scale, unlike the fixed `graph_bytes_max`.
+    #[serde(default = "default_reclaimable_ratio_max")]
+    pub reclaimable_ratio_max: f64,
+}
+
+fn default_reclaimable_ratio_max() -> f64 {
+    0.25
 }
 
 impl Thresholds {
@@ -157,6 +191,7 @@ impl Thresholds {
                 p50_ms_max: 50,
                 p95_ms_max: 300,
                 p99_ms_max: 1000,
+                index_pass_ms_max: default_index_pass_ms_max(),
             },
             memory: MemoryThresholds {
                 rss_growth_max_fraction: 0.10,
@@ -167,6 +202,7 @@ impl Thresholds {
                 metadata_bytes_max: 1_500_000,
                 search_bytes_max: 50_000,
                 total_bytes_max: 3_500_000,
+                reclaimable_ratio_max: default_reclaimable_ratio_max(),
             },
         }
     }

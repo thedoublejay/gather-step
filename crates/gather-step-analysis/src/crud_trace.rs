@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::event_topology::{RouteTrace, TopologyMatch, trace_route};
@@ -59,8 +59,14 @@ pub fn trace_crud_route<S: GraphStore>(
     target: NodeId,
     limit: usize,
 ) -> Result<CrudTrace, CrudTraceError> {
+    let session = store.read_session()?;
     let route_trace = trace_route(store, target, limit)?;
-    build_crud_trace(store, route_trace, limit, DEFAULT_CRUD_TRACE_DEPTH)
+    build_crud_trace(
+        session.as_ref(),
+        route_trace,
+        limit,
+        DEFAULT_CRUD_TRACE_DEPTH,
+    )
 }
 
 pub fn trace_crud_symbol<S: GraphStore>(
@@ -68,7 +74,8 @@ pub fn trace_crud_symbol<S: GraphStore>(
     symbol_id: NodeId,
     limit: usize,
 ) -> Result<Option<CrudTrace>, CrudTraceError> {
-    let Some(symbol) = store.get_node(symbol_id)? else {
+    let session = store.read_session()?;
+    let Some(symbol) = session.node(symbol_id)? else {
         return Ok(None);
     };
 
@@ -76,7 +83,7 @@ pub fn trace_crud_symbol<S: GraphStore>(
         return Ok(Some(trace_crud_route(store, symbol.id, limit)?));
     }
 
-    let Some(route) = best_route_target_for_symbol(store, symbol.id)? else {
+    let Some(route) = best_route_target_for_symbol(session.as_ref(), symbol.id)? else {
         return Ok(None);
     };
 
@@ -85,8 +92,8 @@ pub fn trace_crud_symbol<S: GraphStore>(
     Ok(Some(trace))
 }
 
-fn build_crud_trace<S: GraphStore>(
-    store: &S,
+fn build_crud_trace(
+    session: &dyn GraphReadSession,
     route_trace: RouteTrace,
     limit: usize,
     max_depth: usize,
@@ -130,17 +137,17 @@ fn build_crud_trace<S: GraphStore>(
         }
         expansions = expansions.saturating_add(1);
         if depth >= max_depth {
-            if has_follow_up(store, node_id, depth, &best_seen)? {
+            if has_follow_up(session, node_id, depth, &best_seen)? {
                 truncated = true;
             }
             continue;
         }
 
-        for edge in store.get_outgoing(node_id)? {
+        for edge in session.outgoing(node_id)? {
             if !is_crud_edge(edge.kind) {
                 continue;
             }
-            let Some(node) = store.get_node(edge.target)? else {
+            let Some(node) = session.node(edge.target)? else {
                 continue;
             };
             if !is_relevant_crud_node(&node) {
@@ -227,17 +234,17 @@ fn crud_entry(entry: TopologyMatch, role: CrudTraceRole, depth: usize) -> CrudTr
     }
 }
 
-fn has_follow_up<S: GraphStore>(
-    store: &S,
+fn has_follow_up(
+    session: &dyn GraphReadSession,
     node_id: NodeId,
     depth: usize,
     best_seen: &FxHashMap<[u8; 16], (usize, Option<u16>)>,
 ) -> Result<bool, GraphStoreError> {
-    for edge in store.get_outgoing(node_id)? {
+    for edge in session.outgoing(node_id)? {
         if !is_crud_edge(edge.kind) {
             continue;
         }
-        let Some(node) = store.get_node(edge.target)? else {
+        let Some(node) = session.node(edge.target)? else {
             continue;
         };
         if !is_relevant_crud_node(&node) {
@@ -253,16 +260,16 @@ fn has_follow_up<S: GraphStore>(
     Ok(false)
 }
 
-fn best_route_target_for_symbol<S: GraphStore>(
-    store: &S,
+fn best_route_target_for_symbol(
+    session: &dyn GraphReadSession,
     symbol_id: NodeId,
 ) -> Result<Option<NodeData>, GraphStoreError> {
-    let mut matches = store
-        .get_outgoing(symbol_id)?
+    let mut matches = session
+        .outgoing(symbol_id)?
         .into_iter()
         .filter(|edge| edge.kind == EdgeKind::Consumes)
         .filter_map(|edge| {
-            let node = store.get_node(edge.target).ok().flatten()?;
+            let node = session.node(edge.target).ok().flatten()?;
             (node.kind == NodeKind::Route && node.is_virtual).then_some((edge, node))
         })
         .collect::<Vec<_>>();

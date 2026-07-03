@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeKind, canonical_topology_part};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +61,7 @@ pub fn deployment_topology<S: GraphStore>(
     limit: usize,
 ) -> Result<DeploymentTopologyReport, DeploymentTopologyError> {
     let limit = limit.clamp(1, 100);
+    let session = store.read_session()?;
     let mut report = DeploymentTopologyReport {
         query: query.clone(),
         repo: repo.map(ToOwned::to_owned),
@@ -87,7 +88,7 @@ pub fn deployment_topology<S: GraphStore>(
                 }
                 let edge_count = report.edges.len();
                 collect_outgoing(
-                    store,
+                    session.as_ref(),
                     &mut report,
                     &service_node,
                     &[EdgeKind::DeployedAs],
@@ -116,7 +117,7 @@ pub fn deployment_topology<S: GraphStore>(
                 }
                 let edge_count = report.edges.len();
                 collect_outgoing(
-                    store,
+                    session.as_ref(),
                     &mut report,
                     &service_node,
                     &[EdgeKind::ReadsEnv],
@@ -145,7 +146,7 @@ pub fn deployment_topology<S: GraphStore>(
                 }
                 let edge_count = report.edges.len();
                 collect_incoming(
-                    store,
+                    session.as_ref(),
                     &mut report,
                     &env_node,
                     &[EdgeKind::ReadsEnv],
@@ -166,8 +167,8 @@ pub fn deployment_topology<S: GraphStore>(
                 if report.services.len() >= limit {
                     break;
                 }
-                let has_deployment = store
-                    .get_outgoing(service_node.id)?
+                let has_deployment = session
+                    .outgoing(service_node.id)?
                     .iter()
                     .any(|edge| edge.kind == EdgeKind::DeployedAs);
                 if !has_deployment {
@@ -185,8 +186,8 @@ pub fn deployment_topology<S: GraphStore>(
                 if report.deployments.len() >= limit {
                     break;
                 }
-                let has_service = store
-                    .get_incoming(deployment.id)?
+                let has_service = session
+                    .incoming(deployment.id)?
                     .iter()
                     .any(|edge| edge.kind == EdgeKind::DeployedAs);
                 if !has_service {
@@ -209,7 +210,7 @@ pub fn deployment_topology<S: GraphStore>(
                 }
                 let edge_count = report.edges.len();
                 collect_incoming(
-                    store,
+                    session.as_ref(),
                     &mut report,
                     &infra_node,
                     &[EdgeKind::UsesDatabase, EdgeKind::UsesBroker],
@@ -232,22 +233,22 @@ pub fn deployment_topology<S: GraphStore>(
     Ok(report)
 }
 
-fn collect_outgoing<S: GraphStore>(
-    store: &S,
+fn collect_outgoing(
+    session: &dyn GraphReadSession,
     report: &mut DeploymentTopologyReport,
     source: &NodeData,
     edge_kinds: &[EdgeKind],
     target_kind: Option<NodeKind>,
     limit: usize,
 ) -> Result<(), DeploymentTopologyError> {
-    for edge in store.get_outgoing(source.id)? {
+    for edge in session.outgoing(source.id)? {
         if report.edges.len() >= limit {
             break;
         }
         if !edge_kinds.contains(&edge.kind) {
             continue;
         }
-        let Some(target) = store.get_node(edge.target)? else {
+        let Some(target) = session.node(edge.target)? else {
             continue;
         };
         if target_kind.is_some_and(|kind| target.kind != kind) {
@@ -258,22 +259,22 @@ fn collect_outgoing<S: GraphStore>(
     Ok(())
 }
 
-fn collect_incoming<S: GraphStore>(
-    store: &S,
+fn collect_incoming(
+    session: &dyn GraphReadSession,
     report: &mut DeploymentTopologyReport,
     target: &NodeData,
     edge_kinds: &[EdgeKind],
     source_kind: Option<NodeKind>,
     limit: usize,
 ) -> Result<(), DeploymentTopologyError> {
-    for edge in store.get_incoming(target.id)? {
+    for edge in session.incoming(target.id)? {
         if report.edges.len() >= limit {
             break;
         }
         if !edge_kinds.contains(&edge.kind) {
             continue;
         }
-        let Some(source) = store.get_node(edge.source)? else {
+        let Some(source) = session.node(edge.source)? else {
             continue;
         };
         if source_kind.is_some_and(|kind| source.kind != kind) {

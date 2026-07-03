@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 
 /// Edge kinds that represent structural relationships.  These are traversed in
@@ -115,21 +115,27 @@ pub fn shared_contract_impact<S: GraphStore>(
     store: &S,
     entry_node_id: NodeId,
 ) -> Result<ImpactMap, ImpactError> {
+    let session = store.read_session()?;
+
     // ── Pass 1: structural edges only ────────────────────────────────────────
-    let structural_by_repo =
-        traverse_incoming(store, entry_node_id, TraversalFilter::StructuralOnly)?;
+    let structural_by_repo = traverse_incoming(
+        session.as_ref(),
+        entry_node_id,
+        TraversalFilter::StructuralOnly,
+    )?;
 
     // ── Pass 2: weak edges, but only for repos with no structural path ───────
     // Build the full accumulator map by merging in weak-edge results for any
     // repo that Pass 1 left empty.
     let by_repo = if structural_by_repo.is_empty() {
         // No structural evidence at all → run the full weak-edge traversal.
-        traverse_incoming(store, entry_node_id, TraversalFilter::WeakOnly)?
+        traverse_incoming(session.as_ref(), entry_node_id, TraversalFilter::WeakOnly)?
     } else {
         // Structural evidence exists for at least one repo. Run a weak-edge
         // traversal to find repos that have *only* weak-edge paths, then add
         // those repos as fallback entries alongside the structural results.
-        let weak_by_repo = traverse_incoming(store, entry_node_id, TraversalFilter::WeakOnly)?;
+        let weak_by_repo =
+            traverse_incoming(session.as_ref(), entry_node_id, TraversalFilter::WeakOnly)?;
 
         let mut merged = structural_by_repo;
         for (repo, weak_files) in weak_by_repo {
@@ -163,8 +169,8 @@ impl TraversalFilter {
 /// BFS over incoming edges, restricted to the given [`TraversalFilter`].
 ///
 /// Returns a map of `repo → (file_path → ImpactAccumulator)`.
-fn traverse_incoming<S: GraphStore>(
-    store: &S,
+fn traverse_incoming(
+    session: &dyn GraphReadSession,
     entry_node_id: NodeId,
     filter: TraversalFilter,
 ) -> Result<BTreeMap<String, BTreeMap<String, ImpactAccumulator>>, ImpactError> {
@@ -173,14 +179,14 @@ fn traverse_incoming<S: GraphStore>(
     let mut by_repo = BTreeMap::<String, BTreeMap<String, ImpactAccumulator>>::new();
 
     while let Some((node_id, depth)) = queue.pop_front() {
-        for edge in store.get_incoming(node_id)? {
+        for edge in session.incoming(node_id)? {
             if !filter.allows(edge.kind) {
                 continue;
             }
-            let Some(source_node) = store.get_node(edge.source)? else {
+            let Some(source_node) = session.node(edge.source)? else {
                 continue;
             };
-            let owner_file = store.get_node(edge.owner_file)?;
+            let owner_file = session.node(edge.owner_file)?;
             let file_node = owner_file
                 .filter(|node| node.kind == NodeKind::File)
                 .unwrap_or_else(|| source_node.clone());

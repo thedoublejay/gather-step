@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gather_step_core::{EdgeKind, NodeKind};
-use gather_step_storage::{GraphStore, MetadataStore, MetadataStoreError, PayloadContractQuery};
+use gather_step_storage::{
+    GraphReadSession, GraphStore, MetadataStore, MetadataStoreError, PayloadContractQuery,
+};
 
 use crate::event_topology::list_orphan_topics_paged;
 use serde::Serialize;
@@ -215,6 +217,7 @@ fn classify_attached_virtual_targets(
     kinds: &[NodeKind],
     relevant_edges: &[EdgeKind],
 ) -> Result<SemanticLinkHealth, SemanticHealthError> {
+    let session = graph.read_session()?;
     let mut total_targets = 0_usize;
     let mut linked_targets = 0_usize;
     let partially_linked_targets = 0_usize;
@@ -223,7 +226,7 @@ fn classify_attached_virtual_targets(
 
     for &kind in kinds {
         for node in graph.nodes_by_type(kind)? {
-            if !node.is_virtual || !virtual_target_in_scope(graph, &node, repo)? {
+            if !node.is_virtual || !virtual_target_in_scope(session.as_ref(), &node, repo)? {
                 continue;
             }
             total_targets += 1;
@@ -233,12 +236,12 @@ fn classify_attached_virtual_targets(
                     .or_default() += 1;
             }
 
-            let has_relevant_edge = graph
-                .get_incoming(node.id)?
+            let has_relevant_edge = session
+                .incoming(node.id)?
                 .iter()
                 .any(|edge| relevant_edges.contains(&edge.kind))
-                || graph
-                    .get_outgoing(node.id)?
+                || session
+                    .outgoing(node.id)?
                     .iter()
                     .any(|edge| relevant_edges.contains(&edge.kind));
             if has_relevant_edge {
@@ -266,7 +269,7 @@ fn classify_attached_virtual_targets(
 }
 
 fn virtual_target_in_scope(
-    graph: &impl GraphStore,
+    session: &dyn GraphReadSession,
     node: &gather_step_core::NodeData,
     repo: &str,
 ) -> Result<bool, SemanticHealthError> {
@@ -274,23 +277,23 @@ fn virtual_target_in_scope(
         return Ok(true);
     }
 
-    for edge in graph
-        .get_incoming(node.id)?
+    for edge in session
+        .incoming(node.id)?
         .into_iter()
-        .chain(graph.get_outgoing(node.id)?)
+        .chain(session.outgoing(node.id)?)
     {
         let other_id = if edge.source == node.id {
             edge.target
         } else {
             edge.source
         };
-        if let Some(other) = graph.get_node(other_id)?
+        if let Some(other) = session.node(other_id)?
             && !other.is_virtual
             && other.repo == repo
         {
             return Ok(true);
         }
-        if let Some(owner) = graph.get_node(edge.owner_file)?
+        if let Some(owner) = session.node(edge.owner_file)?
             && owner.kind == NodeKind::File
             && owner.repo == repo
         {

@@ -38,8 +38,8 @@ pub use traverse::{
     classify_language, collect_repo_files, collect_selected_repo_files,
 };
 pub use tree_sitter::{
-    ParseError, ParsedFile, SymbolCapture, parse_file, parse_file_with_context,
-    parse_file_with_frameworks, parse_file_with_packs,
+    ParseError, ParsedFile, RouterPrefixBindings, SymbolCapture, parse_file,
+    parse_file_with_context, parse_file_with_frameworks, parse_file_with_packs,
 };
 pub use ts_js_oxc::{
     ValueMirrorCandidate, ValueMirrorKind, ValueMirrorSurface, is_specific_value_mirror,

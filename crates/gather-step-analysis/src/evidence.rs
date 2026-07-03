@@ -10,7 +10,7 @@
 use std::collections::{VecDeque, hash_map::Entry};
 
 use gather_step_core::{EdgeKind, NodeId, VirtualNodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashMap;
 
 /// Maximum total hop count for bi-directional BFS: at most `MAX_HOPS / 2` hops
@@ -70,6 +70,8 @@ pub fn evidence_chain_for<S: GraphStore>(
         }));
     }
 
+    let session = store.read_session()?;
+
     // parent[node] = (parent_node, edge_kind, specificity)
     // The specificity u8 enables tie-breaking: when two paths of equal length
     // reach the same node, the one with the higher-specificity edge wins.
@@ -87,7 +89,12 @@ pub fn evidence_chain_for<S: GraphStore>(
 
     for _depth in 0..half {
         // Expand forward frontier by one hop.
-        expand_frontier(store, &mut forward_frontier, &mut forward_parent, true)?;
+        expand_frontier(
+            session.as_ref(),
+            &mut forward_frontier,
+            &mut forward_parent,
+            true,
+        )?;
 
         // Check for meeting point.
         let meeting = forward_parent
@@ -96,7 +103,7 @@ pub fn evidence_chain_for<S: GraphStore>(
             .copied();
         if let Some(meet) = meeting {
             return Ok(Some(build_chain(
-                store,
+                session.as_ref(),
                 meet,
                 target,
                 &forward_parent,
@@ -106,7 +113,12 @@ pub fn evidence_chain_for<S: GraphStore>(
         }
 
         // Expand backward frontier by one hop.
-        expand_frontier(store, &mut backward_frontier, &mut backward_parent, false)?;
+        expand_frontier(
+            session.as_ref(),
+            &mut backward_frontier,
+            &mut backward_parent,
+            false,
+        )?;
 
         // Check for meeting point again after backward expansion.
         let meeting = backward_parent
@@ -115,7 +127,7 @@ pub fn evidence_chain_for<S: GraphStore>(
             .copied();
         if let Some(meet) = meeting {
             return Ok(Some(build_chain(
-                store,
+                session.as_ref(),
                 meet,
                 target,
                 &forward_parent,
@@ -157,8 +169,8 @@ pub fn edge_specificity(kind: EdgeKind) -> u8 {
 /// a lower-specificity edge, the stored predecessor is updated to the
 /// higher-specificity one.  This ensures the claim in [`evidence_chain_for`]
 /// that equal-length paths prefer higher-specificity edge kinds.
-fn expand_frontier<S: GraphStore>(
-    store: &S,
+fn expand_frontier(
+    session: &dyn GraphReadSession,
     frontier: &mut VecDeque<NodeId>,
     parents: &mut FxHashMap<NodeId, (NodeId, EdgeKind, u8)>,
     forward: bool,
@@ -169,9 +181,9 @@ fn expand_frontier<S: GraphStore>(
             break;
         };
         let edges = if forward {
-            store.get_outgoing(node)?
+            session.outgoing(node)?
         } else {
-            store.get_incoming(node)?
+            session.incoming(node)?
         };
         for edge in edges {
             let next = if forward { edge.target } else { edge.source };
@@ -205,8 +217,8 @@ fn expand_frontier<S: GraphStore>(
 /// against the store: if the node is virtual and its QN matches a known
 /// transport-boundary pattern (`__route__`, `__queue__`, `__topic__`,
 /// `__event__`), a [`VirtualNodeKind`] value is attached.
-fn build_chain<S: GraphStore>(
-    store: &S,
+fn build_chain(
+    session: &dyn GraphReadSession,
     meet: NodeId,
     target: NodeId,
     forward_parent: &FxHashMap<NodeId, (NodeId, EdgeKind, u8)>,
@@ -221,7 +233,7 @@ fn build_chain<S: GraphStore>(
             // Sentinel — we've reached the anchor.
             break;
         }
-        let via = resolve_via(store, current);
+        let via = resolve_via(session, current);
         forward_steps.push(EvidenceStep {
             from: parent,
             to: current,
@@ -243,7 +255,7 @@ fn build_chain<S: GraphStore>(
             // Sentinel — we've reached the target.
             break;
         }
-        let via = resolve_via(store, child);
+        let via = resolve_via(session, child);
         backward_steps.push(EvidenceStep {
             from: current,
             to: child,
@@ -267,8 +279,8 @@ fn build_chain<S: GraphStore>(
 ///
 /// Returns `None` when the node is not virtual, does not exist in the store, or
 /// when its QN does not match a known transport-boundary pattern.
-fn resolve_via<S: GraphStore>(store: &S, node_id: NodeId) -> ViaNode {
-    let Ok(Some(node)) = store.get_node(node_id) else {
+fn resolve_via(session: &dyn GraphReadSession, node_id: NodeId) -> ViaNode {
+    let Ok(Some(node)) = session.node(node_id) else {
         return None;
     };
     if !node.is_virtual {

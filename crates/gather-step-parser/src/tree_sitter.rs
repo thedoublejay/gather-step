@@ -53,7 +53,22 @@ pub struct DecoratorCapture {
     pub name: String,
     pub arguments: SmallVec<[Box<str>; 2]>,
     pub raw: String,
+    /// Object the decorator is invoked on, if any: for `@router.get(...)` this
+    /// is `Some("router")`, letting route passes resolve per-router prefixes.
+    /// `None` for bare decorators like `@login_required`.
+    pub receiver: Option<String>,
     pub span: Option<SourceSpan>,
+}
+
+/// A single annotated field (`name: type` or `name: type = default`) captured
+/// from a Python class body. Types are kept as raw source strings — no
+/// normalization. Used to build Pydantic/dataclass/`TypedDict` payload
+/// contracts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythonClassField {
+    pub name: String,
+    pub type_annotation: String,
+    pub has_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +81,18 @@ pub struct SymbolCapture {
     pub constructor_dependencies: Vec<String>,
     pub implemented_interfaces: Vec<String>,
     pub base_classes: Vec<String>,
+    pub python_class_fields: Vec<PythonClassField>,
+}
+
+/// Same-file `FastAPI` router-prefix bindings captured at parse time so the
+/// `FastAPI` augmenter can compose full route paths. Cross-file `include_router`
+/// resolution is out of scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RouterPrefixBindings {
+    /// `var = APIRouter(prefix="…")` → `var` → prefix literal.
+    pub ctor: FxHashMap<String, String>,
+    /// `parent.include_router(var, prefix="…")` → `var` → prefix literal.
+    pub include: FxHashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +111,7 @@ pub struct ParsedFile {
     pub call_sites: Vec<EnrichedCallSite>,
     pub import_bindings: Vec<ImportBinding>,
     pub constant_strings: FxHashMap<String, String>,
+    pub router_prefixes: RouterPrefixBindings,
     pub value_mirror_candidates: Vec<crate::ts_js_oxc::ValueMirrorCandidate>,
     pub parse_ms: i64,
 }
@@ -348,6 +376,7 @@ fn parse_file_core(
             call_sites: state.call_sites,
             import_bindings: state.import_bindings,
             constant_strings: state.constant_strings,
+            router_prefixes: state.router_prefixes,
             value_mirror_candidates: state.value_mirror_candidates,
             parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
         };
@@ -456,6 +485,7 @@ fn parse_file_core(
         call_sites: state.call_sites,
         import_bindings: state.import_bindings,
         constant_strings: state.constant_strings,
+        router_prefixes: state.router_prefixes,
         value_mirror_candidates: state.value_mirror_candidates,
         parse_ms: i64::try_from(parse_start.elapsed().as_millis()).unwrap_or(i64::MAX),
     };
@@ -731,6 +761,7 @@ pub(crate) struct ParseState<'a> {
     import_bindings: Vec<ImportBinding>,
     module_cache: FxHashMap<String, gather_step_core::NodeId>,
     constant_strings: FxHashMap<String, String>,
+    router_prefixes: RouterPrefixBindings,
     value_mirror_candidates: Vec<crate::ts_js_oxc::ValueMirrorCandidate>,
     function_ordinal: u16,
     class_ordinal: u16,
@@ -753,6 +784,7 @@ struct ParseStateCheckpoint {
     import_bindings_len: usize,
     module_cache: FxHashMap<String, gather_step_core::NodeId>,
     constant_strings: FxHashMap<String, String>,
+    router_prefixes: RouterPrefixBindings,
     function_ordinal: u16,
     class_ordinal: u16,
     type_ordinal: u16,
@@ -784,6 +816,7 @@ impl<'a> ParseState<'a> {
             import_bindings: Vec::new(),
             module_cache: FxHashMap::default(),
             constant_strings: FxHashMap::default(),
+            router_prefixes: RouterPrefixBindings::default(),
             value_mirror_candidates: Vec::new(),
             function_ordinal: 0,
             class_ordinal: 0,
@@ -883,6 +916,7 @@ impl<'a> ParseState<'a> {
             import_bindings_len: self.import_bindings.len(),
             module_cache: self.module_cache.clone(),
             constant_strings: self.constant_strings.clone(),
+            router_prefixes: self.router_prefixes.clone(),
             function_ordinal: self.function_ordinal,
             class_ordinal: self.class_ordinal,
             type_ordinal: self.type_ordinal,
@@ -900,6 +934,7 @@ impl<'a> ParseState<'a> {
             .truncate(checkpoint.import_bindings_len);
         self.module_cache = checkpoint.module_cache;
         self.constant_strings = checkpoint.constant_strings;
+        self.router_prefixes = checkpoint.router_prefixes;
         self.function_ordinal = checkpoint.function_ordinal;
         self.class_ordinal = checkpoint.class_ordinal;
         self.type_ordinal = checkpoint.type_ordinal;
@@ -966,7 +1001,10 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the owned String/Option arguments are moved into the constructed node, so taking them by value avoids a caller-side clone"
+    )]
     pub(crate) fn push_symbol(
         &mut self,
         kind: NodeKind,
@@ -1039,6 +1077,7 @@ impl<'a> ParseState<'a> {
             constructor_dependencies,
             implemented_interfaces: Vec::new(),
             base_classes: Vec::new(),
+            python_class_fields: Vec::new(),
         });
         node
     }
@@ -1068,6 +1107,20 @@ impl<'a> ParseState<'a> {
             .find(|symbol| symbol.node.id == node_id)
         {
             symbol.base_classes = base_classes;
+        }
+    }
+
+    pub(crate) fn set_symbol_python_class_fields(
+        &mut self,
+        node_id: gather_step_core::NodeId,
+        python_class_fields: Vec<PythonClassField>,
+    ) {
+        if let Some(symbol) = self
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.node.id == node_id)
+        {
+            symbol.python_class_fields = python_class_fields;
         }
     }
 
@@ -1212,6 +1265,18 @@ impl<'a> ParseState<'a> {
         }
     }
 
+    fn record_router_ctor_prefix(&mut self, variable: String, prefix: String) {
+        if !variable.is_empty() && !prefix.is_empty() {
+            self.router_prefixes.ctor.insert(variable, prefix);
+        }
+    }
+
+    fn record_router_include_prefix(&mut self, variable: String, prefix: String) {
+        if !variable.is_empty() && !prefix.is_empty() {
+            self.router_prefixes.include.insert(variable, prefix);
+        }
+    }
+
     fn push_call_site(
         &mut self,
         owner_id: gather_step_core::NodeId,
@@ -1325,7 +1390,10 @@ impl<'a> ParseState<'a> {
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned)]
+#[expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "the tail is a control-flow match that dispatches recursion and yields (); a trailing expression reads clearer than a semicolon here"
+)]
 fn visit_ts_js(
     node: Node<'_>,
     state: &mut ParseState<'_>,
@@ -1671,7 +1739,10 @@ fn visit_ts_js_sequence(
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned)]
+#[expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "the tail is a control-flow match that dispatches recursion and yields (); a trailing expression reads clearer than a semicolon here"
+)]
 fn visit_ts_js_with_pending(
     node: Node<'_>,
     state: &mut ParseState<'_>,
@@ -1813,7 +1884,10 @@ fn visit_ts_js_with_pending(
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned)]
+#[expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "the tail is a control-flow match that dispatches recursion and yields (); a trailing expression reads clearer than a semicolon here"
+)]
 fn visit_python(
     node: Node<'_>,
     state: &mut ParseState<'_>,
@@ -1902,6 +1976,10 @@ fn visit_python(
             );
             state.set_symbol_implemented_interfaces(class_node.id, implemented_interfaces);
             state.set_symbol_base_classes(class_node.id, base_classes.clone());
+            state.set_symbol_python_class_fields(
+                class_node.id,
+                collect_python_class_fields(node, state.source),
+            );
             // Enum subclass: emit authoritative EnumMemberDef candidates.
             if base_classes.iter().any(|b| b == "Enum")
                 && let Some(body) = find_child_by_kind(node, "block")
@@ -1952,6 +2030,15 @@ fn visit_python(
             });
         }
         "call" => {
+            // `parent.include_router(router, prefix="/v1")` binds an app-level
+            // prefix to a router variable. Captured regardless of scope so
+            // module-level mounts (owner-less) are seen too.
+            if python_callee_name(node, state.source).as_deref() == Some("include_router")
+                && let Some(prefix) = python_prefix_kwarg(node, state.source)
+                && let Some(variable) = python_first_positional_ident(node, state.source)
+            {
+                state.record_router_include_prefix(variable, prefix);
+            }
             if let Some(owner_id) = owner
                 && let Some(function_node) = node
                     .child_by_field_name("function")
@@ -2005,6 +2092,13 @@ fn visit_python(
                     // `Status = Literal["a", "b"]` → authoritative Literal mirrors
                     let owner_id = owner.unwrap_or_else(|| state.file_node_id());
                     capture_python_literal_type(right, owner_id, state);
+                } else if right.kind() == "call"
+                    && python_callee_name(right, state.source).as_deref() == Some("APIRouter")
+                    && let Some(prefix) = python_prefix_kwarg(right, state.source)
+                {
+                    // `router = APIRouter(prefix="/items")` → router → prefix.
+                    let name = node_text(left, state.source).trim().to_owned();
+                    state.record_router_ctor_prefix(name, prefix);
                 }
             }
             recurse_children(node, |child| {
@@ -2109,7 +2203,10 @@ fn single_decorator(node: Node<'_>, source: &str) -> DecoratorCapture {
         .named_child(0)
         .or_else(|| node.child(0))
         .unwrap_or(node);
-    let (name, _) = expression_name(expression, source);
+    let (name, qualified) = expression_name(expression, source);
+    let receiver = qualified
+        .as_deref()
+        .and_then(|q| q.rsplit_once('.').map(|(head, _)| head.to_owned()));
     let arg_node = node
         .child_by_field_name("arguments")
         .or_else(|| find_child_by_kind(node, "arguments"))
@@ -2144,6 +2241,7 @@ fn single_decorator(node: Node<'_>, source: &str) -> DecoratorCapture {
         name,
         arguments,
         raw,
+        receiver,
         span: Some(span_from(node)),
     }
 }
@@ -2256,6 +2354,51 @@ fn collect_implemented_interfaces(node: Node<'_>, source: &str) -> Vec<String> {
             (!head.is_empty()).then(|| head.to_owned())
         })
         .collect()
+}
+
+/// Capture annotated class-body fields (`name: type` / `name: type = default`)
+/// from a Python class. Only direct annotated assignments to a plain identifier
+/// are captured; methods, plain assignments, and nested classes are ignored.
+/// Types are kept raw. Consumed by Pydantic/dataclass/`TypedDict` contract
+/// inference.
+fn collect_python_class_fields(node: Node<'_>, source: &str) -> Vec<PythonClassField> {
+    let Some(body) = find_child_by_kind(node, "block") else {
+        return Vec::new();
+    };
+
+    let mut fields = Vec::new();
+    let mut cursor = body.walk();
+    for stmt in body.named_children(&mut cursor) {
+        let assignment = if stmt.kind() == "expression_statement" {
+            stmt.named_child(0).filter(|n| n.kind() == "assignment")
+        } else if stmt.kind() == "assignment" {
+            Some(stmt)
+        } else {
+            None
+        };
+        let Some(assign) = assignment else { continue };
+        let Some(type_node) = assign.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(left) = assign.child_by_field_name("left") else {
+            continue;
+        };
+        if left.kind() != "identifier" {
+            continue;
+        }
+        let name = node_text(left, source).trim().to_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let type_annotation = node_text(type_node, source).trim().to_owned();
+        fields.push(PythonClassField {
+            name,
+            type_annotation,
+            has_default: assign.child_by_field_name("right").is_some(),
+        });
+    }
+
+    fields
 }
 
 fn collect_python_base_classes(node: Node<'_>, source: &str) -> Vec<String> {
@@ -4463,7 +4606,11 @@ fn framework_to_pack_ids(fw: Framework) -> &'static [PackId] {
         Framework::Redux => &[PackId::Redux],
         Framework::Zustand => &[PackId::Zustand],
         Framework::LaunchDarkly => &[PackId::LaunchDarkly],
-        Framework::FastApi => &[PackId::Fastapi],
+        // FastAPI keeps activating the Kafka pack so existing FastAPI repos
+        // stay byte-identical; the Kafka pack now also stands alone below.
+        Framework::FastApi => &[PackId::Fastapi, PackId::PythonKafka],
+        Framework::PythonKafka => &[PackId::PythonKafka],
+        Framework::PythonHttp => &[PackId::PythonHttp],
         Framework::AiTypescript => &[PackId::AiTypescript],
         Framework::GatewayProxy => &[PackId::GatewayProxy],
         Framework::FrontendHooks => &[PackId::FrontendHooks],
@@ -4642,6 +4789,59 @@ fn raw_arguments(node: Node<'_>, source: &str) -> Option<String> {
             .trim()
             .to_owned(),
     )
+}
+
+/// Last-segment callee name of a Python `call` node, e.g. `APIRouter` for
+/// both `APIRouter(...)` and `fastapi.APIRouter(...)`.
+fn python_callee_name(call: Node<'_>, source: &str) -> Option<String> {
+    let function = call
+        .child_by_field_name("function")
+        .or_else(|| call.child(0))?;
+    let (name, _) = expression_name(function, source);
+    (!name.is_empty()).then_some(name)
+}
+
+/// String literal passed to the `prefix=` keyword argument of a Python call.
+/// Returns `None` when the call has no `prefix=` argument or its value is not a
+/// plain string literal (dynamic prefixes are intentionally skipped).
+fn python_prefix_kwarg(call: Node<'_>, source: &str) -> Option<String> {
+    let arguments = call
+        .child_by_field_name("arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            continue;
+        }
+        let Some(name) = child.child_by_field_name("name") else {
+            continue;
+        };
+        if node_text(name, source).trim() != "prefix" {
+            continue;
+        }
+        let value = child.child_by_field_name("value")?;
+        if value.kind() != "string" {
+            return None;
+        }
+        let literal = sanitize_string_literal(node_text(value, source));
+        return (!literal.is_empty()).then_some(literal);
+    }
+    None
+}
+
+/// First positional identifier argument of a Python call, e.g. `router` for
+/// `app.include_router(router, prefix="/v1")`.
+fn python_first_positional_ident(call: Node<'_>, source: &str) -> Option<String> {
+    let arguments = call
+        .child_by_field_name("arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() == "identifier" {
+            return Some(node_text(child, source).trim().to_owned());
+        }
+    }
+    None
 }
 
 fn split_arguments(raw: &str) -> Vec<String> {
@@ -6079,6 +6279,53 @@ class Outer:
             symbol.node.name == "method"
                 && symbol.node.qualified_name.as_deref() == Some("Outer.Inner.method")
         }));
+    }
+
+    #[test]
+    fn python_class_annotated_fields_are_captured() {
+        let temp_dir = TestDir::new("python-class-fields");
+        fs::write(
+            temp_dir.path().join("models.py"),
+            r#"
+class ItemCreate:
+    name: str
+    price: float | None
+    tags: list[str] = []
+    plain = 1
+
+    def method(self, x: int) -> int:
+        return x
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "sample-service",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "models.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        let class = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.node.name == "ItemCreate")
+            .expect("class symbol");
+        let fields = &class.python_class_fields;
+        assert_eq!(fields.len(), 3, "only annotated fields, no plain/methods");
+        assert_eq!(fields[0].name, "name");
+        assert_eq!(fields[0].type_annotation, "str");
+        assert!(!fields[0].has_default);
+        assert_eq!(fields[1].type_annotation, "float | None");
+        assert_eq!(fields[2].name, "tags");
+        assert_eq!(fields[2].type_annotation, "list[str]");
+        assert!(fields[2].has_default);
     }
 
     #[test]

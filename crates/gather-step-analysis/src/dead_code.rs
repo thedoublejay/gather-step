@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
 use gather_step_parser::ParsedPackageManifest;
-use gather_step_storage::GraphStore;
+use gather_step_storage::{GraphReadSession, GraphStore};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -91,6 +91,7 @@ pub fn find_dead_code_with_manifest<S: GraphStore>(
     repo: &str,
     manifest: Option<&ParsedPackageManifest>,
 ) -> Result<DeadCodeReport, DeadCodeError> {
+    let session = store.read_session()?;
     let nodes = store.nodes_by_repo(repo)?;
     let mut file_ids = BTreeMap::<String, NodeId>::new();
     for node in &nodes {
@@ -218,10 +219,10 @@ pub fn find_dead_code_with_manifest<S: GraphStore>(
     let UnusedExportsOutcome {
         findings: unused_export_findings,
         skipped_export_count,
-    } = find_unused_exports(store, &nodes, &nodes_by_id);
+    } = find_unused_exports(session.as_ref(), &nodes, &nodes_by_id);
     findings.extend(unused_export_findings);
     if skipped_export_count > 0 {
-        // A graph-store error on `get_incoming` means we could not verify
+        // A graph-store error on the incoming-edge read means we could not verify
         // whether N export candidates are unused. Surface the count so MCP
         // consumers know the unused-export findings are incomplete rather
         // than discovering it accidentally.
@@ -258,8 +259,8 @@ struct UnusedExportsOutcome {
     skipped_export_count: usize,
 }
 
-fn find_unused_exports<S: GraphStore>(
-    store: &S,
+fn find_unused_exports(
+    session: &dyn GraphReadSession,
     nodes: &[gather_step_core::NodeData],
     nodes_by_id: &rustc_hash::FxHashMap<NodeId, &gather_step_core::NodeData>,
 ) -> UnusedExportsOutcome {
@@ -273,7 +274,7 @@ fn find_unused_exports<S: GraphStore>(
         // Surface failures in coverage_limits via the count; the alternative —
         // returning Err — would mask all other findings for one bad node.
         // Counting at the boundary keeps the report partial-but-honest.
-        let Ok(incoming) = store.get_incoming(node.id) else {
+        let Ok(incoming) = session.incoming(node.id) else {
             skipped_export_count = skipped_export_count.saturating_add(1);
             continue;
         };

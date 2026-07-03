@@ -30,6 +30,7 @@ latency:
   p50_ms_max: 50
   p95_ms_max: 300
   p99_ms_max: 1000
+  index_pass_ms_max: 60000
 
 memory:
   rss_growth_max_fraction: 0.10
@@ -40,3 +41,4 @@ storage:
   metadata_bytes_max: 1500000
   search_bytes_max: 50000
   total_bytes_max: 3500000
+  reclaimable_ratio_max: 0.25

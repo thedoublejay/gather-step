@@ -199,6 +199,10 @@ struct EdgeIndexTables<'txn> {
     edges_in: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edges_by_owner: MultimapTable<'txn, NodeIdBytes, EdgeIdBytes>,
     edge_kind_counts: redb::Table<'txn, u8, u64>,
+    /// Per-kind increments accumulated during a bulk edge loop and applied
+    /// to `edge_kind_counts` once per loop via `flush_edge_kind_counts`
+    /// (one B-tree read-modify-write per kind instead of one per edge).
+    pending_kind_counts: FxHashMap<u8, u64>,
 }
 
 const NODES: TableDefinition<NodeIdBytes, &[u8]> = TableDefinition::new("nodes");
@@ -494,6 +498,12 @@ pub trait GraphReadSession {
     fn node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError>;
     /// Return the outgoing edges of `source` within this session's read view.
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+    /// Return the incoming edges of `target` within this session's read view.
+    fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+    /// Return nodes of `kind` within this session's read view.
+    fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError>;
+    /// Return nodes for `repo` within this session's read view.
+    fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError>;
 }
 
 /// Fallback read session that delegates each lookup to the store's own
@@ -511,6 +521,18 @@ impl<S: GraphStore + ?Sized> GraphReadSession for DelegatingReadSession<'_, S> {
 
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
         self.store.get_outgoing(source)
+    }
+
+    fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
+        self.store.get_incoming(target)
+    }
+
+    fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError> {
+        self.store.nodes_by_type(kind)
+    }
+
+    fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError> {
+        self.store.nodes_by_repo(repo)
     }
 }
 
@@ -1532,6 +1554,47 @@ impl GraphStoreDb {
         Self::collect_nodes_for_ids(read_txn, ids)
     }
 
+    pub(crate) fn nodes_by_type_in_read_txn(
+        read_txn: &redb::ReadTransaction,
+        kind: NodeKind,
+    ) -> Result<Vec<NodeData>, GraphStoreError> {
+        let by_type = match read_txn.open_multimap_table(BY_TYPE) {
+            Ok(by_type) => by_type,
+            Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let values = by_type
+            .get(kind.as_u8())
+            .map_err(GraphStoreError::storage)?;
+        let mut ids = Vec::new();
+        for value in values {
+            let raw = value.map_err(GraphStoreError::storage)?;
+            ids.push(raw.value());
+        }
+        Self::collect_nodes_for_ids(read_txn, ids)
+    }
+
+    pub(crate) fn nodes_by_repo_in_read_txn(
+        read_txn: &redb::ReadTransaction,
+        repo: &str,
+    ) -> Result<Vec<NodeData>, GraphStoreError> {
+        let Some(repo_id) = Self::lookup_repo_id(read_txn, repo)? else {
+            return Ok(Vec::new());
+        };
+        let by_repo = match read_txn.open_multimap_table(BY_REPO) {
+            Ok(by_repo) => by_repo,
+            Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(GraphStoreError::storage(error)),
+        };
+        let values = by_repo.get(repo_id).map_err(GraphStoreError::storage)?;
+        let mut ids = Vec::new();
+        for value in values {
+            let raw = value.map_err(GraphStoreError::storage)?;
+            ids.push(raw.value());
+        }
+        Self::collect_nodes_for_ids(read_txn, ids)
+    }
+
     pub(crate) fn with_write_txn<T>(
         &self,
         action: impl FnOnce(&redb::WriteTransaction) -> Result<T, GraphStoreError>,
@@ -2360,7 +2423,28 @@ impl GraphStoreDb {
             edge_kind_counts: write_txn
                 .open_table(EDGE_KIND_COUNTS)
                 .map_err(GraphStoreError::storage)?,
+            pending_kind_counts: FxHashMap::default(),
         })
+    }
+
+    /// Apply the increments accumulated in `pending_kind_counts` to the
+    /// persistent `edge_kind_counts` table. Must run after every bulk edge
+    /// loop, before the tables are dropped — the guard test
+    /// `count_edges_by_kind_matches_after_mixed_bulk_insert` trips if a
+    /// caller forgets.
+    fn flush_edge_kind_counts(tables: &mut EdgeIndexTables<'_>) -> Result<(), GraphStoreError> {
+        for (key, delta) in std::mem::take(&mut tables.pending_kind_counts) {
+            let next = tables
+                .edge_kind_counts
+                .get(key)
+                .map_err(GraphStoreError::storage)?
+                .map_or(delta, |current| current.value().saturating_add(delta));
+            tables
+                .edge_kind_counts
+                .insert(key, next)
+                .map_err(GraphStoreError::storage)?;
+        }
+        Ok(())
     }
 
     fn bulk_insert_edge_with_tables(
@@ -2428,7 +2512,10 @@ impl GraphStoreDb {
                 .edges_by_owner
                 .insert(edge.owner_file.as_bytes(), edge_id)
                 .map_err(GraphStoreError::storage)?;
-            Self::increment_edge_kind_count(&mut tables.edge_kind_counts, edge.kind)?;
+            *tables
+                .pending_kind_counts
+                .entry(edge.kind.as_u8())
+                .or_insert(0) += 1;
         }
 
         let encoded = Self::encode_edge(edge);
@@ -3026,6 +3113,7 @@ impl GraphStoreDb {
             // other files, so we keep the existence check for safety.
             Self::bulk_insert_edge_with_tables(&mut tables, edge, true)?;
         }
+        Self::flush_edge_kind_counts(&mut tables)?;
         Ok(())
     }
 
@@ -3059,7 +3147,7 @@ impl GraphStoreDb {
         nodes: &[NodeData],
         edges: &[EdgeData],
     ) -> Result<(), GraphStoreError> {
-        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, true)
+        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, true, false)
     }
 
     /// Internal variant used by the indexer's hot write path. The caller
@@ -3067,12 +3155,20 @@ impl GraphStoreDb {
     /// by the same parser run as the `nodes` slice, so node existence is
     /// invariant by construction — skipping the 3 per-edge B-tree reads
     /// removes ~800K reads on the full-monorepo cold index.
+    ///
+    /// When `cold_index` is true (repo verified to have zero prior nodes),
+    /// the per-node existing-row probe is also skipped for non-virtual
+    /// nodes: their ids are file-scoped and each file is inserted exactly
+    /// once per cold run, so the probe is a guaranteed miss. Virtual nodes
+    /// (routes, topics, …) keep the probe — the same virtual id can be
+    /// re-emitted by several files within one cold run.
     pub(crate) fn bulk_insert_in_txn_trusted(
         write_txn: &redb::WriteTransaction,
         nodes: &[NodeData],
         edges: &[EdgeData],
+        cold_index: bool,
     ) -> Result<(), GraphStoreError> {
-        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, false)
+        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, false, cold_index)
     }
 
     fn bulk_insert_in_txn_inner(
@@ -3080,6 +3176,7 @@ impl GraphStoreDb {
         nodes: &[NodeData],
         edges: &[EdgeData],
         validate_nodes: bool,
+        cold_index: bool,
     ) -> Result<(), GraphStoreError> {
         let mut owner_file_set = FxHashSet::default();
         let mut replaced_owner_files = Vec::new();
@@ -3099,12 +3196,16 @@ impl GraphStoreDb {
         let mut index_tables = Self::open_node_index_tables(write_txn)?;
         for node in nodes {
             let stored = Self::store_node_in_txn(write_txn, node)?;
-            if let Some(existing) = table
-                .get(node.id.as_bytes())
-                .map_err(GraphStoreError::storage)?
-                .map(|raw| Self::decode_stored_node(raw.value()))
-                .transpose()?
-            {
+            let existing = if !cold_index || node.is_virtual {
+                table
+                    .get(node.id.as_bytes())
+                    .map_err(GraphStoreError::storage)?
+                    .map(|raw| Self::decode_stored_node(raw.value()))
+                    .transpose()?
+            } else {
+                None
+            };
+            if let Some(existing) = existing {
                 Self::remove_node_indexes_with_tables(&mut index_tables, &existing)?;
                 if !matches!(existing.kind, NodeKind::File) && !existing.is_virtual {
                     Self::remove_node_edges(write_txn, existing.id)?;
@@ -3127,6 +3228,7 @@ impl GraphStoreDb {
         for edge in edges {
             Self::bulk_insert_edge_with_tables(&mut edge_tables, edge, validate_nodes)?;
         }
+        Self::flush_edge_kind_counts(&mut edge_tables)?;
 
         Ok(())
     }
@@ -3496,6 +3598,18 @@ impl GraphReadSession for DbReadSession {
 
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
         GraphStoreDb::get_outgoing_in_read_txn(&self.read_txn, source)
+    }
+
+    fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
+        GraphStoreDb::get_incoming_in_read_txn(&self.read_txn, target)
+    }
+
+    fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError> {
+        GraphStoreDb::nodes_by_type_in_read_txn(&self.read_txn, kind)
+    }
+
+    fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError> {
+        GraphStoreDb::nodes_by_repo_in_read_txn(&self.read_txn, repo)
     }
 }
 
@@ -4331,6 +4445,34 @@ mod tests {
         assert_eq!(
             session.outgoing(b.id).expect("session outgoing"),
             store.get_outgoing(b.id).expect("store outgoing"),
+        );
+        assert_eq!(
+            session.incoming(b.id).expect("session incoming"),
+            store.get_incoming(b.id).expect("store incoming"),
+        );
+        assert_eq!(
+            session.incoming(a.id).expect("session incoming"),
+            store.get_incoming(a.id).expect("store incoming"),
+        );
+        assert_eq!(
+            session.incoming(missing).expect("session incoming"),
+            Vec::new()
+        );
+        assert_eq!(
+            session
+                .nodes_by_type(NodeKind::Function)
+                .expect("session nodes by type"),
+            store
+                .nodes_by_type(NodeKind::Function)
+                .expect("store nodes by type"),
+        );
+        assert_eq!(
+            session
+                .nodes_by_repo("service-a")
+                .expect("session nodes by repo"),
+            store
+                .nodes_by_repo("service-a")
+                .expect("store nodes by repo"),
         );
     }
 
@@ -5408,6 +5550,95 @@ mod tests {
                 .expect("lookup should work")
                 .map(|count| count.value()),
             Some(1)
+        );
+    }
+
+    /// Guard for the per-loop edge-kind count accumulator: mixed kinds,
+    /// an in-batch duplicate (must count once), and a second batch layered
+    /// on persisted counts must all land on the exact same values the
+    /// per-edge read-modify-write produced.
+    #[test]
+    fn count_edges_by_kind_matches_after_mixed_bulk_insert() {
+        fn edge_with_kind(
+            source: NodeId,
+            target: NodeId,
+            owner_file: NodeId,
+            kind: EdgeKind,
+        ) -> EdgeData {
+            EdgeData {
+                source,
+                target,
+                kind,
+                metadata: EdgeMetadata {
+                    access_mechanism: Some(kind.access_mechanism()),
+                    ..EdgeMetadata::default()
+                },
+                owner_file,
+                is_cross_file: false,
+            }
+        }
+
+        let store = test_store("edge-kind-accumulator");
+        let file = node("service-a", "src/foo.ts", NodeKind::File, "src/foo.ts", 0);
+        // Second-batch edges get their own owner file: `bulk_insert` replaces
+        // all prior edges of each owner, and this test layers batches instead.
+        let other_file = node("service-a", "src/bar.ts", NodeKind::File, "src/bar.ts", 0);
+        let a = node("service-a", "src/foo.ts", NodeKind::Function, "a", 0);
+        let b = node("service-a", "src/foo.ts", NodeKind::Function, "b", 1);
+        let c = node("service-a", "src/foo.ts", NodeKind::Function, "c", 2);
+        let d = node("service-a", "src/foo.ts", NodeKind::Function, "d", 3);
+
+        let a_calls_b = edge_with_kind(a.id, b.id, file.id, EdgeKind::Calls);
+        store
+            .bulk_insert(
+                &[
+                    file.clone(),
+                    other_file.clone(),
+                    a.clone(),
+                    b.clone(),
+                    c.clone(),
+                    d.clone(),
+                ],
+                &[
+                    a_calls_b.clone(),
+                    a_calls_b.clone(),
+                    edge_with_kind(a.id, c.id, file.id, EdgeKind::Calls),
+                    edge_with_kind(b.id, c.id, file.id, EdgeKind::Consumes),
+                ],
+            )
+            .expect("first batch should insert");
+
+        assert_eq!(
+            store.count_edges_by_kind(EdgeKind::Calls).expect("count"),
+            2,
+            "duplicate edge in one batch must count once"
+        );
+        assert_eq!(
+            store
+                .count_edges_by_kind(EdgeKind::Consumes)
+                .expect("count"),
+            1
+        );
+
+        store
+            .bulk_insert(
+                &[],
+                &[edge_with_kind(c.id, d.id, other_file.id, EdgeKind::Calls)],
+            )
+            .expect("second batch should insert");
+        assert_eq!(
+            store.count_edges_by_kind(EdgeKind::Calls).expect("count"),
+            3,
+            "second batch must accumulate onto persisted counts"
+        );
+
+        store
+            .delete_edge(&a_calls_b)
+            .expect("edge delete should succeed");
+        assert_eq!(
+            store.count_edges_by_kind(EdgeKind::Calls).expect("count"),
+            2,
+            "single-edge decrement path must stay consistent with batched increments"
         );
     }
 

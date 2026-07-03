@@ -419,6 +419,30 @@ pub struct RepoIndexPayload {
     pub synthetic_file_count: usize,
 }
 
+/// Runs a per-file parse under `catch_unwind` so a parser panic on a single
+/// adversarial file becomes a skip-with-warning instead of aborting the whole
+/// repo index. Returns `None` when the parse panicked (the file is left
+/// unindexed and is retried on the next incremental reindex); otherwise the
+/// parse's own `Result` is passed through unchanged.
+///
+/// `AssertUnwindSafe` is sound here: the panicking parse's partial state is
+/// confined to the closure and discarded on unwind, and nothing observed after
+/// this call depends on it.
+fn parse_file_catching_panic(
+    file: &SourceFileEntry,
+    parse: impl FnOnce() -> Result<ParsedFile, ParseError>,
+) -> Option<Result<ParsedFile, ParseError>> {
+    if let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse)) {
+        Some(result)
+    } else {
+        warn!(
+            path = %file.path.display(),
+            "parser panicked while indexing this file; skipping it (it will be retried on the next incremental reindex)"
+        );
+        None
+    }
+}
+
 impl RepoIndexer {
     pub fn open(
         storage_root: impl AsRef<Path>,
@@ -1194,14 +1218,17 @@ impl RepoIndexer {
                     let _: Result<(), ()> = files_to_index.par_iter().try_for_each_with(
                         sender.clone(),
                         |sender, file| {
-                            let parsed = parse_file_with_packs(
-                                repo_name.as_str(),
-                                root.as_path(),
-                                file,
-                                packs.as_ref(),
-                                path_aliases.as_ref(),
-                            );
-                            sender.send(parsed).map_err(|_| ())?;
+                            if let Some(parsed) = parse_file_catching_panic(file, || {
+                                parse_file_with_packs(
+                                    repo_name.as_str(),
+                                    root.as_path(),
+                                    file,
+                                    packs.as_ref(),
+                                    path_aliases.as_ref(),
+                                )
+                            }) {
+                                sender.send(parsed).map_err(|_| ())?;
+                            }
                             Ok(())
                         },
                     );
@@ -1210,14 +1237,17 @@ impl RepoIndexer {
                     let _: Result<(), ()> = files_to_index.par_iter().try_for_each_with(
                         sender.clone(),
                         |sender, file| {
-                            let parsed = parse_file_with_context(
-                                repo_name.as_str(),
-                                root.as_path(),
-                                file,
-                                frameworks.as_ref(),
-                                path_aliases.as_ref(),
-                            );
-                            sender.send(parsed).map_err(|_| ())?;
+                            if let Some(parsed) = parse_file_catching_panic(file, || {
+                                parse_file_with_context(
+                                    repo_name.as_str(),
+                                    root.as_path(),
+                                    file,
+                                    frameworks.as_ref(),
+                                    path_aliases.as_ref(),
+                                )
+                            }) {
+                                sender.send(parsed).map_err(|_| ())?;
+                            }
                             Ok(())
                         },
                     );
@@ -1407,7 +1437,10 @@ impl RepoIndexer {
         })
     }
 
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "sequential per-repo indexing pipeline whose phases share tightly-coupled local state; splitting it would scatter that state without improving readability"
+    )]
     fn index_repo_files(
         &self,
         repo: &str,
@@ -1552,14 +1585,17 @@ impl RepoIndexer {
                                     {
                                         return Err(());
                                     }
-                                    let parsed = parse_file_with_packs(
-                                        repo_name.as_str(),
-                                        root.as_path(),
-                                        file,
-                                        packs.as_ref(),
-                                        path_aliases.as_ref(),
-                                    );
-                                    sender.send(parsed).map_err(|_| ())?;
+                                    if let Some(parsed) = parse_file_catching_panic(file, || {
+                                        parse_file_with_packs(
+                                            repo_name.as_str(),
+                                            root.as_path(),
+                                            file,
+                                            packs.as_ref(),
+                                            path_aliases.as_ref(),
+                                        )
+                                    }) {
+                                        sender.send(parsed).map_err(|_| ())?;
+                                    }
                                     Ok(())
                                 },
                             );
@@ -1572,14 +1608,17 @@ impl RepoIndexer {
                                     {
                                         return Err(());
                                     }
-                                    let parsed = parse_file_with_context(
-                                        repo_name.as_str(),
-                                        root.as_path(),
-                                        file,
-                                        frameworks.as_ref(),
-                                        path_aliases.as_ref(),
-                                    );
-                                    sender.send(parsed).map_err(|_| ())?;
+                                    if let Some(parsed) = parse_file_catching_panic(file, || {
+                                        parse_file_with_context(
+                                            repo_name.as_str(),
+                                            root.as_path(),
+                                            file,
+                                            frameworks.as_ref(),
+                                            path_aliases.as_ref(),
+                                        )
+                                    }) {
+                                        sender.send(parsed).map_err(|_| ())?;
+                                    }
                                     Ok(())
                                 },
                             );
@@ -2691,7 +2730,7 @@ mod tests {
 
     use gather_step_core::{EdgeKind, NodeKind};
     use gather_step_parser::{
-        FileEntry, Language, collect_repo_files,
+        FileEntry, Language, ParseError, collect_repo_files,
         frameworks::{Framework, detect_frameworks},
         parse_file_with_context,
         tsconfig::PathAliases,
@@ -2703,7 +2742,7 @@ mod tests {
     use super::{
         DeploymentIndexingOptions, IndexingOptions, RepoIndexer,
         deployment_artifact_path_is_non_live, is_path_alias_config_path,
-        mongo_findings_path_is_excluded,
+        mongo_findings_path_is_excluded, parse_file_catching_panic,
     };
 
     #[test]
@@ -2722,6 +2761,36 @@ mod tests {
         assert!(!mongo_findings_path_is_excluded(Path::new(
             "src/services/alert.service.ts"
         )));
+    }
+
+    #[test]
+    fn parse_file_catching_panic_isolates_panics_to_a_skip() {
+        let file = FileEntry {
+            path: PathBuf::from("adversarial.ts"),
+            language: Language::TypeScript,
+            size_bytes: 0,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+
+        // A parser panic on one file becomes a skip (None), never an abort of
+        // the whole repo index.
+        let skipped = parse_file_catching_panic(&file, || panic!("simulated parser panic"));
+        assert!(
+            skipped.is_none(),
+            "a panicking parse must be skipped, not propagated"
+        );
+
+        // A non-panicking parse passes its own Result through unchanged.
+        let passed = parse_file_catching_panic(&file, || {
+            Err(ParseError::MissingTree {
+                path: file.path.clone(),
+            })
+        });
+        assert!(
+            matches!(passed, Some(Err(ParseError::MissingTree { .. }))),
+            "a non-panicking parse result must pass through unchanged"
+        );
     }
 
     #[test]
@@ -3009,6 +3078,305 @@ export async function compareItems(a: string, b: string) {
                 .iter()
                 .any(|node| node.external_id.as_deref() == Some("__llm__openai__gpt-4.1-mini")),
             "converged LlmModel node should be persisted"
+        );
+    }
+
+    #[test]
+    fn indexes_python_http_consumer_and_fastapi_provider_onto_one_route() {
+        let repo_root = TestDir::new("pyhttp-repo");
+        let storage_root = TestDir::new("pyhttp-storage");
+        fs::write(
+            repo_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\", \"httpx>=0.27\"]\n",
+        )
+        .expect("pyproject fixture should write");
+        fs::write(
+            repo_root.path().join("consumer.py"),
+            r#"
+import httpx
+
+
+def create_item(payload):
+    return httpx.post("http://gateway:8000/items", json=payload)
+"#,
+        )
+        .expect("consumer fixture should write");
+        fs::write(
+            repo_root.path().join("provider.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.post("/items")
+def create_item():
+    return {}
+"#,
+        )
+        .expect("provider fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("pyhttp-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let graph = indexer.storage().graph();
+        let route = graph
+            .nodes_by_type(NodeKind::Route)
+            .expect("route nodes should load")
+            .into_iter()
+            .find(|node| node.external_id.as_deref() == Some("__route__POST__/items"))
+            .expect("consumer and provider should converge on __route__POST__/items");
+
+        let incoming = graph
+            .get_incoming(route.id)
+            .expect("incoming edges should load");
+        assert!(
+            incoming
+                .iter()
+                .any(|edge| edge.kind == EdgeKind::ConsumesApiFrom),
+            "httpx consumer should ConsumesApiFrom the shared route: {incoming:?}"
+        );
+        assert!(
+            incoming.iter().any(|edge| edge.kind == EdgeKind::Serves),
+            "FastAPI provider should Serve the shared route: {incoming:?}"
+        );
+    }
+
+    /// Part A exit criterion / release demo: one trace walks
+    /// FE `ConsumesApiFrom` → public Route ← gateway `Serves`, gateway
+    /// `ConsumesApiFrom` → backend Route ← `FastAPI` `Serves`, across three repos.
+    #[test]
+    fn indexes_fe_gateway_fastapi_route_chain_end_to_end() {
+        use gather_step_core::{NodeId, route_qn};
+
+        let storage_root = TestDir::new("chain-storage");
+
+        // (a) TS React frontend: axios POST to the PUBLIC path.
+        let fe_root = TestDir::new("fe-repo");
+        fs::create_dir_all(fe_root.path().join("src")).expect("fe src dir should exist");
+        fs::write(
+            fe_root.path().join("package.json"),
+            r#"{ "name": "storefront-web", "dependencies": { "react": "^19.0.0", "axios": "^1.7.0" } }"#,
+        )
+        .expect("fe package.json fixture should write");
+        fs::write(
+            fe_root.path().join("src/api.ts"),
+            r#"
+import axios from 'axios';
+
+export async function createItem(payload: unknown) {
+    return axios.post('/api/v1/items', payload);
+}
+"#,
+        )
+        .expect("fe api fixture should write");
+
+        // (b) Gateway: serviceConfigs entry mapping public /api/v1/items → backend /items.
+        let gw_root = TestDir::new("gw-repo");
+        fs::create_dir_all(gw_root.path().join("src/serviceConfigs"))
+            .expect("gateway serviceConfigs dir should exist");
+        fs::write(
+            gw_root.path().join("package.json"),
+            r#"{ "name": "api-gateway" }"#,
+        )
+        .expect("gateway package.json fixture should write");
+        fs::write(
+            gw_root.path().join("src/serviceConfigs/items.service.ts"),
+            r"
+export const itemsServiceConfig = {
+  createItem: {
+    method: 'POST',
+    pathMapping: {
+      basePathWithoutApiPrefix: '/items',
+      rewrite: { from: '/api/v1/items' },
+    },
+  },
+};
+",
+        )
+        .expect("gateway serviceConfig fixture should write");
+
+        // (c) Python FastAPI backend: @app.post("/items") handler.
+        let py_root = TestDir::new("py-repo");
+        fs::write(
+            py_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\"]\n",
+        )
+        .expect("python pyproject fixture should write");
+        fs::write(
+            py_root.path().join("provider.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+@app.post("/items")
+def create_item():
+    return {}
+"#,
+        )
+        .expect("python provider fixture should write");
+
+        // Index all three repos into ONE storage via the real index_repo path.
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("storefront-web", fe_root.path(), None)
+            .expect("frontend indexing should succeed");
+        indexer
+            .index_repo("api-gateway", gw_root.path(), None)
+            .expect("gateway indexing should succeed");
+        indexer
+            .index_repo("items-svc", py_root.path(), None)
+            .expect("python indexing should succeed");
+
+        let graph = indexer.storage().graph();
+        let repo_of = |id: NodeId| {
+            graph
+                .get_node(id)
+                .expect("edge source node should load")
+                .expect("edge source node should exist")
+                .repo
+        };
+        let find_route = |external_id: &str| {
+            graph
+                .nodes_by_type(NodeKind::Route)
+                .expect("route nodes should load")
+                .into_iter()
+                .find(|node| node.external_id.as_deref() == Some(external_id))
+                .unwrap_or_else(|| panic!("route {external_id} should exist"))
+        };
+
+        // PUBLIC route: FE ConsumesApiFrom + gateway Serves.
+        let public_route = find_route(&route_qn("POST", "/api/v1/items"));
+        let public_incoming = graph
+            .get_incoming(public_route.id)
+            .expect("public route incoming edges should load");
+        assert!(
+            public_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "storefront-web"
+            }),
+            "FE repo should ConsumesApiFrom the public route: {public_incoming:?}"
+        );
+        let gateway_public_server = public_incoming
+            .iter()
+            .find(|edge| edge.kind == EdgeKind::Serves && repo_of(edge.source) == "api-gateway")
+            .map_or_else(
+                || panic!("gateway repo should Serve the public route: {public_incoming:?}"),
+                |edge| edge.source,
+            );
+        assert!(
+            !public_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && edge.source == gateway_public_server
+            }),
+            "gateway should not consume the same public route it serves: {public_incoming:?}"
+        );
+
+        // BACKEND route: gateway ConsumesApiFrom + FastAPI Serves.
+        let backend_route = find_route(&route_qn("POST", "/items"));
+        let backend_incoming = graph
+            .get_incoming(backend_route.id)
+            .expect("backend route incoming edges should load");
+        let gateway_backend_consumer = backend_incoming
+            .iter()
+            .find(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && repo_of(edge.source) == "api-gateway"
+            })
+            .map_or_else(
+                || {
+                    panic!(
+                        "gateway repo should ConsumesApiFrom the backend route: {backend_incoming:?}"
+                    )
+                },
+                |edge| edge.source,
+            );
+        assert_eq!(
+            gateway_backend_consumer, gateway_public_server,
+            "one gateway node should bridge the public and backend routes"
+        );
+        assert!(
+            backend_incoming.iter().any(|edge| {
+                edge.kind == EdgeKind::Serves && repo_of(edge.source) == "items-svc"
+            }),
+            "python FastAPI repo should Serve the backend route: {backend_incoming:?}"
+        );
+    }
+
+    #[test]
+    fn indexes_pydantic_payload_contract_onto_fastapi_route() {
+        use crate::metadata::PayloadContractQuery;
+        use gather_step_core::{PayloadSide, ref_node_id, route_qn};
+
+        let repo_root = TestDir::new("pydantic-repo");
+        let storage_root = TestDir::new("pydantic-storage");
+        fs::write(
+            repo_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\", \"pydantic>=2\"]\n",
+        )
+        .expect("pyproject fixture should write");
+        fs::write(
+            repo_root.path().join("provider.py"),
+            r#"
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+
+class ItemCreate(BaseModel):
+    name: str
+    price: float | None
+
+
+@app.post("/items", response_model=ItemCreate)
+def create_item(item: ItemCreate):
+    return item
+"#,
+        )
+        .expect("provider fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("pydantic-service", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let route_target = ref_node_id(NodeKind::Route, &route_qn("POST", "/items"));
+        let contracts = indexer
+            .storage()
+            .metadata()
+            .payload_contracts_for_query(PayloadContractQuery {
+                contract_target_node_id: Some(route_target),
+                ..PayloadContractQuery::default()
+            })
+            .expect("payload contract query should succeed");
+
+        let consumer = contracts
+            .iter()
+            .find(|c| c.record.side == PayloadSide::Consumer)
+            .expect("Pydantic consumer contract must be queryable for the route");
+        assert_eq!(
+            consumer.record.source_type_name.as_deref(),
+            Some("ItemCreate")
+        );
+        assert_eq!(consumer.record.contract_target_kind, NodeKind::Route);
+        let names = consumer
+            .record
+            .contract
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["name", "price"]);
+        assert!(
+            contracts
+                .iter()
+                .any(|c| c.record.side == PayloadSide::Producer),
+            "response_model= must produce a producer contract: {contracts:?}"
         );
     }
 

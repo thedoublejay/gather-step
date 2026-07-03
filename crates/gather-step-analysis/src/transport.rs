@@ -12,18 +12,20 @@
 /// When that support is added, a new linker variant can be added here
 /// alongside `transport_links_for`.
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 
 /// Confidence of a [`TransportLink`] match.
 ///
-/// Only [`Confidence::Exact`] is currently assigned — `route_qn` normalises
-/// all virtual-node QNs at emit time so every match is exact.
+/// This is a query-time-only concept; it is never persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     /// The frontend and backend QNs matched exactly via the same canonical
     /// route QN produced by [`gather_step_core::route_qn`].
     Exact,
+    /// The consumer's canonical path segment-suffix-extends a unique
+    /// server-only route (e.g. a gateway rewrite `/api/v1/items` → `/items`).
+    Suffix,
 }
 
 /// A derived (non-persisted) link between a frontend caller and a backend
@@ -66,23 +68,24 @@ pub fn transport_links_for<S: GraphStore>(
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TransportLink>, GraphStoreError> {
+    let session = store.read_session()?;
     let mut links = Vec::new();
 
     // --- Route boundary ---
-    for route_node in store.nodes_by_type(NodeKind::Route)? {
+    for route_node in session.nodes_by_type(NodeKind::Route)? {
         if !route_node.is_virtual {
             continue;
         }
         let (method, canonical_path) = parse_route_qn(&route_node);
 
-        let incoming = store.get_incoming(route_node.id)?;
+        let incoming = session.incoming(route_node.id)?;
         // The repo filter is applied to the consumer side only (the caller /
         // frontend). The server side is always included so that a filtered call
         // site still resolves to its backend handler.
         let frontend_ids: Vec<NodeId> = incoming
             .iter()
             .filter(|edge| edge.kind == EdgeKind::ConsumesApiFrom)
-            .filter(|edge| node_matches_repo(store, edge.source, repo))
+            .filter(|edge| node_matches_repo(session.as_ref(), edge.source, repo))
             .map(|edge| edge.source)
             .collect();
         let backend_ids: Vec<NodeId> = incoming
@@ -108,20 +111,20 @@ pub fn transport_links_for<S: GraphStore>(
     }
 
     // --- Queue boundary ---
-    for queue_node in store.nodes_by_type(NodeKind::Queue)? {
+    for queue_node in session.nodes_by_type(NodeKind::Queue)? {
         if !queue_node.is_virtual {
             continue;
         }
         let queue_path = parse_queue_qn(&queue_node);
 
-        let incoming = store.get_incoming(queue_node.id)?;
+        let incoming = session.incoming(queue_node.id)?;
         // The repo filter applies to the producer side (the caller / publisher).
         // Consumers are always included so a filtered producer still resolves to
         // its queue handler.
         let producer_ids: Vec<NodeId> = incoming
             .iter()
             .filter(|edge| edge.kind == EdgeKind::Publishes)
-            .filter(|edge| node_matches_repo(store, edge.source, repo))
+            .filter(|edge| node_matches_repo(session.as_ref(), edge.source, repo))
             .map(|edge| edge.source)
             .collect();
         let consumer_ids: Vec<NodeId> = incoming
@@ -146,7 +149,143 @@ pub fn transport_links_for<S: GraphStore>(
         }
     }
 
+    // --- Suffix-tolerant route linking (query-time only, additive) ---
+    append_suffix_route_links(session.as_ref(), repo, limit, &mut links)?;
+
     Ok(links)
+}
+
+/// A consumes-only route eligible to suffix-extend a server route.
+struct SuffixConsumer {
+    method: String,
+    segments: Vec<String>,
+    frontends: Vec<NodeId>,
+}
+
+/// A serves-only route that a consumer route may suffix-extend.
+struct SuffixServer {
+    method: String,
+    path: String,
+    segments: Vec<String>,
+    backends: Vec<NodeId>,
+}
+
+/// Append query-time suffix links for gateway-style path rewrites.
+///
+/// A consumes-only route whose canonical path segment-suffix-extends a unique
+/// serves-only route (same method, ≥2 aligned trailing segments) yields a
+/// [`Confidence::Suffix`] link. Both sides are exclusive (a route that also
+/// serves is never a consumer; a route that also consumes is never a server),
+/// so these links never coincide with an [`Confidence::Exact`] pairing.
+fn append_suffix_route_links(
+    session: &dyn GraphReadSession,
+    repo: Option<&str>,
+    limit: usize,
+    links: &mut Vec<TransportLink>,
+) -> Result<(), GraphStoreError> {
+    let mut consumers: Vec<SuffixConsumer> = Vec::new();
+    let mut servers: Vec<SuffixServer> = Vec::new();
+
+    for route_node in session.nodes_by_type(NodeKind::Route)? {
+        if !route_node.is_virtual {
+            continue;
+        }
+        let incoming = session.incoming(route_node.id)?;
+        let has_serve = incoming.iter().any(|edge| edge.kind == EdgeKind::Serves);
+        let has_consume = incoming
+            .iter()
+            .any(|edge| edge.kind == EdgeKind::ConsumesApiFrom);
+
+        let (method, path) = parse_route_qn(&route_node);
+        let segments = path_segments(&path);
+
+        if has_consume && !has_serve {
+            let frontends: Vec<NodeId> = incoming
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::ConsumesApiFrom)
+                .filter(|edge| node_matches_repo(session, edge.source, repo))
+                .map(|edge| edge.source)
+                .collect();
+            if !frontends.is_empty() {
+                consumers.push(SuffixConsumer {
+                    method,
+                    segments,
+                    frontends,
+                });
+            }
+        } else if has_serve && !has_consume {
+            let backends: Vec<NodeId> = incoming
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Serves)
+                .map(|edge| edge.source)
+                .collect();
+            servers.push(SuffixServer {
+                method,
+                path,
+                segments,
+                backends,
+            });
+        }
+    }
+
+    for consumer in &consumers {
+        let mut matched: Option<&SuffixServer> = None;
+        let mut ambiguous = false;
+        for server in &servers {
+            if server.method != consumer.method {
+                continue;
+            }
+            if is_segment_suffix(&consumer.segments, &server.segments) {
+                if matched.is_some() {
+                    ambiguous = true;
+                    break;
+                }
+                matched = Some(server);
+            }
+        }
+        if ambiguous {
+            continue;
+        }
+        let Some(server) = matched else {
+            continue;
+        };
+        for &frontend_node in &consumer.frontends {
+            for &backend_node in &server.backends {
+                links.push(TransportLink {
+                    frontend_node,
+                    backend_node,
+                    method: consumer.method.clone(),
+                    canonical_path: server.path.clone(),
+                    confidence: Confidence::Suffix,
+                });
+                if links.len() >= limit {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Split a canonical route path into non-empty segments.
+fn path_segments(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Return `true` when `consumer` strictly suffix-extends `server` on aligned
+/// path segments: `server` has ≥2 segments, `consumer` has strictly more, and
+/// `consumer`'s trailing segments equal `server` exactly. Parameter segments
+/// (`:id`) only match identical parameter segments, never literals, because
+/// canonicalization already normalises them and equality is byte-wise.
+fn is_segment_suffix(consumer: &[String], server: &[String]) -> bool {
+    let server_len = server.len();
+    server_len >= 2
+        && consumer.len() > server_len
+        && consumer[consumer.len() - server_len..] == *server
 }
 
 /// Extract `(method, canonical_path)` from a Route virtual node's QN.
@@ -186,12 +325,12 @@ fn parse_queue_qn(node: &gather_step_core::NodeData) -> String {
 
 /// Return `true` when the node identified by `id` belongs to `repo`, or when
 /// no repo filter is active.
-fn node_matches_repo<S: GraphStore>(store: &S, id: NodeId, repo: Option<&str>) -> bool {
+fn node_matches_repo(session: &dyn GraphReadSession, id: NodeId, repo: Option<&str>) -> bool {
     let Some(filter) = repo else {
         return true;
     };
-    store
-        .get_node(id)
+    session
+        .node(id)
         .ok()
         .flatten()
         .is_some_and(|node| node.repo == filter)
@@ -200,13 +339,45 @@ fn node_matches_repo<S: GraphStore>(store: &S, id: NodeId, repo: Option<&str>) -
 #[cfg(test)]
 mod tests {
     use gather_step_core::{
-        EdgeData, EdgeKind, EdgeMetadata, NodeKind, queue_qn, route_qn, virtual_node,
+        EdgeData, EdgeKind, EdgeMetadata, NodeId, NodeKind, queue_qn, route_qn, virtual_node,
     };
     use gather_step_storage::GraphStore;
 
     use crate::test_utils::{TempDb, file_node, symbol_node};
 
-    use super::transport_links_for;
+    use super::{Confidence, transport_links_for};
+
+    fn route_vnode(method: &str, path: &str) -> gather_step_core::NodeData {
+        virtual_node(
+            NodeKind::Route,
+            "svc",
+            "src/routes.ts",
+            format!("{method} {path}"),
+            route_qn(method, path),
+        )
+    }
+
+    fn consumes_edge(source: NodeId, route: NodeId, owner: NodeId) -> EdgeData {
+        EdgeData {
+            source,
+            target: route,
+            kind: EdgeKind::ConsumesApiFrom,
+            metadata: EdgeMetadata::default(),
+            owner_file: owner,
+            is_cross_file: true,
+        }
+    }
+
+    fn serves_edge(source: NodeId, route: NodeId, owner: NodeId) -> EdgeData {
+        EdgeData {
+            source,
+            target: route,
+            kind: EdgeKind::Serves,
+            metadata: EdgeMetadata::default(),
+            owner_file: owner,
+            is_cross_file: true,
+        }
+    }
 
     #[test]
     fn route_transport_link_found_via_serves_and_consumes_api_from() {
@@ -268,6 +439,67 @@ mod tests {
         assert_eq!(link.backend_node, backend.id);
         assert_eq!(link.method, "GET");
         assert_eq!(link.canonical_path, "/orders");
+    }
+
+    #[test]
+    fn gateway_bridge_does_not_emit_gateway_self_link() {
+        let temp = TempDb::new("transport", "gateway-bridge");
+        let store = temp.open();
+
+        let fe_file = file_node("storefront-web", "src/api.ts");
+        let gw_file = file_node("api-gateway", "src/serviceConfigs/items.service.ts");
+        let be_file = file_node("items-svc", "provider.py");
+        let frontend = symbol_node("storefront-web", "src/api.ts", "createItem", 0);
+        let backend = symbol_node("items-svc", "provider.py", "create_item", 0);
+        let public_route = route_vnode("POST", "/api/v1/items");
+        let backend_route = route_vnode("POST", "/items");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    gw_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    public_route.clone(),
+                    backend_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, public_route.id, fe_file.id),
+                    serves_edge(gw_file.id, public_route.id, gw_file.id),
+                    consumes_edge(gw_file.id, backend_route.id, gw_file.id),
+                    serves_edge(backend.id, backend_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert_eq!(links.len(), 2, "expected public and backend route links");
+        assert!(
+            links.iter().any(|link| {
+                link.frontend_node == frontend.id
+                    && link.backend_node == gw_file.id
+                    && link.canonical_path == "/api/v1/items"
+                    && link.confidence == Confidence::Exact
+            }),
+            "frontend should link to gateway public route: {links:?}"
+        );
+        assert!(
+            links.iter().any(|link| {
+                link.frontend_node == gw_file.id
+                    && link.backend_node == backend.id
+                    && link.canonical_path == "/items"
+                    && link.confidence == Confidence::Exact
+            }),
+            "gateway should link to backend route: {links:?}"
+        );
+        assert!(
+            links
+                .iter()
+                .all(|link| link.frontend_node != gw_file.id || link.backend_node != gw_file.id),
+            "gateway must not link to itself on the public route: {links:?}"
+        );
     }
 
     #[test]
@@ -399,6 +631,321 @@ mod tests {
                 .unwrap()
                 .repo,
             "frontend_standard"
+        );
+    }
+
+    #[test]
+    fn suffix_link_gateway_rewrite_matches_unique_server() {
+        let temp = TempDb::new("transport", "suffix-basic");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "getItem", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "getItem", 0);
+        let consumer_route = route_vnode("GET", "/api/v1/items/:id");
+        let server_route = route_vnode("GET", "/items/:id");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    consumer_route.clone(),
+                    server_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert_eq!(links.len(), 1, "expected exactly one suffix link");
+        let link = &links[0];
+        assert_eq!(link.frontend_node, frontend.id);
+        assert_eq!(link.backend_node, backend.id);
+        assert_eq!(link.method, "GET");
+        assert_eq!(link.canonical_path, "/items/:id");
+        assert_eq!(link.confidence, Confidence::Suffix);
+    }
+
+    #[test]
+    fn suffix_link_requires_matching_method() {
+        let temp = TempDb::new("transport", "suffix-method");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "getItem", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "getItem", 0);
+        let consumer_route = route_vnode("POST", "/api/v1/items/:id");
+        let server_route = route_vnode("GET", "/items/:id");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    consumer_route.clone(),
+                    server_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert!(links.is_empty(), "method mismatch must not link");
+    }
+
+    #[test]
+    fn suffix_link_requires_at_least_two_trailing_segments() {
+        let temp = TempDb::new("transport", "suffix-onesegment");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "listItems", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "listItems", 0);
+        let consumer_route = route_vnode("GET", "/api/items");
+        let server_route = route_vnode("GET", "/items");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    consumer_route.clone(),
+                    server_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert!(links.is_empty(), "single trailing segment must not link");
+    }
+
+    #[test]
+    fn suffix_link_is_segment_aligned_not_string_suffix() {
+        let temp = TempDb::new("transport", "suffix-segment");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "listItems", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "listItems", 0);
+        // "/svc/api-v1/items" ends with the string "v1/items" but its trailing
+        // segments are [api-v1, items], not [v1, items].
+        let consumer_route = route_vnode("GET", "/svc/api-v1/items");
+        let server_route = route_vnode("GET", "/v1/items");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    consumer_route.clone(),
+                    server_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert!(
+            links.is_empty(),
+            "string suffix without segment alignment must not link"
+        );
+    }
+
+    #[test]
+    fn suffix_link_param_does_not_match_literal_segment() {
+        let temp = TempDb::new("transport", "suffix-param");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "getItem", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "getItem", 0);
+        let consumer_route = route_vnode("GET", "/api/items/123");
+        let server_route = route_vnode("GET", "/items/:id");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    be_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    consumer_route.clone(),
+                    server_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert!(
+            links.is_empty(),
+            "literal segment must not match a param segment"
+        );
+    }
+
+    #[test]
+    fn suffix_link_ambiguous_candidates_emit_nothing() {
+        let temp = TempDb::new("transport", "suffix-ambiguous");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let items_ctrl_file = file_node("items_service", "src/items.controller.ts");
+        let versioned_ctrl_file = file_node("items_service", "src/versioned.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "getItem", 0);
+        let items_handler =
+            symbol_node("items_service", "src/items.controller.ts", "handleItems", 0);
+        let versioned_handler = symbol_node(
+            "items_service",
+            "src/versioned.controller.ts",
+            "handleVersioned",
+            0,
+        );
+        let consumer_route = route_vnode("GET", "/api/v1/items/:id");
+        let items_route = route_vnode("GET", "/items/:id");
+        let versioned_route = route_vnode("GET", "/v1/items/:id");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    items_ctrl_file.clone(),
+                    versioned_ctrl_file.clone(),
+                    frontend.clone(),
+                    items_handler.clone(),
+                    versioned_handler.clone(),
+                    consumer_route.clone(),
+                    items_route.clone(),
+                    versioned_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    serves_edge(items_handler.id, items_route.id, items_ctrl_file.id),
+                    serves_edge(
+                        versioned_handler.id,
+                        versioned_route.id,
+                        versioned_ctrl_file.id,
+                    ),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert!(links.is_empty(), "two suffix candidates must emit no link");
+    }
+
+    #[test]
+    fn suffix_link_skips_consumer_route_that_also_serves() {
+        let temp = TempDb::new("transport", "suffix-consumer-serves");
+        let store = temp.open();
+
+        let fe_file = file_node("frontend_standard", "src/api.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let self_file = file_node("gateway_service", "src/gw.controller.ts");
+        let frontend = symbol_node("frontend_standard", "src/api.ts", "getItem", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "getItem", 0);
+        let gw = symbol_node("gateway_service", "src/gw.controller.ts", "proxy", 0);
+        let consumer_route = route_vnode("GET", "/api/v1/items/:id");
+        let server_route = route_vnode("GET", "/items/:id");
+
+        store
+            .bulk_insert(
+                &[
+                    fe_file.clone(),
+                    be_file.clone(),
+                    self_file.clone(),
+                    frontend.clone(),
+                    backend.clone(),
+                    gw.clone(),
+                    consumer_route.clone(),
+                    server_route.clone(),
+                ],
+                &[
+                    consumes_edge(frontend.id, consumer_route.id, fe_file.id),
+                    // The consumer route also serves — it is not consumes-only.
+                    serves_edge(gw.id, consumer_route.id, self_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        // The consumer route (with its own Serves) yields an Exact link; no
+        // Suffix link is produced.
+        assert!(
+            links.iter().all(|l| l.confidence == Confidence::Exact),
+            "a route that serves must not act as a suffix consumer"
+        );
+    }
+
+    #[test]
+    fn suffix_link_skips_server_route_that_also_consumes() {
+        let temp = TempDb::new("transport", "suffix-server-consumes");
+        let store = temp.open();
+
+        let exact_caller_file = file_node("frontend_standard", "src/exact.ts");
+        let suffix_caller_file = file_node("frontend_standard", "src/suffix.ts");
+        let be_file = file_node("items_service", "src/items.controller.ts");
+        let exact_caller = symbol_node("frontend_standard", "src/exact.ts", "callExact", 0);
+        let suffix_caller = symbol_node("frontend_standard", "src/suffix.ts", "callSuffix", 0);
+        let backend = symbol_node("items_service", "src/items.controller.ts", "getItem", 0);
+        // Server route has BOTH a Serves and a ConsumesApiFrom → not serves-only.
+        let server_route = route_vnode("GET", "/items/:id");
+        let consumer_route = route_vnode("GET", "/api/v1/items/:id");
+
+        store
+            .bulk_insert(
+                &[
+                    exact_caller_file.clone(),
+                    suffix_caller_file.clone(),
+                    be_file.clone(),
+                    exact_caller.clone(),
+                    suffix_caller.clone(),
+                    backend.clone(),
+                    server_route.clone(),
+                    consumer_route.clone(),
+                ],
+                &[
+                    consumes_edge(exact_caller.id, server_route.id, exact_caller_file.id),
+                    serves_edge(backend.id, server_route.id, be_file.id),
+                    consumes_edge(suffix_caller.id, consumer_route.id, suffix_caller_file.id),
+                ],
+            )
+            .expect("bulk_insert should succeed");
+
+        let links = transport_links_for(&store, None, 100).expect("links should resolve");
+        assert!(
+            links.iter().all(|l| l.confidence == Confidence::Exact),
+            "a route that consumes must not act as a suffix server"
         );
     }
 }

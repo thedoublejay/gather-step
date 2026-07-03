@@ -171,6 +171,8 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
         });
     }
 
+    inferred.extend(crate::frameworks::python_payload::infer(parsed));
+
     inferred
 }
 
@@ -289,7 +291,7 @@ fn imported_source_key(path: &Path, metadata: &fs::Metadata) -> ImportedSourceKe
     }
 }
 
-fn payload_contract_node(
+pub(crate) fn payload_contract_node(
     parsed: &ParsedFile,
     external_id: &str,
     line_start: Option<u32>,

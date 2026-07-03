@@ -11,7 +11,7 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     FileEntry,
-    frameworks::Framework,
+    frameworks::{Framework, join_route_path},
     resolve::ImportBinding,
     top_level_split::split_top_level,
     traverse::{Language, classify_language},
@@ -1502,25 +1502,6 @@ fn first_string_arg(decorator: &DecoratorCapture) -> String {
         .first()
         .map(|value| sanitize_topic_name(value))
         .unwrap_or_default()
-}
-
-fn join_route_path(base: &str, method_path: &str) -> String {
-    let mut pieces = Vec::new();
-    for piece in [base, method_path] {
-        let trimmed = piece
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim_matches('/');
-        if !trimmed.is_empty() {
-            pieces.push(trimmed);
-        }
-    }
-    if pieces.is_empty() {
-        "/".to_owned()
-    } else {
-        format!("/{}", pieces.join("/"))
-    }
 }
 
 fn topic_names_from_decorator(

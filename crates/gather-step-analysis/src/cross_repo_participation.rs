@@ -41,7 +41,8 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     store: &S,
     repo: &str,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, GraphStoreError> {
-    let nodes = store.nodes_by_repo(repo)?;
+    let session = store.read_session()?;
+    let nodes = session.nodes_by_repo(repo)?;
 
     // file_path -> File node id for this repo.
     let mut file_ids = BTreeMap::<String, NodeId>::new();
@@ -75,8 +76,8 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     // consumers, mirroring `cross_repo_deps`'s reverse/forward hop walk.
     let mut virtual_producers = FxHashMap::<NodeId, BTreeSet<String>>::default();
     for node in &nodes {
-        for edge in store.get_outgoing(node.id)? {
-            let Some(target) = store.get_node(edge.target)? else {
+        for edge in session.outgoing(node.id)? {
+            let Some(target) = session.node(edge.target)? else {
                 continue;
             };
             if !target.is_virtual || is_provenance_virtual(target.kind) {
@@ -93,7 +94,7 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
 
     for (virtual_id, producer_files) in &virtual_producers {
         let mut foreign_consumer_repos = BTreeSet::<String>::new();
-        for related in store.get_incoming(*virtual_id)? {
+        for related in session.incoming(*virtual_id)? {
             // Virtual identity is workspace-wide, so a foreign repo serving
             // or publishing to an identically-named surface shares this node
             // as a CO-PRODUCER (every service's `GET /healthcheck` collapses
@@ -102,14 +103,14 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
             if is_producer_edge(related.kind) {
                 continue;
             }
-            if let Some(source) = store.get_node(related.source)?
+            if let Some(source) = session.node(related.source)?
                 && is_foreign_repo(&source.repo, repo)
             {
                 foreign_consumer_repos.insert(source.repo);
             }
         }
-        for related in store.get_outgoing(*virtual_id)? {
-            if let Some(target) = store.get_node(related.target)?
+        for related in session.outgoing(*virtual_id)? {
+            if let Some(target) = session.node(related.target)?
                 && is_foreign_repo(&target.repo, repo)
             {
                 foreign_consumer_repos.insert(target.repo);
@@ -143,8 +144,8 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
         let Some(producer_file) = owning_file.get(&node.id) else {
             continue;
         };
-        for edge in store.get_incoming(node.id)? {
-            let Some(source) = store.get_node(edge.source)? else {
+        for edge in session.incoming(node.id)? {
+            let Some(source) = session.node(edge.source)? else {
                 continue;
             };
             if source.is_virtual || !is_foreign_repo(&source.repo, repo) {

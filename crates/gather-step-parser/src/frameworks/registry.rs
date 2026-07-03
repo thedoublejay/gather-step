@@ -27,8 +27,8 @@ use gather_step_core::{EdgeData, NodeData};
 use crate::{
     frameworks::{
         ai_typescript, azure, detect, drizzle, fastapi, frontend_hooks, frontend_react,
-        frontend_router, gateway_proxy, mongoose, nestjs, nextjs, prisma, python_kafka, storybook,
-        tailwind, typeorm,
+        frontend_router, gateway_proxy, http_client, mongoose, nestjs, nextjs, prisma, python_http,
+        python_kafka, storybook, tailwind, typeorm,
     },
     traverse::Language,
     tree_sitter::ParsedFile,
@@ -80,6 +80,13 @@ pub enum PackId {
     LaunchDarkly,
     /// Detection-only `FastAPI` Python API pack.
     Fastapi,
+    /// Python Kafka producer/consumer extraction, gated on `aiokafka` /
+    /// `confluent-kafka` deps independently of `FastAPI`.
+    PythonKafka,
+    /// Python HTTP-client consumer extraction, gated on `requests` / `httpx` /
+    /// `aiohttp` deps.  Emits `Route` + `ConsumesApiFrom` for statically
+    /// resolvable client-call URLs.
+    PythonHttp,
     /// LangChain-style TypeScript/JavaScript AI extraction (v5).
     AiTypescript,
     /// Shared-library / shared-lib contract detection.  This pack is always
@@ -114,6 +121,8 @@ pub(crate) enum AugGroup {
     Storybook,
     Azure,
     Fastapi,
+    PythonKafka,
+    PythonHttp,
     AiTypescript,
     SharedLib,
     GatewayProxy,
@@ -125,8 +134,11 @@ impl PackId {
     #[must_use]
     pub(crate) const fn applies_to_language(self, language: Language) -> bool {
         match self {
-            // FastAPI augments Python files (route extraction).
-            Self::Fastapi => matches!(language, Language::Python),
+            // FastAPI augments Python files (route extraction); the Python
+            // Kafka and HTTP packs likewise operate on Python files.
+            Self::Fastapi | Self::PythonKafka | Self::PythonHttp => {
+                matches!(language, Language::Python)
+            }
             Self::Nestjs
             | Self::Mongoose
             | Self::Nextjs
@@ -171,6 +183,8 @@ impl PackId {
             Self::Storybook => AugGroup::Storybook,
             Self::Azure | Self::LaunchDarkly => AugGroup::Azure,
             Self::Fastapi => AugGroup::Fastapi,
+            Self::PythonKafka => AugGroup::PythonKafka,
+            Self::PythonHttp => AugGroup::PythonHttp,
             Self::AiTypescript => AugGroup::AiTypescript,
             Self::SharedLib => AugGroup::SharedLib,
             Self::GatewayProxy => AugGroup::GatewayProxy,
@@ -284,6 +298,14 @@ impl PackRegistry {
                     detect: Some(detect::is_fastapi),
                 },
                 PackEntry {
+                    id: PackId::PythonKafka,
+                    detect: Some(detect::is_python_kafka),
+                },
+                PackEntry {
+                    id: PackId::PythonHttp,
+                    detect: Some(detect::is_python_http),
+                },
+                PackEntry {
                     id: PackId::AiTypescript,
                     detect: Some(detect::is_ai_typescript),
                 },
@@ -352,9 +374,10 @@ impl PackRegistry {
         match pack_id.aug_group() {
             AugGroup::Nestjs => {
                 let aug = nestjs::augment(parsed);
+                let http = http_client::augment(parsed);
                 AugmentationOutput {
-                    nodes: aug.nodes,
-                    edges: aug.edges,
+                    nodes: aug.nodes.into_iter().chain(http.nodes).collect(),
+                    edges: aug.edges.into_iter().chain(http.edges).collect(),
                 }
             }
             AugGroup::Mongoose => {
@@ -428,13 +451,25 @@ impl PackRegistry {
                 }
             }
             AugGroup::Fastapi => {
-                let routes = fastapi::augment(parsed);
-                let kafka = python_kafka::augment(parsed);
-                let mut nodes = routes.nodes;
-                nodes.extend(kafka.nodes);
-                let mut edges = routes.edges;
-                edges.extend(kafka.edges);
-                AugmentationOutput { nodes, edges }
+                let aug = fastapi::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
+            }
+            AugGroup::PythonKafka => {
+                let aug = python_kafka::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
+            }
+            AugGroup::PythonHttp => {
+                let aug = python_http::augment(parsed);
+                AugmentationOutput {
+                    nodes: aug.nodes,
+                    edges: aug.edges,
+                }
             }
             AugGroup::AiTypescript => {
                 let aug = ai_typescript::augment(parsed);
@@ -692,6 +727,28 @@ mod tests {
     }
 
     #[test]
+    fn python_packs_apply_to_python_only() {
+        for pack_id in [PackId::PythonKafka, PackId::PythonHttp] {
+            assert!(pack_id.applies_to_language(Language::Python));
+            assert!(!pack_id.applies_to_language(Language::TypeScript));
+            assert!(!pack_id.applies_to_language(Language::JavaScript));
+        }
+    }
+
+    #[test]
+    fn builtin_registry_detects_python_kafka_without_fastapi() {
+        let dir = TempDir::new("detect-python-kafka");
+        dir.write(
+            "pyproject.toml",
+            "[project]\ndependencies = [\"aiokafka>=0.10\"]\n",
+        );
+        let registry = PackRegistry::builtin();
+        let active = registry.detect(&dir.path);
+        assert!(active.contains(&PackId::PythonKafka));
+        assert!(!active.contains(&PackId::Fastapi));
+    }
+
+    #[test]
     fn augment_dispatches_to_correct_pack() {
         use gather_step_core::NodeKind;
 
@@ -736,6 +793,58 @@ export class ItemController {
             has_route,
             "augment(NestJs) should produce a Route node for @Get('list'); nodes: {:#?}",
             parsed.nodes
+        );
+    }
+
+    #[test]
+    fn nestjs_group_emits_http_client_consumes_api_from() {
+        use gather_step_core::{EdgeKind, NodeKind};
+
+        // A NestJS gateway service that axios-forwards to a backend must emit a
+        // canonical route node + ConsumesApiFrom edge, not just NestJS routes.
+        let source = r"
+export class GatewayService {
+  constructor(private readonly httpService: HttpService) {}
+
+  async createItem(payload: unknown) {
+    return this.httpService.post('/items', payload);
+  }
+}
+";
+
+        let dir = TempDir::new("nestjs-http-client");
+        fs::create_dir_all(dir.path.join("src")).expect("src dir");
+        fs::write(dir.path.join("src/gateway.service.ts"), source).expect("service fixture");
+
+        let traversal_file = crate::traverse::FileEntry {
+            path: std::path::PathBuf::from("src/gateway.service.ts"),
+            language: crate::traverse::Language::TypeScript,
+            size_bytes: 0,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+
+        let parsed = crate::tree_sitter::parse_file_with_frameworks(
+            "gateway-repo",
+            &dir.path,
+            &traversal_file,
+            &[crate::frameworks::Framework::NestJs],
+        )
+        .expect("parse should succeed");
+
+        let route_node = parsed
+            .nodes
+            .iter()
+            .find(|node| {
+                node.kind == NodeKind::Route
+                    && node.external_id.as_deref() == Some("__route__POST__/items")
+            })
+            .expect("NestJS group should emit a canonical POST /items route node");
+        assert!(
+            parsed.edges.iter().any(|edge| {
+                edge.kind == EdgeKind::ConsumesApiFrom && edge.target == route_node.id
+            }),
+            "NestJS group should emit a ConsumesApiFrom edge for the axios-forwarded call"
         );
     }
 

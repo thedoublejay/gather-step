@@ -4,7 +4,7 @@ use gather_step_core::{
     EdgeData, EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId, NodeKind,
     PayloadContractRecord, ResolverStrategy,
 };
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +99,7 @@ pub fn projection_impact<S: GraphStore>(
     request: ProjectionImpactRequest,
 ) -> Result<ProjectionImpactReport, ProjectionImpactError> {
     let max_results = request.max_results.clamp(1, 100);
+    let session = store.read_session()?;
     let candidates = resolve_field_candidates(store, &request.target, request.repo.as_deref())?;
     let selected = candidates
         .iter()
@@ -109,9 +110,9 @@ pub fn projection_impact<S: GraphStore>(
 
     let mut chains_by_signature = BTreeMap::<BTreeSet<LogicalDerivation>, DerivationChain>::new();
     for candidate in &selected {
-        let chain = collect_derivation_chain(store, candidate.id, max_results)?;
+        let chain = collect_derivation_chain(session.as_ref(), candidate.id, max_results)?;
         if !chain.derivations.is_empty() {
-            let signature = logical_derivation_signature(store, &chain.derivations)?;
+            let signature = logical_derivation_signature(session.as_ref(), &chain.derivations)?;
             chains_by_signature
                 .entry(signature)
                 .and_modify(|existing| existing.merge(&chain))
@@ -161,7 +162,7 @@ pub fn projection_impact<S: GraphStore>(
     // `nodes_by_type(DataField)` independently — fold them into a single pass
     // so a workspace with millions of `DataField` nodes pays the cost once per
     // request rather than twice.
-    let projected_keys = field_keys_for_ids(store, &projected_ids)?;
+    let projected_keys = field_keys_for_ids(session.as_ref(), &projected_ids)?;
     let (descendant_ids, equivalent_ids) =
         descendant_and_equivalent_field_ids(store, &selected, &projected_keys)?;
     relevant_ids.extend(descendant_ids);
@@ -171,12 +172,12 @@ pub fn projection_impact<S: GraphStore>(
 
     let mut evidence = EvidenceBuckets::default();
     for field_id in &relevant_ids {
-        for edge in store.get_incoming(*field_id)? {
+        for edge in session.incoming(*field_id)? {
             if !FIELD_EDGE_KINDS.contains(&edge.kind) || edge.kind == EdgeKind::DerivesFieldFrom {
                 continue;
             }
-            if let Some(field) = store.get_node(*field_id)?
-                && let Some(item) = evidence_item(store, &field, &edge)?
+            if let Some(field) = session.node(*field_id)?
+                && let Some(item) = evidence_item(session.as_ref(), &field, &edge)?
             {
                 evidence.push(edge.kind, item);
             }
@@ -188,9 +189,9 @@ pub fn projection_impact<S: GraphStore>(
         resolved: !selected.is_empty(),
         ambiguity: None,
         candidates: nodes_to_fields(&selected),
-        source_fields: ids_to_fields(store, &source_ids)?,
-        projected_fields: ids_to_fields(store, &projected_ids)?,
-        derivation_edges: derivations_to_report(store, &derivations)?,
+        source_fields: ids_to_fields(session.as_ref(), &source_ids)?,
+        projected_fields: ids_to_fields(session.as_ref(), &projected_ids)?,
+        derivation_edges: derivations_to_report(session.as_ref(), &derivations)?,
         readers: evidence.readers.into_values().collect(),
         writers: evidence.writers.into_values().collect(),
         filters: evidence.filters.into_values().collect(),
@@ -230,9 +231,10 @@ pub fn apply_optional_payload_filter_risk<S: GraphStore>(
         return Ok(());
     }
 
+    let session = store.read_session()?;
     let report_repos = report_repos(report);
     let target_fields = report_logical_fields(report);
-    let filter_fields = report_filter_fields(store, report, &report_repos)?;
+    let filter_fields = report_filter_fields(store, session.as_ref(), report, &report_repos)?;
     if target_fields.is_empty() || filter_fields.is_empty() {
         return Ok(());
     }
@@ -280,8 +282,8 @@ impl DerivationChain {
     }
 }
 
-fn collect_derivation_chain<S: GraphStore>(
-    store: &S,
+fn collect_derivation_chain(
+    session: &dyn GraphReadSession,
     seed: NodeId,
     max_results: usize,
 ) -> Result<DerivationChain, ProjectionImpactError> {
@@ -298,8 +300,8 @@ fn collect_derivation_chain<S: GraphStore>(
             continue;
         }
 
-        let incoming = store.get_incoming(field_id)?;
-        let outgoing = store.get_outgoing(field_id)?;
+        let incoming = session.incoming(field_id)?;
+        let outgoing = session.outgoing(field_id)?;
         for edge in incoming
             .iter()
             .chain(outgoing.iter())
@@ -323,16 +325,16 @@ fn collect_derivation_chain<S: GraphStore>(
     Ok(chain)
 }
 
-fn logical_derivation_signature<S: GraphStore>(
-    store: &S,
+fn logical_derivation_signature(
+    session: &dyn GraphReadSession,
     derivations: &BTreeSet<(NodeId, NodeId)>,
 ) -> Result<BTreeSet<LogicalDerivation>, ProjectionImpactError> {
     let mut signature = BTreeSet::new();
     for (source_id, target_id) in derivations {
-        let Some(source) = store.get_node(*source_id)? else {
+        let Some(source) = session.node(*source_id)? else {
             continue;
         };
-        let Some(target) = store.get_node(*target_id)? else {
+        let Some(target) = session.node(*target_id)? else {
             continue;
         };
         signature.insert((field_key(&source), field_key(&target)));
@@ -340,13 +342,13 @@ fn logical_derivation_signature<S: GraphStore>(
     Ok(signature)
 }
 
-fn field_keys_for_ids<S: GraphStore>(
-    store: &S,
+fn field_keys_for_ids(
+    session: &dyn GraphReadSession,
     ids: &BTreeSet<NodeId>,
 ) -> Result<BTreeSet<FieldKey>, ProjectionImpactError> {
     let mut keys = BTreeSet::new();
     for id in ids {
-        if let Some(node) = store.get_node(*id)? {
+        if let Some(node) = session.node(*id)? {
             keys.insert(field_key(&node));
         }
     }
@@ -434,13 +436,13 @@ fn field_node_sort_key(node: &NodeData) -> (String, String, String) {
     )
 }
 
-fn ids_to_fields<S: GraphStore>(
-    store: &S,
+fn ids_to_fields(
+    session: &dyn GraphReadSession,
     ids: &BTreeSet<NodeId>,
 ) -> Result<Vec<ProjectionField>, ProjectionImpactError> {
     let mut fields = Vec::new();
     for id in ids {
-        if let Some(node) = store.get_node(*id)? {
+        if let Some(node) = session.node(*id)? {
             fields.push(field_from_node(&node));
         }
     }
@@ -462,16 +464,16 @@ fn field_from_node(node: &NodeData) -> ProjectionField {
     }
 }
 
-fn derivations_to_report<S: GraphStore>(
-    store: &S,
+fn derivations_to_report(
+    session: &dyn GraphReadSession,
     derivations: &BTreeSet<(NodeId, NodeId)>,
 ) -> Result<Vec<ProjectionDerivation>, ProjectionImpactError> {
     let mut result = Vec::new();
     for (source, projected) in derivations {
-        let Some(source) = store.get_node(*source)? else {
+        let Some(source) = session.node(*source)? else {
             continue;
         };
-        let Some(projected) = store.get_node(*projected)? else {
+        let Some(projected) = session.node(*projected)? else {
             continue;
         };
         result.push(ProjectionDerivation {
@@ -483,12 +485,12 @@ fn derivations_to_report<S: GraphStore>(
     Ok(result)
 }
 
-fn evidence_item<S: GraphStore>(
-    store: &S,
+fn evidence_item(
+    session: &dyn GraphReadSession,
     field: &NodeData,
     edge: &EdgeData,
 ) -> Result<Option<ProjectionEvidence>, ProjectionImpactError> {
-    let Some(owner) = store.get_node(edge.owner_file)? else {
+    let Some(owner) = session.node(edge.owner_file)? else {
         return Ok(None);
     };
     Ok(Some(ProjectionEvidence {
@@ -558,6 +560,7 @@ fn report_logical_fields(report: &ProjectionImpactReport) -> BTreeSet<String> {
 
 fn report_filter_fields<S: GraphStore>(
     store: &S,
+    session: &dyn GraphReadSession,
     report: &ProjectionImpactReport,
     report_repos: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>, ProjectionImpactError> {
@@ -575,11 +578,11 @@ fn report_filter_fields<S: GraphStore>(
         {
             continue;
         }
-        for edge in store.get_incoming(node.id)? {
+        for edge in session.incoming(node.id)? {
             if edge.kind != EdgeKind::MigratesCollection {
                 continue;
             }
-            let owner = store.get_node(edge.owner_file)?;
+            let owner = session.node(edge.owner_file)?;
             if let Some(owner) = owner.as_ref()
                 && !report_repos.is_empty()
                 && !report_repos.contains(&owner.repo)
@@ -914,16 +917,17 @@ fn has_deployment_topology_for_report<S: GraphStore>(
         return Ok(false);
     }
 
+    let session = store.read_session()?;
     let service_targets = report_service_targets(report);
     for deployment in store.nodes_by_type(NodeKind::Deployment)? {
         if !repos.contains(&deployment.repo) {
             continue;
         }
-        for edge in store.get_incoming(deployment.id)? {
+        for edge in session.incoming(deployment.id)? {
             if edge.kind != EdgeKind::DeployedAs {
                 continue;
             }
-            if store.get_node(edge.source)?.is_some_and(|source| {
+            if session.node(edge.source)?.is_some_and(|source| {
                 source.kind == NodeKind::Service
                     && if service_targets.is_empty() {
                         service_matches_report_repo(&source, &repos)

@@ -414,7 +414,7 @@ impl LiteralParser {
         if depth >= MAX_PARSE_DEPTH {
             return None;
         }
-        self.expect('{')?;
+        self.expect_char('{')?;
         let mut map = Map::new();
         loop {
             self.skip_trivia();
@@ -429,7 +429,7 @@ impl LiteralParser {
                 _ => {
                     let key = self.parse_key()?;
                     self.skip_trivia();
-                    self.expect(':')?;
+                    self.expect_char(':')?;
                     let value = self.parse_value(depth + 1)?;
                     map.insert(key, value);
                 }
@@ -441,7 +441,7 @@ impl LiteralParser {
         if depth >= MAX_PARSE_DEPTH {
             return None;
         }
-        self.expect('[')?;
+        self.expect_char('[')?;
         let mut items = Vec::new();
         loop {
             self.skip_trivia();
@@ -524,7 +524,7 @@ impl LiteralParser {
         }
     }
 
-    fn expect(&mut self, expected: char) -> Option<()> {
+    fn expect_char(&mut self, expected: char) -> Option<()> {
         (self.bump()? == expected).then_some(())
     }
 }

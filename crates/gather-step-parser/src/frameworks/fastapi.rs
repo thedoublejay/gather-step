@@ -5,14 +5,21 @@
 //!
 //! Verified decorator-capture facts: `single_decorator` keeps only the last
 //! name segment, so `@app.get(...)` is seen as `"get"`; `split_arguments`
-//! already strips quotes, so the first argument is the bare path. `APIRouter`
-//! `prefix=` resolution needs receiver/RHS binding and is deferred to R2.
+//! already strips quotes, so the first argument is the bare path.
+//!
+//! Same-file `APIRouter(prefix="…")` and `app.include_router(router, prefix="…")`
+//! bindings are composed into the public route path (`app_prefix` +
+//! `router_prefix` + decorator path). Cross-file `include_router` resolution is
+//! out of scope.
 
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id, route_qn,
 };
 
-use crate::tree_sitter::{ParsedFile, SymbolCapture};
+use crate::{
+    frameworks::join_route_path,
+    tree_sitter::{ParsedFile, RouterPrefixBindings, SymbolCapture},
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FastapiAugmentation {
@@ -22,7 +29,7 @@ pub struct FastapiAugmentation {
 
 /// HTTP-method decorator names `FastAPI` exposes on `app`/`router`. Lowercase
 /// because Python uses `@app.get`, unlike `NestJS`'s `@Get`.
-const HTTP_METHODS: &[&str] = &[
+pub(crate) const HTTP_METHODS: &[&str] = &[
     "get", "post", "put", "delete", "patch", "options", "head", "trace",
 ];
 
@@ -30,27 +37,53 @@ const HTTP_METHODS: &[&str] = &[
 pub fn augment(parsed: &ParsedFile) -> FastapiAugmentation {
     let mut augmentation = FastapiAugmentation::default();
     for symbol in &parsed.symbols {
-        add_route(symbol, &mut augmentation);
+        add_route(symbol, &parsed.router_prefixes, &mut augmentation);
     }
     augmentation
 }
 
-fn add_route(symbol: &SymbolCapture, augmentation: &mut FastapiAugmentation) {
-    let Some(decorator) = symbol
+fn add_route(
+    symbol: &SymbolCapture,
+    prefixes: &RouterPrefixBindings,
+    augmentation: &mut FastapiAugmentation,
+) {
+    let Some((method, path)) = route_method_and_path(symbol, prefixes) else {
+        return;
+    };
+    let qn = route_qn(&method, &path);
+    emit_route(symbol, &qn, augmentation);
+}
+
+pub(crate) fn route_method_and_path(
+    symbol: &SymbolCapture,
+    prefixes: &RouterPrefixBindings,
+) -> Option<(String, String)> {
+    let decorator = symbol
         .decorators
         .iter()
-        .find(|decorator| HTTP_METHODS.contains(&decorator.name.as_str()))
-    else {
-        return;
-    };
+        .find(|decorator| HTTP_METHODS.contains(&decorator.name.as_str()))?;
     // A matching-named decorator with no path argument is not a route.
     // `split_arguments` already strips quotes, so this is the bare path.
-    let Some(path) = decorator.arguments.first().map(ToString::to_string) else {
-        return;
-    };
+    let mut path = decorator.arguments.first().map(ToString::to_string)?;
     let method = decorator.name.to_ascii_uppercase();
-    let qualified_name = route_qn(&method, &path);
-    let route_node = virtual_node(NodeKind::Route, &qualified_name, symbol);
+    let Some(receiver) = decorator.receiver.as_deref() else {
+        return Some((method, path));
+    };
+    if let Some(prefix) = prefixes.ctor.get(receiver) {
+        path = join_route_path(prefix, &path);
+    }
+    if let Some(prefix) = prefixes.include.get(receiver) {
+        path = join_route_path(prefix, &path);
+    }
+    Some((method, path))
+}
+
+fn emit_route(
+    symbol: &SymbolCapture,
+    qualified_name: &str,
+    augmentation: &mut FastapiAugmentation,
+) {
+    let route_node = virtual_node(NodeKind::Route, qualified_name, symbol);
     augmentation.edges.push(EdgeData {
         source: symbol.node.id,
         target: route_node.id,
@@ -179,5 +212,98 @@ def create_item(item_id: int):
             .filter(|edge| edge.kind == EdgeKind::Serves)
             .count();
         assert_eq!(serves, 2, "each handler should Serve its route");
+    }
+
+    fn route_ids(source: &str) -> Vec<String> {
+        let dir = TestDir::new("compose");
+        fs::write(dir.path().join("api.py"), source).expect("fixture should write");
+        let parsed = parse_file_with_frameworks(
+            "ingestion",
+            dir.path(),
+            &crate::FileEntry {
+                path: "api.py".into(),
+                language: Language::Python,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::FastApi],
+        )
+        .expect("fixture should parse");
+        let mut routes = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Route)
+            .map(|node| node.external_id.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        routes.sort();
+        routes
+    }
+
+    #[test]
+    fn apirouter_prefix_composes_into_route_identity() {
+        let routes = route_ids(
+            r#"
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/items")
+
+
+@router.get("/{item_id}")
+def get_item(item_id: int):
+    return {}
+"#,
+        );
+        assert_eq!(
+            routes,
+            vec!["__route__GET__/items/:item_id".to_owned()],
+            "APIRouter prefix should compose into the only public route path: {routes:?}"
+        );
+    }
+
+    #[test]
+    fn include_router_prefix_composes_with_apirouter_prefix() {
+        let routes = route_ids(
+            r#"
+from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter(prefix="/items")
+
+
+@router.get("/{item_id}")
+def get_item(item_id: int):
+    return {}
+
+
+app.include_router(router, prefix="/v1")
+"#,
+        );
+        assert_eq!(
+            routes,
+            vec!["__route__GET__/v1/items/:item_id".to_owned()],
+            "include_router + APIRouter prefixes should compose into the only public route path: {routes:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_router_prefix_skips_composition() {
+        let routes = route_ids(
+            r#"
+from fastapi import APIRouter
+
+router = APIRouter(prefix=dynamic_prefix)
+
+
+@router.get("/things")
+def list_things():
+    return []
+"#,
+        );
+        assert_eq!(
+            routes,
+            vec!["__route__GET__/things".to_owned()],
+            "a dynamic prefix should keep only the bare route: {routes:?}"
+        );
     }
 }
