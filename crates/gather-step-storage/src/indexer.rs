@@ -419,6 +419,31 @@ pub struct RepoIndexPayload {
     pub synthetic_file_count: usize,
 }
 
+/// Runs a per-file parse under `catch_unwind` so a parser panic on a single
+/// adversarial file becomes a skip-with-warning instead of aborting the whole
+/// repo index. Returns `None` when the parse panicked (the file is left
+/// unindexed and is retried on the next incremental reindex); otherwise the
+/// parse's own `Result` is passed through unchanged.
+///
+/// `AssertUnwindSafe` is sound here: the panicking parse's partial state is
+/// confined to the closure and discarded on unwind, and nothing observed after
+/// this call depends on it.
+fn parse_file_catching_panic(
+    file: &SourceFileEntry,
+    parse: impl FnOnce() -> Result<ParsedFile, ParseError>,
+) -> Option<Result<ParsedFile, ParseError>> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse)) {
+        Ok(result) => Some(result),
+        Err(_) => {
+            warn!(
+                path = %file.path.display(),
+                "parser panicked while indexing this file; skipping it (it will be retried on the next incremental reindex)"
+            );
+            None
+        }
+    }
+}
+
 impl RepoIndexer {
     pub fn open(
         storage_root: impl AsRef<Path>,
@@ -1194,14 +1219,17 @@ impl RepoIndexer {
                     let _: Result<(), ()> = files_to_index.par_iter().try_for_each_with(
                         sender.clone(),
                         |sender, file| {
-                            let parsed = parse_file_with_packs(
-                                repo_name.as_str(),
-                                root.as_path(),
-                                file,
-                                packs.as_ref(),
-                                path_aliases.as_ref(),
-                            );
-                            sender.send(parsed).map_err(|_| ())?;
+                            if let Some(parsed) = parse_file_catching_panic(file, || {
+                                parse_file_with_packs(
+                                    repo_name.as_str(),
+                                    root.as_path(),
+                                    file,
+                                    packs.as_ref(),
+                                    path_aliases.as_ref(),
+                                )
+                            }) {
+                                sender.send(parsed).map_err(|_| ())?;
+                            }
                             Ok(())
                         },
                     );
@@ -1210,14 +1238,17 @@ impl RepoIndexer {
                     let _: Result<(), ()> = files_to_index.par_iter().try_for_each_with(
                         sender.clone(),
                         |sender, file| {
-                            let parsed = parse_file_with_context(
-                                repo_name.as_str(),
-                                root.as_path(),
-                                file,
-                                frameworks.as_ref(),
-                                path_aliases.as_ref(),
-                            );
-                            sender.send(parsed).map_err(|_| ())?;
+                            if let Some(parsed) = parse_file_catching_panic(file, || {
+                                parse_file_with_context(
+                                    repo_name.as_str(),
+                                    root.as_path(),
+                                    file,
+                                    frameworks.as_ref(),
+                                    path_aliases.as_ref(),
+                                )
+                            }) {
+                                sender.send(parsed).map_err(|_| ())?;
+                            }
                             Ok(())
                         },
                     );
@@ -1555,14 +1586,17 @@ impl RepoIndexer {
                                     {
                                         return Err(());
                                     }
-                                    let parsed = parse_file_with_packs(
-                                        repo_name.as_str(),
-                                        root.as_path(),
-                                        file,
-                                        packs.as_ref(),
-                                        path_aliases.as_ref(),
-                                    );
-                                    sender.send(parsed).map_err(|_| ())?;
+                                    if let Some(parsed) = parse_file_catching_panic(file, || {
+                                        parse_file_with_packs(
+                                            repo_name.as_str(),
+                                            root.as_path(),
+                                            file,
+                                            packs.as_ref(),
+                                            path_aliases.as_ref(),
+                                        )
+                                    }) {
+                                        sender.send(parsed).map_err(|_| ())?;
+                                    }
                                     Ok(())
                                 },
                             );
@@ -1575,14 +1609,17 @@ impl RepoIndexer {
                                     {
                                         return Err(());
                                     }
-                                    let parsed = parse_file_with_context(
-                                        repo_name.as_str(),
-                                        root.as_path(),
-                                        file,
-                                        frameworks.as_ref(),
-                                        path_aliases.as_ref(),
-                                    );
-                                    sender.send(parsed).map_err(|_| ())?;
+                                    if let Some(parsed) = parse_file_catching_panic(file, || {
+                                        parse_file_with_context(
+                                            repo_name.as_str(),
+                                            root.as_path(),
+                                            file,
+                                            frameworks.as_ref(),
+                                            path_aliases.as_ref(),
+                                        )
+                                    }) {
+                                        sender.send(parsed).map_err(|_| ())?;
+                                    }
                                     Ok(())
                                 },
                             );
@@ -2694,7 +2731,7 @@ mod tests {
 
     use gather_step_core::{EdgeKind, NodeKind};
     use gather_step_parser::{
-        FileEntry, Language, collect_repo_files,
+        FileEntry, Language, ParseError, collect_repo_files,
         frameworks::{Framework, detect_frameworks},
         parse_file_with_context,
         tsconfig::PathAliases,
@@ -2706,7 +2743,7 @@ mod tests {
     use super::{
         DeploymentIndexingOptions, IndexingOptions, RepoIndexer,
         deployment_artifact_path_is_non_live, is_path_alias_config_path,
-        mongo_findings_path_is_excluded,
+        mongo_findings_path_is_excluded, parse_file_catching_panic,
     };
 
     #[test]
@@ -2725,6 +2762,36 @@ mod tests {
         assert!(!mongo_findings_path_is_excluded(Path::new(
             "src/services/alert.service.ts"
         )));
+    }
+
+    #[test]
+    fn parse_file_catching_panic_isolates_panics_to_a_skip() {
+        let file = FileEntry {
+            path: PathBuf::from("adversarial.ts"),
+            language: Language::TypeScript,
+            size_bytes: 0,
+            content_hash: [0u8; 32],
+            source_bytes: None,
+        };
+
+        // A parser panic on one file becomes a skip (None), never an abort of
+        // the whole repo index.
+        let skipped = parse_file_catching_panic(&file, || panic!("simulated parser panic"));
+        assert!(
+            skipped.is_none(),
+            "a panicking parse must be skipped, not propagated"
+        );
+
+        // A non-panicking parse passes its own Result through unchanged.
+        let passed = parse_file_catching_panic(&file, || {
+            Err(ParseError::MissingTree {
+                path: file.path.clone(),
+            })
+        });
+        assert!(
+            matches!(passed, Some(Err(ParseError::MissingTree { .. }))),
+            "a non-panicking parse result must pass through unchanged"
+        );
     }
 
     #[test]
