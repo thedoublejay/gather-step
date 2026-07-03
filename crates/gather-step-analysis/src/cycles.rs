@@ -41,6 +41,7 @@ pub fn find_cycles<S: GraphStore>(
     store: &S,
     edge_kinds: Option<&[EdgeKind]>,
 ) -> Result<Vec<Cycle>, CycleError> {
+    let session = store.read_session()?;
     let mut index_of: FxHashMap<[u8; 16], usize> = FxHashMap::default();
     let mut labels: Vec<String> = Vec::new();
     let mut repos: Vec<String> = Vec::new();
@@ -65,7 +66,7 @@ pub fn find_cycles<S: GraphStore>(
     let count = node_ids.len();
     let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); count];
     for (source_index, node_id) in node_ids.iter().enumerate() {
-        for edge in store.get_outgoing(*node_id)? {
+        for edge in session.outgoing(*node_id)? {
             if let Some(kinds) = edge_kinds
                 && !kinds.contains(&edge.kind)
             {

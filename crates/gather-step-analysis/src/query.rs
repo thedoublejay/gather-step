@@ -39,7 +39,8 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
     }
 
     pub fn get_node(&self, id: NodeId) -> Result<Option<NodeData>, QueryError> {
-        self.store.get_node(id).map_err(QueryError::from)
+        let session = self.store.read_session()?;
+        session.node(id).map_err(QueryError::from)
     }
 
     pub fn get_nodes_by_kind(&self, kind: NodeKind) -> Result<Vec<NodeData>, QueryError> {
@@ -52,7 +53,8 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         edge_kind: Option<EdgeKind>,
         min_confidence: Option<u16>,
     ) -> Result<Vec<EdgeData>, QueryError> {
-        let mut edges = self.store.get_outgoing(source)?;
+        let session = self.store.read_session()?;
+        let mut edges = session.outgoing(source)?;
         if let Some(edge_kind) = edge_kind {
             edges.retain(|edge| edge.kind == edge_kind);
         }
@@ -66,7 +68,8 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         edge_kind: Option<EdgeKind>,
         min_confidence: Option<u16>,
     ) -> Result<Vec<EdgeData>, QueryError> {
-        let mut edges = self.store.get_incoming(target)?;
+        let session = self.store.read_session()?;
+        let mut edges = session.incoming(target)?;
         if let Some(edge_kind) = edge_kind {
             edges.retain(|edge| edge.kind == edge_kind);
         }
@@ -93,6 +96,7 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         max_depth: usize,
         min_confidence: Option<u16>,
     ) -> Result<TraversalOutcome, QueryError> {
+        let session = self.store.read_session()?;
         let mut queue = VecDeque::from([(start, Vec::<EdgeKind>::new(), 0_usize)]);
         let mut enqueued = FxHashSet::from_iter([start.as_bytes()]);
         let mut order: Vec<NodeId> = Vec::new();
@@ -102,9 +106,8 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
         let mut truncated = false;
 
         while let Some((node_id, path, depth)) = queue.pop_front() {
-            let outgoing: Vec<EdgeData> = self
-                .store
-                .get_outgoing(node_id)?
+            let outgoing: Vec<EdgeData> = session
+                .outgoing(node_id)?
                 .into_iter()
                 .filter(|edge| edge_kinds.is_empty() || edge_kinds.contains(&edge.kind))
                 .filter(|edge| edge.metadata.passes_confidence(min_confidence))
@@ -183,6 +186,7 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
     }
 
     pub fn resolution_fingerprint(&self) -> Result<Vec<String>, QueryError> {
+        let session = self.store.read_session()?;
         let mut labels: FxHashMap<[u8; 16], String> = FxHashMap::default();
         let mut node_ids: Vec<NodeId> = Vec::new();
         for kind in NodeKind::all() {
@@ -198,7 +202,7 @@ impl<'a, S: GraphStore> GraphQuery<'a, S> {
 
         let mut lines = Vec::new();
         for node_id in node_ids {
-            for edge in self.store.get_outgoing(node_id)? {
+            for edge in session.outgoing(node_id)? {
                 let source = labels
                     .get(&edge.source.as_bytes())
                     .map_or("<unknown>", String::as_str);

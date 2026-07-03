@@ -12,7 +12,7 @@
 /// When that support is added, a new linker variant can be added here
 /// alongside `transport_links_for`.
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 
 /// Confidence of a [`TransportLink`] match.
 ///
@@ -68,6 +68,7 @@ pub fn transport_links_for<S: GraphStore>(
     repo: Option<&str>,
     limit: usize,
 ) -> Result<Vec<TransportLink>, GraphStoreError> {
+    let session = store.read_session()?;
     let mut links = Vec::new();
 
     // --- Route boundary ---
@@ -77,14 +78,14 @@ pub fn transport_links_for<S: GraphStore>(
         }
         let (method, canonical_path) = parse_route_qn(&route_node);
 
-        let incoming = store.get_incoming(route_node.id)?;
+        let incoming = session.incoming(route_node.id)?;
         // The repo filter is applied to the consumer side only (the caller /
         // frontend). The server side is always included so that a filtered call
         // site still resolves to its backend handler.
         let frontend_ids: Vec<NodeId> = incoming
             .iter()
             .filter(|edge| edge.kind == EdgeKind::ConsumesApiFrom)
-            .filter(|edge| node_matches_repo(store, edge.source, repo))
+            .filter(|edge| node_matches_repo(session.as_ref(), edge.source, repo))
             .map(|edge| edge.source)
             .collect();
         let backend_ids: Vec<NodeId> = incoming
@@ -116,14 +117,14 @@ pub fn transport_links_for<S: GraphStore>(
         }
         let queue_path = parse_queue_qn(&queue_node);
 
-        let incoming = store.get_incoming(queue_node.id)?;
+        let incoming = session.incoming(queue_node.id)?;
         // The repo filter applies to the producer side (the caller / publisher).
         // Consumers are always included so a filtered producer still resolves to
         // its queue handler.
         let producer_ids: Vec<NodeId> = incoming
             .iter()
             .filter(|edge| edge.kind == EdgeKind::Publishes)
-            .filter(|edge| node_matches_repo(store, edge.source, repo))
+            .filter(|edge| node_matches_repo(session.as_ref(), edge.source, repo))
             .map(|edge| edge.source)
             .collect();
         let consumer_ids: Vec<NodeId> = incoming
@@ -149,7 +150,7 @@ pub fn transport_links_for<S: GraphStore>(
     }
 
     // --- Suffix-tolerant route linking (query-time only, additive) ---
-    append_suffix_route_links(store, repo, limit, &mut links)?;
+    append_suffix_route_links(store, session.as_ref(), repo, limit, &mut links)?;
 
     Ok(links)
 }
@@ -178,6 +179,7 @@ struct SuffixServer {
 /// so these links never coincide with an [`Confidence::Exact`] pairing.
 fn append_suffix_route_links<S: GraphStore>(
     store: &S,
+    session: &dyn GraphReadSession,
     repo: Option<&str>,
     limit: usize,
     links: &mut Vec<TransportLink>,
@@ -189,7 +191,7 @@ fn append_suffix_route_links<S: GraphStore>(
         if !route_node.is_virtual {
             continue;
         }
-        let incoming = store.get_incoming(route_node.id)?;
+        let incoming = session.incoming(route_node.id)?;
         let has_serve = incoming.iter().any(|edge| edge.kind == EdgeKind::Serves);
         let has_consume = incoming
             .iter()
@@ -202,7 +204,7 @@ fn append_suffix_route_links<S: GraphStore>(
             let frontends: Vec<NodeId> = incoming
                 .iter()
                 .filter(|edge| edge.kind == EdgeKind::ConsumesApiFrom)
-                .filter(|edge| node_matches_repo(store, edge.source, repo))
+                .filter(|edge| node_matches_repo(session, edge.source, repo))
                 .map(|edge| edge.source)
                 .collect();
             if !frontends.is_empty() {
@@ -324,12 +326,12 @@ fn parse_queue_qn(node: &gather_step_core::NodeData) -> String {
 
 /// Return `true` when the node identified by `id` belongs to `repo`, or when
 /// no repo filter is active.
-fn node_matches_repo<S: GraphStore>(store: &S, id: NodeId, repo: Option<&str>) -> bool {
+fn node_matches_repo(session: &dyn GraphReadSession, id: NodeId, repo: Option<&str>) -> bool {
     let Some(filter) = repo else {
         return true;
     };
-    store
-        .get_node(id)
+    session
+        .node(id)
         .ok()
         .flatten()
         .is_some_and(|node| node.repo == filter)

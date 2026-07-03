@@ -4,7 +4,7 @@ use gather_step_core::{
     EdgeKind, NodeData, NodeId, NodeKind, PlanningProof, ProofHop, ProofKind, node_id,
     proof_sort_key,
 };
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use thiserror::Error;
 
 use crate::{
@@ -99,14 +99,17 @@ pub fn build_pack_proofs<S: GraphStore>(
     anchor_repo: &str,
     options: ProofEngineOptions,
 ) -> Result<ProofEngineOutput, ProofEngineError> {
-    let Some(anchor) = graph.get_node(anchor_id)? else {
+    let session = graph.read_session()?;
+
+    let Some(anchor) = session.node(anchor_id)? else {
         return Ok(empty_output());
     };
 
-    let mut proofs = base_graph_proofs(graph, anchor_id, anchor_repo)?;
+    let mut proofs = base_graph_proofs(session.as_ref(), anchor_id, anchor_repo)?;
     let supplemental_callers = if options.include_shared_peer_callers {
         shared_peer_callers(
             graph,
+            session.as_ref(),
             &anchor,
             options.traversal_depth,
             options.traversal_limit,
@@ -119,10 +122,14 @@ pub fn build_pack_proofs<S: GraphStore>(
         anchor_repo,
         &supplemental_callers,
     ));
-    proofs.extend(shared_contract_impact_proofs(graph, &anchor)?);
-    proofs.extend(event_trace_proofs(graph, &anchor)?);
-    proofs.extend(hook_trace_proofs(graph, &anchor)?);
-    proofs.extend(route_trace_proofs(graph, &anchor)?);
+    proofs.extend(shared_contract_impact_proofs(
+        graph,
+        session.as_ref(),
+        &anchor,
+    )?);
+    proofs.extend(event_trace_proofs(graph, session.as_ref(), &anchor)?);
+    proofs.extend(hook_trace_proofs(graph, session.as_ref(), &anchor)?);
+    proofs.extend(route_trace_proofs(graph, session.as_ref(), &anchor)?);
 
     let proofs = finalize_proofs(proofs);
     let (confirmed_downstream_repos, probable_downstream_repos) = derive_repo_sets(&proofs, None);
@@ -167,8 +174,8 @@ fn edge_to_proof_kind(edge: EdgeKind) -> Option<ProofKind> {
     }
 }
 
-fn base_graph_proofs<S: GraphStore>(
-    graph: &S,
+fn base_graph_proofs(
+    session: &dyn GraphReadSession,
     anchor_id: NodeId,
     anchor_repo: &str,
 ) -> Result<Vec<PlanningProof>, ProofEngineError> {
@@ -178,10 +185,10 @@ fn base_graph_proofs<S: GraphStore>(
     let mut queue = VecDeque::from([(anchor_id, Vec::<ProofHop>::new())]);
 
     while let Some((current_id, path_so_far)) = queue.pop_front() {
-        let mut all_edges = graph
-            .get_outgoing(current_id)?
+        let mut all_edges = session
+            .outgoing(current_id)?
             .into_iter()
-            .chain(graph.get_incoming(current_id)?)
+            .chain(session.incoming(current_id)?)
             .collect::<Vec<_>>();
         all_edges.sort_by_key(|edge| {
             (
@@ -198,7 +205,7 @@ fn base_graph_proofs<S: GraphStore>(
             } else {
                 edge.source
             };
-            let Some(neighbor) = graph.get_node(neighbor_id)? else {
+            let Some(neighbor) = session.node(neighbor_id)? else {
                 continue;
             };
 
@@ -222,8 +229,8 @@ fn base_graph_proofs<S: GraphStore>(
             let Some(kind) = edge_to_proof_kind(edge.kind) else {
                 continue;
             };
-            let source_file = graph
-                .get_node(edge.owner_file)?
+            let source_file = session
+                .node(edge.owner_file)?
                 .filter(|node| node.kind == NodeKind::File)
                 .map(|node| node.file_path)
                 .unwrap_or_default();
@@ -255,6 +262,7 @@ fn base_graph_proofs<S: GraphStore>(
 
 fn shared_peer_callers<S: GraphStore>(
     graph: &S,
+    session: &dyn GraphReadSession,
     anchor: &NodeData,
     traversal_depth: usize,
     traversal_limit: usize,
@@ -272,7 +280,7 @@ fn shared_peer_callers<S: GraphStore>(
             continue;
         }
         callers.extend(callers_by_incoming_calls(
-            graph,
+            session,
             peer.id,
             traversal_depth,
             traversal_limit.saturating_sub(callers.len()),
@@ -282,7 +290,7 @@ fn shared_peer_callers<S: GraphStore>(
             break;
         }
 
-        for edge in graph.get_incoming(peer.id)? {
+        for edge in session.incoming(peer.id)? {
             if !matches!(
                 edge.kind,
                 EdgeKind::References
@@ -292,7 +300,7 @@ fn shared_peer_callers<S: GraphStore>(
             ) {
                 continue;
             }
-            let Some(source) = graph.get_node(edge.source)? else {
+            let Some(source) = session.node(edge.source)? else {
                 continue;
             };
             if source.is_virtual || !seen.insert(source.id) {
@@ -327,8 +335,8 @@ fn shared_peer_callers<S: GraphStore>(
     Ok(callers)
 }
 
-fn callers_by_incoming_calls<S: GraphStore>(
-    graph: &S,
+fn callers_by_incoming_calls(
+    session: &dyn GraphReadSession,
     start: NodeId,
     max_depth: usize,
     limit: usize,
@@ -345,8 +353,8 @@ fn callers_by_incoming_calls<S: GraphStore>(
         if depth >= max_depth || callers.len() >= limit {
             continue;
         }
-        for edge in graph
-            .get_incoming(node_id)?
+        for edge in session
+            .incoming(node_id)?
             .into_iter()
             .filter(|edge| edge.kind == EdgeKind::Calls)
         {
@@ -354,7 +362,7 @@ fn callers_by_incoming_calls<S: GraphStore>(
             if !seen.insert(next_id) {
                 continue;
             }
-            let Some(node) = graph.get_node(next_id)? else {
+            let Some(node) = session.node(next_id)? else {
                 continue;
             };
             callers.push(ProofCaller {
@@ -410,18 +418,19 @@ fn shared_peer_caller_proofs(
 
 fn event_trace_proofs<S: GraphStore>(
     graph: &S,
+    session: &dyn GraphReadSession,
     anchor: &NodeData,
 ) -> Result<Vec<PlanningProof>, ProofEngineError> {
     let mut targets = canonical_event_target_for_node(graph, anchor)?
         .map(|node| vec![node.id])
         .unwrap_or_default();
     if targets.is_empty() {
-        targets = event_adjacent_targets(graph, anchor.id)?;
+        targets = event_adjacent_targets_with_session(graph, session, anchor.id)?;
         targets.sort();
         targets.dedup();
     }
     if targets.is_empty() {
-        targets = same_repo_event_context_targets(graph, anchor, 2)?;
+        targets = same_repo_event_context_targets_with_session(graph, session, anchor, 2)?;
     }
     if targets.is_empty() {
         return Ok(Vec::new());
@@ -429,7 +438,7 @@ fn event_trace_proofs<S: GraphStore>(
 
     let mut proofs = Vec::new();
     for event_id in targets {
-        let Some(event_node) = graph.get_node(event_id)? else {
+        let Some(event_node) = session.node(event_id)? else {
             continue;
         };
         let trace = trace_event(graph, event_id, 64)?;
@@ -472,6 +481,7 @@ fn event_trace_proofs<S: GraphStore>(
 
 fn hook_trace_proofs<S: GraphStore>(
     graph: &S,
+    session: &dyn GraphReadSession,
     anchor: &NodeData,
 ) -> Result<Vec<PlanningProof>, ProofEngineError> {
     if !matches!(anchor.kind, NodeKind::Function) || anchor.name.is_empty() {
@@ -502,11 +512,11 @@ fn hook_trace_proofs<S: GraphStore>(
             continue;
         }
 
-        for edge in graph.get_incoming(peer.id)? {
+        for edge in session.incoming(peer.id)? {
             if edge.kind != EdgeKind::ConsumesHookFrom {
                 continue;
             }
-            let Some(consumer) = graph.get_node(edge.source)? else {
+            let Some(consumer) = session.node(edge.source)? else {
                 continue;
             };
             if consumer.is_virtual
@@ -569,16 +579,17 @@ fn package_matches_anchor_repo(package: &str, anchor_repo: &str) -> bool {
 
 fn route_trace_proofs<S: GraphStore>(
     graph: &S,
+    session: &dyn GraphReadSession,
     anchor: &NodeData,
 ) -> Result<Vec<PlanningProof>, ProofEngineError> {
-    let targets = route_adjacent_targets(graph, anchor.id)?;
+    let targets = route_adjacent_targets(session, anchor.id)?;
     if targets.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut proofs = Vec::new();
     for route_id in targets {
-        let Some(route_node) = graph.get_node(route_id)? else {
+        let Some(route_node) = session.node(route_id)? else {
             continue;
         };
         let trace = trace_route(graph, route_id, 64)?;
@@ -621,6 +632,7 @@ fn route_trace_proofs<S: GraphStore>(
 
 fn shared_contract_impact_proofs<S: GraphStore>(
     graph: &S,
+    session: &dyn GraphReadSession,
     anchor: &NodeData,
 ) -> Result<Vec<PlanningProof>, ProofEngineError> {
     let participates = match anchor.kind {
@@ -637,7 +649,7 @@ fn shared_contract_impact_proofs<S: GraphStore>(
     let mut proofs = Vec::new();
     let mut seen = BTreeSet::<(String, String, EdgeKind)>::new();
     for id in candidate_ids {
-        let Some(target) = graph.get_node(id)? else {
+        let Some(target) = session.node(id)? else {
             continue;
         };
         emit_shared_contract_proofs(graph, anchor, &target, &mut seen, &mut proofs)?;
@@ -726,29 +738,29 @@ fn event_or_route_proof_path(
     ]
 }
 
-fn route_adjacent_targets<S: GraphStore>(
-    graph: &S,
+fn route_adjacent_targets(
+    session: &dyn GraphReadSession,
     anchor_id: NodeId,
 ) -> Result<Vec<NodeId>, ProofEngineError> {
     let mut targets = Vec::new();
-    let Some(anchor) = graph.get_node(anchor_id)? else {
+    let Some(anchor) = session.node(anchor_id)? else {
         return Ok(targets);
     };
     if anchor.kind == NodeKind::Route {
         targets.push(anchor.id);
     }
 
-    for edge in graph
-        .get_outgoing(anchor_id)?
+    for edge in session
+        .outgoing(anchor_id)?
         .into_iter()
-        .chain(graph.get_incoming(anchor_id)?)
+        .chain(session.incoming(anchor_id)?)
     {
         let other_id = if edge.source == anchor_id {
             edge.target
         } else {
             edge.source
         };
-        let Some(other) = graph.get_node(other_id)? else {
+        let Some(other) = session.node(other_id)? else {
             continue;
         };
         if other.is_virtual && other.kind == NodeKind::Route {
@@ -770,8 +782,17 @@ pub fn event_adjacent_targets<S: GraphStore>(
     graph: &S,
     anchor_id: NodeId,
 ) -> Result<Vec<NodeId>, ProofEngineError> {
+    let session = graph.read_session()?;
+    event_adjacent_targets_with_session(graph, session.as_ref(), anchor_id)
+}
+
+fn event_adjacent_targets_with_session<S: GraphStore>(
+    graph: &S,
+    session: &dyn GraphReadSession,
+    anchor_id: NodeId,
+) -> Result<Vec<NodeId>, ProofEngineError> {
     let mut targets = Vec::new();
-    let Some(anchor) = graph.get_node(anchor_id)? else {
+    let Some(anchor) = session.node(anchor_id)? else {
         return Ok(targets);
     };
     if is_eventish_kind(anchor.kind) {
@@ -779,17 +800,17 @@ pub fn event_adjacent_targets<S: GraphStore>(
         push_messaging_sibling(graph, &anchor, &mut targets)?;
     }
 
-    for edge in graph
-        .get_outgoing(anchor_id)?
+    for edge in session
+        .outgoing(anchor_id)?
         .into_iter()
-        .chain(graph.get_incoming(anchor_id)?)
+        .chain(session.incoming(anchor_id)?)
     {
         let other_id = if edge.source == anchor_id {
             edge.target
         } else {
             edge.source
         };
-        let Some(other) = graph.get_node(other_id)? else {
+        let Some(other) = session.node(other_id)? else {
             continue;
         };
         if other.is_virtual && is_eventish_kind(other.kind) {
@@ -807,6 +828,16 @@ pub fn same_repo_event_context_targets<S: GraphStore>(
     anchor: &NodeData,
     max_depth: usize,
 ) -> Result<Vec<NodeId>, ProofEngineError> {
+    let session = graph.read_session()?;
+    same_repo_event_context_targets_with_session(graph, session.as_ref(), anchor, max_depth)
+}
+
+fn same_repo_event_context_targets_with_session<S: GraphStore>(
+    graph: &S,
+    session: &dyn GraphReadSession,
+    anchor: &NodeData,
+    max_depth: usize,
+) -> Result<Vec<NodeId>, ProofEngineError> {
     let mut targets = Vec::new();
     let mut seen = BTreeSet::from([anchor.id]);
     let mut queue = VecDeque::from([(anchor.id, 0_usize)]);
@@ -815,17 +846,19 @@ pub fn same_repo_event_context_targets<S: GraphStore>(
         if depth >= max_depth {
             continue;
         }
-        for edge in graph.get_incoming(current_id)? {
+        for edge in session.incoming(current_id)? {
             if edge.kind != EdgeKind::Calls {
                 continue;
             }
-            let Some(caller) = graph.get_node(edge.source)? else {
+            let Some(caller) = session.node(edge.source)? else {
                 continue;
             };
             if caller.is_virtual || caller.repo != anchor.repo || !seen.insert(caller.id) {
                 continue;
             }
-            targets.extend(event_adjacent_targets(graph, caller.id)?);
+            targets.extend(event_adjacent_targets_with_session(
+                graph, session, caller.id,
+            )?);
             queue.push_back((caller.id, depth + 1));
         }
     }

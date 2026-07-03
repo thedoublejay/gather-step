@@ -54,6 +54,7 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
     node: &NodeData,
     shape: QueryShape,
 ) -> Result<Vec<NodeId>, GraphStoreError> {
+    let session = graph.read_session()?;
     let mut candidate_ids = BTreeSet::new();
 
     if matches!(
@@ -64,10 +65,10 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
     }
 
     // ── Edge-neighbour expansion (structural shared-contract edges) ──
-    for edge in graph
-        .get_outgoing(node.id)?
+    for edge in session
+        .outgoing(node.id)?
         .into_iter()
-        .chain(graph.get_incoming(node.id)?)
+        .chain(session.incoming(node.id)?)
     {
         if !matches!(
             edge.kind,
@@ -83,7 +84,7 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
         } else {
             edge.source
         };
-        let Some(other) = graph.get_node(other_id)? else {
+        let Some(other) = session.node(other_id)? else {
             continue;
         };
         if matches!(
@@ -161,10 +162,10 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
         shape,
         QueryShape::EventRollout | QueryShape::GenericSymbolImpact
     ) {
-        for edge in graph
-            .get_outgoing(node.id)?
+        for edge in session
+            .outgoing(node.id)?
             .into_iter()
-            .chain(graph.get_incoming(node.id)?)
+            .chain(session.incoming(node.id)?)
         {
             if !matches!(
                 edge.kind,
@@ -177,7 +178,7 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
             } else {
                 edge.source
             };
-            if let Some(other) = graph.get_node(other_id)?
+            if let Some(other) = session.node(other_id)?
                 && matches!(
                     other.kind,
                     NodeKind::Topic
@@ -197,10 +198,10 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
         shape,
         QueryShape::RouteApiRollout | QueryShape::GenericSymbolImpact
     ) {
-        for edge in graph
-            .get_outgoing(node.id)?
+        for edge in session
+            .outgoing(node.id)?
             .into_iter()
-            .chain(graph.get_incoming(node.id)?)
+            .chain(session.incoming(node.id)?)
         {
             if !matches!(edge.kind, EdgeKind::ConsumesApiFrom | EdgeKind::Serves) {
                 continue;
@@ -210,7 +211,7 @@ pub fn shared_contract_candidate_ids<S: GraphStore>(
             } else {
                 edge.source
             };
-            if let Some(other) = graph.get_node(other_id)?
+            if let Some(other) = session.node(other_id)?
                 && matches!(other.kind, NodeKind::Route)
             {
                 candidate_ids.insert(other.id);

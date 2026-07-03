@@ -17,7 +17,7 @@
 /// dimension that contributed a bonus.  If no dimension applies the single
 /// `Local` rationale is returned.
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 
 /// Rationale for why a node received a particular scoring bonus.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,9 +84,10 @@ pub fn rank_anchors<S: GraphStore>(
     store: &S,
     candidates: &[NodeId],
 ) -> Result<Vec<RankedAnchor>, GraphStoreError> {
+    let session = store.read_session()?;
     let mut ranked = candidates
         .iter()
-        .map(|&node_id| score_candidate(store, node_id))
+        .map(|&node_id| score_candidate(session.as_ref(), node_id))
         .collect::<Result<Vec<_>, _>>()?;
 
     ranked.sort_by(|left, right| {
@@ -100,15 +101,15 @@ pub fn rank_anchors<S: GraphStore>(
     Ok(ranked)
 }
 
-fn score_candidate<S: GraphStore>(
-    store: &S,
+fn score_candidate(
+    session: &dyn GraphReadSession,
     node_id: NodeId,
 ) -> Result<RankedAnchor, GraphStoreError> {
     let mut rank_score = 0.0_f32;
     let mut rationale = Vec::new();
 
     // Fetch the node once for kind and qualified-name checks.
-    let node_data = store.get_node(node_id)?;
+    let node_data = session.node(node_id)?;
     let node_kind = node_data.as_ref().map(|n| n.kind);
     let mut node_qn = node_data
         .as_ref()
@@ -127,8 +128,8 @@ fn score_candidate<S: GraphStore>(
         .to_owned();
     node_name.make_ascii_lowercase();
 
-    let incoming = store.get_incoming(node_id)?;
-    let outgoing = store.get_outgoing(node_id)?;
+    let incoming = session.incoming(node_id)?;
+    let outgoing = session.outgoing(node_id)?;
 
     // §3.1 Fan-out score.
     let fan_out = incoming

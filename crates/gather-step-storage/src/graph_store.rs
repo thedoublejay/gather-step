@@ -494,6 +494,8 @@ pub trait GraphReadSession {
     fn node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError>;
     /// Return the outgoing edges of `source` within this session's read view.
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
+    /// Return the incoming edges of `target` within this session's read view.
+    fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError>;
 }
 
 /// Fallback read session that delegates each lookup to the store's own
@@ -511,6 +513,10 @@ impl<S: GraphStore + ?Sized> GraphReadSession for DelegatingReadSession<'_, S> {
 
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
         self.store.get_outgoing(source)
+    }
+
+    fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
+        self.store.get_incoming(target)
     }
 }
 
@@ -3497,6 +3503,10 @@ impl GraphReadSession for DbReadSession {
     fn outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
         GraphStoreDb::get_outgoing_in_read_txn(&self.read_txn, source)
     }
+
+    fn incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
+        GraphStoreDb::get_incoming_in_read_txn(&self.read_txn, target)
+    }
 }
 
 impl GraphStore for GraphStoreDb {
@@ -4331,6 +4341,18 @@ mod tests {
         assert_eq!(
             session.outgoing(b.id).expect("session outgoing"),
             store.get_outgoing(b.id).expect("store outgoing"),
+        );
+        assert_eq!(
+            session.incoming(b.id).expect("session incoming"),
+            store.get_incoming(b.id).expect("store incoming"),
+        );
+        assert_eq!(
+            session.incoming(a.id).expect("session incoming"),
+            store.get_incoming(a.id).expect("store incoming"),
+        );
+        assert_eq!(
+            session.incoming(missing).expect("session incoming"),
+            Vec::new()
         );
     }
 

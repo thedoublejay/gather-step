@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind, route_qn};
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
@@ -249,9 +249,10 @@ pub fn rank_event_targets<S: GraphStore>(
     targets: &mut [NodeData],
     subject: &str,
 ) -> Result<(), EventTopologyError> {
+    let session = store.read_session()?;
     targets.sort_by(|left, right| {
-        event_target_score(store, right, subject)
-            .cmp(&event_target_score(store, left, subject))
+        event_target_score(session.as_ref(), right, subject)
+            .cmp(&event_target_score(session.as_ref(), left, subject))
             .then_with(|| left.repo.cmp(&right.repo))
             .then_with(|| left.file_path.cmp(&right.file_path))
             .then_with(|| left.name.cmp(&right.name))
@@ -311,7 +312,8 @@ pub fn trace_event<S: GraphStore>(
     target: NodeId,
     limit: usize,
 ) -> Result<EventTrace, EventTopologyError> {
-    let Some(target_node) = store.get_node(target)? else {
+    let session = store.read_session()?;
+    let Some(target_node) = session.node(target)? else {
         return Ok(EventTrace {
             target: missing_virtual_node(target, NodeKind::Topic),
             producers: Vec::new(),
@@ -321,13 +323,13 @@ pub fn trace_event<S: GraphStore>(
     };
 
     let (mut producers, producers_truncated) = collect_incoming_matches_many_kinds(
-        store,
+        session.as_ref(),
         &[target],
         &[EdgeKind::Publishes, EdgeKind::ProducesEventFor],
         limit,
     )?;
     let (mut consumers, consumers_truncated) = collect_incoming_matches_many_kinds(
-        store,
+        session.as_ref(),
         &[target],
         &[
             EdgeKind::Consumes,
@@ -345,7 +347,7 @@ pub fn trace_event<S: GraphStore>(
     // directly (e.g. producers that call `sendMessage` with a string literal).
     let producers_truncated = if producers.is_empty() {
         let (envelope_producers, envelope_truncated) =
-            topic_envelope_producers(store, &target_node, limit)?;
+            topic_envelope_producers(store, session.as_ref(), &target_node, limit)?;
         producers = envelope_producers;
         envelope_truncated
     } else {
@@ -353,7 +355,7 @@ pub fn trace_event<S: GraphStore>(
     };
     let consumers_truncated = if consumers.is_empty() {
         let (envelope_consumers, envelope_truncated) =
-            topic_envelope_consumers(store, &target_node, limit)?;
+            topic_envelope_consumers(store, session.as_ref(), &target_node, limit)?;
         consumers = envelope_consumers;
         envelope_truncated
     } else {
@@ -381,6 +383,7 @@ pub fn trace_event<S: GraphStore>(
 /// empty, so it never removes already-found producers.
 fn topic_envelope_producers<S: GraphStore>(
     store: &S,
+    session: &dyn GraphReadSession,
     target: &NodeData,
     limit: usize,
 ) -> Result<(Vec<TopologyMatch>, bool), EventTopologyError> {
@@ -402,7 +405,7 @@ fn topic_envelope_producers<S: GraphStore>(
     }
 
     collect_incoming_matches_many_kinds(
-        store,
+        session,
         &envelope_ids,
         &[EdgeKind::Publishes, EdgeKind::ProducesEventFor],
         limit,
@@ -411,6 +414,7 @@ fn topic_envelope_producers<S: GraphStore>(
 
 fn topic_envelope_consumers<S: GraphStore>(
     store: &S,
+    session: &dyn GraphReadSession,
     target: &NodeData,
     limit: usize,
 ) -> Result<(Vec<TopologyMatch>, bool), EventTopologyError> {
@@ -430,7 +434,7 @@ fn topic_envelope_consumers<S: GraphStore>(
     }
 
     collect_incoming_matches_many_kinds(
-        store,
+        session,
         &envelope_ids,
         &[
             EdgeKind::Consumes,
@@ -446,7 +450,8 @@ pub fn trace_route<S: GraphStore>(
     target: NodeId,
     limit: usize,
 ) -> Result<RouteTrace, EventTopologyError> {
-    let Some(target_node) = store.get_node(target)? else {
+    let session = store.read_session()?;
+    let Some(target_node) = session.node(target)? else {
         return Ok(RouteTrace {
             target: missing_virtual_node(target, NodeKind::Route),
             handlers: Vec::new(),
@@ -457,9 +462,9 @@ pub fn trace_route<S: GraphStore>(
 
     let route_targets = matching_route_target_ids(store, &target_node)?;
     let (handlers, handlers_truncated) =
-        collect_incoming_matches_many(store, &route_targets, EdgeKind::Serves, limit)?;
+        collect_incoming_matches_many(session.as_ref(), &route_targets, EdgeKind::Serves, limit)?;
     let (callers, callers_truncated) = collect_incoming_matches_many_kinds(
-        store,
+        session.as_ref(),
         &route_targets,
         &[EdgeKind::Consumes, EdgeKind::ConsumesApiFrom],
         limit,
@@ -532,7 +537,7 @@ fn event_family_matches(event_name: &str, family_query: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-fn event_target_score<S: GraphStore>(store: &S, target: &NodeData, subject: &str) -> usize {
+fn event_target_score(session: &dyn GraphReadSession, target: &NodeData, subject: &str) -> usize {
     let kind_bonus = match target.kind {
         NodeKind::Event => 4,
         NodeKind::Topic => 3,
@@ -550,8 +555,8 @@ fn event_target_score<S: GraphStore>(store: &S, target: &NodeData, subject: &str
                 0
             }
         });
-    let incoming_score = store
-        .get_incoming(target.id)
+    let incoming_score = session
+        .incoming(target.id)
         .map(|edges| {
             edges
                 .into_iter()
@@ -632,7 +637,8 @@ pub fn event_blast_radius<S: GraphStore>(
     max_depth: usize,
     limit: usize,
 ) -> Result<EventBlastRadius, EventTopologyError> {
-    let Some(target_node) = store.get_node(target)? else {
+    let session = store.read_session()?;
+    let Some(target_node) = session.node(target)? else {
         return Ok(EventBlastRadius {
             target: missing_virtual_node(target, NodeKind::Topic),
             nodes: Vec::new(),
@@ -654,14 +660,14 @@ pub fn event_blast_radius<S: GraphStore>(
             continue;
         }
         if depth >= max_depth {
-            if !downstream_hops(store, virtual_id)?.is_empty() {
+            if !downstream_hops(session.as_ref(), virtual_id)?.is_empty() {
                 truncated = true;
             }
             continue;
         }
 
         let edge_limit = limit.saturating_mul(4);
-        for hop in downstream_hops(store, virtual_id)? {
+        for hop in downstream_hops(session.as_ref(), virtual_id)? {
             let edge_id = (
                 hop.source.as_bytes(),
                 hop.target.as_bytes(),
@@ -739,6 +745,7 @@ pub fn list_orphan_topics_paged<S: GraphStore>(
     repo: Option<&str>,
     limit: usize,
 ) -> Result<OrphanTopicsPage, EventTopologyError> {
+    let session = store.read_session()?;
     let mut page = OrphanTopicsPage::default();
 
     for kind in EVENT_KINDS {
@@ -746,17 +753,17 @@ pub fn list_orphan_topics_paged<S: GraphStore>(
             if !target.is_virtual {
                 continue;
             }
-            let incoming = store.get_incoming(target.id)?;
+            let incoming = session.incoming(target.id)?;
             let producer_nodes = incoming
                 .iter()
                 .filter(|edge| edge.kind == EdgeKind::Publishes)
-                .filter_map(|edge| store.get_node(edge.source).ok().flatten())
+                .filter_map(|edge| session.node(edge.source).ok().flatten())
                 .filter(|node| !node.is_virtual)
                 .collect::<Vec<_>>();
             let consumer_nodes = incoming
                 .iter()
                 .filter(|edge| edge.kind == EdgeKind::Consumes)
-                .filter_map(|edge| store.get_node(edge.source).ok().flatten())
+                .filter_map(|edge| session.node(edge.source).ok().flatten())
                 .filter(|node| !node.is_virtual)
                 .collect::<Vec<_>>();
             if let Some(repo) = repo {
@@ -851,8 +858,8 @@ pub fn list_orphan_topics<S: GraphStore>(
     Ok(page.items)
 }
 
-fn collect_incoming_matches_many_kinds<S: GraphStore>(
-    store: &S,
+fn collect_incoming_matches_many_kinds(
+    session: &dyn GraphReadSession,
     targets: &[NodeId],
     edge_kinds: &[EdgeKind],
     limit: usize,
@@ -861,11 +868,11 @@ fn collect_incoming_matches_many_kinds<S: GraphStore>(
     let mut seen = FxHashSet::default();
 
     for target in targets {
-        for edge in store.get_incoming(*target)? {
+        for edge in session.incoming(*target)? {
             if !edge_kinds.contains(&edge.kind) {
                 continue;
             }
-            let Some(node) = store.get_node(edge.source)? else {
+            let Some(node) = session.node(edge.source)? else {
                 continue;
             };
             if node.is_virtual {
@@ -893,8 +900,8 @@ fn collect_incoming_matches_many_kinds<S: GraphStore>(
     Ok((entries, truncated))
 }
 
-fn collect_incoming_matches_many<S: GraphStore>(
-    store: &S,
+fn collect_incoming_matches_many(
+    session: &dyn GraphReadSession,
     targets: &[NodeId],
     edge_kind: EdgeKind,
     limit: usize,
@@ -903,11 +910,11 @@ fn collect_incoming_matches_many<S: GraphStore>(
     let mut seen = FxHashSet::default();
 
     for target in targets {
-        for edge in store.get_incoming(*target)? {
+        for edge in session.incoming(*target)? {
             if edge.kind != edge_kind {
                 continue;
             }
-            let Some(node) = store.get_node(edge.source)? else {
+            let Some(node) = session.node(edge.source)? else {
                 continue;
             };
             if node.is_virtual {
@@ -940,11 +947,11 @@ struct DownstreamHop {
     node: Option<NodeData>,
 }
 
-fn downstream_hops<S: GraphStore>(
-    store: &S,
+fn downstream_hops(
+    session: &dyn GraphReadSession,
     virtual_id: NodeId,
 ) -> Result<Vec<DownstreamHop>, EventTopologyError> {
-    let Some(virtual_node) = store.get_node(virtual_id)? else {
+    let Some(virtual_node) = session.node(virtual_id)? else {
         return Ok(Vec::new());
     };
     let mut hops = Vec::new();
@@ -953,11 +960,11 @@ fn downstream_hops<S: GraphStore>(
         _ => [EdgeKind::Consumes].as_slice(),
     };
 
-    for edge in store.get_incoming(virtual_id)? {
+    for edge in session.incoming(virtual_id)? {
         if !relevant_incoming.contains(&edge.kind) {
             continue;
         }
-        let Some(symbol) = store.get_node(edge.source)? else {
+        let Some(symbol) = session.node(edge.source)? else {
             continue;
         };
         if symbol.is_virtual {
@@ -971,14 +978,14 @@ fn downstream_hops<S: GraphStore>(
             node: Some(symbol.clone()),
         });
 
-        for outgoing in store.get_outgoing(symbol.id)? {
+        for outgoing in session.outgoing(symbol.id)? {
             if !matches!(
                 outgoing.kind,
                 EdgeKind::Publishes | EdgeKind::Consumes | EdgeKind::Serves
             ) {
                 continue;
             }
-            let Some(next) = store.get_node(outgoing.target)? else {
+            let Some(next) = session.node(outgoing.target)? else {
                 continue;
             };
             if !next.is_virtual || !is_topology_virtual(next.kind) {

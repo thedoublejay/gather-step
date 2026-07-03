@@ -35,6 +35,7 @@ pub fn trace_across_repos<S: GraphStore>(
     virtual_node_id: NodeId,
     max_depth: usize,
 ) -> Result<BTreeMap<String, Vec<CrossRepoHop>>, CrossRepoError> {
+    let session = store.read_session()?;
     let mut grouped = BTreeMap::<String, Vec<CrossRepoHop>>::new();
     let mut queue = VecDeque::from([(virtual_node_id, 0_usize)]);
     let mut seen = FxHashSet::from_iter([virtual_node_id.as_bytes()]);
@@ -44,8 +45,8 @@ pub fn trace_across_repos<S: GraphStore>(
             continue;
         }
 
-        for edge in store.get_incoming(node_id)? {
-            if let Some(node) = store.get_node(edge.source)? {
+        for edge in session.incoming(node_id)? {
+            if let Some(node) = session.node(edge.source)? {
                 if node.is_virtual {
                     if seen.insert(edge.source.as_bytes()) {
                         queue.push_back((edge.source, depth + 1));
@@ -70,8 +71,8 @@ pub fn trace_across_repos<S: GraphStore>(
             }
         }
 
-        for edge in store.get_outgoing(node_id)? {
-            if let Some(node) = store.get_node(edge.target)? {
+        for edge in session.outgoing(node_id)? {
+            if let Some(node) = session.node(edge.target)? {
                 if node.is_virtual {
                     if seen.insert(edge.target.as_bytes()) {
                         queue.push_back((edge.target, depth + 1));
@@ -125,12 +126,13 @@ pub fn cross_repo_deps<S: GraphStore>(
     store: &S,
     repo_name: &str,
 ) -> Result<CrossRepoDependencies, CrossRepoError> {
+    let session = store.read_session()?;
     let mut dependencies = BTreeMap::<String, BTreeSet<EdgeKind>>::new();
     let mut virtual_targets = FxHashSet::default();
 
     for node in store.nodes_by_repo(repo_name)? {
-        for edge in store.get_outgoing(node.id)? {
-            let Some(target) = store.get_node(edge.target)? else {
+        for edge in session.outgoing(node.id)? {
+            let Some(target) = session.node(edge.target)? else {
                 continue;
             };
             if !target.is_virtual {
@@ -141,8 +143,8 @@ pub fn cross_repo_deps<S: GraphStore>(
     }
 
     for (virtual_id, _source_kind) in virtual_targets {
-        for related in store.get_incoming(virtual_id)? {
-            let Some(source) = store.get_node(related.source)? else {
+        for related in session.incoming(virtual_id)? {
+            let Some(source) = session.node(related.source)? else {
                 continue;
             };
             if source.repo != repo_name {
@@ -153,8 +155,8 @@ pub fn cross_repo_deps<S: GraphStore>(
             }
         }
 
-        for related in store.get_outgoing(virtual_id)? {
-            let Some(target_node) = store.get_node(related.target)? else {
+        for related in session.outgoing(virtual_id)? {
+            let Some(target_node) = session.node(related.target)? else {
                 continue;
             };
             if target_node.repo != repo_name {

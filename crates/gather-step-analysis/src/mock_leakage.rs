@@ -57,6 +57,7 @@ pub fn find_mock_leakage<S: GraphStore>(
     store: &S,
     repo: &str,
 ) -> Result<Vec<MockLeakage>, MockLeakageError> {
+    let session = store.read_session()?;
     let nodes = store.nodes_by_repo(repo)?;
     let file_of: FxHashMap<[u8; 16], String> = nodes
         .iter()
@@ -68,7 +69,7 @@ pub fn find_mock_leakage<S: GraphStore>(
         if is_test_path(&node.file_path) || is_mock_path(&node.file_path) {
             continue;
         }
-        for edge in store.get_outgoing(node.id)? {
+        for edge in session.outgoing(node.id)? {
             if edge.kind != EdgeKind::Imports {
                 continue;
             }
