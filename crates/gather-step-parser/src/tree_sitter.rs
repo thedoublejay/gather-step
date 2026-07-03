@@ -1001,7 +1001,10 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the owned String/Option arguments are moved into the constructed node, so taking them by value avoids a caller-side clone"
+    )]
     pub(crate) fn push_symbol(
         &mut self,
         kind: NodeKind,
@@ -1387,7 +1390,10 @@ impl<'a> ParseState<'a> {
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned)]
+#[expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "the tail is a control-flow match that dispatches recursion and yields (); a trailing expression reads clearer than a semicolon here"
+)]
 fn visit_ts_js(
     node: Node<'_>,
     state: &mut ParseState<'_>,
@@ -1733,7 +1739,10 @@ fn visit_ts_js_sequence(
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned)]
+#[expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "the tail is a control-flow match that dispatches recursion and yields (); a trailing expression reads clearer than a semicolon here"
+)]
 fn visit_ts_js_with_pending(
     node: Node<'_>,
     state: &mut ParseState<'_>,
@@ -1875,7 +1884,10 @@ fn visit_ts_js_with_pending(
     }
 }
 
-#[expect(clippy::semicolon_if_nothing_returned)]
+#[expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "the tail is a control-flow match that dispatches recursion and yields (); a trailing expression reads clearer than a semicolon here"
+)]
 fn visit_python(
     node: Node<'_>,
     state: &mut ParseState<'_>,

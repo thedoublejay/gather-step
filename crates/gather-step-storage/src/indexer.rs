@@ -1407,7 +1407,10 @@ impl RepoIndexer {
         })
     }
 
-    #[expect(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "sequential per-repo indexing pipeline whose phases share tightly-coupled local state; splitting it would scatter that state without improving readability"
+    )]
     fn index_repo_files(
         &self,
         repo: &str,

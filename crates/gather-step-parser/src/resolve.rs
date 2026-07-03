@@ -1162,7 +1162,10 @@ fn qualified_hint_import_head_matches(
         .any(|binding| binding.local_name == head)
 }
 
-#[expect(clippy::cast_precision_loss)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "candidate_count is a small ambiguity count; f32 precision loss is irrelevant to a 0..=1 heuristic score"
+)]
 fn penalize(base: f32, candidate_count: usize) -> f32 {
     if candidate_count <= 1 {
         return base;
@@ -1179,7 +1182,10 @@ fn normalize_name(value: &str) -> String {
         .collect()
 }
 
-#[expect(clippy::cast_precision_loss)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "char counts are small; f32 precision loss is irrelevant to a 0..=1 similarity score"
+)]
 fn fuzzy_similarity(left: &str, right: &str) -> f32 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
@@ -1207,7 +1213,11 @@ fn fuzzy_similarity(left: &str, right: &str) -> f32 {
     ((prefix_score * 0.6) + (shared_score * 0.4)).clamp(0.0, 1.0)
 }
 
-#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "confidence is clamped to 0..=1 then scaled by 1000, so the rounded value is always 0..=1000 and non-negative — fits u16"
+)]
 fn encode_confidence(confidence: f32) -> u16 {
     (confidence.clamp(0.0, 1.0) * 1000.0).round() as u16
 }
