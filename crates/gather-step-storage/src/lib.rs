@@ -307,9 +307,10 @@ impl StorageCoordinator {
 
     /// Run a repo batch without committing file-state rows. When
     /// `cold_index` is true, skip the semantic-bridge read walk (always
-    /// empty on a cold index) and the per-file graph delete (nothing to
-    /// delete), saving one read transaction per batch and ~N table opens
-    /// per file.
+    /// empty on a cold index), the per-file graph delete (nothing to
+    /// delete), the file-state reindex probe (every file is new), and the
+    /// per-file metadata DELETE transaction (no rows to clear; the later
+    /// file-state/dependency writes are upserts).
     pub(crate) fn index_repo_batch_without_file_states_cold(
         &self,
         batch: &RepoBatch,
@@ -325,15 +326,18 @@ impl StorageCoordinator {
         cold_index: bool,
     ) -> Result<RepoBatchResult, StorageCoordinatorError> {
         let mut changed_files = Vec::new();
-        let reindex_candidates = batch
-            .files
-            .iter()
-            .filter(|file| file.repo == batch.repo && !file.force)
-            .map(|file| (file.effective_path_bytes(), file.content_hash.as_slice()))
-            .collect::<Vec<_>>();
-        let reindex_required = self
-            .metadata()
-            .should_reindex_batch_by_path_bytes(&batch.repo, &reindex_candidates)?;
+        let reindex_required = if cold_index {
+            Default::default()
+        } else {
+            let reindex_candidates = batch
+                .files
+                .iter()
+                .filter(|file| file.repo == batch.repo && !file.force)
+                .map(|file| (file.effective_path_bytes(), file.content_hash.as_slice()))
+                .collect::<Vec<_>>();
+            self.metadata()
+                .should_reindex_batch_by_path_bytes(&batch.repo, &reindex_candidates)?
+        };
         for file in &batch.files {
             if file.repo != batch.repo {
                 return Err(StorageCoordinatorError::MismatchedRepo {
@@ -341,7 +345,7 @@ impl StorageCoordinator {
                     actual: file.repo.clone(),
                 });
             }
-            if file.force || reindex_required.contains(file.effective_path_bytes()) {
+            if cold_index || file.force || reindex_required.contains(file.effective_path_bytes()) {
                 changed_files.push(file);
             }
         }
@@ -350,18 +354,20 @@ impl StorageCoordinator {
             return Ok(RepoBatchResult::default());
         }
 
-        let changed_file_paths = changed_files
-            .iter()
-            .map(|file| file.file_path.clone())
-            .collect::<Vec<_>>();
-        let changed_file_path_ids = changed_files
-            .iter()
-            .map(|file| file.effective_path_bytes().to_vec())
-            .collect::<Vec<_>>();
-        // On cold index there are no prior semantic bridges to discover and
-        // no context packs to invalidate, so skip the read-transaction walk
-        // that would always return empty.
+        // On cold index there are no prior semantic bridges to discover, no
+        // context packs to invalidate, and no per-file metadata rows to
+        // clear (the later file-state/dependency writes are upserts), so
+        // skip the read-transaction walk and the per-file DELETE
+        // transaction that would both be no-ops.
         if !cold_index {
+            let changed_file_paths = changed_files
+                .iter()
+                .map(|file| file.file_path.clone())
+                .collect::<Vec<_>>();
+            let changed_file_path_ids = changed_files
+                .iter()
+                .map(|file| file.effective_path_bytes().to_vec())
+                .collect::<Vec<_>>();
             let invalidation_targets = crate::reconcile::semantic_bridge_related_files(
                 self.graph(),
                 &batch.repo,
@@ -380,24 +386,24 @@ impl StorageCoordinator {
             let _ = self
                 .metadata()
                 .invalidate_context_packs_for_targets(&invalidation_targets)?;
+            self.metadata().with_write_txn(|tx| {
+                for file_path_id in &changed_file_path_ids {
+                    tx.execute(
+                        "DELETE FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
+                        rusqlite::params![&batch.repo, file_path_id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM file_dependencies WHERE source_repo = ?1 AND source_path = ?2",
+                        rusqlite::params![&batch.repo, file_path_id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM file_dependencies WHERE target_repo = ?1 AND target_path = ?2",
+                        rusqlite::params![&batch.repo, file_path_id],
+                    )?;
+                }
+                Ok(())
+            })?;
         }
-        self.metadata().with_write_txn(|tx| {
-            for file_path_id in &changed_file_path_ids {
-                tx.execute(
-                    "DELETE FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
-                    rusqlite::params![&batch.repo, file_path_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM file_dependencies WHERE source_repo = ?1 AND source_path = ?2",
-                    rusqlite::params![&batch.repo, file_path_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM file_dependencies WHERE target_repo = ?1 AND target_path = ?2",
-                    rusqlite::params![&batch.repo, file_path_id],
-                )?;
-            }
-            Ok(())
-        })?;
 
         let mut write_txn = self.graph().begin_write_txn()?;
         // In bulk mode (Durability::None) persistent savepoints are not
@@ -434,7 +440,12 @@ impl StorageCoordinator {
                 // Edges produced here come from the same ParsedFile as the
                 // nodes, so their source/target/owner_file references are
                 // guaranteed to exist — skip the per-edge node validation.
-                GraphStoreDb::bulk_insert_in_txn_trusted(&write_txn, &file.nodes, &file.edges)?;
+                GraphStoreDb::bulk_insert_in_txn_trusted(
+                    &write_txn,
+                    &file.nodes,
+                    &file.edges,
+                    cold_index,
+                )?;
 
                 result.files_indexed += 1;
                 result.nodes_written += file.nodes.len();
@@ -971,6 +982,75 @@ mod tests {
             "DELETE FROM file_index_state WHERE repo = ?1 AND file_path = ?2",
             params![repo, file_path.as_bytes()],
         )
+    }
+
+    /// Guard for the cold-index no-op skips: the cold path (skipped reindex
+    /// probe, skipped per-file metadata DELETEs, skipped existing-node probe
+    /// for non-virtual nodes) must produce graph output identical to the
+    /// same batch run through the warm code path on an equally-fresh store.
+    /// The shared virtual route across both files exercises the one probe
+    /// the cold path must keep (same virtual id inserted twice per run).
+    #[test]
+    fn cold_index_skips_match_warm_path_output() {
+        let route = route_node("GET /orders", "route__get__orders");
+        let make_batch = || RepoBatch {
+            repo: "service-a".to_owned(),
+            files: vec![
+                semantic_batch("service-a", "src/foo.ts", "createOrder", &route, &[1])
+                    .files
+                    .remove(0),
+                semantic_batch("service-a", "src/bar.ts", "listOrders", &route, &[2])
+                    .files
+                    .remove(0),
+            ],
+            test_hooks: RepoBatchHooks::default(),
+        };
+
+        let cold_root = TestRoot::new("cold-skips");
+        let cold = StorageCoordinator::open(cold_root.path()).expect("coordinator should open");
+        let cold_result = cold
+            .index_repo_batch_without_file_states_cold(&make_batch(), true)
+            .expect("cold batch should index");
+
+        let warm_root = TestRoot::new("warm-parity");
+        let warm = StorageCoordinator::open(warm_root.path()).expect("coordinator should open");
+        let warm_result = warm
+            .index_repo_batch_without_file_states_cold(&make_batch(), false)
+            .expect("warm batch should index");
+
+        assert_eq!(cold_result, warm_result);
+        for file_path in ["src/foo.ts", "src/bar.ts"] {
+            assert_eq!(
+                cold.graph()
+                    .nodes_by_file("service-a", file_path)
+                    .expect("cold graph lookup"),
+                warm.graph()
+                    .nodes_by_file("service-a", file_path)
+                    .expect("warm graph lookup"),
+            );
+        }
+        assert_eq!(
+            cold.graph().get_node(route.id).expect("cold route lookup"),
+            warm.graph().get_node(route.id).expect("warm route lookup"),
+        );
+        assert_eq!(
+            cold.graph()
+                .get_incoming(route.id)
+                .expect("cold route edges")
+                .len(),
+            warm.graph()
+                .get_incoming(route.id)
+                .expect("warm route edges")
+                .len(),
+        );
+        assert_eq!(
+            cold.graph()
+                .count_nodes_by_repo("service-a")
+                .expect("cold node count"),
+            warm.graph()
+                .count_nodes_by_repo("service-a")
+                .expect("warm node count"),
+        );
     }
 
     #[test]

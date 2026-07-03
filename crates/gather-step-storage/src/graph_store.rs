@@ -3065,7 +3065,7 @@ impl GraphStoreDb {
         nodes: &[NodeData],
         edges: &[EdgeData],
     ) -> Result<(), GraphStoreError> {
-        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, true)
+        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, true, false)
     }
 
     /// Internal variant used by the indexer's hot write path. The caller
@@ -3073,12 +3073,20 @@ impl GraphStoreDb {
     /// by the same parser run as the `nodes` slice, so node existence is
     /// invariant by construction — skipping the 3 per-edge B-tree reads
     /// removes ~800K reads on the full-monorepo cold index.
+    ///
+    /// When `cold_index` is true (repo verified to have zero prior nodes),
+    /// the per-node existing-row probe is also skipped for non-virtual
+    /// nodes: their ids are file-scoped and each file is inserted exactly
+    /// once per cold run, so the probe is a guaranteed miss. Virtual nodes
+    /// (routes, topics, …) keep the probe — the same virtual id can be
+    /// re-emitted by several files within one cold run.
     pub(crate) fn bulk_insert_in_txn_trusted(
         write_txn: &redb::WriteTransaction,
         nodes: &[NodeData],
         edges: &[EdgeData],
+        cold_index: bool,
     ) -> Result<(), GraphStoreError> {
-        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, false)
+        Self::bulk_insert_in_txn_inner(write_txn, nodes, edges, false, cold_index)
     }
 
     fn bulk_insert_in_txn_inner(
@@ -3086,6 +3094,7 @@ impl GraphStoreDb {
         nodes: &[NodeData],
         edges: &[EdgeData],
         validate_nodes: bool,
+        cold_index: bool,
     ) -> Result<(), GraphStoreError> {
         let mut owner_file_set = FxHashSet::default();
         let mut replaced_owner_files = Vec::new();
@@ -3105,12 +3114,16 @@ impl GraphStoreDb {
         let mut index_tables = Self::open_node_index_tables(write_txn)?;
         for node in nodes {
             let stored = Self::store_node_in_txn(write_txn, node)?;
-            if let Some(existing) = table
-                .get(node.id.as_bytes())
-                .map_err(GraphStoreError::storage)?
-                .map(|raw| Self::decode_stored_node(raw.value()))
-                .transpose()?
-            {
+            let existing = if !cold_index || node.is_virtual {
+                table
+                    .get(node.id.as_bytes())
+                    .map_err(GraphStoreError::storage)?
+                    .map(|raw| Self::decode_stored_node(raw.value()))
+                    .transpose()?
+            } else {
+                None
+            };
+            if let Some(existing) = existing {
                 Self::remove_node_indexes_with_tables(&mut index_tables, &existing)?;
                 if !matches!(existing.kind, NodeKind::File) && !existing.is_virtual {
                     Self::remove_node_edges(write_txn, existing.id)?;
