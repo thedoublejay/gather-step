@@ -8,7 +8,7 @@
 //! All Oxc-specific types (`Allocator`, `Span`, AST nodes) stay inside this
 //! module. Public surfaces consume only owned, span-free Gather Step data.
 
-use std::{ffi::OsStr, path::Path};
+use std::{cell::RefCell, ffi::OsStr, path::Path};
 
 use gather_step_core::{NodeData, NodeKind, SourceSpan, Visibility};
 use oxc_allocator::Allocator;
@@ -128,6 +128,13 @@ pub fn is_specific_value_mirror(value: &str) -> bool {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
+// Per-worker arena reused across files: `reset()` keeps the allocation
+// capacity of the largest file parsed on this thread instead of growing a
+// fresh arena from zero for every file.
+thread_local! {
+    static PARSE_ALLOCATOR: RefCell<Allocator> = RefCell::new(Allocator::default());
+}
+
 /// Parse a TypeScript or JavaScript file with Oxc and populate `state`.
 ///
 /// Always succeeds: when Oxc panics on the source we emit no symbols and
@@ -139,34 +146,37 @@ pub(crate) fn parse_ts_js_with_oxc_with_status(
     source: &str,
     _absolute_path: &Path,
 ) -> TsJsParseStatus {
-    let allocator = Allocator::default();
-    let options = ParseOptions {
-        allow_return_outside_function: true,
-        ..ParseOptions::default()
-    };
-    let parsed = Parser::new(&allocator, source, source_type_for_path(&file.path))
-        .with_options(options)
-        .parse();
+    PARSE_ALLOCATOR.with(|cell| {
+        let mut allocator = cell.borrow_mut();
+        allocator.reset();
+        let options = ParseOptions {
+            allow_return_outside_function: true,
+            ..ParseOptions::default()
+        };
+        let parsed = Parser::new(&allocator, source, source_type_for_path(&file.path))
+            .with_options(options)
+            .parse();
 
-    let status = if parsed.panicked {
-        TsJsParseStatus::Unrecoverable
-    } else if parsed.diagnostics.is_empty() {
-        TsJsParseStatus::Parsed
-    } else {
-        TsJsParseStatus::Recovered
-    };
+        let status = if parsed.panicked {
+            TsJsParseStatus::Unrecoverable
+        } else if parsed.diagnostics.is_empty() {
+            TsJsParseStatus::Parsed
+        } else {
+            TsJsParseStatus::Recovered
+        };
 
-    if status == TsJsParseStatus::Unrecoverable {
-        return status;
-    }
+        if status == TsJsParseStatus::Unrecoverable {
+            return status;
+        }
 
-    let offsets = build_line_offsets(source);
-    let mut ctx = VisitCtx::new(source, &offsets);
-    for stmt in &parsed.program.body {
-        visit_top_level_statement(stmt, state, &mut ctx);
-    }
+        let offsets = build_line_offsets(source);
+        let mut ctx = VisitCtx::new(source, &offsets);
+        for stmt in &parsed.program.body {
+            visit_top_level_statement(stmt, state, &mut ctx);
+        }
 
-    status
+        status
+    })
 }
 
 #[cfg(feature = "test-support")]
