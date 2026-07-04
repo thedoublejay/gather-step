@@ -1,6 +1,7 @@
 use gather_step_analysis::{
-    EventRole, RouteRole, canonical_event_target, event_blast_radius, list_orphan_topics,
-    resolve_agent_targets, resolve_event_targets, resolve_route_target, trace_agent,
+    EventRole, RouteRole, canonical_event_target, confidence::band_label, event_blast_radius,
+    list_orphan_topics, resolve_agent_targets, resolve_event_targets, resolve_route_target,
+    trace_agent,
 };
 use gather_step_core::{NodeId, NodeKind, WorkspaceRegistry};
 use rmcp::schemars;
@@ -114,6 +115,8 @@ pub struct EventBlastRadiusData {
 pub struct BlastRadiusNodeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub depth: usize,
     pub file_path: String,
     pub kind: String,
@@ -128,6 +131,8 @@ pub struct BlastRadiusNodeItem {
 pub struct BlastRadiusEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub edge_kind: String,
     pub source_id: String,
     pub target_id: String,
@@ -178,6 +183,8 @@ pub struct AgentNodeItem {
 pub struct AgentEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub edge_kind: String,
     pub source_id: String,
     pub target_id: String,
@@ -231,6 +238,8 @@ pub struct TopologySymbol {
     pub edge_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub evidence: Evidence,
     pub file_path: String,
     pub framework_context: Vec<String>,
@@ -454,6 +463,7 @@ pub fn event_blast_radius_tool(
                 .into_iter()
                 .map(|edge| BlastRadiusEdgeItem {
                     confidence: edge.confidence,
+                    confidence_band: edge.confidence.map(|c| band_label(c).to_owned()),
                     edge_kind: edge_kind_label(edge.edge_kind).to_owned(),
                     source_id: encode_node_id(edge.source),
                     target_id: encode_node_id(edge.target),
@@ -465,6 +475,9 @@ pub fn event_blast_radius_tool(
                 .into_iter()
                 .map(|node| BlastRadiusNodeItem {
                     confidence: node.cumulative_confidence,
+                    confidence_band: node
+                        .cumulative_confidence
+                        .map(|c| band_label(c).to_owned()),
                     depth: node.depth,
                     file_path: node.file_path,
                     kind: node_kind_label(node.node_kind).to_owned(),
@@ -519,6 +532,7 @@ pub fn trace_agent_tool(
                 .into_iter()
                 .map(|edge| AgentEdgeItem {
                     confidence: edge.confidence,
+                    confidence_band: edge.confidence.map(|c| band_label(c).to_owned()),
                     edge_kind: edge_kind_label(edge.edge_kind).to_owned(),
                     source_id: encode_node_id(edge.source),
                     target_id: encode_node_id(edge.target),
@@ -756,6 +770,7 @@ fn topology_symbol(
     TopologySymbol {
         edge_kind: edge_kind_label,
         confidence,
+        confidence_band: confidence.map(|c| band_label(c).to_owned()),
         evidence,
         file_path,
         framework_context,

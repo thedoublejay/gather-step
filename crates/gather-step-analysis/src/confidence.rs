@@ -35,6 +35,28 @@ pub fn band_of(confidence: u16) -> ConfidenceBand {
     }
 }
 
+impl ConfidenceBand {
+    /// The lowercase label used in query output (`"extracted"` / `"inferred"`
+    /// / `"hint"`). Matches the serde representation, letting `JsonSchema`
+    /// response DTOs carry the band as a plain string without depending on
+    /// `schemars`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ConfidenceBand::Extracted => "extracted",
+            ConfidenceBand::Inferred => "inferred",
+            ConfidenceBand::Hint => "hint",
+        }
+    }
+}
+
+/// Convenience: the band label for a numeric confidence, ready to drop into a
+/// string-typed output field.
+#[must_use]
+pub fn band_label(confidence: u16) -> &'static str {
+    band_of(confidence).as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +76,15 @@ mod tests {
     fn band_serializes_lowercase() {
         let json = serde_json::to_string(&ConfidenceBand::Inferred).unwrap();
         assert_eq!(json, "\"inferred\"");
+    }
+
+    #[test]
+    fn as_str_matches_serde_representation() {
+        assert_eq!(ConfidenceBand::Extracted.as_str(), "extracted");
+        assert_eq!(ConfidenceBand::Inferred.as_str(), "inferred");
+        assert_eq!(ConfidenceBand::Hint.as_str(), "hint");
+        assert_eq!(band_label(920), "extracted");
+        assert_eq!(band_label(600), "inferred");
+        assert_eq!(band_label(100), "hint");
     }
 }
