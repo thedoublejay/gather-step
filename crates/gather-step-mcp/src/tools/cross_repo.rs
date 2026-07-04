@@ -79,6 +79,11 @@ pub struct TraceImpactMeta {
     pub response_schema_version: u8,
     pub budget: ResponseBudget,
     pub truncated: bool,
+    /// Repos whose index lags their current git HEAD, when any. Omitted when
+    /// the index is current for every repo. Lets an agent tell a genuinely
+    /// empty result from one produced against a stale index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_stale: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -204,6 +209,7 @@ pub fn trace_impact_tool(
             response_schema_version: response_schema_version(),
             budget: ResponseBudget::not_truncated(BudgetedTool::TraceImpact, 0, 0),
             truncated: false,
+            index_stale: crate::tools::packs::index_stale_field(ctx),
         }),
     };
     let budget = apply_response_budget(
@@ -523,6 +529,32 @@ mod tests {
         assert!(
             value.get("confidence_band").is_none(),
             "confidence_band omitted when no numeric confidence"
+        );
+    }
+
+    #[test]
+    fn trace_impact_meta_index_stale_is_additive() {
+        use super::{BudgetedTool, ResponseBudget, TraceImpactMeta, response_schema_version};
+        let meta = TraceImpactMeta {
+            response_schema_version: response_schema_version(),
+            budget: ResponseBudget::not_truncated(BudgetedTool::TraceImpact, 0, 0),
+            truncated: false,
+            index_stale: Some(vec!["service-api".to_owned()]),
+        };
+        let value = serde_json::to_value(&meta).expect("serialize");
+        assert_eq!(
+            value.get("index_stale").and_then(|v| v.get(0)).and_then(|v| v.as_str()),
+            Some("service-api")
+        );
+
+        let fresh = TraceImpactMeta {
+            index_stale: None,
+            ..meta
+        };
+        let value = serde_json::to_value(&fresh).expect("serialize");
+        assert!(
+            value.get("index_stale").is_none(),
+            "index_stale omitted when the index is current"
         );
     }
 
