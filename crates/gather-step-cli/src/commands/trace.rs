@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
+use gather_step_analysis::confidence::{ConfidenceBand, band_of};
 use gather_step_mcp::tools::crud_trace::{CrudTraceRequest, crud_trace_tool};
 use serde_json::json;
 
@@ -232,7 +233,15 @@ pub(crate) fn execute_crud(
 }
 
 fn format_confidence(confidence: Option<u16>) -> String {
-    confidence.map_or_else(String::new, |value| format!(" confidence={value}"))
+    confidence.map_or_else(String::new, |value| {
+        // High-confidence (extracted) edges render unmarked to keep the common
+        // case clean; only inferred/hint tiers get a band marker.
+        let marker = match band_of(value) {
+            ConfidenceBand::Extracted => String::new(),
+            band => format!(" ({})", band.as_str()),
+        };
+        format!(" confidence={value}{marker}")
+    })
 }
 
 fn format_resolver(resolver: Option<&str>) -> String {
