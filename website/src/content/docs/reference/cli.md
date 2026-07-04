@@ -310,24 +310,29 @@ gather-step --workspace /path/to/workspace doctor --json
 Prints recent run telemetry recorded in the local telemetry store: index/query runs with their status, duration, and any warning or error counters. Telemetry is local-only and privacy-preserving — runs are recorded with hashes rather than raw workspace paths or messages. Nothing is transmitted off-machine.
 
 ```bash
-gather-step [GLOBAL FLAGS] log [--last <N>] [--since <AGE>] [--errors-only] [--clear-before <AGE>]
+gather-step [GLOBAL FLAGS] log [--last <N>] [--since <AGE>] [--errors-only] [--command <NAME>] [--summary] [--repair] [--clear-before <AGE>]
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--last <N>` | usize | 20 | Maximum number of run rows to show. |
+| `--last <N>` | usize | 20 | Maximum number of run rows to consider (also caps the `--summary` window). |
 | `--since <AGE>` | duration | — | Only show runs newer than an age such as `7d` or `12h`. |
 | `--errors-only` | bool flag | false | Only show runs that recorded an error or a non-success status. |
+| `--command <NAME>` | string | — | Only show runs for this command. |
+| `--summary` | bool flag | false | Print an aggregate summary (run counts by status, run counts by graph availability, abandoned count, peak RSS, slowest commands) instead of rows. Respects `--last`, `--since`, and `--command`. |
+| `--repair` | bool flag | false | Finalize stale `running` rows (left by killed processes) as `abandoned`, then report how many were rewritten. Stale rows are also finalized automatically when the telemetry store is opened. |
 | `--clear-before <AGE>` | duration | — | Delete telemetry rows older than an age such as `90d`. Maintenance only; does not print runs. |
 
 **Example**
 
 ```bash
 gather-step --workspace /path/to/workspace log --last 50 --errors-only
+gather-step --workspace /path/to/workspace log --summary --since 30d
+gather-step --workspace /path/to/workspace log --repair
 gather-step --workspace /path/to/workspace log --clear-before 90d
 ```
 
-**When to use** — to inspect why a recent index or query run was slow or failed, or to prune the local telemetry store.
+**When to use** — to inspect why a recent index or query run was slow or failed, to summarize graph availability and slow commands over a window, or to prune the local telemetry store. See the [Local Run Telemetry](/guides/telemetry/) guide for the full field set.
 
 ---
 
