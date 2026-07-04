@@ -514,7 +514,10 @@ mod tests {
     #[test]
     fn impact_hop_serializes_confidence_band_when_confidence_present() {
         let value = serde_json::to_value(sample_hop(Some(450))).expect("serialize");
-        assert_eq!(value.get("confidence").and_then(|v| v.as_u64()), Some(450));
+        assert_eq!(
+            value.get("confidence").and_then(serde_json::Value::as_u64),
+            Some(450)
+        );
         assert_eq!(
             value.get("confidence_band").and_then(|v| v.as_str()),
             Some("hint")
