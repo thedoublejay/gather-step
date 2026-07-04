@@ -29,7 +29,10 @@ pub struct LogArgs {
         help = "Print an aggregate summary (status, graph availability, slowest commands) instead of rows"
     )]
     pub summary: bool,
-    #[arg(long, help = "Finalize stale `running` rows as `abandoned`, then report how many")]
+    #[arg(
+        long,
+        help = "Finalize stale `running` rows as `abandoned`, then report how many"
+    )]
     pub repair: bool,
     #[arg(long, help = "Delete telemetry rows older than an age such as 90d")]
     pub clear_before: Option<String>,
@@ -332,7 +335,12 @@ fn format_tenths(value: u64, unit: u64, suffix: &str) -> String {
 mod tests {
     use super::*;
 
-    fn record(command: &str, status: &str, duration_ms: i64, availability: &str) -> TelemetryRunRecord {
+    fn record(
+        command: &str,
+        status: &str,
+        duration_ms: i64,
+        availability: &str,
+    ) -> TelemetryRunRecord {
         TelemetryRunRecord {
             run_id: format!("{command}-{status}-{duration_ms}"),
             started_at_ms: 0,

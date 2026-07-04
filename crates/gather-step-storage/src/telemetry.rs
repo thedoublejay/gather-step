@@ -478,10 +478,8 @@ mod tests {
 
     fn temp_root(tag: &str) -> PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "gs-telemetry-{tag}-{}-{id}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("gs-telemetry-{tag}-{}-{id}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp root");
         dir
     }
@@ -495,7 +493,13 @@ mod tests {
         let root = temp_root("roundtrip");
         let store = TelemetryStore::open(&root).expect("open");
         let run = store
-            .begin_run("index", Path::new("/ws"), "9.9.9", "release", &schema_versions())
+            .begin_run(
+                "index",
+                Path::new("/ws"),
+                "9.9.9",
+                "release",
+                &schema_versions(),
+            )
             .expect("begin");
         let finish = TelemetryRunFinish {
             exit_status: "success".to_owned(),

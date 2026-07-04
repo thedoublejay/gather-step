@@ -504,9 +504,8 @@ mod tests {
             file_path: "src/a.ts".to_owned(),
             line_start: None,
             confidence,
-            confidence_band: confidence.map(|c| {
-                gather_step_analysis::confidence::band_label(c).to_owned()
-            }),
+            confidence_band: confidence
+                .map(|c| gather_step_analysis::confidence::band_label(c).to_owned()),
             repo: "service-api".to_owned(),
             symbol_id: "n1".to_owned(),
         }
@@ -543,7 +542,10 @@ mod tests {
         };
         let value = serde_json::to_value(&meta).expect("serialize");
         assert_eq!(
-            value.get("index_stale").and_then(|v| v.get(0)).and_then(|v| v.as_str()),
+            value
+                .get("index_stale")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str()),
             Some("service-api")
         );
 

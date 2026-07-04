@@ -483,9 +483,7 @@ pub fn event_blast_radius_tool(
                 .into_iter()
                 .map(|node| BlastRadiusNodeItem {
                     confidence: node.cumulative_confidence,
-                    confidence_band: node
-                        .cumulative_confidence
-                        .map(|c| band_label(c).to_owned()),
+                    confidence_band: node.cumulative_confidence.map(|c| band_label(c).to_owned()),
                     depth: node.depth,
                     file_path: node.file_path,
                     kind: node_kind_label(node.node_kind).to_owned(),
