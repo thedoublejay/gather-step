@@ -6,6 +6,7 @@ mod test_utils;
 pub mod agent_topology;
 pub mod anchor;
 pub mod canonical;
+pub mod confidence;
 pub mod contract_drift;
 pub mod conventions;
 pub mod cross_repo;
