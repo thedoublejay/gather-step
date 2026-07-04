@@ -62,17 +62,12 @@ struct LogSummary {
     total_runs: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     repaired_stale: Option<usize>,
-    #[serde(skip_serializing_if = "is_zero")]
     cleared_rows: usize,
     by_status: BTreeMap<String, usize>,
     by_graph_availability: BTreeMap<String, usize>,
     abandoned: usize,
     peak_rss_bytes_max: Option<u64>,
     slowest_commands: Vec<CommandDuration>,
-}
-
-fn is_zero(value: &usize) -> bool {
-    *value == 0
 }
 
 const SLOWEST_COMMANDS: usize = 5;

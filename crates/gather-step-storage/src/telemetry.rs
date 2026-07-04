@@ -384,8 +384,8 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
 /// The base `SCHEMA` only creates missing tables (`CREATE TABLE IF NOT
 /// EXISTS`), so a database created by an older gather-step keeps its original
 /// columns. Each `ADD COLUMN` here is idempotent: on a fresh database the
-/// column already exists and SQLite reports a duplicate-column error, which we
-/// treat as success.
+/// column already exists and `SQLite` reports a duplicate-column error, which
+/// we treat as success.
 fn migrate_schema(connection: &Connection) -> Result<(), TelemetryError> {
     const ADDED_COLUMNS: [&str; 3] = [
         "ALTER TABLE run_log ADD COLUMN result_count INTEGER",
