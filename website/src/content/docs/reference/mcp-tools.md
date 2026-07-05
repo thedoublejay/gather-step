@@ -65,6 +65,8 @@ Used automatically when the assistant needs the direct delegated work of a funct
 
 ## Topology and Impact
 
+Confidence-bearing edges in these responses (cross-repo hops, trace/route/event/agent edges, transport links) carry an additive `confidence_band` field — `extracted` (numeric confidence ≥ 900), `inferred` (500–899), or `hint` (< 500) — alongside the raw numeric `confidence`, so the tier is legible without knowing the scale. Query response metadata also carries `index_stale`: the list of repos whose index lags their current git HEAD, present only when the index is behind, so a genuinely empty result is distinguishable from one produced against a stale index.
+
 ### `trace_impact`
 
 > "What features, repos, or pages could be affected if I change this symbol?"

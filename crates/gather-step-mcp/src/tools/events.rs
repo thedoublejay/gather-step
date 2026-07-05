@@ -1,6 +1,7 @@
 use gather_step_analysis::{
-    EventRole, RouteRole, canonical_event_target, event_blast_radius, list_orphan_topics,
-    resolve_agent_targets, resolve_event_targets, resolve_route_target, trace_agent,
+    EventRole, RouteRole, canonical_event_target, confidence::band_label, event_blast_radius,
+    list_orphan_topics, resolve_agent_targets, resolve_event_targets, resolve_route_target,
+    trace_agent,
 };
 use gather_step_core::{NodeId, NodeKind, WorkspaceRegistry};
 use rmcp::schemars;
@@ -114,6 +115,8 @@ pub struct EventBlastRadiusData {
 pub struct BlastRadiusNodeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub depth: usize,
     pub file_path: String,
     pub kind: String,
@@ -128,6 +131,8 @@ pub struct BlastRadiusNodeItem {
 pub struct BlastRadiusEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub edge_kind: String,
     pub source_id: String,
     pub target_id: String,
@@ -178,6 +183,8 @@ pub struct AgentNodeItem {
 pub struct AgentEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub edge_kind: String,
     pub source_id: String,
     pub target_id: String,
@@ -224,6 +231,11 @@ pub struct TopologyMeta {
     pub response_schema_version: u8,
     pub budget: ResponseBudget,
     pub truncated: bool,
+    /// Repos whose index lags their current git HEAD, when any. Omitted when
+    /// the index is current for every repo. Lets an agent tell a genuinely
+    /// empty result from one produced against a stale index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_stale: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -231,6 +243,8 @@ pub struct TopologySymbol {
     pub edge_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub evidence: Evidence,
     pub file_path: String,
     pub framework_context: Vec<String>,
@@ -316,6 +330,7 @@ pub fn trace_event_tool(
             response_schema_version: response_schema_version(),
             budget: ResponseBudget::not_truncated(BudgetedTool::TraceEvent, 0, 0),
             truncated,
+            index_stale: crate::tools::packs::index_stale_field(ctx),
         }),
     };
     let budget = apply_response_budget(
@@ -394,6 +409,7 @@ pub fn trace_route_tool(
                 response_schema_version: response_schema_version(),
                 budget: ResponseBudget::not_truncated(BudgetedTool::TraceRoute, 0, 0),
                 truncated: trace.truncated,
+                index_stale: crate::tools::packs::index_stale_field(ctx),
             }),
         };
         sort_topology_symbols(&mut response.data.callers);
@@ -427,6 +443,7 @@ pub fn trace_route_tool(
                     0,
                 ),
                 truncated: false,
+                index_stale: crate::tools::packs::index_stale_field(ctx),
             }),
         }
     };
@@ -454,6 +471,7 @@ pub fn event_blast_radius_tool(
                 .into_iter()
                 .map(|edge| BlastRadiusEdgeItem {
                     confidence: edge.confidence,
+                    confidence_band: edge.confidence.map(|c| band_label(c).to_owned()),
                     edge_kind: edge_kind_label(edge.edge_kind).to_owned(),
                     source_id: encode_node_id(edge.source),
                     target_id: encode_node_id(edge.target),
@@ -465,6 +483,7 @@ pub fn event_blast_radius_tool(
                 .into_iter()
                 .map(|node| BlastRadiusNodeItem {
                     confidence: node.cumulative_confidence,
+                    confidence_band: node.cumulative_confidence.map(|c| band_label(c).to_owned()),
                     depth: node.depth,
                     file_path: node.file_path,
                     kind: node_kind_label(node.node_kind).to_owned(),
@@ -481,6 +500,7 @@ pub fn event_blast_radius_tool(
             response_schema_version: response_schema_version(),
             budget: ResponseBudget::not_truncated(BudgetedTool::EventBlastRadius, 0, 0),
             truncated: blast.truncated,
+            index_stale: crate::tools::packs::index_stale_field(ctx),
         }),
     };
     sort_blast_nodes(&mut response.data.nodes);
@@ -519,6 +539,7 @@ pub fn trace_agent_tool(
                 .into_iter()
                 .map(|edge| AgentEdgeItem {
                     confidence: edge.confidence,
+                    confidence_band: edge.confidence.map(|c| band_label(c).to_owned()),
                     edge_kind: edge_kind_label(edge.edge_kind).to_owned(),
                     source_id: encode_node_id(edge.source),
                     target_id: encode_node_id(edge.target),
@@ -545,6 +566,7 @@ pub fn trace_agent_tool(
             response_schema_version: response_schema_version(),
             budget: ResponseBudget::not_truncated(BudgetedTool::TraceAgent, 0, 0),
             truncated: trace.truncated,
+            index_stale: crate::tools::packs::index_stale_field(ctx),
         }),
     };
     sort_agent_nodes(&mut response.data.nodes);
@@ -756,6 +778,7 @@ fn topology_symbol(
     TopologySymbol {
         edge_kind: edge_kind_label,
         confidence,
+        confidence_band: confidence.map(|c| band_label(c).to_owned()),
         evidence,
         file_path,
         framework_context,
@@ -923,6 +946,35 @@ mod tests {
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn topology_meta_index_stale_is_additive() {
+        use super::{BudgetedTool, ResponseBudget, TopologyMeta, response_schema_version};
+        let meta = TopologyMeta {
+            response_schema_version: response_schema_version(),
+            budget: ResponseBudget::not_truncated(BudgetedTool::TraceRoute, 0, 0),
+            truncated: false,
+            index_stale: Some(vec!["service-api".to_owned()]),
+        };
+        let value = serde_json::to_value(&meta).expect("serialize");
+        assert_eq!(
+            value
+                .get("index_stale")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str()),
+            Some("service-api")
+        );
+
+        let fresh = TopologyMeta {
+            index_stale: None,
+            ..meta
+        };
+        let value = serde_json::to_value(&fresh).expect("serialize");
+        assert!(
+            value.get("index_stale").is_none(),
+            "index_stale omitted when the index is current"
+        );
+    }
 
     struct TempDir {
         path: PathBuf,

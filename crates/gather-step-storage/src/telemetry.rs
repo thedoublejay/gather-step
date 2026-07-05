@@ -11,10 +11,14 @@ use serde::Serialize;
 use thiserror::Error;
 
 pub const TELEMETRY_DB_NAME: &str = "telemetry.db";
-pub const TELEMETRY_SCHEMA_VERSION: i64 = 1;
+pub const TELEMETRY_SCHEMA_VERSION: i64 = 2;
 
 const MAX_RUN_ROWS: i64 = 10_000;
 const RETENTION_DAYS: i64 = 90;
+/// A `running` row older than this is assumed to belong to a process that died
+/// without writing its finish row (crash, `kill -9`, power loss) and is
+/// finalized as `abandoned` so the dashboard stops counting it as in-flight.
+const STALE_RUNNING_THRESHOLD_MS: i64 = 6 * 60 * 60 * 1000;
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS run_log (
@@ -34,7 +38,10 @@ CREATE TABLE IF NOT EXISTS run_log (
     warn_count      INTEGER NOT NULL DEFAULT 0,
     error_count     INTEGER NOT NULL DEFAULT 0,
     recovery_event  INTEGER NOT NULL DEFAULT 0,
-    extra_json      TEXT
+    extra_json      TEXT,
+    result_count       INTEGER,
+    graph_availability TEXT,
+    build_provenance   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_run_log_started_at ON run_log(started_at_ms DESC);
 
@@ -87,6 +94,12 @@ pub struct TelemetryRunFinish {
     pub error_count: u32,
     pub recovery_event: bool,
     pub extra_json: Option<serde_json::Value>,
+    /// Command-specific result magnitude (e.g. dependency count, trace hops,
+    /// search hits) for the `log --summary` view. `None` when not applicable.
+    pub result_count: Option<i64>,
+    /// Graph availability observed for this run: `available` / `locked` /
+    /// `not_indexed` / `degraded`. `None` when the run did not touch the graph.
+    pub graph_availability: Option<String>,
     pub error: Option<TelemetryErrorEvent>,
 }
 
@@ -111,6 +124,9 @@ pub struct TelemetryRunRecord {
     pub warn_count: u32,
     pub error_count: u32,
     pub recovery_event: bool,
+    pub result_count: Option<i64>,
+    pub graph_availability: Option<String>,
+    pub build_provenance: Option<String>,
 }
 
 impl TelemetryStore {
@@ -137,6 +153,7 @@ impl TelemetryStore {
         command: &str,
         workspace_path: &Path,
         cli_version: &str,
+        build_provenance: &str,
         schema_versions: &serde_json::Value,
     ) -> Result<TelemetryRun, TelemetryError> {
         let connection = self.connection()?;
@@ -145,14 +162,15 @@ impl TelemetryStore {
         connection.execute(
             "INSERT INTO run_log (
                 run_id, started_at_ms, command, workspace_hash, cli_version,
-                schema_versions, exit_status
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running')",
+                build_provenance, schema_versions, exit_status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running')",
             params![
                 &run_id,
                 now_ms(),
                 command,
                 hash_text(&workspace_path.display().to_string()),
                 cli_version,
+                build_provenance,
                 schema_versions,
             ],
         )?;
@@ -183,8 +201,10 @@ impl TelemetryStore {
                  warn_count = ?7,
                  error_count = ?8,
                  recovery_event = ?9,
-                 extra_json = ?10
-             WHERE run_id = ?11",
+                 extra_json = ?10,
+                 result_count = ?11,
+                 graph_availability = ?12
+             WHERE run_id = ?13",
             params![
                 ended_at,
                 finish.exit_status,
@@ -196,6 +216,8 @@ impl TelemetryStore {
                 finish.error_count,
                 i64::from(finish.recovery_event),
                 extra_json,
+                finish.result_count,
+                finish.graph_availability,
                 &run.run_id,
             ],
         )?;
@@ -241,7 +263,7 @@ impl TelemetryStore {
         let mut sql = String::from(
             "SELECT run_id, started_at_ms, ended_at_ms, command, exit_status,
                     duration_ms, peak_rss_bytes, warn_count, error_count, recovery_event,
-                    cli_version
+                    cli_version, result_count, graph_availability, build_provenance
              FROM run_log",
         );
         let mut clauses = Vec::new();
@@ -282,9 +304,20 @@ impl TelemetryStore {
         let connection = self.connection()?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.execute_batch(SCHEMA)?;
+        migrate_schema(&connection)?;
         connection.pragma_update(None, "user_version", TELEMETRY_SCHEMA_VERSION)?;
+        finalize_stale_running(&connection, now_ms())?;
         prune_old_rows(&connection)?;
         Ok(())
+    }
+
+    /// Finalize every `running` row older than [`STALE_RUNNING_THRESHOLD_MS`]
+    /// as `abandoned`, returning how many were rewritten. Runs automatically on
+    /// [`TelemetryStore::open`]; exposed for an explicit `gather-step log
+    /// --repair`.
+    pub fn repair_stale_running(&self) -> Result<usize, TelemetryError> {
+        let connection = self.connection()?;
+        finalize_stale_running(&connection, now_ms())
     }
 
     fn connection(&self) -> Result<Connection, TelemetryError> {
@@ -340,7 +373,50 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
         warn_count: u32::try_from(warn_count).unwrap_or(u32::MAX),
         error_count: u32::try_from(error_count).unwrap_or(u32::MAX),
         recovery_event: recovery_event != 0,
+        result_count: row.get(11)?,
+        graph_availability: row.get(12)?,
+        build_provenance: row.get(13)?,
     })
+}
+
+/// Bring a pre-existing telemetry database up to the current column shape.
+///
+/// The base `SCHEMA` only creates missing tables (`CREATE TABLE IF NOT
+/// EXISTS`), so a database created by an older gather-step keeps its original
+/// columns. Each `ADD COLUMN` here is idempotent: on a fresh database the
+/// column already exists and `SQLite` reports a duplicate-column error, which
+/// we treat as success.
+fn migrate_schema(connection: &Connection) -> Result<(), TelemetryError> {
+    const ADDED_COLUMNS: [&str; 3] = [
+        "ALTER TABLE run_log ADD COLUMN result_count INTEGER",
+        "ALTER TABLE run_log ADD COLUMN graph_availability TEXT",
+        "ALTER TABLE run_log ADD COLUMN build_provenance TEXT",
+    ];
+    for statement in ADDED_COLUMNS {
+        match connection.execute(statement, []) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("duplicate column name") => {}
+            Err(error) => return Err(TelemetryError::Sqlite(error)),
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `running` rows older than the stale threshold as `abandoned`.
+/// `ended_at_ms`/`duration_ms` are set to a lower-bound estimate (the threshold
+/// itself) since the true end time is unknown. Returns the number rewritten.
+fn finalize_stale_running(connection: &Connection, now: i64) -> Result<usize, TelemetryError> {
+    let cutoff = now.saturating_sub(STALE_RUNNING_THRESHOLD_MS);
+    let updated = connection.execute(
+        "UPDATE run_log
+         SET exit_status = 'abandoned',
+             ended_at_ms = started_at_ms + ?1,
+             duration_ms = ?1
+         WHERE exit_status = 'running' AND started_at_ms < ?2",
+        params![STALE_RUNNING_THRESHOLD_MS, cutoff],
+    )?;
+    Ok(updated)
 }
 
 fn prune_old_rows(connection: &Connection) -> Result<(), TelemetryError> {
@@ -390,4 +466,154 @@ fn u64_to_i64(value: u64) -> Option<i64> {
 
 fn i64_to_u64(value: i64) -> Option<u64> {
     u64::try_from(value).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("gs-telemetry-{tag}-{}-{id}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp root");
+        dir
+    }
+
+    fn schema_versions() -> serde_json::Value {
+        serde_json::json!({ "telemetry": TELEMETRY_SCHEMA_VERSION })
+    }
+
+    #[test]
+    fn v2_fields_round_trip() {
+        let root = temp_root("roundtrip");
+        let store = TelemetryStore::open(&root).expect("open");
+        let run = store
+            .begin_run(
+                "index",
+                Path::new("/ws"),
+                "9.9.9",
+                "release",
+                &schema_versions(),
+            )
+            .expect("begin");
+        let finish = TelemetryRunFinish {
+            exit_status: "success".to_owned(),
+            result_count: Some(42),
+            graph_availability: Some("available".to_owned()),
+            ..TelemetryRunFinish::default()
+        };
+        store.finish_run(&run, &finish).expect("finish");
+
+        let runs = store.list_runs(10, None, false).expect("list");
+        let record = runs
+            .iter()
+            .find(|record| record.run_id == run.run_id)
+            .expect("row present");
+        assert_eq!(record.result_count, Some(42));
+        assert_eq!(record.graph_availability.as_deref(), Some("available"));
+        assert_eq!(record.build_provenance.as_deref(), Some("release"));
+    }
+
+    #[test]
+    fn migrate_schema_adds_columns_to_pre_v2_db_without_data_loss() {
+        let root = temp_root("migrate");
+        let db_path = root.join(TELEMETRY_DB_NAME);
+        {
+            let connection = Connection::open(&db_path).expect("open raw");
+            connection
+                .execute_batch(
+                    "CREATE TABLE run_log (
+                        run_id TEXT PRIMARY KEY,
+                        started_at_ms INTEGER NOT NULL,
+                        ended_at_ms INTEGER,
+                        command TEXT NOT NULL,
+                        workspace_hash TEXT NOT NULL,
+                        cli_version TEXT NOT NULL,
+                        schema_versions TEXT NOT NULL,
+                        exit_status TEXT NOT NULL,
+                        duration_ms INTEGER,
+                        peak_rss_bytes INTEGER,
+                        repo_count INTEGER,
+                        files_parsed INTEGER,
+                        nodes_created INTEGER,
+                        warn_count INTEGER NOT NULL DEFAULT 0,
+                        error_count INTEGER NOT NULL DEFAULT 0,
+                        recovery_event INTEGER NOT NULL DEFAULT 0,
+                        extra_json TEXT
+                    );",
+                )
+                .expect("create legacy table");
+            connection
+                .execute(
+                    "INSERT INTO run_log
+                        (run_id, started_at_ms, command, workspace_hash, cli_version,
+                         schema_versions, exit_status)
+                     VALUES ('old-1', ?1, 'status', 'hash', '1.0.0', '{}', 'success')",
+                    params![now_ms()],
+                )
+                .expect("seed legacy row");
+        }
+
+        let store = TelemetryStore::open(&root).expect("open migrates");
+        let runs = store.list_runs(10, None, false).expect("list");
+        let record = runs
+            .iter()
+            .find(|record| record.run_id == "old-1")
+            .expect("legacy row preserved");
+        assert_eq!(record.command, "status");
+        assert_eq!(record.result_count, None);
+        assert_eq!(record.graph_availability, None);
+        assert_eq!(record.build_provenance, None);
+
+        // Reopening runs the idempotent migration again without error.
+        drop(store);
+        TelemetryStore::open(&root).expect("reopen is idempotent");
+    }
+
+    #[test]
+    fn stale_running_rows_are_finalized_but_fresh_ones_are_kept() {
+        let root = temp_root("stale");
+        let db_path = root.join(TELEMETRY_DB_NAME);
+        {
+            TelemetryStore::open(&root).expect("initialize");
+            let connection = Connection::open(&db_path).expect("open raw");
+            let stale_start = now_ms() - STALE_RUNNING_THRESHOLD_MS - 1_000;
+            connection
+                .execute(
+                    "INSERT INTO run_log
+                        (run_id, started_at_ms, command, workspace_hash, cli_version,
+                         schema_versions, exit_status)
+                     VALUES ('stale', ?1, 'index', 'hash', '1.0.0', '{}', 'running')",
+                    params![stale_start],
+                )
+                .expect("seed stale");
+            connection
+                .execute(
+                    "INSERT INTO run_log
+                        (run_id, started_at_ms, command, workspace_hash, cli_version,
+                         schema_versions, exit_status)
+                     VALUES ('fresh', ?1, 'index', 'hash', '1.0.0', '{}', 'running')",
+                    params![now_ms()],
+                )
+                .expect("seed fresh");
+        }
+
+        let store = TelemetryStore::open(&root).expect("reopen sweeps");
+        let runs = store.list_runs(10, None, false).expect("list");
+        let status = |id: &str| {
+            runs.iter()
+                .find(|record| record.run_id == id)
+                .map(|record| record.exit_status.clone())
+        };
+        assert_eq!(status("stale").as_deref(), Some("abandoned"));
+        assert_eq!(status("fresh").as_deref(), Some("running"));
+
+        // Already finalized: an explicit repair now rewrites nothing.
+        assert_eq!(store.repair_stale_running().expect("repair"), 0);
+    }
 }

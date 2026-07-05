@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use gather_step_analysis::{cross_repo_deps, trace_across_repos};
+use gather_step_analysis::{confidence::band_label, cross_repo_deps, trace_across_repos};
 use gather_step_core::{NodeId, NodeKind};
 use gather_step_storage::GraphStore;
 use rmcp::schemars;
@@ -50,6 +50,10 @@ pub struct ImpactHop {
     pub line_start: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    /// Coarse band derived from `confidence` (`extracted` / `inferred` /
+    /// `hint`). Present iff `confidence` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_band: Option<String>,
     pub repo: String,
     pub symbol_id: String,
 }
@@ -75,6 +79,11 @@ pub struct TraceImpactMeta {
     pub response_schema_version: u8,
     pub budget: ResponseBudget,
     pub truncated: bool,
+    /// Repos whose index lags their current git HEAD, when any. Omitted when
+    /// the index is current for every repo. Lets an agent tell a genuinely
+    /// empty result from one produced against a stale index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_stale: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -161,6 +170,7 @@ pub fn trace_impact_tool(
                 file_path: hop.file_path,
                 line_start: hop.line_number,
                 confidence: hop.confidence,
+                confidence_band: hop.confidence.map(|c| band_label(c).to_owned()),
                 repo: hop.repo,
                 symbol_id: encode_node_id(hop.node_id),
             });
@@ -199,6 +209,7 @@ pub fn trace_impact_tool(
             response_schema_version: response_schema_version(),
             budget: ResponseBudget::not_truncated(BudgetedTool::TraceImpact, 0, 0),
             truncated: false,
+            index_stale: crate::tools::packs::index_stale_field(ctx),
         }),
     };
     let budget = apply_response_budget(
@@ -484,7 +495,73 @@ fn strongest_repo_confidence(repo: &ImpactRepo) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CrossRepoDepsData, CrossRepoDepsResponse, RepoDependency};
+    use super::{CrossRepoDepsData, CrossRepoDepsResponse, ImpactHop, RepoDependency};
+
+    fn sample_hop(confidence: Option<u16>) -> ImpactHop {
+        ImpactHop {
+            direction: "incoming".to_owned(),
+            edge_kind: "calls".to_owned(),
+            file_path: "src/a.ts".to_owned(),
+            line_start: None,
+            confidence,
+            confidence_band: confidence
+                .map(|c| gather_step_analysis::confidence::band_label(c).to_owned()),
+            repo: "service-api".to_owned(),
+            symbol_id: "n1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn impact_hop_serializes_confidence_band_when_confidence_present() {
+        let value = serde_json::to_value(sample_hop(Some(450))).expect("serialize");
+        assert_eq!(
+            value.get("confidence").and_then(serde_json::Value::as_u64),
+            Some(450)
+        );
+        assert_eq!(
+            value.get("confidence_band").and_then(|v| v.as_str()),
+            Some("hint")
+        );
+    }
+
+    #[test]
+    fn impact_hop_omits_confidence_band_when_confidence_absent() {
+        let value = serde_json::to_value(sample_hop(None)).expect("serialize");
+        assert!(value.get("confidence").is_none(), "confidence omitted");
+        assert!(
+            value.get("confidence_band").is_none(),
+            "confidence_band omitted when no numeric confidence"
+        );
+    }
+
+    #[test]
+    fn trace_impact_meta_index_stale_is_additive() {
+        use super::{BudgetedTool, ResponseBudget, TraceImpactMeta, response_schema_version};
+        let meta = TraceImpactMeta {
+            response_schema_version: response_schema_version(),
+            budget: ResponseBudget::not_truncated(BudgetedTool::TraceImpact, 0, 0),
+            truncated: false,
+            index_stale: Some(vec!["service-api".to_owned()]),
+        };
+        let value = serde_json::to_value(&meta).expect("serialize");
+        assert_eq!(
+            value
+                .get("index_stale")
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str()),
+            Some("service-api")
+        );
+
+        let fresh = TraceImpactMeta {
+            index_stale: None,
+            ..meta
+        };
+        let value = serde_json::to_value(&fresh).expect("serialize");
+        assert!(
+            value.get("index_stale").is_none(),
+            "index_stale omitted when the index is current"
+        );
+    }
 
     /// Payload-shape guard: the serialized `cross_repo_deps` response must keep
     /// its stable top-level and per-dependency JSON keys. A serde rename or

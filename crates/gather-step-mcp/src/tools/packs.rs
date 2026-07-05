@@ -474,11 +474,18 @@ pub fn apply_stale_index_warning(ctx: &McpContext, response: &mut ContextPackRes
     }
 }
 
-/// A warning naming any repo whose index is stale relative to its current git
-/// HEAD, or `None` when everything is current. Computed fresh per call (never
+/// Sorted names of every repo whose index is stale relative to its current git
+/// HEAD. Empty when everything is current. Computed fresh per call (never
 /// cached) and best-effort: an unreadable registry/repo is treated as current.
-fn staleness_warning(ctx: &McpContext) -> Option<String> {
-    let registry = gather_step_core::RegistryStore::open(&ctx.config.registry_path).ok()?;
+///
+/// Shared by the context-pack warning ([`staleness_warning`]) and the
+/// structured `index_stale` field on query-tool responses so both report the
+/// same signal.
+#[must_use]
+pub fn stale_repos(ctx: &McpContext) -> Vec<String> {
+    let Ok(registry) = gather_step_core::RegistryStore::open(&ctx.config.registry_path) else {
+        return Vec::new();
+    };
     let mut stale: Vec<String> = registry
         .registry()
         .repos
@@ -495,10 +502,26 @@ fn staleness_warning(ctx: &McpContext) -> Option<String> {
             }
         })
         .collect();
+    stale.sort();
+    stale
+}
+
+/// The value for a query response meta's `index_stale` field: the sorted
+/// stale-repo list when any repo lags HEAD, or `None` so the field is omitted
+/// on a fresh index.
+#[must_use]
+pub fn index_stale_field(ctx: &McpContext) -> Option<Vec<String>> {
+    let stale = stale_repos(ctx);
+    (!stale.is_empty()).then_some(stale)
+}
+
+/// A warning naming any repo whose index is stale relative to its current git
+/// HEAD, or `None` when everything is current.
+fn staleness_warning(ctx: &McpContext) -> Option<String> {
+    let stale = stale_repos(ctx);
     if stale.is_empty() {
         return None;
     }
-    stale.sort();
     Some(format!(
         "Index is stale relative to HEAD for repo(s): {}. Re-run `gather-step index`.",
         stale.join(", ")

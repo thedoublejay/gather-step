@@ -5,6 +5,18 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.11.0 (2026-07-04)
+
+**Query-confidence bands, index-staleness on query responses, and telemetry diagnostics.** An additive release: no command was removed and the index schema is unchanged. The local telemetry database migrates additively from schema v1 to v2 on first open.
+
+### Added
+
+- **Edge confidence now carries a human-facing band.** Cross-repo, trace, and transport query results include an additive `confidence_band` (`extracted` / `inferred` / `hint`) alongside the raw numeric confidence, so agents can tell an extracted fact from a weak hint without memorizing the scale. Trace text output marks inferred/hint tiers.
+- **Query responses flag a stale index.** `trace`, `trace-route`, `trace-event`, `trace-agent`, and impact responses now include `index_stale` (the repos lagging their git HEAD) when the index is behind the working tree, reusing the same signal context packs already carried.
+- **`gather-step log --summary`.** Aggregates the selected window into run counts by status, run counts by graph availability, abandoned-run count, peak RSS, and the slowest commands. Add `--json` for machine output.
+- **`gather-step log --repair` and `--command`.** `--repair` finalizes stale `running` rows (from killed processes) as `abandoned` and reports the count; stale rows are also finalized automatically when the telemetry store is opened. `--command` filters to a single command.
+- **Richer telemetry rows.** Runs now record a command-specific `result_count`, the observed graph availability (`available` / `locked` / `not_indexed`), and build provenance, in addition to the existing version, RSS, and error-category fields. See the [Local Run Telemetry](/guides/telemetry/) guide.
+
 ## v5.10.0 (2026-07-03)
 
 **Python route-chain extraction and faster indexing.** A behavioural release on top of v5.9.0: no command was removed and the index schema is unchanged.

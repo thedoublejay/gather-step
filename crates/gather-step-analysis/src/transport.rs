@@ -14,6 +14,8 @@
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
 use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 
+use crate::confidence::ConfidenceBand;
+
 /// Confidence of a [`TransportLink`] match.
 ///
 /// This is a query-time-only concept; it is never persisted.
@@ -44,6 +46,11 @@ pub struct TransportLink {
     pub canonical_path: String,
     /// How confident the match is.
     pub confidence: Confidence,
+    /// The confidence tier in the shared cross-surface vocabulary
+    /// (`extracted` / `inferred`): [`Confidence::Exact`] maps to
+    /// [`ConfidenceBand::Extracted`], [`Confidence::Suffix`] to
+    /// [`ConfidenceBand::Inferred`].
+    pub confidence_band: ConfidenceBand,
 }
 
 /// Derive transport links by walking all virtual transport nodes.
@@ -102,6 +109,7 @@ pub fn transport_links_for<S: GraphStore>(
                     method: method.clone(),
                     canonical_path: canonical_path.clone(),
                     confidence: Confidence::Exact,
+                    confidence_band: ConfidenceBand::Extracted,
                 });
                 if links.len() >= limit {
                     return Ok(links);
@@ -141,6 +149,7 @@ pub fn transport_links_for<S: GraphStore>(
                     method: "queue".to_owned(),
                     canonical_path: queue_path.clone(),
                     confidence: Confidence::Exact,
+                    confidence_band: ConfidenceBand::Extracted,
                 });
                 if links.len() >= limit {
                     return Ok(links);
@@ -257,6 +266,7 @@ fn append_suffix_route_links(
                     method: consumer.method.clone(),
                     canonical_path: server.path.clone(),
                     confidence: Confidence::Suffix,
+                    confidence_band: ConfidenceBand::Inferred,
                 });
                 if links.len() >= limit {
                     return Ok(());
@@ -345,7 +355,7 @@ mod tests {
 
     use crate::test_utils::{TempDb, file_node, symbol_node};
 
-    use super::{Confidence, transport_links_for};
+    use super::{Confidence, ConfidenceBand, transport_links_for};
 
     fn route_vnode(method: &str, path: &str) -> gather_step_core::NodeData {
         virtual_node(
@@ -439,6 +449,8 @@ mod tests {
         assert_eq!(link.backend_node, backend.id);
         assert_eq!(link.method, "GET");
         assert_eq!(link.canonical_path, "/orders");
+        assert_eq!(link.confidence, Confidence::Exact);
+        assert_eq!(link.confidence_band, ConfidenceBand::Extracted);
     }
 
     #[test]
@@ -671,6 +683,7 @@ mod tests {
         assert_eq!(link.method, "GET");
         assert_eq!(link.canonical_path, "/items/:id");
         assert_eq!(link.confidence, Confidence::Suffix);
+        assert_eq!(link.confidence_band, ConfidenceBand::Inferred);
     }
 
     #[test]

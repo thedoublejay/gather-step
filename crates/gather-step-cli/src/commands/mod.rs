@@ -283,6 +283,7 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
             command_name,
             &workspace_path,
             env!("CARGO_PKG_VERSION"),
+            build_provenance(),
             &telemetry_schema_versions(),
         ) {
             Ok(run) => Some(run),
@@ -411,6 +412,7 @@ fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
             )
         }
     };
+    let graph_availability = graph_availability(result).map(str::to_owned);
     let explicit_error_count = u32::from(error.is_some());
     TelemetryRunFinish {
         exit_status,
@@ -418,9 +420,47 @@ fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
         warn_count,
         error_count: traced_error_count.saturating_add(explicit_error_count),
         recovery_event: app::telemetry_recovery_event(),
+        graph_availability,
         error,
         ..TelemetryRunFinish::default()
     }
+}
+
+/// Build provenance recorded per run alongside the CLI version: which build
+/// profile produced this binary.
+const fn build_provenance() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+/// The dominant graph-availability signal for a finished run, derived from its
+/// outcome: `locked` / `not_indexed` on the matching error, `available` on
+/// success, and `None` when the error is unrelated to the graph (so telemetry
+/// never over-claims availability).
+fn graph_availability(result: &Result<CliOutcome>) -> Option<&'static str> {
+    match result {
+        Ok(_) => Some("available"),
+        Err(error) => {
+            if graph_lock_contention(error) {
+                Some("locked")
+            } else if is_not_indexed_error(error) {
+                Some("not_indexed")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Whether an error indicates the workspace (or a repo) has no usable index yet.
+fn is_not_indexed_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    contains_ascii_case_insensitive(&message, "not indexed")
+        || contains_ascii_case_insensitive(&message, "no index")
+        || contains_ascii_case_insensitive(&message, "run `gather-step index`")
 }
 
 pub(crate) fn telemetry_root() -> Option<PathBuf> {
