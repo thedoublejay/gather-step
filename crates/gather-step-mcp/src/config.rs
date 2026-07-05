@@ -41,7 +41,7 @@ impl McpServerConfig {
             graph_path,
             max_limit: DEFAULT_MCP_MAX_LIMIT,
             server_name: "gather-step".to_owned(),
-            instructions: "Local code graph and workspace orientation tools.".to_owned(),
+            instructions: crate::instructions::default_instructions(),
             trace_tool_calls: None,
         }
     }

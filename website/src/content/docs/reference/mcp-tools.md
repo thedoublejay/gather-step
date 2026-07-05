@@ -7,6 +7,8 @@ The `gather-step serve` command exposes a local stdio MCP server over the indexe
 
 In normal use, engineers do not call these tools manually. An MCP-aware assistant selects them automatically based on the task. This page exists as a reference so the tool surface is explicit, inspectable, and easier to debug.
 
+On connect, the server sends an `instructions` payload (part of the MCP `initialize` response) that orients the assistant to the workflow and the response signals to act on — the `confidence_band` tiers and the `index_stale` freshness flag. Each tool also advertises an output schema, so these fields are discoverable without reading this page. Upgrading the server is therefore enough for a connected assistant to start using new signals.
+
 ## Tool Groups
 
 - **Orientation**: understand what is indexed before deeper queries

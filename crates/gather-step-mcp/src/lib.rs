@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod evidence;
 pub mod ids;
+pub mod instructions;
 pub mod output;
 pub mod server;
 pub mod tool_trace;

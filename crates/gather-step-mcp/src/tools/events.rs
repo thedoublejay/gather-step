@@ -115,6 +115,8 @@ pub struct EventBlastRadiusData {
 pub struct BlastRadiusNodeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    /// Confidence tier derived from the numeric confidence (`extracted` /
+    /// `inferred` / `hint`). Present iff a numeric confidence is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_band: Option<String>,
     pub depth: usize,
@@ -131,6 +133,8 @@ pub struct BlastRadiusNodeItem {
 pub struct BlastRadiusEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    /// Confidence tier derived from the numeric confidence (`extracted` /
+    /// `inferred` / `hint`). Present iff a numeric confidence is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_band: Option<String>,
     pub edge_kind: String,
@@ -183,6 +187,8 @@ pub struct AgentNodeItem {
 pub struct AgentEdgeItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    /// Confidence tier derived from the numeric confidence (`extracted` /
+    /// `inferred` / `hint`). Present iff a numeric confidence is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_band: Option<String>,
     pub edge_kind: String,
@@ -243,6 +249,8 @@ pub struct TopologySymbol {
     pub edge_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u16>,
+    /// Confidence tier derived from the numeric confidence (`extracted` /
+    /// `inferred` / `hint`). Present iff a numeric confidence is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_band: Option<String>,
     pub evidence: Evidence,

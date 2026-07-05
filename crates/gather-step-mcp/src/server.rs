@@ -351,7 +351,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_impact",
-        description = "Trace cross-repo impact through virtual nodes such as routes, topics, queues, and shared symbols.",
+        description = "Trace cross-repo impact through virtual nodes such as routes, topics, queues, and shared symbols. Hops carry a `confidence_band` (extracted/inferred/hint) — verify `hint` edges before acting. Response meta includes `index_stale` (repos whose index lags git HEAD) when the index is behind.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_impact_tool(
@@ -370,7 +370,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_event",
-        description = "Trace producer and consumer symbols attached to a topic, queue, subject, stream, or event.",
+        description = "Trace producer and consumer symbols attached to a topic, queue, subject, stream, or event. Edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_event_tool(
@@ -389,7 +389,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_agent",
-        description = "Trace an AI agent's forward flow (agent graph, nodes, LLM calls, tools, prompts, vector indexes, MCP tools) from a target node.",
+        description = "Trace an AI agent's forward flow (agent graph, nodes, LLM calls, tools, prompts, vector indexes, MCP tools) from a target node. Edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_agent_tool(
@@ -408,7 +408,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_route",
-        description = "Trace server handlers and client callers attached to a route virtual node.",
+        description = "Trace server handlers and client callers attached to a route virtual node. Symbols carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_route_tool(
@@ -446,7 +446,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "event_blast_radius",
-        description = "Trace transitive downstream impact from an event-like virtual node.",
+        description = "Trace transitive downstream impact from an event-like virtual node. Nodes and edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn event_blast_radius_tool(

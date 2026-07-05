@@ -44,10 +44,14 @@ The graph is precomputed and stored locally. MCP queries read from indexed state
 - Local-first CLI and stdio MCP server
 - Multi-repo indexing into `WORKSPACE/.gather-step/`
 - Guided startup with no-args onboarding, `init`, `setup-mcp`, and watch handoff
+- Cross-language indexing across TypeScript/JavaScript and Python, including FastAPI routes, HTTP clients, and Kafka producers/consumers
 - Route, event, shared-symbol, payload-contract, projection-impact, deployment-topology, and AI/agent-flow graph surfaces
+- Confidence-banded edges (`extracted` / `inferred` / `hint`) and index-staleness signals so results carry how much to trust them
+- Self-describing MCP server: an upgraded server tells connected agents how to read its signals automatically, no doc reading required
 - Context packs for `planning`, `debug`, `fix`, `review`, and `change_impact`
 - Evidence-only QA planning manifests for downstream test-plan workflows
 - Workspace health commands such as `status`, `doctor`, and `watch`
+- Local, privacy-preserving run telemetry with a `log --summary` diagnostic view (graph availability, slowest commands, error categories)
 - Derived outputs for assistant summaries, rules, and ownership files
 - Local release validation with high-contract probes and PR-oracle scoring
 
@@ -69,9 +73,9 @@ Use Gather Step when the expensive part of the task is gathering context rather 
 
 Gather Step treats a workspace as one system. A Kafka producer in repo A and a consumer in repo B meet at the same virtual topic node, so cross-repo reasoning is a graph traversal instead of a guess.
 
-### Event-Driven Topology
+### Cross-Language and Event-Driven
 
-It is designed to surface producer-to-consumer relationships across event-driven systems, including frameworks and patterns commonly used in TypeScript backends and service architectures.
+It surfaces producer-to-consumer relationships across event-driven systems, spanning TypeScript/JavaScript and Python services. Python HTTP consumers (`requests`, `httpx`, `aiohttp`), FastAPI route identity including mounted router prefixes, Python payload contracts, and Kafka producers/consumers participate in the same graph as their TypeScript counterparts, so a request or event chain that crosses languages is still one traversal.
 
 ### AI & Agent Flow Awareness
 
@@ -92,6 +96,10 @@ Each pack ranks the relevant graph surfaces for that task, includes next-step hi
 ### Local-First MCP Workflow
 
 Once configured, an MCP-aware client can launch `gather-step serve` locally and call the right tools automatically. No API keys. No account. The graph runs on your machine.
+
+### Agent-Ready, Self-Describing Signals
+
+Query results are annotated so an assistant knows how much to trust them: each edge carries a `confidence_band` (`extracted`, `inferred`, or `hint`), and query responses flag `index_stale` when a repo's index lags its git HEAD. The MCP server describes these signals to the agent on connect — through its server instructions, tool descriptions, and auto-generated output schemas — so upgrading is enough for a connected assistant to start using new capabilities immediately, with no manual documentation reading.
 
 ## How It Works
 
@@ -185,6 +193,8 @@ gather-step --workspace /path/to/workspace generate codeowners
 gather-step --workspace /path/to/workspace setup-mcp --scope local
 gather-step --workspace /path/to/workspace compact
 gather-step --workspace /path/to/workspace log --last 50 --errors-only
+gather-step --workspace /path/to/workspace log --summary --since 30d
+gather-step --workspace /path/to/workspace log --repair
 gather-step --workspace /path/to/workspace watch
 gather-step --workspace /path/to/workspace pr-review --base main --head feature/my-branch --json
 ```
