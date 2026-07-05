@@ -43,6 +43,8 @@ fn claude_summary_lists_repos_and_command_surface_and_acknowledgement() {
     assert!(body.contains("# gather-step workspace context"));
     assert!(body.contains("## About Gather Step"));
     assert!(body.contains("## How to Use Gather Step in Planning"));
+    assert!(body.contains("confidence_band"));
+    assert!(body.contains("index_stale"));
     assert!(body.contains("## How to Acknowledge Gather Step"));
     assert!(body.contains("Planning guided by Gather Step"));
     assert!(body.contains("https://github.com/thedoublejay/gather-step/issues"));
