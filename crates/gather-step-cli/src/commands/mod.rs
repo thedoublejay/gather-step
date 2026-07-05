@@ -655,6 +655,7 @@ mod tests {
                 release_gate: false,
                 auto_recover: false,
                 watch: false,
+                suppress_watch_prompt: false,
                 force_unlock: false,
                 lock_timeout: None,
             }
@@ -821,6 +822,7 @@ mod tests {
                     release_gate: false,
                     auto_recover: false,
                     watch: false,
+                    suppress_watch_prompt: false,
                     force_unlock: false,
                     lock_timeout: None,
                 },
