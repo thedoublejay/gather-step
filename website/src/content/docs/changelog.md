@@ -5,6 +5,20 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.12.0 (2026-07-05)
+
+**Agent-facing feature discoverability + dependency refresh.** An additive release focused on making the graph's capabilities self-describing to AI agents, so an upgrade is all that's needed for connected agents to use new signals — no manual documentation reading. No command or tool was removed and the index schema is unchanged.
+
+### Added
+
+- **Rich MCP server instructions.** The MCP `initialize` response now carries a full orientation payload (delivered into an agent's context automatically on connect) covering the core workflow and — critically — the response signals to act on: the `confidence_band` tiers (`extracted` / `inferred` / `hint`) and the `index_stale` freshness flag, with guidance on how to act on each.
+- **Signal-aware tool descriptions.** `trace_impact`, `trace_event`, `trace_route`, `trace_agent`, and `event_blast_radius` now describe the `confidence_band` and `index_stale` fields their responses carry, so agents discover and use them from the tool list alone. (Tool output schemas already advertise these fields automatically.)
+- **Generated agent guides teach the signals.** `gather-step generate claude-md` / `agents-md` now include guidance on weighting results by `confidence_band` and heeding `index_stale`.
+
+### Changed
+
+- **Dependencies refreshed.** Rust crates updated to latest compatible versions; website (Astro/Starlight) updated; the `taiki-e/install-action` CI action bumped to v2.82.8.
+
 ## v5.11.0 (2026-07-04)
 
 **Query-confidence bands, index-staleness on query responses, and telemetry diagnostics.** An additive release: no command was removed and the index schema is unchanged. The local telemetry database migrates additively from schema v1 to v2 on first open.
