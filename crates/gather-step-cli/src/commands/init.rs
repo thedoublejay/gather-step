@@ -219,6 +219,9 @@ fn init_index_args(config: Option<PathBuf>) -> index::IndexArgs {
     index::IndexArgs {
         config,
         auto_recover: true,
+        // `init` owns the watch decision (step 5 / --watch) and starts watch mode
+        // itself after all setup steps, so the index run must not prompt again.
+        suppress_watch_prompt: true,
         ..index::IndexArgs::default()
     }
 }
@@ -967,7 +970,7 @@ mod tests {
     };
 
     use super::{
-        DiscoveredRepo, discover_git_repos, materialize_repo_config,
+        DiscoveredRepo, discover_git_repos, init_index_args, materialize_repo_config,
         retain_allow_listed_repos_for_selected,
     };
 
@@ -1049,6 +1052,15 @@ mod tests {
                 ("web".to_owned(), "apps/web".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn init_index_args_suppress_watch_prompt_so_init_never_double_prompts() {
+        let args = init_index_args(None);
+        // `init` starts watch mode itself, so the index run it triggers must not
+        // re-ask "Start watching for changes?" after step 5 already decided it.
+        assert!(args.suppress_watch_prompt);
+        assert!(!args.watch);
     }
 
     #[test]

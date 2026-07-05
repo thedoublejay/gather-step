@@ -77,6 +77,11 @@ pub struct IndexArgs {
     pub auto_recover: bool,
     #[arg(long, help = "Enter watch mode after indexing completes")]
     pub watch: bool,
+    /// Skip the interactive "Start watching for changes?" prompt after indexing.
+    /// Set by callers (e.g. `init`) that already own the watch decision, so the
+    /// user is not asked about watching twice.
+    #[arg(skip)]
+    pub suppress_watch_prompt: bool,
     #[arg(
         long,
         help = "Do not wait for a contended index lock: report it immediately with recovery instructions. A held lock is never broken automatically — advisory locks cannot be reclaimed safely from outside; clear a confirmed-dead owner's lock per the printed instructions."
@@ -394,6 +399,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     let release_gate = args.release_gate;
     let auto_recover = args.auto_recover;
     let watch = args.watch;
+    let suppress_watch_prompt = args.suppress_watch_prompt;
 
     // A release-gate run must be produced from a clean, committed worktree.
     // Fail fast here rather than emitting an artifact that cannot be reproduced.
@@ -1231,7 +1237,7 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         output.line(format!("Release-gate artifact: {}", path.display()));
     }
 
-    if watch || should_prompt_for_watch(app)? {
+    if watch || should_prompt_for_watch(app, suppress_watch_prompt)? {
         return crate::commands::watch::run(app, crate::commands::watch::WatchArgs::default())
             .await;
     }
@@ -1239,8 +1245,8 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
     Ok(())
 }
 
-fn should_prompt_for_watch(app: &AppContext) -> Result<bool> {
-    if !app.is_interactive() {
+fn should_prompt_for_watch(app: &AppContext, suppress: bool) -> Result<bool> {
+    if suppress || !app.is_interactive() {
         return Ok(false);
     }
 
