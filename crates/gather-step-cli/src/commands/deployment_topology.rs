@@ -50,7 +50,7 @@ pub enum DeploymentTopologyCommand {
 
 pub fn run(app: &AppContext, args: DeploymentTopologyArgs) -> Result<()> {
     if args.registry.is_some() || args.storage.is_some() {
-        return run_rendered(app, args)?.emit(&app.output());
+        return run_rendered(app, &args)?.emit(&app.output());
     }
 
     validate_limit(args.limit)?;
@@ -62,13 +62,13 @@ pub fn run(app: &AppContext, args: DeploymentTopologyArgs) -> Result<()> {
             limit: args.limit,
             repo_filter: app.repo_filter.clone(),
         },
-        move |app| run_rendered(app, args),
+        move |app| run_rendered(app, &args),
     )
 }
 
 pub(crate) fn run_rendered(
     app: &AppContext,
-    args: DeploymentTopologyArgs,
+    args: &DeploymentTopologyArgs,
 ) -> Result<RenderedCommand> {
     let ctx = if args.registry.is_some() || args.storage.is_some() {
         StorageContext::workspace_read_only_with_overrides(
