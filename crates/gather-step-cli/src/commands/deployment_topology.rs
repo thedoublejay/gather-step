@@ -9,6 +9,8 @@ use gather_step_storage::StorageCoordinator;
 
 use crate::app::AppContext;
 use crate::command_render::RenderedCommand;
+use crate::daemon_protocol::DaemonRequest;
+use crate::daemon_proxy;
 use crate::storage_context::StorageContext;
 
 #[derive(Debug, Args)]
@@ -47,12 +49,26 @@ pub enum DeploymentTopologyCommand {
 }
 
 pub fn run(app: &AppContext, args: DeploymentTopologyArgs) -> Result<()> {
-    run_rendered(app, args)?.emit(&app.output())
+    if args.registry.is_some() || args.storage.is_some() {
+        return run_rendered(app, &args)?.emit(&app.output());
+    }
+
+    validate_limit(args.limit)?;
+    let query = query_from_command(&args.command)?;
+    daemon_proxy::run_read_only_command(
+        app,
+        &DaemonRequest::DeploymentTopology {
+            query,
+            limit: args.limit,
+            repo_filter: app.repo_filter.clone(),
+        },
+        move |app| run_rendered(app, &args),
+    )
 }
 
 pub(crate) fn run_rendered(
     app: &AppContext,
-    args: DeploymentTopologyArgs,
+    args: &DeploymentTopologyArgs,
 ) -> Result<RenderedCommand> {
     let ctx = if args.registry.is_some() || args.storage.is_some() {
         StorageContext::workspace_read_only_with_overrides(
@@ -70,32 +86,56 @@ pub(crate) fn run_rendered(
 pub fn execute(
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
-    args: DeploymentTopologyArgs,
+    args: &DeploymentTopologyArgs,
 ) -> Result<RenderedCommand> {
-    if !(1..=100).contains(&args.limit) {
+    let query = query_from_command(&args.command)?;
+    execute_query(storage, repo_filter, query, args.limit)
+}
+
+pub(crate) fn execute_query(
+    storage: &StorageCoordinator,
+    repo_filter: Option<&str>,
+    query: DeploymentTopologyQuery,
+    limit: usize,
+) -> Result<RenderedCommand> {
+    validate_limit(limit)?;
+    let report = deployment_topology(storage.graph(), query, repo_filter, limit)?;
+    RenderedCommand::success_serialized(&report, render_text_lines(&report))
+}
+
+fn validate_limit(limit: usize) -> Result<()> {
+    if !(1..=100).contains(&limit) {
         bail!("The `deployment-topology --limit` flag must be between 1 and 100.");
     }
-    let query = match args.command {
+    Ok(())
+}
+
+fn query_from_command(command: &DeploymentTopologyCommand) -> Result<DeploymentTopologyQuery> {
+    Ok(match command {
         DeploymentTopologyCommand::WhereDeployed { service } => {
-            require_target("service", &service)?;
-            DeploymentTopologyQuery::WhereDeployed { service }
+            require_target("service", service)?;
+            DeploymentTopologyQuery::WhereDeployed {
+                service: service.clone(),
+            }
         }
         DeploymentTopologyCommand::ServiceEnv { service } => {
-            require_target("service", &service)?;
-            DeploymentTopologyQuery::ServiceEnv { service }
+            require_target("service", service)?;
+            DeploymentTopologyQuery::ServiceEnv {
+                service: service.clone(),
+            }
         }
         DeploymentTopologyCommand::EnvVarConsumers { env_var } => {
-            require_target("env-var", &env_var)?;
-            DeploymentTopologyQuery::EnvVarConsumers { env_var }
+            require_target("env-var", env_var)?;
+            DeploymentTopologyQuery::EnvVarConsumers {
+                env_var: env_var.clone(),
+            }
         }
         DeploymentTopologyCommand::UndeployedServices => {
             DeploymentTopologyQuery::UndeployedServices
         }
         DeploymentTopologyCommand::DeployedButNoCode => DeploymentTopologyQuery::DeployedButNoCode,
         DeploymentTopologyCommand::SharedInfra => DeploymentTopologyQuery::SharedInfra,
-    };
-    let report = deployment_topology(storage.graph(), query, repo_filter, args.limit)?;
-    RenderedCommand::success_serialized(&report, render_text_lines(&report))
+    })
 }
 
 fn require_target(name: &str, value: &str) -> Result<()> {
@@ -168,7 +208,7 @@ mod tests {
         let error = execute(
             &storage,
             None,
-            DeploymentTopologyArgs {
+            &DeploymentTopologyArgs {
                 command: DeploymentTopologyCommand::WhereDeployed {
                     service: " ".to_owned(),
                 },

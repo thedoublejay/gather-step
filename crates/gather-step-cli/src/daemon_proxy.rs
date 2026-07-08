@@ -193,6 +193,7 @@ fn request_name(request: &DaemonRequest) -> &'static str {
         DaemonRequest::EventsAgentTrace { .. } => "events_agent_trace",
         DaemonRequest::Impact { .. } => "impact",
         DaemonRequest::Pack { .. } => "pack",
+        DaemonRequest::DeploymentTopology { .. } => "deployment_topology",
     }
 }
 

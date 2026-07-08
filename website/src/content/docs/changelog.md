@@ -5,6 +5,18 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.14.0 (2026-07-08)
+
+**Deployment-topology daemon routing + dependency refresh.** A maintenance release that fixes a read-command lock failure and refreshes package/action dependencies. No command or tool was removed and the index schema is unchanged.
+
+### Fixed
+
+- **`deployment-topology` now uses the workspace daemon for baseline reads.** The CLI routes normal workspace topology queries through the same daemon-aware read path as `search`, `trace`, `events`, and `pack`, so a running daemon can answer from its existing graph handle instead of causing a local `workspace in use` graph-open failure. Explicit `--registry` / `--storage` review-artifact queries still run directly against the supplied paths.
+
+### Changed
+
+- **Package and workflow dependencies refreshed.** Workspace crates now report `5.14.0`; Rust dependencies were updated, including `rmcp` / `rmcp-macros` to `2.1.0` and pinned OXC parser crates to `0.139.0`; website lock metadata was refreshed, and the shared `taiki-e/install-action` workflow pin moved to `v2.82.10`.
+
 ## v5.12.0 (2026-07-05)
 
 **Agent-facing feature discoverability + dependency refresh.** An additive release focused on making the graph's capabilities self-describing to AI agents, so an upgrade is all that's needed for connected agents to use new signals — no manual documentation reading. No command or tool was removed and the index schema is unchanged.
