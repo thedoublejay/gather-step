@@ -1010,7 +1010,7 @@ mod tests {
         );
         assert_eq!(
             payload["edges"][0]["kind"],
-            Value::String("deployed_as".to_owned())
+            Value::String("DeployedAs".to_owned())
         );
     }
 

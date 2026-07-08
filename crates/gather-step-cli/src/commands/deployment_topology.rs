@@ -80,7 +80,7 @@ pub(crate) fn run_rendered(
         StorageContext::workspace_read_only(app)
     };
     let storage = ctx.open_storage_coordinator()?;
-    execute(&storage, app.repo_filter.as_deref(), &args)
+    execute(&storage, app.repo_filter.as_deref(), args)
 }
 
 pub fn execute(
