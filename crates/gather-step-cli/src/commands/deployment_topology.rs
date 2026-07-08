@@ -80,13 +80,13 @@ pub(crate) fn run_rendered(
         StorageContext::workspace_read_only(app)
     };
     let storage = ctx.open_storage_coordinator()?;
-    execute(&storage, app.repo_filter.as_deref(), args)
+    execute(&storage, app.repo_filter.as_deref(), &args)
 }
 
 pub fn execute(
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
-    args: DeploymentTopologyArgs,
+    args: &DeploymentTopologyArgs,
 ) -> Result<RenderedCommand> {
     let query = query_from_command(&args.command)?;
     execute_query(storage, repo_filter, query, args.limit)
@@ -208,7 +208,7 @@ mod tests {
         let error = execute(
             &storage,
             None,
-            DeploymentTopologyArgs {
+            &DeploymentTopologyArgs {
                 command: DeploymentTopologyCommand::WhereDeployed {
                     service: " ".to_owned(),
                 },

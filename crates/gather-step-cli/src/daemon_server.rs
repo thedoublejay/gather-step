@@ -955,7 +955,8 @@ mod tests {
         let storage_root = workspace.path().join(".gather-step/storage");
         let registry_path = workspace.path().join(".gather-step/registry.json");
         let graph_path = storage_root.join("graph.redb");
-        let stores = WorkspaceStores::open(&storage_root).expect("workspace stores");
+        let stores =
+            std::sync::Arc::new(WorkspaceStores::open(&storage_root).expect("workspace stores"));
 
         let file = test_node(NodeKind::File, "backend", "compose.yaml", "compose.yaml");
         let service = test_node(
