@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use gather_step_analysis::DeploymentTopologyQuery;
+
 pub use gather_step_storage::StorageDaemonMetadata as DaemonPidFile;
 
 use crate::command_render::RenderedCommand;
@@ -74,6 +76,11 @@ pub enum DaemonRequest {
         limit: usize,
         depth: usize,
         budget_bytes: Option<usize>,
+        repo_filter: Option<String>,
+    },
+    DeploymentTopology {
+        query: DeploymentTopologyQuery,
+        limit: usize,
         repo_filter: Option<String>,
     },
 }

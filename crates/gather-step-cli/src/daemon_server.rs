@@ -16,7 +16,7 @@ use crate::{
     commands::{
         conventions,
         cross_repo_deps::{self, CrossRepoDepsArgs},
-        doctor,
+        deployment_topology, doctor,
         events::{
             self, AgentTraceArgs, BlastRadiusArgs, EventsArgs, EventsCommand, OrphansArgs,
             TraceArgs,
@@ -360,6 +360,32 @@ pub fn dispatch_request_with_runtime(
                 pack::execute(runtime.mcp.as_ref(), app.repo_filter.clone(), &args)
             } else {
                 pack::run_rendered(&app, &StorageContext::workspace_read_only(&app), &args)
+            }
+        }
+        DaemonRequest::DeploymentTopology {
+            query,
+            limit,
+            repo_filter,
+        } => {
+            let app = app_with_repo_filter(app, repo_filter);
+            if let Some(runtime) = runtime {
+                let storage = runtime.storage();
+                deployment_topology::execute_query(
+                    &storage,
+                    app.repo_filter.as_deref(),
+                    query,
+                    limit,
+                )
+            } else {
+                let storage = StorageContext::workspace_read_only(&app)
+                    .open_storage_coordinator()
+                    .context("opening workspace-local storage")?;
+                deployment_topology::execute_query(
+                    &storage,
+                    app.repo_filter.as_deref(),
+                    query,
+                    limit,
+                )
             }
         }
     }
@@ -859,10 +885,19 @@ mod tests {
     };
 
     use anyhow::Result;
+    use gather_step_analysis::DeploymentTopologyQuery;
+    use gather_step_core::{
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id, ref_node_id,
+    };
+    use gather_step_storage::{GraphStore, WorkspaceStores};
     use indicatif::MultiProgress;
+    use serde_json::Value;
     use tokio_util::sync::CancellationToken;
 
-    use super::{DaemonServer, check_socket_path_len, daemon_pid_path, daemon_socket_path};
+    use super::{
+        DaemonRuntime, DaemonServer, check_socket_path_len, daemon_pid_path, daemon_socket_path,
+        dispatch_request_with_runtime,
+    };
     use crate::{
         app::{AppContext, ColorModeArg},
         daemon_client::DaemonClient,
@@ -914,6 +949,70 @@ mod tests {
             .expect("a short socket path must be accepted");
     }
 
+    #[test]
+    fn dispatches_deployment_topology_through_runtime_stores() {
+        let workspace = TestWorkspace::new("deployment-topology");
+        let storage_root = workspace.path().join(".gather-step/storage");
+        let registry_path = workspace.path().join(".gather-step/registry.json");
+        let graph_path = storage_root.join("graph.redb");
+        let stores = WorkspaceStores::open(&storage_root).expect("workspace stores");
+
+        let file = test_node(NodeKind::File, "backend", "compose.yaml", "compose.yaml");
+        let service = test_node(
+            NodeKind::Service,
+            "backend",
+            "api",
+            "__service__backend__api",
+        );
+        let deployment = test_node(
+            NodeKind::Deployment,
+            "backend",
+            "api",
+            "__deployment__backend__api",
+        );
+        let edge = EdgeData {
+            source: service.id,
+            target: deployment.id,
+            kind: EdgeKind::DeployedAs,
+            metadata: EdgeMetadata::default(),
+            owner_file: file.id,
+            is_cross_file: false,
+        };
+        stores
+            .graph()
+            .bulk_insert(&[file, service, deployment], &[edge])
+            .expect("topology graph seed");
+
+        let runtime = DaemonRuntime::from_stores(registry_path, graph_path, stores);
+        let rendered = dispatch_request_with_runtime(
+            &app(workspace.path()),
+            DaemonRequest::DeploymentTopology {
+                query: DeploymentTopologyQuery::WhereDeployed {
+                    service: "api".to_owned(),
+                },
+                limit: 10,
+                repo_filter: None,
+            },
+            Some(&runtime),
+        )
+        .expect("daemon dispatch should render topology");
+
+        assert!(
+            rendered.error.is_none(),
+            "unexpected error: {:?}",
+            rendered.error
+        );
+        let payload = rendered.payload.expect("payload");
+        assert_eq!(
+            payload["deployments"][0]["name"],
+            Value::String("api".to_owned())
+        );
+        assert_eq!(
+            payload["edges"][0]["kind"],
+            Value::String("deployed_as".to_owned())
+        );
+    }
+
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TestWorkspace {
@@ -956,6 +1055,28 @@ mod tests {
             color_mode: ColorModeArg::Auto,
             show_banner: false,
             multi_progress: MultiProgress::new(),
+        }
+    }
+
+    fn test_node(kind: NodeKind, repo: &str, name: &str, qualified_name: &str) -> NodeData {
+        let id = if kind == NodeKind::File {
+            node_id(repo, name, kind, name)
+        } else {
+            ref_node_id(kind, qualified_name)
+        };
+        NodeData {
+            id,
+            kind,
+            repo: repo.to_owned(),
+            file_path: "compose.yaml".to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(qualified_name.to_owned()),
+            external_id: Some(qualified_name.to_owned()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: kind != NodeKind::File,
+            ai_role: None,
         }
     }
 
