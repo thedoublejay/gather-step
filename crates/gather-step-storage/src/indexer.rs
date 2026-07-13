@@ -5037,7 +5037,7 @@ export class EventHandlersService {
     }
 
     #[test]
-    fn orchestrator_skips_nestjs_extractor_when_package_json_is_absent() {
+    fn orchestrator_detects_nestjs_extractor_when_package_json_is_absent() {
         let repo_root = TestDir::new("plain-repo");
         let storage_root = TestDir::new("plain-storage");
         fs::create_dir_all(repo_root.path().join("src")).expect("src dir should exist");
@@ -5070,7 +5070,7 @@ export class ItemController {
             .graph()
             .nodes_by_type(NodeKind::Route)
             .expect("route nodes should load");
-        assert!(route_nodes.is_empty());
+        assert_eq!(route_nodes.len(), 1);
     }
 
     #[test]

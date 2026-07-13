@@ -5,6 +5,21 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.15.0 (2026-07-13)
+
+**Source-only NestJS library detection and dependency refresh.** A behavioral release that closes false event producer-orphans when shared NestJS libraries omit runtime framework dependencies from their own package manifests. No command or tool was removed and the index schema is unchanged.
+
+### Fixed
+
+- **Source-only NestJS libraries now participate in framework extraction.** Framework detection recognizes TypeScript/JavaScript source that both imports `@nestjs/*` and uses a Nest decorator, even when `package.json` does not declare `@nestjs/core`. Messaging publishers in shared libraries now contribute producer edges instead of leaving consumer-backed events with `producers=0`.
+- **Detection remains bounded to paired source signals.** A decorator name alone is insufficient; the same source file must also import NestJS, avoiding broad false-positive classification of unrelated custom decorators.
+
+### Changed
+
+- **Rust dependencies refreshed within the existing compatibility policy.** Direct updates include `tree-sitter` 0.26.11, `rmcp` 2.2.0, `regex` 1.13.0, `regex-automata` 0.4.15, `ignore` 0.4.28, and `lru` 0.18.1, plus compatible transitive lockfile updates.
+- **Website dependencies refreshed.** Astro moved to 7.0.7 with the Bun lockfile regenerated.
+- **Workspace packages report `5.15.0`.** Cargo workspace crates and website package metadata are parked at the minor-release version.
+
 ## v5.14.1 (2026-07-13)
 
 **Exact cross-repo consumers for symbol queries.** A patch release that removes false cross-repo consumers caused by co-located symbols and shared graph stubs. No command or tool was removed and the index schema is unchanged.
