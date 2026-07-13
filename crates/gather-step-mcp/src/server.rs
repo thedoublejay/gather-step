@@ -503,7 +503,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "who_consumes",
-        description = "Find which repos consume what a symbol's file produces, directly or via a transport boundary.",
+        description = "Find which repos consume an exact symbol, directly or via a transport boundary.",
         annotations(read_only_hint = true)
     )]
     pub async fn who_consumes_tool(

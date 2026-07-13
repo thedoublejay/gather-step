@@ -77,6 +77,9 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     let mut virtual_producers = FxHashMap::<NodeId, BTreeSet<String>>::default();
     for node in &nodes {
         for edge in session.outgoing(node.id)? {
+            if !is_producer_edge(edge.kind) {
+                continue;
+            }
             let Some(target) = session.node(edge.target)? else {
                 continue;
             };
@@ -206,6 +209,98 @@ pub fn cross_repo_participation_by_file<S: GraphStore>(
     Ok(consumers)
 }
 
+/// Return foreign repositories with a dependency path to the exact symbol.
+///
+/// Unlike [`cross_repo_participation_by_file`], this traversal never widens a
+/// symbol to every other declaration in its file. It walks same-repo reverse
+/// dependency edges from the target symbol to its producers, then crosses only
+/// explicit transport producer/consumer boundaries or direct foreign usage
+/// edges. This keeps route-mediated config consumers while preventing an
+/// unrelated co-located symbol from inheriting the file's consumers.
+pub fn cross_repo_consumers_for_symbol<S: GraphStore>(
+    store: &S,
+    symbol_id: NodeId,
+) -> Result<Vec<String>, GraphStoreError> {
+    let session = store.read_session()?;
+    let Some(target) = session.node(symbol_id)? else {
+        return Ok(Vec::new());
+    };
+    if target.is_virtual {
+        if is_provenance_virtual(target.kind) {
+            return Ok(Vec::new());
+        }
+        let mut consumers = BTreeSet::new();
+        for edge in session.incoming(target.id)? {
+            if !is_direct_consumer_edge(edge.kind) {
+                continue;
+            }
+            if let Some(source) = session.node(edge.source)?
+                && !source.is_virtual
+                && source.repo != VIRTUAL_NODE_REPO
+            {
+                consumers.insert(source.repo);
+            }
+        }
+        return Ok(consumers.into_iter().collect());
+    }
+    if matches!(target.kind, NodeKind::File | NodeKind::Module) {
+        return Ok(Vec::new());
+    }
+
+    let producer_repo = target.repo;
+    let mut consumers = BTreeSet::<String>::new();
+    let mut queue = VecDeque::from([symbol_id]);
+    let mut visited = BTreeSet::from([symbol_id]);
+
+    while let Some(current_id) = queue.pop_front() {
+        for edge in session.outgoing(current_id)? {
+            if !is_producer_edge(edge.kind) {
+                continue;
+            }
+            let Some(surface) = session.node(edge.target)? else {
+                continue;
+            };
+            if !surface.is_virtual || is_provenance_virtual(surface.kind) {
+                continue;
+            }
+            for related in session.incoming(surface.id)? {
+                if !is_virtual_consumer_edge(related.kind) {
+                    continue;
+                }
+                if let Some(source) = session.node(related.source)?
+                    && !source.is_virtual
+                    && is_foreign_repo(&source.repo, &producer_repo)
+                {
+                    consumers.insert(source.repo);
+                }
+            }
+        }
+
+        for edge in session.incoming(current_id)? {
+            let Some(source) = session.node(edge.source)? else {
+                continue;
+            };
+            if source.is_virtual {
+                continue;
+            }
+            if is_foreign_repo(&source.repo, &producer_repo) {
+                if is_direct_consumer_edge(edge.kind) {
+                    consumers.insert(source.repo);
+                }
+                continue;
+            }
+            if source.repo == producer_repo
+                && is_reverse_dependency_edge(edge.kind)
+                && visited.insert(source.id)
+            {
+                queue.push_back(source.id);
+            }
+        }
+    }
+
+    Ok(consumers.into_iter().collect())
+}
+
 /// A repo is a foreign consumer when it is neither the analysed `repo` nor the
 /// synthetic [`VIRTUAL_NODE_REPO`] (virtual transport stubs are never a real
 /// consuming repo, and same-repo consumers are excluded by design).
@@ -226,6 +321,72 @@ const fn is_producer_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
         EdgeKind::Serves | EdgeKind::Publishes | EdgeKind::ProducesEventFor
+    )
+}
+
+const fn is_virtual_consumer_edge(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Consumes | EdgeKind::ConsumesApiFrom | EdgeKind::UsesEventFrom
+    )
+}
+
+const fn is_direct_consumer_edge(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Calls
+            | EdgeKind::Extends
+            | EdgeKind::Implements
+            | EdgeKind::References
+            | EdgeKind::DependsOn
+            | EdgeKind::UsesDecorator
+            | EdgeKind::Consumes
+            | EdgeKind::Triggers
+            | EdgeKind::UsesShared
+            | EdgeKind::UsesTypeFrom
+            | EdgeKind::UsesEventFrom
+            | EdgeKind::UsesGuardFrom
+            | EdgeKind::ConsumesApiFrom
+            | EdgeKind::ImplementsContractFrom
+            | EdgeKind::ConsumesHookFrom
+            | EdgeKind::ContractOn
+            | EdgeKind::FetchesPromptFrom
+            | EdgeKind::Embeds
+            | EdgeKind::CallsMcpTool
+            | EdgeKind::RetrievesFrom
+    )
+}
+
+const fn is_reverse_dependency_edge(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Calls
+            | EdgeKind::Extends
+            | EdgeKind::Implements
+            | EdgeKind::References
+            | EdgeKind::DependsOn
+            | EdgeKind::UsesDecorator
+            | EdgeKind::Triggers
+            | EdgeKind::UsesShared
+            | EdgeKind::UsesTypeFrom
+            | EdgeKind::UsesEventFrom
+            | EdgeKind::UsesGuardFrom
+            | EdgeKind::ImplementsContractFrom
+            | EdgeKind::ConsumesHookFrom
+            | EdgeKind::ContractOn
+            | EdgeKind::DefinesAgentNode
+            | EdgeKind::GraphTransitionsTo
+            | EdgeKind::ComposesAgent
+            | EdgeKind::SpawnsSubagent
+            | EdgeKind::BindsTool
+            | EdgeKind::InvokesLlm
+            | EdgeKind::ProducesAiContract
+            | EdgeKind::UsesPrompt
+            | EdgeKind::FetchesPromptFrom
+            | EdgeKind::RetrievesFrom
+            | EdgeKind::Embeds
+            | EdgeKind::CallsMcpTool
+            | EdgeKind::ExposesMcpTool
     )
 }
 
@@ -710,6 +871,70 @@ mod tests {
         assert!(
             !participation.contains_key("src/uses_typing.py"),
             "co-importing a shared module stub must not mark the file as consumed, got {participation:?}"
+        );
+    }
+
+    /// Two repos can reference the same virtual shared-symbol stub without
+    /// either producing it for the other. Treating every outgoing edge to a
+    /// virtual node as production turns that co-usage into a false consumer
+    /// relationship.
+    #[test]
+    fn shared_virtual_co_usage_does_not_seed_consumers() {
+        let temp_db = TempDb::new("xrepo-participation-unit", "shared-symbol-co-usage");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let producer_file = file("producer", "app/api/v1/chat/service.py");
+        let producer_sym = symbol("producer", "app/api/v1/chat/service.py", "ChatService");
+        let foreign_file = file("consumer", "app/api/v1/chat/service.py");
+        let foreign_sym = symbol("consumer", "app/api/v1/chat/service.py", "ChatService");
+        let shared = NodeData {
+            id: ref_node_id(NodeKind::SharedSymbol, "ChatService"),
+            kind: NodeKind::SharedSymbol,
+            repo: VIRTUAL_NODE_REPO.to_owned(),
+            file_path: "__shared__/ChatService".to_owned(),
+            name: "ChatService".to_owned(),
+            qualified_name: Some("ChatService".to_owned()),
+            external_id: Some("ChatService".to_owned()),
+            signature: None,
+            visibility: Some(Visibility::Public),
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+
+        store
+            .bulk_insert(
+                &[
+                    producer_file.clone(),
+                    producer_sym.clone(),
+                    foreign_file.clone(),
+                    foreign_sym.clone(),
+                    shared.clone(),
+                ],
+                &[
+                    defines(producer_file.id, producer_sym.id),
+                    defines(foreign_file.id, foreign_sym.id),
+                    edge(
+                        producer_file.id,
+                        producer_sym.id,
+                        shared.id,
+                        EdgeKind::UsesShared,
+                    ),
+                    edge(
+                        foreign_file.id,
+                        foreign_sym.id,
+                        shared.id,
+                        EdgeKind::UsesShared,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let participation =
+            cross_repo_participation_by_file(&store, "producer").expect("participation");
+        assert!(
+            !participation.contains_key("app/api/v1/chat/service.py"),
+            "co-using a shared virtual symbol must not create a consumer edge: {participation:?}"
         );
     }
 

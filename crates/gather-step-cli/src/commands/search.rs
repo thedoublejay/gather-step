@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
 use console::style;
-use gather_step_analysis::CrossRepoConsumerLookup;
-use gather_step_core::NodeKind;
+use gather_step_analysis::{CrossRepoConsumerLookup, cross_repo_consumers_for_symbol};
+use gather_step_core::{NodeId, NodeKind};
 use gather_step_storage::{GraphStore, SearchFilters, SearchStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::json;
@@ -35,6 +35,8 @@ struct SearchOutput {
 
 #[derive(Debug, Serialize)]
 struct SearchHitOutput {
+    #[serde(skip)]
+    node_id: NodeId,
     repo: String,
     file_path: String,
     line: Option<u32>,
@@ -47,8 +49,8 @@ struct SearchHitOutput {
 }
 
 /// Cross-repo participation annotation for a search hit: which *other* repos
-/// consume something the hit's file produces (directly or via a transport
-/// boundary). Same-repo consumers are excluded by the underlying primitive.
+/// consume the exact symbol (directly or via a transport boundary). File and
+/// module hits retain file-level participation.
 #[derive(Debug, Serialize)]
 struct CrossRepoHit {
     participates: bool,
@@ -127,6 +129,7 @@ pub(crate) fn execute(
                 return None;
             }
             Some(Ok(SearchHitOutput {
+                node_id: hit.node_id,
                 repo,
                 file_path,
                 line,
@@ -195,19 +198,22 @@ pub(crate) fn execute(
     Ok(RenderedCommand::success(json!(payload), lines))
 }
 
-/// Annotate each hit with the foreign repos that consume what its file
-/// produces, calling the Task-6 participation primitive **once per distinct
-/// hit repo** (memoized) rather than once per hit.
+/// Annotate symbol hits with exact consumer reachability. File and module hits
+/// retain the broader file-participation projection because they do not name a
+/// single declaration.
 ///
 /// Best-effort: a graph error while computing a repo's projection leaves the
 /// affected hits with an empty (non-participating) annotation rather than
 /// failing the whole search.
 fn annotate_cross_repo(storage: &StorageCoordinator, hits: &mut [SearchHitOutput]) {
-    let mut lookup = CrossRepoConsumerLookup::new();
+    let mut file_lookup = CrossRepoConsumerLookup::new();
     for hit in hits.iter_mut() {
-        if let Ok(consumer_repos) =
-            lookup.consumer_repos(storage.graph(), &hit.repo, &hit.file_path)
-        {
+        let consumer_repos = if matches!(hit.node_kind.as_str(), "file" | "module") {
+            file_lookup.consumer_repos(storage.graph(), &hit.repo, &hit.file_path)
+        } else {
+            cross_repo_consumers_for_symbol(storage.graph(), hit.node_id)
+        };
+        if let Ok(consumer_repos) = consumer_repos {
             hit.cross_repo.participates = !consumer_repos.is_empty();
             hit.cross_repo.consumer_repos = consumer_repos;
         }
@@ -371,6 +377,7 @@ mod tests {
             "src/config/credit.ts",
             "CREDIT_AGENT_CONFIGS",
         );
+        let unrelated_sym = symbol("service-api", "src/config/credit.ts", "PRIVATE_HELPER");
         let handler_file = file("service-api", "src/handlers/credit.ts");
         let handler_sym = symbol("service-api", "src/handlers/credit.ts", "getCredits");
         let caller_file = file("service-ui", "src/caller.ts");
@@ -389,6 +396,7 @@ mod tests {
                 &[
                     config_file.clone(),
                     config_sym.clone(),
+                    unrelated_sym.clone(),
                     handler_file.clone(),
                     handler_sym.clone(),
                     caller_file.clone(),
@@ -397,6 +405,7 @@ mod tests {
                 ],
                 &[
                     defines(config_file.id, config_sym.id),
+                    defines(config_file.id, unrelated_sym.id),
                     defines(handler_file.id, handler_sym.id),
                     defines(caller_file.id, caller_sym.id),
                     edge(
@@ -443,6 +452,29 @@ mod tests {
                 .iter()
                 .any(|repo| repo.as_str() == Some("service-ui")),
             "config hit must carry service-ui as a cross-repo consumer, got: {payload}"
+        );
+
+        let unrelated = execute(
+            &storage,
+            Some("service-api"),
+            SearchArgs {
+                query: "PRIVATE_HELPER".to_owned(),
+                limit: 10,
+                kind: None,
+            },
+        )
+        .expect("search should succeed");
+        let unrelated_payload = unrelated.payload.as_ref().expect("payload");
+        let unrelated_hit = unrelated_payload["hits"]
+            .as_array()
+            .expect("hits array")
+            .iter()
+            .find(|hit| hit["symbol_name"].as_str() == Some("PRIVATE_HELPER"))
+            .unwrap_or_else(|| panic!("private helper hit must be present: {unrelated_payload}"));
+        assert_eq!(
+            unrelated_hit["cross_repo"]["consumer_repos"],
+            serde_json::json!([]),
+            "unrelated symbol must not inherit its file's consumers: {unrelated_payload}"
         );
 
         let _ = fs::remove_dir_all(&storage_root);

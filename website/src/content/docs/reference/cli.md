@@ -46,7 +46,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`events orphans`](#events-orphans) — List event-like targets that have only producers or only consumers.
 - [`impact`](#impact) — Summarize which repos are touched by a symbol's cross-repo virtual targets.
 - [`cross-repo-deps`](#cross-repo-deps) — List repositories connected to a repo through shared virtual nodes.
-- [`who-consumes`](#who-consumes) — Find which repos consume what a symbol's file produces.
+- [`who-consumes`](#who-consumes) — Find which repos consume an exact symbol.
 - [`projection-impact`](#projection-impact) — Trace static source-to-projection field impact.
 - [`deployment-topology`](#deployment-topology) — Query indexed deployment artifacts, env vars, and shared runtime infrastructure.
 - [`storage-report`](#storage-report) — Report on-disk storage usage and compaction opportunities.
@@ -529,7 +529,7 @@ gather-step --workspace /path/to/workspace cross-repo-deps backend_standard --js
 
 ### `who-consumes`
 
-Searches for a symbol by name and reports which repos consume what that symbol's file produces — directly, or across a transport boundary (route, event, shared type). This is the CLI surface of the `who_consumes` MCP tool.
+Searches for a symbol by name and reports which repos consume that exact symbol — directly, or across a transport boundary (route, event, shared type). Unrelated symbols in the same file do not inherit each other's consumers. This is the CLI surface of the `who_consumes` MCP tool.
 
 ```bash
 gather-step [GLOBAL FLAGS] who-consumes <SYMBOL>
@@ -537,7 +537,7 @@ gather-step [GLOBAL FLAGS] who-consumes <SYMBOL>
 
 | Argument/Flag | Type | Default | Description |
 |---|---|---|---|
-| `<SYMBOL>` | string (positional) | required | Symbol name to search for. The command reports the repos that consume what it produces. |
+| `<SYMBOL>` | string (positional) | required | Symbol name to search for. The command reports the repos that consume that exact symbol. |
 
 The command also accepts the `who_consumes` alias for parity with the MCP tool name.
 
@@ -547,7 +547,7 @@ The command also accepts the `who_consumes` alias for parity with the MCP tool n
 gather-step --workspace /path/to/workspace who-consumes OrderCreatedDto --json
 ```
 
-**Output shape (`--json`)** — emits the producing file and the set of consuming repos, with the boundary (direct, route, event, or shared type) that connects each consumer.
+**Output shape (`--json`)** — emits the queried symbol and consuming repos. Each consumer includes `linking_symbols`, the exact matched symbols that connect it.
 
 **When to use** — to find downstream consumers of a producer symbol before changing or removing it.
 
