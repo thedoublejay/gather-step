@@ -197,19 +197,21 @@ pub fn detect_frameworks_workspace_aware(repo_root: &Path) -> FxHashSet<Framewor
     frameworks
 }
 
-/// Returns `true` when `repo_root/package.json` lists `@nestjs/core` in any
-/// dependency section. The presence of `@nestjs/common` or `@nestjs/microservices`
-/// alone is NOT sufficient: those can appear in libraries that expose types
-/// without being `NestJS` applications themselves. `@nestjs/core` is the
-/// runtime framework marker; `@nestjs/common` is accepted only when route or
-/// message decorators are present in source.
+/// Returns `true` when the repository is a NestJS application or contains a
+/// source-only NestJS library.
+///
+/// `@nestjs/core` remains the strongest manifest marker. Source inspection also
+/// recognizes shared libraries that import `@nestjs/*` and use a Nest decorator
+/// even when their own manifest intentionally omits the runtime dependency.
+/// Requiring both signals avoids classifying unrelated custom decorators as
+/// NestJS.
 #[must_use]
 pub fn is_nestjs(repo_root: &Path) -> bool {
     if has_any_dependency(repo_root, &["@nestjs/core"]) {
         return true;
     }
 
-    if has_any_dependency(repo_root, &["@nestjs/common"]) && has_nestjs_source_markers(repo_root) {
+    if has_nestjs_source_markers(repo_root) {
         return true;
     }
 
@@ -659,6 +661,8 @@ fn has_any_file(repo_root: &Path, paths: &[&str]) -> bool {
 fn has_nestjs_source_markers(repo_root: &Path) -> bool {
     const MARKERS: &[&str] = &[
         "@Controller(",
+        "@Injectable(",
+        "@Module(",
         "@RequestMapping(",
         "@Get(",
         "@Post(",
@@ -705,7 +709,11 @@ fn has_nestjs_source_markers(repo_root: &Path) -> bool {
             let Ok(source) = fs::read_to_string(&path) else {
                 continue;
             };
-            if MARKERS.iter().any(|marker| source.contains(marker)) {
+            let imports_nestjs = source.contains("from '@nestjs/")
+                || source.contains("from \"@nestjs/")
+                || source.contains("require('@nestjs/")
+                || source.contains("require(\"@nestjs/");
+            if imports_nestjs && MARKERS.iter().any(|marker| source.contains(marker)) {
                 return true;
             }
         }
@@ -807,6 +815,17 @@ mod tests {
         dir.write(
             "src/controller.ts",
             "import { Controller, Get } from '@nestjs/common';\n@Controller('items')\nexport class ItemsController { @Get() list() {} }\n",
+        );
+        assert!(is_nestjs(&dir.path));
+    }
+
+    #[test]
+    fn is_nestjs_detects_source_only_shared_library() {
+        let dir = TempDir::new("nest-source-only-library");
+        dir.write("package.json", r#"{ "name": "shared-event-library" }"#);
+        dir.write(
+            "src/event-publisher.service.ts",
+            "import { Injectable } from '@nestjs/common';\n@Injectable()\nexport class EventPublisherService { publish(value) { return this.client.sendMessage('domain-events', value); } }\n",
         );
         assert!(is_nestjs(&dir.path));
     }

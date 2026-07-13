@@ -140,3 +140,102 @@ export class AuditController {
         "the decorated method `generateReport` must be a producer of {event_qn}; producers: {producers:#?}"
     );
 }
+
+#[test]
+fn source_only_nestjs_library_closes_event_producer_orphan() {
+    let producer_root = tempfile::tempdir().expect("producer tempdir should create");
+    let consumer_root = tempfile::tempdir().expect("consumer tempdir should create");
+    let storage_root = tempfile::tempdir().expect("storage tempdir should create");
+
+    // Shared NestJS libraries may use framework decorators and messaging clients
+    // without declaring @nestjs/core in their own package manifest. The producer
+    // still needs the NestJS augmentation pass so its enum-backed topic converges
+    // with consumers instead of remaining a producer-orphan.
+    write_fixture(
+        producer_root.path(),
+        "package.json",
+        r#"{ "name": "shared-event-library" }"#,
+    );
+    write_fixture(
+        producer_root.path(),
+        "src/event-topics.ts",
+        r#"
+export enum EventTopic {
+    DomainEvents = 'domain-events',
+}
+"#,
+    );
+    write_fixture(
+        producer_root.path(),
+        "src/event-publisher.service.ts",
+        r#"
+import { Injectable } from '@nestjs/common';
+import { EventTopic } from './event-topics';
+
+@Injectable()
+export class EventPublisherService {
+    publish(payload) {
+        return this.messageClient.sendMessage(EventTopic.DomainEvents, payload);
+    }
+}
+"#,
+    );
+    write_fixture(
+        producer_root.path(),
+        "src/emit-domain-event.decorator.ts",
+        r#"
+import { Inject } from '@nestjs/common';
+import { EventPublisherService } from './event-publisher.service';
+
+export function EmitDomainEvent() {
+    return function (target, _key, descriptor) {
+        Inject(EventPublisherService)(target, 'eventPublisher');
+        const original = descriptor.value;
+        descriptor.value = async function (...args) {
+            const result = await original.apply(this, args);
+            await this.eventPublisher.publish({ result });
+            return result;
+        };
+    };
+}
+"#,
+    );
+
+    write_fixture(consumer_root.path(), "package.json", NESTJS_MANIFEST);
+    write_fixture(
+        consumer_root.path(),
+        "src/domain-events.controller.ts",
+        r#"
+import { MessagePattern } from '@nestjs/microservices';
+
+export class DomainEventsController {
+    @MessagePattern('domain-events')
+    handle(data) {
+        return data;
+    }
+}
+"#,
+    );
+
+    let indexer =
+        RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+    indexer
+        .index_repo("shared-event-library", producer_root.path(), None)
+        .expect("producer repo indexing should succeed");
+    indexer
+        .index_repo("event-consumer", consumer_root.path(), None)
+        .expect("consumer repo indexing should succeed");
+
+    let graph = indexer.storage().graph();
+    let event_qn = "__event__kafka__domain-events";
+    let incoming = graph
+        .get_incoming(ref_node_id(NodeKind::Event, event_qn))
+        .expect("incoming edges to the event node should load");
+
+    assert!(
+        incoming
+            .iter()
+            .any(|edge| matches!(edge.kind, EdgeKind::Publishes | EdgeKind::ProducesEventFor)),
+        "source-only NestJS library must contribute a producer edge to {event_qn}; incoming: {incoming:#?}"
+    );
+}
