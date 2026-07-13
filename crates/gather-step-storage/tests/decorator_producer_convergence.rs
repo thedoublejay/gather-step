@@ -159,16 +159,16 @@ fn source_only_nestjs_library_closes_event_producer_orphan() {
     write_fixture(
         producer_root.path(),
         "src/event-topics.ts",
-        r#"
+        r"
 export enum EventTopic {
     DomainEvents = 'domain-events',
 }
-"#,
+",
     );
     write_fixture(
         producer_root.path(),
         "src/event-publisher.service.ts",
-        r#"
+        r"
 import { Injectable } from '@nestjs/common';
 import { EventTopic } from './event-topics';
 
@@ -178,12 +178,12 @@ export class EventPublisherService {
         return this.messageClient.sendMessage(EventTopic.DomainEvents, payload);
     }
 }
-"#,
+",
     );
     write_fixture(
         producer_root.path(),
         "src/emit-domain-event.decorator.ts",
-        r#"
+        r"
 import { Inject } from '@nestjs/common';
 import { EventPublisherService } from './event-publisher.service';
 
@@ -198,14 +198,14 @@ export function EmitDomainEvent() {
         };
     };
 }
-"#,
+",
     );
 
     write_fixture(consumer_root.path(), "package.json", NESTJS_MANIFEST);
     write_fixture(
         consumer_root.path(),
         "src/domain-events.controller.ts",
-        r#"
+        r"
 import { MessagePattern } from '@nestjs/microservices';
 
 export class DomainEventsController {
@@ -214,7 +214,7 @@ export class DomainEventsController {
         return data;
     }
 }
-"#,
+",
     );
 
     let indexer =
