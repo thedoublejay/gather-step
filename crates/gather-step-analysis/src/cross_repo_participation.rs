@@ -308,12 +308,6 @@ fn is_foreign_repo(candidate: &str, repo: &str) -> bool {
     candidate != repo && candidate != VIRTUAL_NODE_REPO
 }
 
-/// Virtual kinds carrying provenance or import metadata rather than a
-/// consumable transport/contract surface. Their node identity hashes only the
-/// qualified name, so one author (or one `module-import::typing` stub) is
-/// shared by every repo that touches it — a hub that links repos without
-/// either consuming what the other produces. Participation never seeds
-/// through them (the "one file -> every repo in the workspace" over-match).
 /// Edge kinds whose source PRODUCES into a virtual surface (serves the route,
 /// publishes the topic/event). A foreign co-producer of an identically-named
 /// surface is not a consumer of what this repo's files feed it.
@@ -390,6 +384,12 @@ const fn is_reverse_dependency_edge(kind: EdgeKind) -> bool {
     )
 }
 
+/// Virtual kinds carrying provenance or import metadata rather than a
+/// consumable transport/contract surface. Their node identity hashes only the
+/// qualified name, so one author (or one `module-import::typing` stub) is
+/// shared by every repo that touches it — a hub that links repos without
+/// either consuming what the other produces. Participation never seeds
+/// through them (the "one file -> every repo in the workspace" over-match).
 const fn is_provenance_virtual(kind: NodeKind) -> bool {
     matches!(
         kind,
@@ -456,7 +456,7 @@ mod tests {
     };
     use gather_step_storage::{GraphStore, GraphStoreDb, GraphStoreError};
 
-    use super::cross_repo_participation_by_file;
+    use super::{cross_repo_consumers_for_symbol, cross_repo_participation_by_file};
     use crate::test_utils::TempDb;
 
     fn file(repo: &str, file_path: &str) -> NodeData {
@@ -991,5 +991,247 @@ mod tests {
             2,
             "edges_by_owner must be called once per File node (2), not once per node (8)"
         );
+    }
+
+    /// A foreign repo with a direct cross-repo `...From` edge into the exact
+    /// symbol is reported as a consumer of that symbol.
+    #[test]
+    fn consumers_for_symbol_reports_direct_foreign_usage() {
+        let temp_db = TempDb::new("xrepo-consumers-unit", "direct-foreign");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let producer_file = file("producer", "src/api.ts");
+        let producer_sym = symbol("producer", "src/api.ts", "exportedThing");
+        let consumer_file = file("consumer", "src/uses.ts");
+        let consumer_sym = symbol("consumer", "src/uses.ts", "usesThing");
+
+        store
+            .bulk_insert(
+                &[
+                    producer_file.clone(),
+                    producer_sym.clone(),
+                    consumer_file.clone(),
+                    consumer_sym.clone(),
+                ],
+                &[
+                    defines(producer_file.id, producer_sym.id),
+                    defines(consumer_file.id, consumer_sym.id),
+                    edge(
+                        consumer_file.id,
+                        consumer_sym.id,
+                        producer_sym.id,
+                        EdgeKind::ConsumesApiFrom,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let consumers =
+            cross_repo_consumers_for_symbol(&store, producer_sym.id).expect("consumers");
+        assert_eq!(consumers, vec!["consumer".to_owned()]);
+    }
+
+    /// The core symbol-accuracy guarantee: a co-located, unrelated declaration
+    /// in the same file must NOT inherit the consumers of a sibling symbol.
+    #[test]
+    fn consumers_for_symbol_ignores_co_located_unrelated_symbol() {
+        let temp_db = TempDb::new("xrepo-consumers-unit", "co-located");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let producer_file = file("producer", "src/config.ts");
+        let config_sym = symbol("producer", "src/config.ts", "SHARED_CONFIG");
+        let unrelated_sym = symbol("producer", "src/config.ts", "PRIVATE_HELPER");
+        let importer_file = file("consumer", "src/uses.ts");
+        let importer_sym = symbol("consumer", "src/uses.ts", "useConfig");
+
+        store
+            .bulk_insert(
+                &[
+                    producer_file.clone(),
+                    config_sym.clone(),
+                    unrelated_sym.clone(),
+                    importer_file.clone(),
+                    importer_sym.clone(),
+                ],
+                &[
+                    defines(producer_file.id, config_sym.id),
+                    defines(producer_file.id, unrelated_sym.id),
+                    defines(importer_file.id, importer_sym.id),
+                    edge(
+                        importer_file.id,
+                        importer_sym.id,
+                        config_sym.id,
+                        EdgeKind::UsesTypeFrom,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let config_consumers =
+            cross_repo_consumers_for_symbol(&store, config_sym.id).expect("config lookup");
+        assert_eq!(config_consumers, vec!["consumer".to_owned()]);
+
+        let unrelated =
+            cross_repo_consumers_for_symbol(&store, unrelated_sym.id).expect("unrelated lookup");
+        assert!(
+            unrelated.is_empty(),
+            "an unrelated co-located symbol must not inherit its sibling's consumers: {unrelated:?}"
+        );
+    }
+
+    /// A same-repo reverse-dependency chain to a producer surface resolves the
+    /// transport consumer: a config symbol referenced by a route handler whose
+    /// route a foreign repo consumes reports that foreign repo.
+    #[test]
+    fn consumers_for_symbol_follows_reverse_dependency_through_route() {
+        let temp_db = TempDb::new("xrepo-consumers-unit", "route-mediated");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let config_file = file("service-api", "src/config.ts");
+        let config_sym = symbol("service-api", "src/config.ts", "CREDIT_CONFIG");
+        let handler_file = file("service-api", "src/handler.ts");
+        let handler_sym = symbol("service-api", "src/handler.ts", "getCredits");
+        let caller_file = file("service-ui", "src/caller.ts");
+        let caller_sym = symbol("service-ui", "src/caller.ts", "callCredits");
+        let route = gather_step_core::virtual_node(
+            NodeKind::Route,
+            VIRTUAL_NODE_REPO,
+            "__route__GET__/credits",
+            "GET /credits",
+            "__route__GET__/credits",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    config_file.clone(),
+                    config_sym.clone(),
+                    handler_file.clone(),
+                    handler_sym.clone(),
+                    caller_file.clone(),
+                    caller_sym.clone(),
+                    route.clone(),
+                ],
+                &[
+                    defines(config_file.id, config_sym.id),
+                    defines(handler_file.id, handler_sym.id),
+                    defines(caller_file.id, caller_sym.id),
+                    // Handler references the config symbol (reverse dependency).
+                    edge(
+                        handler_file.id,
+                        handler_sym.id,
+                        config_sym.id,
+                        EdgeKind::References,
+                    ),
+                    // Handler serves the route (producer edge into the surface).
+                    edge(handler_file.id, handler_sym.id, route.id, EdgeKind::Serves),
+                    // Foreign repo consumes the route.
+                    edge(
+                        caller_file.id,
+                        caller_sym.id,
+                        route.id,
+                        EdgeKind::ConsumesApiFrom,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let consumers = cross_repo_consumers_for_symbol(&store, config_sym.id).expect("consumers");
+        assert_eq!(consumers, vec!["service-ui".to_owned()]);
+    }
+
+    /// A File target has no single declaration to resolve, so the exact-symbol
+    /// traversal reports no consumers (file-level participation is a separate
+    /// projection).
+    #[test]
+    fn consumers_for_symbol_is_empty_for_file_target() {
+        let temp_db = TempDb::new("xrepo-consumers-unit", "file-target");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let f = file("repo", "src/a.ts");
+        store
+            .bulk_insert(std::slice::from_ref(&f), &[])
+            .expect("fixture insert");
+
+        let consumers = cross_repo_consumers_for_symbol(&store, f.id).expect("consumers");
+        assert!(
+            consumers.is_empty(),
+            "a File target yields no consumers: {consumers:?}"
+        );
+    }
+
+    /// A provenance virtual node (Author) is a shared hub, not a transport
+    /// surface, and must never resolve consumers.
+    #[test]
+    fn consumers_for_symbol_is_empty_for_provenance_virtual() {
+        let temp_db = TempDb::new("xrepo-consumers-unit", "provenance-virtual");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let author = NodeData {
+            id: ref_node_id(NodeKind::Author, "dev@redacted"),
+            kind: NodeKind::Author,
+            repo: VIRTUAL_NODE_REPO.to_owned(),
+            file_path: "__authors__/dev@redacted".to_owned(),
+            name: "dev@redacted".to_owned(),
+            qualified_name: Some("dev@redacted".to_owned()),
+            external_id: Some("dev@redacted".to_owned()),
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+        store
+            .bulk_insert(std::slice::from_ref(&author), &[])
+            .expect("fixture insert");
+
+        let consumers = cross_repo_consumers_for_symbol(&store, author.id).expect("consumers");
+        assert!(
+            consumers.is_empty(),
+            "a provenance virtual node yields no consumers: {consumers:?}"
+        );
+    }
+
+    /// Querying a non-provenance virtual surface (a shared symbol) directly
+    /// reports the real repos that consume it.
+    #[test]
+    fn consumers_for_symbol_reports_direct_virtual_consumer() {
+        let temp_db = TempDb::new("xrepo-consumers-unit", "virtual-target");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+
+        let consumer_file = file("consumer", "src/uses.ts");
+        let consumer_sym = symbol("consumer", "src/uses.ts", "usesShared");
+        let shared = NodeData {
+            id: ref_node_id(NodeKind::SharedSymbol, "ChatService"),
+            kind: NodeKind::SharedSymbol,
+            repo: VIRTUAL_NODE_REPO.to_owned(),
+            file_path: "__shared__/ChatService".to_owned(),
+            name: "ChatService".to_owned(),
+            qualified_name: Some("ChatService".to_owned()),
+            external_id: Some("ChatService".to_owned()),
+            signature: None,
+            visibility: Some(Visibility::Public),
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+
+        store
+            .bulk_insert(
+                &[consumer_file.clone(), consumer_sym.clone(), shared.clone()],
+                &[
+                    defines(consumer_file.id, consumer_sym.id),
+                    edge(
+                        consumer_file.id,
+                        consumer_sym.id,
+                        shared.id,
+                        EdgeKind::UsesShared,
+                    ),
+                ],
+            )
+            .expect("fixture insert");
+
+        let consumers = cross_repo_consumers_for_symbol(&store, shared.id).expect("consumers");
+        assert_eq!(consumers, vec!["consumer".to_owned()]);
     }
 }

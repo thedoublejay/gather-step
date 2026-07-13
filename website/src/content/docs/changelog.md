@@ -5,6 +5,16 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.15.1 (2026-07-13)
+
+**Internal cleanup for the symbol-accurate cross-repo path.** A maintenance release with no user-visible behavior change: identical query results, unchanged commands, tools, and index schema.
+
+### Changed
+
+- **`who_consumes` reuses the search annotation instead of re-walking the graph.** The MCP tool now reads the foreign-consumer set `search` already computed for each hit rather than repeating the exact-symbol traversal once per hit, removing redundant per-query graph walks.
+- **Added direct unit coverage for `cross_repo_consumers_for_symbol`** (direct foreign usage, co-located symbol isolation, route-mediated reverse dependency, file targets, provenance virtuals, and direct virtual-surface consumers), plus a documentation-comment fix in the analysis crate.
+- **Workspace packages report `5.15.1`.** Cargo workspace crates and website package metadata are parked at the patch-release version.
+
 ## v5.15.0 (2026-07-13)
 
 **Source-only NestJS library detection and dependency refresh.** A behavioral release that closes false event producer-orphans when shared NestJS libraries omit runtime framework dependencies from their own package manifests. No command or tool was removed and the index schema is unchanged.

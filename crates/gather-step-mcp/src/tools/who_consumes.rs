@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use gather_step_analysis::cross_repo_consumers_for_symbol;
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::{McpContext, validate_input_length},
     error::McpServerError,
-    ids::decode_node_id,
     tools::search::{SearchRequest, search_symbols},
 };
 
@@ -89,16 +87,20 @@ pub fn who_consumes_tool(
         }
     }
 
-    let graph = ctx.graph();
     // consumer repo -> set of matched symbol names that link it.
     let mut consumers: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
 
+    // `search_symbols` already annotated each hit's foreign consumers via
+    // `annotate_cross_repo`; reuse it instead of walking the graph a second
+    // time per hit. File/module hits carry only file-level participation, which
+    // who-consumes does not attribute to an exact symbol.
     for hit in &search.data.results {
-        let symbol_id = decode_node_id(&hit.symbol_id).map_err(McpServerError::InvalidInput)?;
-        let consumer_repos = cross_repo_consumers_for_symbol(graph, symbol_id)?;
-        for consumer_repo in consumer_repos {
+        if matches!(hit.kind.as_str(), "file" | "module") {
+            continue;
+        }
+        for consumer_repo in &hit.consumer_repos {
             consumers
-                .entry(consumer_repo)
+                .entry(consumer_repo.clone())
                 .or_default()
                 .insert(hit.symbol_name.clone());
         }
