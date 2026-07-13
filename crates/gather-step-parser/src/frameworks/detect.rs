@@ -197,14 +197,14 @@ pub fn detect_frameworks_workspace_aware(repo_root: &Path) -> FxHashSet<Framewor
     frameworks
 }
 
-/// Returns `true` when the repository is a NestJS application or contains a
-/// source-only NestJS library.
+/// Returns `true` when the repository is a `NestJS` application or contains a
+/// source-only `NestJS` library.
 ///
 /// `@nestjs/core` remains the strongest manifest marker. Source inspection also
 /// recognizes shared libraries that import `@nestjs/*` and use a Nest decorator
 /// even when their own manifest intentionally omits the runtime dependency.
 /// Requiring both signals avoids classifying unrelated custom decorators as
-/// NestJS.
+/// `NestJS`.
 #[must_use]
 pub fn is_nestjs(repo_root: &Path) -> bool {
     if has_any_dependency(repo_root, &["@nestjs/core"]) {
