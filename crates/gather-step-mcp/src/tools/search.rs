@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
-use gather_step_analysis::CrossRepoConsumerLookup;
 use gather_step_analysis::anchor::rank_anchors;
+use gather_step_analysis::{CrossRepoConsumerLookup, cross_repo_consumers_for_symbol};
 use gather_step_core::{EdgeKind, NodeData, NodeId, NodeKind};
 use gather_step_storage::{GraphStore, SearchFilters, SearchStore};
 use rmcp::schemars;
@@ -56,8 +56,8 @@ pub struct TraversalRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct SearchResultItem {
-    /// Foreign repos that consume something this hit's file produces (directly
-    /// or via a transport boundary). Same-repo consumers are excluded.
+    /// Foreign repos that consume this symbol directly or through a reachable
+    /// transport boundary. File/module hits retain file-level participation.
     #[serde(default)]
     pub consumer_repos: Vec<String>,
     pub exact_match: bool,
@@ -721,17 +721,24 @@ fn anchor_rerank(ctx: &McpContext, mut items: Vec<SearchResultItem>) -> Vec<Sear
     items
 }
 
-/// Annotate each result with the foreign repos that consume what its file
-/// produces, calling the Task-6 participation primitive **once per distinct
-/// hit repo** (memoized) rather than once per hit.
+/// Annotate symbol hits with exact consumer reachability. File and module hits
+/// retain the broader file-participation projection because they do not name a
+/// single declaration.
 ///
 /// Best-effort: a graph error while computing a repo's projection leaves the
 /// affected items with an empty (non-participating) annotation rather than
 /// failing the search.
 fn annotate_cross_repo(graph: &impl GraphStore, items: &mut [SearchResultItem]) {
-    let mut lookup = CrossRepoConsumerLookup::new();
+    let mut file_lookup = CrossRepoConsumerLookup::new();
     for item in items.iter_mut() {
-        if let Ok(consumer_repos) = lookup.consumer_repos(graph, &item.repo, &item.file_path) {
+        let consumer_repos = if matches!(item.kind.as_str(), "file" | "module") {
+            file_lookup.consumer_repos(graph, &item.repo, &item.file_path)
+        } else if let Ok(symbol_id) = decode_node_id(&item.symbol_id) {
+            cross_repo_consumers_for_symbol(graph, symbol_id)
+        } else {
+            continue;
+        };
+        if let Ok(consumer_repos) = consumer_repos {
             item.participates = !consumer_repos.is_empty();
             item.consumer_repos = consumer_repos;
         }
@@ -1036,6 +1043,7 @@ mod tests {
             "src/config/credit.ts",
             "CREDIT_AGENT_CONFIGS",
         );
+        let unrelated_sym = symbol("service-api", "src/config/credit.ts", "PRIVATE_HELPER");
         let handler_file = file("service-api", "src/handlers/credit.ts");
         let handler_sym = symbol("service-api", "src/handlers/credit.ts", "getCredits");
         let caller_file = file("service-ui", "src/caller.ts");
@@ -1056,6 +1064,7 @@ mod tests {
                     &[
                         config_file.clone(),
                         config_sym.clone(),
+                        unrelated_sym.clone(),
                         handler_file.clone(),
                         handler_sym.clone(),
                         caller_file.clone(),
@@ -1064,6 +1073,7 @@ mod tests {
                     ],
                     &[
                         defines(config_file.id, config_sym.id),
+                        defines(config_file.id, unrelated_sym.id),
                         defines(handler_file.id, handler_sym.id),
                         defines(caller_file.id, caller_sym.id),
                         edge(
@@ -1123,6 +1133,32 @@ mod tests {
             config_item.participates,
             "config hit must be marked as participating"
         );
+
+        let unrelated = search_symbols(
+            &ctx,
+            SearchRequest {
+                budget_bytes: None,
+                cursor: None,
+                kind: None,
+                language: None,
+                limit: Some(10),
+                query: "PRIVATE_HELPER".to_owned(),
+                repo: Some("service-api".to_owned()),
+            },
+        )
+        .expect("search should succeed");
+        let unrelated_item = unrelated
+            .data
+            .results
+            .iter()
+            .find(|item| item.symbol_name == "PRIVATE_HELPER")
+            .unwrap_or_else(|| panic!("private helper hit must be present: {:?}", unrelated.data));
+        assert!(
+            unrelated_item.consumer_repos.is_empty(),
+            "unrelated symbol must not inherit its file's consumers: {:?}",
+            unrelated_item.consumer_repos
+        );
+        assert!(!unrelated_item.participates);
 
         let _ = fs::remove_dir_all(&storage_root);
     }

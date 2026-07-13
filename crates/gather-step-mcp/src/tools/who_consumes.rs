@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use gather_step_analysis::CrossRepoConsumerLookup;
+use gather_step_analysis::cross_repo_consumers_for_symbol;
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::{McpContext, validate_input_length},
     error::McpServerError,
+    ids::decode_node_id,
     tools::search::{SearchRequest, search_symbols},
 };
 
@@ -36,19 +37,14 @@ pub struct WhoConsumesData {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ConsumerRepo {
-    /// The symbols matched by the query whose files link this consumer repo.
+    /// The exact symbols matched by the query that link this consumer repo.
     pub linking_symbols: Vec<String>,
-    /// The foreign repo that consumes what one of the matched symbols produces.
+    /// The foreign repo that consumes one of the matched symbols.
     pub repo: String,
 }
 
-/// Find the symbols matching `symbol`, group their hit files by producing repo,
-/// and report the foreign repos that consume what those files produce, together
-/// with which matched symbols link each consumer.
-///
-/// The cross-repo participation primitive is computed once per *distinct*
-/// producing repo via [`CrossRepoConsumerLookup`], so a query that returns many
-/// hits in the same repo pays a single graph scan for that repo.
+/// Find the symbols matching `symbol` and report foreign repositories with a
+/// dependency path to those exact symbols.
 pub fn who_consumes_tool(
     ctx: &McpContext,
     request: WhoConsumesRequest,
@@ -94,12 +90,12 @@ pub fn who_consumes_tool(
     }
 
     let graph = ctx.graph();
-    let mut lookup = CrossRepoConsumerLookup::new();
     // consumer repo -> set of matched symbol names that link it.
     let mut consumers: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
 
     for hit in &search.data.results {
-        let consumer_repos = lookup.consumer_repos(graph, &hit.repo, &hit.file_path)?;
+        let symbol_id = decode_node_id(&hit.symbol_id).map_err(McpServerError::InvalidInput)?;
+        let consumer_repos = cross_repo_consumers_for_symbol(graph, symbol_id)?;
         for consumer_repo in consumer_repos {
             consumers
                 .entry(consumer_repo)
@@ -299,6 +295,68 @@ mod tests {
                 .iter()
                 .any(|consumer| consumer.repo == "service-ui"),
             "consumers must contain service-ui: {:?}",
+            response.data.consumers
+        );
+
+        let _ = fs::remove_dir_all(&storage_root);
+    }
+
+    #[test]
+    fn who_consumes_does_not_inherit_another_symbols_file_consumers() {
+        let storage_root = unique_storage_root("gather-step-mcp-who-consumes-symbol-accuracy");
+
+        let producer_file = file("service-api", "src/config/shared.ts");
+        let config_sym = symbol("service-api", "src/config/shared.ts", "SHARED_CONFIG");
+        let unrelated_sym = symbol("service-api", "src/config/shared.ts", "PRIVATE_HELPER");
+        let consumer_file = file("service-ui", "src/consumer.ts");
+        let ui_sym = symbol("service-ui", "src/consumer.ts", "useSharedConfig");
+
+        {
+            let storage = StorageCoordinator::open(&storage_root).expect("coordinator opens");
+            storage
+                .graph()
+                .bulk_insert(
+                    &[
+                        producer_file.clone(),
+                        config_sym.clone(),
+                        unrelated_sym.clone(),
+                        consumer_file.clone(),
+                        ui_sym.clone(),
+                    ],
+                    &[
+                        defines(producer_file.id, config_sym.id),
+                        defines(producer_file.id, unrelated_sym.id),
+                        defines(consumer_file.id, ui_sym.id),
+                        edge(
+                            consumer_file.id,
+                            ui_sym.id,
+                            config_sym.id,
+                            EdgeKind::UsesTypeFrom,
+                        ),
+                    ],
+                )
+                .expect("fixture insert");
+            storage.reconcile_search("service-api");
+            storage.reconcile_search("service-ui");
+        }
+
+        let registry_path = storage_root.join("registry.json");
+        let graph_path = storage_root.join("graph.redb");
+        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+
+        let response = who_consumes_tool(
+            &ctx,
+            WhoConsumesRequest {
+                symbol: "PRIVATE_HELPER".to_owned(),
+                repo: Some("service-api".to_owned()),
+            },
+        )
+        .expect("who_consumes should succeed");
+
+        assert!(
+            response.data.consumers.is_empty(),
+            "unrelated symbols must not inherit file-level consumers: {:?}",
             response.data.consumers
         );
 

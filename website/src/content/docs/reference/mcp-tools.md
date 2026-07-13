@@ -119,9 +119,9 @@ Used automatically when the assistant needs repo-level dependency structure befo
 
 ### `who_consumes`
 
-> "Which repos consume what this symbol's file produces?"
+> "Which repos consume this exact symbol?"
 
-Used automatically when the assistant needs the downstream consumers of a producer symbol — directly, or across a transport boundary (route, event, or shared type) — before changing or removing it.
+Used automatically when the assistant needs the downstream consumers of an exact producer symbol — directly, or across a transport boundary (route, event, or shared type) — before changing or removing it. Unrelated symbols in the same file do not inherit each other's consumers.
 
 ### `where_deployed`
 

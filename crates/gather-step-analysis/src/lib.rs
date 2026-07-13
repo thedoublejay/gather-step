@@ -44,7 +44,9 @@ pub use cross_repo::{
     CrossRepoDependencies, CrossRepoError, CrossRepoHop, TraceDirection, cross_repo_deps,
     trace_across_repos,
 };
-pub use cross_repo_participation::{CrossRepoConsumerLookup, cross_repo_participation_by_file};
+pub use cross_repo_participation::{
+    CrossRepoConsumerLookup, cross_repo_consumers_for_symbol, cross_repo_participation_by_file,
+};
 pub use crud_trace::{
     CrudTrace, CrudTraceEntry, CrudTraceError, CrudTraceRole, trace_crud_route, trace_crud_symbol,
 };
