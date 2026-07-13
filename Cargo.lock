@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1184,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-analysis"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "gather-step-core",
  "gather-step-parser",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-bench"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-core"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "bitcode",
  "blake3",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-deploy"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "gather-step-core",
  "pretty_assertions",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-git"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "blake3",
  "gather-step-core",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-mcp"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "blake3",
  "criterion",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-output"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "chrono",
  "gather-step-analysis",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-parser"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "aho-corasick",
  "blake3",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "gather-step-storage"
-version = "5.15.0"
+version = "5.15.1"
 dependencies = [
  "bitcode",
  "blake3",
