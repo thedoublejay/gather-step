@@ -5,6 +5,20 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.14.1 (2026-07-13)
+
+**Exact cross-repo consumers for symbol queries.** A patch release that removes false cross-repo consumers caused by co-located symbols and shared graph stubs. No command or tool was removed and the index schema is unchanged.
+
+### Fixed
+
+- **`who-consumes` now follows the queried symbol instead of its whole file.** CLI and MCP results resolve direct consumers and route/event-mediated consumers from the exact matched symbol. A private helper no longer inherits consumers from another declaration merely because both live in a common path such as `app/api/v1/chat/service.py`.
+- **`search` cross-repo annotations are symbol-accurate.** Native CLI and MCP search hits use the same exact-symbol traversal; explicit file/module hits retain the broader file-level participation projection.
+- **Shared virtual-node co-usage no longer seeds file consumers.** Only true producer edges (`Serves`, `Publishes`, and `ProducesEventFor`) can establish a transport producer boundary, so parallel services that reference the same virtual shared symbol are not mislabeled as consumers of one another.
+
+### Changed
+
+- **Workspace packages report `5.14.1`.** Cargo workspace crates and website package metadata are parked at the patch-release version.
+
 ## v5.14.0 (2026-07-08)
 
 **Deployment-topology daemon routing + dependency refresh.** A maintenance release that fixes a read-command lock failure and refreshes package/action dependencies. No command or tool was removed and the index schema is unchanged.
