@@ -1,9 +1,10 @@
 use std::{
+    collections::VecDeque,
     env,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
     },
 };
@@ -13,7 +14,10 @@ use clap::ValueEnum;
 use console::{set_colors_enabled, set_colors_enabled_stderr, style};
 use gather_step_core::GatherStepConfig;
 use indicatif::{MultiProgress, ProgressDrawTarget};
-use tracing::{Event, Level, Subscriber};
+use tracing::{
+    Event, Level, Subscriber,
+    field::{Field, Visit},
+};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{MakeWriter, time::ChronoLocal},
@@ -35,6 +39,30 @@ static TELEMETRY_REPO_COUNT: AtomicI64 = AtomicI64::new(-1);
 static TELEMETRY_FILES_PARSED: AtomicI64 = AtomicI64::new(-1);
 static TELEMETRY_NODES_CREATED: AtomicI64 = AtomicI64::new(-1);
 static TELEMETRY_RESULT_COUNT: AtomicI64 = AtomicI64::new(-1);
+const TELEMETRY_EVENT_LIMIT: usize = 32;
+static TELEMETRY_EVENTS: LazyLock<Mutex<VecDeque<gather_step_storage::TelemetryErrorEvent>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(TELEMETRY_EVENT_LIMIT)));
+
+#[derive(Default)]
+struct TelemetryEventVisitor {
+    message: Option<String>,
+    category: Option<String>,
+}
+
+impl Visit for TelemetryEventVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "message" => self.message = Some(value.to_owned()),
+            "category" => self.category = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let value = format!("{value:?}");
+        self.record_str(field, value.trim_matches('"'));
+    }
+}
 
 #[derive(Debug)]
 struct TelemetryCounterLayer;
@@ -44,14 +72,34 @@ where
     S: Subscriber,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
-        match *event.metadata().level() {
+        let level = match *event.metadata().level() {
             Level::WARN => {
                 TELEMETRY_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                "WARN"
             }
             Level::ERROR => {
                 TELEMETRY_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                "ERROR"
             }
-            _ => {}
+            _ => return,
+        };
+        let mut visitor = TelemetryEventVisitor::default();
+        event.record(&mut visitor);
+        let telemetry_event = gather_step_storage::TelemetryErrorEvent {
+            level: level.to_owned(),
+            category: visitor
+                .category
+                .unwrap_or_else(|| event.metadata().target().to_owned()),
+            message: visitor
+                .message
+                .unwrap_or_else(|| event.metadata().name().to_owned()),
+            context_json: None,
+        };
+        if let Ok(mut events) = TELEMETRY_EVENTS.lock() {
+            if events.len() == TELEMETRY_EVENT_LIMIT {
+                events.pop_front();
+            }
+            events.push_back(telemetry_event);
         }
     }
 }
@@ -62,6 +110,13 @@ pub fn telemetry_counts() -> (u32, u32) {
         TELEMETRY_WARN_COUNT.load(Ordering::Relaxed),
         TELEMETRY_ERROR_COUNT.load(Ordering::Relaxed),
     )
+}
+
+pub fn take_telemetry_events() -> Vec<gather_step_storage::TelemetryErrorEvent> {
+    TELEMETRY_EVENTS
+        .lock()
+        .map(|mut events| events.drain(..).collect())
+        .unwrap_or_default()
 }
 
 pub fn mark_telemetry_recovery_event() {
@@ -77,6 +132,9 @@ pub fn reset_telemetry_run_state() {
     TELEMETRY_FILES_PARSED.store(-1, Ordering::Relaxed);
     TELEMETRY_NODES_CREATED.store(-1, Ordering::Relaxed);
     TELEMETRY_RESULT_COUNT.store(-1, Ordering::Relaxed);
+    if let Ok(mut events) = TELEMETRY_EVENTS.lock() {
+        events.clear();
+    }
 }
 
 #[must_use]

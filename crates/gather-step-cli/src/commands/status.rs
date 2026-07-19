@@ -211,8 +211,6 @@ pub(crate) fn execute(
                 .metadata()
                 .get_last_commit_sha(repo)
                 .with_context(|| format!("loading indexed commit SHA for `{repo}`"))?;
-            let freshness =
-                crate::freshness::repo_freshness(repo, &registered.path, indexed_sha.as_deref());
             let graph_index_state = if graph_node_count > 0 || !metadata_rows.is_empty() {
                 "indexed"
             } else {
@@ -224,6 +222,11 @@ pub(crate) fn execute(
                 "commit_anchor_missing"
             } else {
                 "not_synced"
+            };
+            let freshness = if graph_index_state == "indexed" && indexed_sha.is_none() {
+                "history_not_synced".to_owned()
+            } else {
+                crate::freshness::repo_freshness(repo, &registered.path, indexed_sha.as_deref())
             };
 
             Ok(RepoStatusOutput {
@@ -278,6 +281,7 @@ pub(crate) fn execute(
     // absolutely rather than relativizing.
     let data_dir = storage_root.parent().unwrap_or(storage_root);
 
+    let workspace_unresolved_inputs = repos.iter().map(|repo| repo.unresolved_inputs).sum();
     let payload = StatusOutput {
         event: "status_completed",
         workspace: relativize_to_workspace(workspace_path, workspace_path),
@@ -291,8 +295,12 @@ pub(crate) fn execute(
         graph: GraphStatusOutput {
             node_kinds,
             edge_kinds,
-            semantic_health: semantic_health_for_workspace(storage.graph(), storage.metadata())
-                .context("computing workspace semantic health")?,
+            semantic_health: semantic_health_for_workspace(
+                storage.graph(),
+                storage.metadata(),
+                workspace_unresolved_inputs,
+            )
+            .context("computing workspace semantic health")?,
         },
         locks,
     };
@@ -597,9 +605,17 @@ mod tests {
                 .as_str()
                 .expect("each repo should carry a freshness verdict");
             assert!(
-                matches!(freshness, "fresh" | "stale" | "never_indexed" | "unknown"),
+                matches!(
+                    freshness,
+                    "fresh" | "stale" | "never_indexed" | "history_not_synced" | "unknown"
+                ),
                 "unexpected freshness verdict: {freshness}"
             );
+            if repo["graph_index_state"] == "indexed"
+                && repo["git_anchor_state"] == "commit_anchor_missing"
+            {
+                assert_eq!(freshness, "history_not_synced");
+            }
         }
     }
 

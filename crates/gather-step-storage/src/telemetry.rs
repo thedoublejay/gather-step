@@ -1,17 +1,23 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use thiserror::Error;
 
 pub const TELEMETRY_DB_NAME: &str = "telemetry.db";
 pub const TELEMETRY_SCHEMA_VERSION: i64 = 3;
+const TELEMETRY_IDENTITY_KEY_NAME: &str = "telemetry-identity.key";
 
 const MAX_RUN_ROWS: i64 = 10_000;
 const RETENTION_DAYS: i64 = 90;
@@ -42,6 +48,8 @@ CREATE TABLE IF NOT EXISTS run_log (
     result_count       INTEGER,
     graph_availability TEXT,
     build_provenance   TEXT,
+    binary_path        TEXT,
+    build_sha          TEXT,
     process_id         INTEGER,
     process_start_token TEXT,
     heartbeat_at_ms    INTEGER
@@ -73,6 +81,20 @@ pub enum TelemetryError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to read telemetry identity key {path}: {source}")]
+    ReadIdentityKey {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write telemetry identity key {path}: {source}")]
+    WriteIdentityKey {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("telemetry identity key {path} has invalid length {length}; expected 32 bytes")]
+    InvalidIdentityKey { path: PathBuf, length: usize },
     #[error("sqlite telemetry error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("failed to serialize telemetry JSON: {0}")]
@@ -86,6 +108,7 @@ pub enum TelemetryError {
 #[derive(Clone, Debug)]
 pub struct TelemetryStore {
     path: PathBuf,
+    identity_key: [u8; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +133,8 @@ pub struct TelemetryRunFinish {
     /// Graph availability observed for this run: `available` / `locked` /
     /// `missing` / `corrupt` / `not_applicable`. `None` means unrecorded.
     pub graph_availability: Option<String>,
+    /// Bounded WARN/ERROR events captured during the command.
+    pub events: Vec<TelemetryErrorEvent>,
     pub error: Option<TelemetryErrorEvent>,
 }
 
@@ -138,9 +163,12 @@ pub struct TelemetryRunRecord {
     pub result_count: Option<i64>,
     pub graph_availability: Option<String>,
     pub build_provenance: Option<String>,
+    pub binary_path: Option<String>,
+    pub build_sha: Option<String>,
     pub repo_count: Option<i64>,
     pub files_parsed: Option<i64>,
     pub nodes_created: Option<i64>,
+    pub error_categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +190,8 @@ impl TelemetryStore {
                 source,
             })?;
         }
-        let store = Self { path };
+        let identity_key = load_or_create_identity_key(state_root.as_ref())?;
+        let store = Self { path, identity_key };
         store.initialize()?;
         Ok(store)
     }
@@ -170,6 +199,12 @@ impl TelemetryStore {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn workspace_hash(&self, path: &Path) -> String {
+        blake3::keyed_hash(&self.identity_key, path.as_os_str().as_encoded_bytes())
+            .to_hex()
+            .to_string()
     }
 
     pub fn begin_run(
@@ -183,19 +218,30 @@ impl TelemetryStore {
         let connection = self.connection()?;
         let run_id = generate_run_id();
         let schema_versions = serde_json::to_string(schema_versions)?;
+        let workspace_hash = self.workspace_hash(workspace_path);
+        let binary_path = std::env::current_exe()
+            .ok()
+            .map(|path| path.display().to_string());
+        let build_sha = option_env!("GATHER_STEP_BUILD_SHA")
+            .or(option_env!("GITHUB_SHA"))
+            .map(ToOwned::to_owned);
+        finalize_stale_running(&connection, now_ms(), Some(workspace_hash.clone()))?;
+        prune_old_rows(&connection, &workspace_hash)?;
         connection.execute(
             "INSERT INTO run_log (
                 run_id, started_at_ms, command, workspace_hash, cli_version,
-                build_provenance, schema_versions, exit_status, process_id,
-                process_start_token, heartbeat_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9, ?10)",
+                build_provenance, binary_path, build_sha, schema_versions,
+                exit_status, process_id, process_start_token, heartbeat_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?12)",
             params![
                 &run_id,
                 now_ms(),
                 command,
-                workspace_hash(workspace_path),
+                workspace_hash,
                 cli_version,
                 build_provenance,
+                binary_path,
+                build_sha,
                 schema_versions,
                 i64::from(process::id()),
                 process_start_token(process::id()),
@@ -252,8 +298,11 @@ impl TelemetryStore {
                 &run.run_id,
             ],
         )?;
+        for event in &finish.events {
+            self.record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
+        }
         if let Some(event) = &finish.error {
-            Self::record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
+            self.record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
         }
         transaction.commit()?;
         Ok(())
@@ -283,7 +332,7 @@ impl TelemetryStore {
             message: message.to_owned(),
             context_json: None,
         };
-        Self::record_error_with_connection(&transaction, &run.run_id, &event, ended_at)?;
+        self.record_error_with_connection(&transaction, &run.run_id, &event, ended_at)?;
         transaction.commit()?;
         Ok(())
     }
@@ -303,16 +352,22 @@ impl TelemetryStore {
         workspace_path: &Path,
         limit: usize,
         since_ms: Option<i64>,
+        before_ms: Option<i64>,
         errors_only: bool,
         command: Option<&str>,
+        status: Option<&str>,
+        category: Option<&str>,
         exclude_run_id: Option<&str>,
     ) -> Result<Vec<TelemetryRunRecord>, TelemetryError> {
         self.list_runs_inner(
-            Some(workspace_hash(workspace_path)),
+            Some(self.workspace_hash(workspace_path)),
             limit,
             since_ms,
+            before_ms,
             errors_only,
             command,
+            status,
+            category,
             exclude_run_id,
         )
     }
@@ -321,11 +376,24 @@ impl TelemetryStore {
         &self,
         limit: usize,
         since_ms: Option<i64>,
+        before_ms: Option<i64>,
         errors_only: bool,
         command: Option<&str>,
+        status: Option<&str>,
+        category: Option<&str>,
         exclude_run_id: Option<&str>,
     ) -> Result<Vec<TelemetryRunRecord>, TelemetryError> {
-        self.list_runs_inner(None, limit, since_ms, errors_only, command, exclude_run_id)
+        self.list_runs_inner(
+            None,
+            limit,
+            since_ms,
+            before_ms,
+            errors_only,
+            command,
+            status,
+            category,
+            exclude_run_id,
+        )
     }
 
     fn list_runs_inner(
@@ -333,8 +401,11 @@ impl TelemetryStore {
         workspace_hash_filter: Option<String>,
         limit: usize,
         since_ms: Option<i64>,
+        before_ms: Option<i64>,
         errors_only: bool,
         command: Option<&str>,
+        status: Option<&str>,
+        category: Option<&str>,
         exclude_run_id: Option<&str>,
     ) -> Result<Vec<TelemetryRunRecord>, TelemetryError> {
         let connection = self.connection()?;
@@ -342,7 +413,9 @@ impl TelemetryStore {
             "SELECT run_id, workspace_hash, started_at_ms, ended_at_ms, command, exit_status,
                     duration_ms, peak_rss_bytes, warn_count, error_count, recovery_event,
                     cli_version, result_count, graph_availability, build_provenance,
-                    repo_count, files_parsed, nodes_created
+                    binary_path, build_sha, repo_count, files_parsed, nodes_created,
+                    (SELECT group_concat(category, char(31))
+                     FROM run_errors WHERE run_errors.run_id = run_log.run_id)
              FROM run_log",
         );
         let mut clauses = Vec::new();
@@ -355,14 +428,28 @@ impl TelemetryStore {
             clauses.push("started_at_ms >= ?");
             values.push(since_ms.unwrap_or_default().into());
         }
+        if before_ms.is_some() {
+            clauses.push("started_at_ms < ?");
+            values.push(before_ms.unwrap_or_default().into());
+        }
         if errors_only {
             clauses.push(
-                "(exit_status NOT IN ('success', 'review_threshold_exceeded') OR error_count > 0)",
+                "(exit_status NOT IN ('success', 'already_running', 'review_threshold_exceeded') OR error_count > 0)",
             );
         }
         if let Some(command) = command {
             clauses.push("command = ?");
             values.push(command.to_owned().into());
+        }
+        if let Some(status) = status {
+            clauses.push("exit_status = ?");
+            values.push(status.to_owned().into());
+        }
+        if let Some(category) = category {
+            clauses.push(
+                "EXISTS (SELECT 1 FROM run_errors WHERE run_errors.run_id = run_log.run_id AND run_errors.category = ?)",
+            );
+            values.push(category.to_owned().into());
         }
         if let Some(run_id) = exclude_run_id {
             clauses.push("run_id != ?");
@@ -390,7 +477,7 @@ impl TelemetryStore {
         let connection = self.connection()?;
         let deleted = connection.execute(
             "DELETE FROM run_log WHERE workspace_hash = ?1 AND started_at_ms < ?2",
-            params![workspace_hash(workspace_path), cutoff_ms],
+            params![self.workspace_hash(workspace_path), cutoff_ms],
         )?;
         Ok(deleted)
     }
@@ -424,7 +511,7 @@ impl TelemetryStore {
             sql.push_str(" ORDER BY errors.occurred_at_ms DESC LIMIT ?2");
         }
         let mut statement = connection.prepare(&sql)?;
-        let hash = workspace_hash(workspace_path);
+        let hash = self.workspace_hash(workspace_path);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let map = |row: &rusqlite::Row<'_>| {
             Ok(TelemetryEventRecord {
@@ -459,18 +546,20 @@ impl TelemetryStore {
         connection.execute_batch(SCHEMA)?;
         migrate_schema(&connection, stored_version)?;
         connection.pragma_update(None, "user_version", TELEMETRY_SCHEMA_VERSION)?;
-        finalize_stale_running(&connection, now_ms(), None)?;
-        prune_old_rows(&connection)?;
         Ok(())
     }
 
     /// Finalize every `running` row older than [`STALE_RUNNING_THRESHOLD_MS`]
-    /// as `abandoned`, returning how many were rewritten. Runs automatically on
-    /// [`TelemetryStore::open`]; exposed for an explicit `gather-step log
-    /// --repair`.
+    /// as `abandoned`, returning how many were rewritten. The current workspace
+    /// is repaired automatically when a new run begins; this method powers the
+    /// explicit `gather-step log --repair` path.
     pub fn repair_stale_running(&self, workspace_path: &Path) -> Result<usize, TelemetryError> {
         let connection = self.connection()?;
-        finalize_stale_running(&connection, now_ms(), Some(workspace_hash(workspace_path)))
+        finalize_stale_running(
+            &connection,
+            now_ms(),
+            Some(self.workspace_hash(workspace_path)),
+        )
     }
 
     pub fn repair_stale_running_all_workspaces(&self) -> Result<usize, TelemetryError> {
@@ -486,6 +575,7 @@ impl TelemetryStore {
     }
 
     fn record_error_with_connection(
+        &self,
         connection: &Connection,
         run_id: &str,
         event: &TelemetryErrorEvent,
@@ -509,7 +599,9 @@ impl TelemetryStore {
                 occurred_at_ms,
                 event.level.as_str(),
                 event.category.as_str(),
-                hash_text(&event.message),
+                blake3::keyed_hash(&self.identity_key, event.message.as_bytes())
+                    .to_hex()
+                    .to_string(),
                 redact_message_excerpt(&event.message),
                 context_json,
             ],
@@ -523,6 +615,7 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
     let warn_count: i64 = row.get(8)?;
     let error_count: i64 = row.get(9)?;
     let recovery_event: i64 = row.get(10)?;
+    let raw_categories: Option<String> = row.get(20)?;
     Ok(TelemetryRunRecord {
         run_id: row.get(0)?,
         workspace_hash: row.get(1)?,
@@ -539,9 +632,15 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
         result_count: row.get(12)?,
         graph_availability: row.get(13)?,
         build_provenance: row.get(14)?,
-        repo_count: row.get(15)?,
-        files_parsed: row.get(16)?,
-        nodes_created: row.get(17)?,
+        binary_path: row.get(15)?,
+        build_sha: row.get(16)?,
+        repo_count: row.get(17)?,
+        files_parsed: row.get(18)?,
+        nodes_created: row.get(19)?,
+        error_categories: raw_categories
+            .as_deref()
+            .map(|categories| categories.split('\u{1f}').map(ToOwned::to_owned).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -562,6 +661,8 @@ fn migrate_schema(connection: &Connection, stored_version: i64) -> Result<(), Te
         add_column_if_missing(connection, "run_log", "process_id", "INTEGER")?;
         add_column_if_missing(connection, "run_log", "process_start_token", "TEXT")?;
         add_column_if_missing(connection, "run_log", "heartbeat_at_ms", "INTEGER")?;
+        add_column_if_missing(connection, "run_log", "binary_path", "TEXT")?;
+        add_column_if_missing(connection, "run_log", "build_sha", "TEXT")?;
         add_column_if_missing(connection, "run_errors", "message_excerpt", "TEXT")?;
     }
     Ok(())
@@ -642,24 +743,22 @@ fn finalize_stale_running(
     Ok(updated)
 }
 
-fn prune_old_rows(connection: &Connection) -> Result<(), TelemetryError> {
+fn prune_old_rows(connection: &Connection, workspace_hash: &str) -> Result<(), TelemetryError> {
     let cutoff_ms = now_ms().saturating_sub(RETENTION_DAYS * 24 * 60 * 60 * 1000);
     connection.execute(
-        "DELETE FROM run_log WHERE started_at_ms < ?1",
-        params![cutoff_ms],
+        "DELETE FROM run_log WHERE workspace_hash = ?1 AND started_at_ms < ?2",
+        params![workspace_hash, cutoff_ms],
     )?;
     connection.execute(
         "DELETE FROM run_log
          WHERE run_id IN (
-             SELECT run_id FROM (
-                 SELECT run_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY workspace_hash ORDER BY started_at_ms DESC
-                        ) AS workspace_row
-                 FROM run_log
-             ) WHERE workspace_row > ?1
+             SELECT run_id
+             FROM run_log
+             WHERE workspace_hash = ?1
+             ORDER BY started_at_ms DESC
+             LIMIT -1 OFFSET ?2
          )",
-        params![MAX_RUN_ROWS],
+        params![workspace_hash, MAX_RUN_ROWS],
     )?;
     Ok(())
 }
@@ -697,23 +796,70 @@ fn hash_text(value: &str) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
 }
 
-#[must_use]
-pub fn workspace_hash(path: &Path) -> String {
-    hash_text(&path.display().to_string())
+fn load_or_create_identity_key(state_root: &Path) -> Result<[u8; 32], TelemetryError> {
+    let path = state_root.join(TELEMETRY_IDENTITY_KEY_NAME);
+    match fs::read(&path) {
+        Ok(bytes) => return identity_key_from_bytes(&path, bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(TelemetryError::ReadIdentityKey { path, source });
+        }
+    }
+
+    use rand::RngExt as _;
+    let generated = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .collect::<Vec<u8>>();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    match options.open(&path) {
+        Ok(mut file) => {
+            file.write_all(&generated)
+                .and_then(|()| file.sync_data())
+                .map_err(|source| TelemetryError::WriteIdentityKey {
+                    path: path.clone(),
+                    source,
+                })?;
+            identity_key_from_bytes(&path, generated)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let bytes = fs::read(&path).map_err(|source| TelemetryError::ReadIdentityKey {
+                path: path.clone(),
+                source,
+            })?;
+            identity_key_from_bytes(&path, bytes)
+        }
+        Err(source) => Err(TelemetryError::WriteIdentityKey { path, source }),
+    }
+}
+
+fn identity_key_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<[u8; 32], TelemetryError> {
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| TelemetryError::InvalidIdentityKey {
+            path: path.to_path_buf(),
+            length: bytes.len(),
+        })
 }
 
 fn redact_message_excerpt(message: &str) -> String {
-    let redacted = message
-        .split_whitespace()
-        .map(|token| {
-            if token.starts_with('/') || token.get(1..3) == Some(":\\") {
-                "<path>"
-            } else {
-                token
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+    static UNIX_PATH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?P<prefix>^|[=:"'(\[])\/(?P<path>[^\s,;)"']+)"#)
+            .expect("valid Unix path redaction regex")
+    });
+    static WINDOWS_PATH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?P<prefix>^|[=:"'(\[])[A-Za-z]:\\(?P<path>[^\s,;)"']+)"#)
+            .expect("valid Windows path redaction regex")
+    });
+    let redacted = UNIX_PATH.replace_all(message, "${prefix}<path>");
+    let redacted = WINDOWS_PATH.replace_all(&redacted, "${prefix}<path>");
     redacted.chars().take(240).collect()
 }
 
@@ -742,7 +888,20 @@ fn process_start_token(pid: u32) -> Option<String> {
         let after_name = stat.rsplit_once(')')?.1;
         return after_name.split_whitespace().nth(19).map(ToOwned::to_owned);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let output = process::Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let token = String::from_utf8(output.stdout).ok()?;
+        let token = token.trim();
+        return (!token.is_empty()).then(|| token.to_owned());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
@@ -827,7 +986,7 @@ mod tests {
         store.finish_run(&run, &finish).expect("finish");
 
         let runs = store
-            .list_runs_all_workspaces(10, None, false, None, None)
+            .list_runs_all_workspaces(10, None, None, false, None, None, None, None)
             .expect("list");
         let record = runs
             .iter()
@@ -836,6 +995,7 @@ mod tests {
         assert_eq!(record.result_count, Some(42));
         assert_eq!(record.graph_availability.as_deref(), Some("available"));
         assert_eq!(record.build_provenance.as_deref(), Some("release"));
+        assert!(record.binary_path.is_some());
     }
 
     #[test]
@@ -880,7 +1040,7 @@ mod tests {
 
         let store = TelemetryStore::open(&root).expect("open migrates");
         let runs = store
-            .list_runs_all_workspaces(10, None, false, None, None)
+            .list_runs_all_workspaces(10, None, None, false, None, None, None, None)
             .expect("list");
         let record = runs
             .iter()
@@ -890,6 +1050,8 @@ mod tests {
         assert_eq!(record.result_count, None);
         assert_eq!(record.graph_availability, None);
         assert_eq!(record.build_provenance, None);
+        assert_eq!(record.binary_path, None);
+        assert_eq!(record.build_sha, None);
 
         // Reopening runs the idempotent migration again without error.
         drop(store);
@@ -897,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_running_rows_are_finalized_but_fresh_ones_are_kept() {
+    fn explicit_repair_finalizes_stale_rows_but_keeps_live_ones() {
         let root = temp_root("stale");
         let db_path = root.join(TELEMETRY_DB_NAME);
         {
@@ -938,9 +1100,13 @@ mod tests {
                 .expect("seed live process");
         }
 
-        let store = TelemetryStore::open(&root).expect("reopen sweeps");
+        let store = TelemetryStore::open(&root).expect("reopen");
+        assert_eq!(
+            store.repair_stale_running_all_workspaces().expect("repair"),
+            1
+        );
         let runs = store
-            .list_runs_all_workspaces(10, None, false, None, None)
+            .list_runs_all_workspaces(10, None, None, false, None, None, None, None)
             .expect("list");
         let status = |id: &str| {
             runs.iter()
@@ -951,7 +1117,7 @@ mod tests {
         assert_eq!(status("fresh").as_deref(), Some("running"));
         assert_eq!(status("live").as_deref(), Some("running"));
 
-        // Already finalized: an explicit repair now rewrites nothing.
+        // Already finalized: another repair rewrites nothing.
         assert_eq!(
             store.repair_stale_running_all_workspaces().expect("repair"),
             0
@@ -984,10 +1150,30 @@ mod tests {
         }
 
         let alpha = store
-            .list_runs(Path::new("/workspace/alpha"), 10, None, false, None, None)
+            .list_runs(
+                Path::new("/workspace/alpha"),
+                10,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
             .expect("alpha rows");
         let beta = store
-            .list_runs(Path::new("/workspace/beta"), 10, None, false, None, None)
+            .list_runs(
+                Path::new("/workspace/beta"),
+                10,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
             .expect("beta rows");
         assert_eq!(alpha.len(), 1);
         assert_eq!(beta.len(), 1);
@@ -998,17 +1184,56 @@ mod tests {
             .expect("clear alpha");
         assert!(
             store
-                .list_runs(Path::new("/workspace/alpha"), 10, None, false, None, None,)
+                .list_runs(
+                    Path::new("/workspace/alpha"),
+                    10,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .expect("alpha rows")
                 .is_empty()
         );
         assert_eq!(
             store
-                .list_runs(Path::new("/workspace/beta"), 10, None, false, None, None,)
+                .list_runs(
+                    Path::new("/workspace/beta"),
+                    10,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .expect("beta rows")
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn workspace_identity_is_install_keyed_and_stable() {
+        let first_root = temp_root("identity-first");
+        let second_root = temp_root("identity-second");
+        let workspace = Path::new("/workspace/known-path");
+
+        let first = TelemetryStore::open(&first_root).expect("open first install");
+        let first_hash = first.workspace_hash(workspace);
+        assert_eq!(first_hash, first.workspace_hash(workspace));
+        drop(first);
+
+        let reopened = TelemetryStore::open(&first_root).expect("reopen first install");
+        assert_eq!(first_hash, reopened.workspace_hash(workspace));
+
+        let second = TelemetryStore::open(&second_root).expect("open second install");
+        assert_ne!(first_hash, second.workspace_hash(workspace));
+        assert_ne!(first_hash, hash_text(&workspace.display().to_string()));
     }
 
     #[test]

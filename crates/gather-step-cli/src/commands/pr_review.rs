@@ -3168,6 +3168,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
     // Execute or preview deletions.
     let mut entries: Vec<CleanArtifactEntry> = Vec::with_capacity(selected.len());
     let mut had_error = false;
+    let mut failure_count = 0_usize;
 
     for artifact in &selected {
         let was_dry = args.dry_run;
@@ -3186,8 +3187,9 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
                 });
             }
             Err(e) => {
-                tracing::error!("Failed to process `{}`: {e:#}.", artifact.root.display());
+                tracing::warn!("Failed to process `{}`: {e:#}.", artifact.root.display());
                 had_error = true;
+                failure_count += 1;
             }
         }
     }
@@ -3215,11 +3217,12 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
             if !args.dry_run
                 && let Err(e) = std::fs::remove_dir_all(&stale.root)
             {
-                tracing::error!(
+                tracing::warn!(
                     "Failed to remove stale review artifact `{}`: {e:#}.",
                     stale.root.display()
                 );
                 had_error = true;
+                failure_count += 1;
                 continue;
             }
             stale_entries.push(CleanStaleArtifactEntry {
@@ -3261,7 +3264,7 @@ fn run_clean(app: &AppContext, top: &PrReviewArgs, args: &CleanArgs) -> Result<(
     }
 
     if had_error {
-        bail!("One or more artifacts could not be cleaned. See the errors above.");
+        bail!("{failure_count} artifact(s) could not be cleaned. See the warnings above.");
     }
 
     Ok(())

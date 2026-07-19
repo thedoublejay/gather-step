@@ -319,6 +319,7 @@ pub enum McpSubcommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliOutcome {
     Success,
+    AlreadyRunning,
     ReviewThresholdExceeded,
 }
 
@@ -327,6 +328,7 @@ impl CliOutcome {
     pub fn exit_code(self) -> ExitCode {
         match self {
             Self::Success => ExitCode::from(0),
+            Self::AlreadyRunning => ExitCode::from(0),
             Self::ReviewThresholdExceeded => ExitCode::from(2),
         }
     }
@@ -342,6 +344,13 @@ impl CliOutcome {
 
 fn success(result: Result<()>) -> Result<CliOutcome> {
     result.map(|()| CliOutcome::Success)
+}
+
+fn serve_outcome(result: Result<serve::ServeOutcome>) -> Result<CliOutcome> {
+    result.map(|outcome| match outcome {
+        serve::ServeOutcome::Started => CliOutcome::Success,
+        serve::ServeOutcome::AlreadyRunning => CliOutcome::AlreadyRunning,
+    })
 }
 
 /// Map a command result to `Success` and, on success, best-effort auto-register
@@ -362,9 +371,11 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     let command_name = command_telemetry_name(cli.command.as_ref());
     app::reset_telemetry_run_state();
     let workspace_path = app.workspace_path.clone();
-    let telemetry = (!matches!(cli.command, Some(Command::Log(_))))
-        .then(open_telemetry_store)
-        .flatten();
+    let telemetry = if matches!(cli.command, Some(Command::Log(_))) {
+        None
+    } else {
+        open_telemetry_store()?
+    };
     let run = telemetry.as_ref().and_then(|store| {
         match store.begin_run(
             command_name,
@@ -414,7 +425,7 @@ async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Reindex(args)) => {
             success_with_mcp_setup(&app, reindex::run(&app, args).await)
         }
-        Some(Command::Serve(args)) => success(serve::run(&app, args).await),
+        Some(Command::Serve(args)) => serve_outcome(serve::run(&app, args).await),
         Some(Command::Watch(args)) => success(watch::run(&app, args).await),
         Some(Command::Tui(args)) => success(tui::run(&app, args)),
         Some(Command::Search(args)) => success(search::run(&app, args)),
@@ -438,25 +449,28 @@ async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
             CliOutcome::from_pr_review_code(pr_review::run(&app, args)?)
         }
         Some(Command::Mcp(command)) => match command.command {
-            McpSubcommand::Serve(args) => success(serve::run(&app, args).await),
+            McpSubcommand::Serve(args) => serve_outcome(serve::run(&app, args).await),
         },
         None => success(no_args::run(&app).await),
     }
 }
 
-fn open_telemetry_store() -> Option<TelemetryStore> {
+fn open_telemetry_store() -> Result<Option<TelemetryStore>> {
     if !telemetry_enabled() {
-        return None;
+        return Ok(None);
     }
     let Some(telemetry_root) = telemetry_root() else {
         warn!("failed to locate data directory for telemetry store");
-        return None;
+        return Ok(None);
     };
     match TelemetryStore::open(&telemetry_root) {
-        Ok(store) => Some(store),
+        Ok(store) => Ok(Some(store)),
+        Err(error @ gather_step_storage::TelemetryError::UnsupportedSchemaVersion { .. }) => {
+            Err(error.into())
+        }
         Err(error) => {
             warn!(%error, "failed to open telemetry store");
-            None
+            Ok(None)
         }
     }
 }
@@ -476,6 +490,7 @@ fn command_telemetry_name(command: Option<&Command>) -> &'static str {
         Some(Command::SetupMcp(_)) => "setup-mcp",
         Some(Command::Status(_)) => "status",
         Some(Command::StorageReport(_)) => "storage-report",
+        Some(Command::Doctor(args)) if args.config_only => "doctor:config-only",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Log(_)) => "log",
         Some(Command::Generate(_)) => "generate",
@@ -501,9 +516,11 @@ fn command_telemetry_name(command: Option<&Command>) -> &'static str {
 
 fn telemetry_finish_fields(command: &str, result: &Result<CliOutcome>) -> TelemetryRunFinish {
     let (warn_count, traced_error_count) = app::telemetry_counts();
+    let events = app::take_telemetry_events();
     let (repo_count, files_parsed, nodes_created, result_count) = app::telemetry_metrics();
     let (exit_status, error) = match result {
         Ok(CliOutcome::Success) => ("success".to_owned(), None),
+        Ok(CliOutcome::AlreadyRunning) => ("already_running".to_owned(), None),
         Ok(CliOutcome::ReviewThresholdExceeded) => ("review_threshold_exceeded".to_owned(), None),
         Err(error) => {
             let category = telemetry_error_category(error);
@@ -531,6 +548,7 @@ fn telemetry_finish_fields(command: &str, result: &Result<CliOutcome>) -> Teleme
         recovery_event: app::telemetry_recovery_event(),
         graph_availability,
         result_count,
+        events,
         error,
         ..TelemetryRunFinish::default()
     }
@@ -563,7 +581,10 @@ fn graph_availability(command: &str, result: &Result<CliOutcome>) -> Option<&'st
 }
 
 fn command_uses_graph(command: &str) -> bool {
-    !matches!(command, "clean" | "log" | "no-args" | "setup-mcp")
+    !matches!(
+        command,
+        "clean" | "doctor:config-only" | "log" | "no-args" | "setup-mcp"
+    )
 }
 
 /// Whether an error indicates the workspace (or a repo) has no usable index yet.

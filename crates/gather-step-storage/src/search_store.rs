@@ -301,15 +301,21 @@ impl TantivySearchStore {
         workload: Option<SearchWorkload>,
     ) -> Result<Self, SearchStoreError> {
         let path = path.as_ref().to_path_buf();
-        fs::create_dir_all(&path)?;
-        // Caller must have validated path via cli::path_safety before opening.
-        crate::fs_mode::apply_private_dir(&path)?;
+        if workload.is_some() {
+            fs::create_dir_all(&path)?;
+            // Caller must have validated path via cli::path_safety before opening.
+            crate::fs_mode::apply_private_dir(&path)?;
+        }
 
         // Stamp (non-test) or skip (test/RamDirectory) schema version metadata.
         // RamDirectory indexes are always fresh so the version file is not
         // written or read in test builds.
         #[cfg(not(test))]
-        stamp_schema_version_if_missing(&path)?;
+        if workload.is_some() {
+            stamp_schema_version_if_missing(&path)?;
+        } else {
+            validate_schema_version(&path)?;
+        }
 
         let schema = build_schema();
         #[cfg(test)]
@@ -317,7 +323,11 @@ impl TantivySearchStore {
         #[cfg(not(test))]
         let mut index = {
             let directory = MmapDirectory::open(&path)?;
-            Index::open_or_create(directory, schema)?
+            if workload.is_some() {
+                Index::open_or_create(directory, schema)?
+            } else {
+                Index::open(directory)?
+            }
         };
         register_tokenizers(&mut index);
 
@@ -942,6 +952,20 @@ pub(crate) fn stamp_schema_version_if_missing(
             Ok(())
         }
         Err(error) => Err(SearchStoreError::Io(error)),
+    }
+}
+
+#[cfg(not(test))]
+fn validate_schema_version(dir: &std::path::Path) -> Result<(), SearchStoreError> {
+    let version_path = dir.join(SEARCH_VERSION_FILE);
+    let stored_raw = fs::read_to_string(&version_path).map_err(SearchStoreError::Io)?;
+    let stored = stored_raw.trim();
+    match stored.parse::<u32>() {
+        Ok(value) if value == SEARCH_INDEX_VERSION => Ok(()),
+        _ => Err(SearchStoreError::SchemaVersionMismatch {
+            stored: stored.to_owned(),
+            expected: SEARCH_INDEX_VERSION,
+        }),
     }
 }
 

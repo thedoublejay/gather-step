@@ -19,10 +19,16 @@ pub struct LogArgs {
     pub last: Option<usize>,
     #[arg(long, help = "Only show runs since an age such as 12h or 7d")]
     pub since: Option<String>,
+    #[arg(long, help = "Only show runs older than an age such as 12h or 7d")]
+    pub before: Option<String>,
     #[arg(long, help = "Only show runs with errors or non-success status")]
     pub errors_only: bool,
     #[arg(long, help = "Only show runs for this command")]
     pub command: Option<String>,
+    #[arg(long, help = "Only show runs with this exact status")]
+    pub status: Option<String>,
+    #[arg(long, help = "Only show runs containing this error category")]
+    pub category: Option<String>,
     #[arg(
         long,
         help = "Print an aggregate summary (status, graph availability, slowest commands) instead of rows"
@@ -76,6 +82,7 @@ struct LogSummary {
     cleared_rows: usize,
     by_status: BTreeMap<String, usize>,
     by_graph_availability: BTreeMap<String, usize>,
+    by_error_category: BTreeMap<String, usize>,
     abandoned: usize,
     peak_rss_bytes_max: Option<u64>,
     slowest_commands: Vec<CommandDuration>,
@@ -98,6 +105,7 @@ fn summarize(
 ) -> LogSummary {
     let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_graph_availability: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_error_category: BTreeMap<String, usize> = BTreeMap::new();
     let mut max_by_command: BTreeMap<String, (usize, i64)> = BTreeMap::new();
     let mut peak_rss_bytes_max: Option<u64> = None;
 
@@ -108,6 +116,9 @@ fn summarize(
             .clone()
             .unwrap_or_else(|| "unrecorded".to_owned());
         *by_graph_availability.entry(availability).or_default() += 1;
+        for category in &record.error_categories {
+            *by_error_category.entry(category.clone()).or_default() += 1;
+        }
         if record.exit_status != "abandoned"
             && let Some(duration_ms) = record.duration_ms
         {
@@ -147,6 +158,7 @@ fn summarize(
         cleared_rows,
         by_status,
         by_graph_availability,
+        by_error_category,
         abandoned,
         peak_rss_bytes_max,
         slowest_commands,
@@ -199,6 +211,16 @@ fn emit_summary(
         graph_table.add_row(vec![Cell::new(availability), Cell::new(count)]);
     }
     app.output().line(graph_table.to_string());
+
+    if !summary.by_error_category.is_empty() {
+        let mut category_table = Table::new();
+        category_table.load_preset(UTF8_BORDERS_ONLY);
+        category_table.set_header(vec!["Error category", "Events"]);
+        for (category, count) in &summary.by_error_category {
+            category_table.add_row(vec![Cell::new(category), Cell::new(count)]);
+        }
+        app.output().line(category_table.to_string());
+    }
 
     let mut command_table = Table::new();
     command_table.load_preset(UTF8_BORDERS_ONLY);
@@ -275,6 +297,12 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
         .map(cutoff_from_age)
         .transpose()
         .context("parsing --since")?;
+    let before_ms = args
+        .before
+        .as_deref()
+        .map(cutoff_from_age)
+        .transpose()
+        .context("parsing --before")?;
     let limit = args.last.unwrap_or_else(|| {
         if args.summary && args.since.is_some() {
             usize::MAX
@@ -286,8 +314,11 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
         store.list_runs_all_workspaces(
             limit,
             since_ms,
+            before_ms,
             args.errors_only,
             args.command.as_deref(),
+            args.status.as_deref(),
+            args.category.as_deref(),
             None,
         )
     } else {
@@ -295,8 +326,11 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
             &app.workspace_path,
             limit,
             since_ms,
+            before_ms,
             args.errors_only,
             args.command.as_deref(),
+            args.status.as_deref(),
+            args.category.as_deref(),
             None,
         )
     }
@@ -431,9 +465,12 @@ mod tests {
             result_count: None,
             graph_availability: Some(availability.to_owned()),
             build_provenance: Some("release".to_owned()),
+            binary_path: Some("/opt/gather-step".to_owned()),
+            build_sha: Some("fixture-sha".to_owned()),
             repo_count: None,
             files_parsed: None,
             nodes_created: None,
+            error_categories: Vec::new(),
         }
     }
 

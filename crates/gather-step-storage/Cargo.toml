@@ -35,6 +35,8 @@ libc.workspace = true
 rustix.workspace = true
 parking_lot.workspace = true
 smallvec.workspace = true
+rand.workspace = true
+regex.workspace = true
 
 [features]
 ## Exposes test-seam helpers (e.g. crash-injection methods) for integration

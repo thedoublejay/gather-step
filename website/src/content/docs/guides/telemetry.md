@@ -11,24 +11,27 @@ excerpt rather than raw command output.
 
 ## What is recorded
 
-Each command run writes one row to a local `telemetry.db` (under your platform's
-user data directory). A row captures:
+Each instrumented command run writes one row to a local `telemetry.db` (under
+your platform's user data directory). The `log` reader itself is not
+instrumented, so it cannot appear in its own results. A row captures:
 
 - the command name, start time, duration, and exit status;
-- the CLI version and build provenance (which build profile produced the binary);
+- the CLI version, build profile, binary path, and build SHA when supplied by the build;
 - peak resident memory (RSS) on platforms that report it;
 - warning and error counts, and whether a recovery event fired;
 - a command-specific `result_count` (e.g. how many dependencies or hops a query
   returned) when applicable;
 - the **graph availability** observed for the run (see below);
-- for failures: a typed error category, hashed message, and truncated redacted
-  excerpt; `log --events` exposes those bounded diagnostic events;
+- for failures and traced warnings: a typed category, per-install keyed message
+  fingerprint, and truncated redacted excerpt; `log --events` exposes the last
+  bounded diagnostic events;
 - process identity and heartbeat data for long-running `serve` and `watch`
   commands, so repair can check liveness before declaring a run abandoned.
 
-Reads, summaries, retention, and the 10,000-row cap are scoped to the current
-workspace by default. Use `--all-workspaces` only when intentionally inspecting
-or maintaining the installation-wide database.
+Workspace IDs use a private per-install key stored beside the database. Reads,
+summaries, automatic retention, repair, and the 10,000-row cap are scoped to the
+current workspace by default. Use `--all-workspaces` only when intentionally
+inspecting or maintaining the installation-wide database.
 
 ## Graph availability
 
@@ -50,7 +53,9 @@ Show recent runs as rows:
 ```bash
 gather-step log --last 50
 gather-step log --since 7d --errors-only
+gather-step log --before 30d --status error
 gather-step log --command index
+gather-step log --category graph_lock_contention
 gather-step log --events
 gather-step log --events --run <run-id>
 ```
