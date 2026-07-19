@@ -164,10 +164,6 @@ pub fn detect_frameworks(repo_root: &Path) -> FxHashSet<Framework> {
     if is_gateway_proxy(repo_root) {
         frameworks.insert(Framework::GatewayProxy);
     }
-    // FrontendHooks detection is always active for any repo: cross-package hook
-    // imports can appear in any TypeScript/JavaScript codebase regardless of
-    // which framework it uses.
-    frameworks.insert(Framework::FrontendHooks);
     frameworks
 }
 
@@ -896,9 +892,8 @@ mod tests {
         );
         let detected = detect_frameworks(&dir.path);
         assert!(detected.contains(&Framework::NestJs));
-        assert!(detected.contains(&Framework::FrontendHooks));
-        // FrontendHooks is always-on, so total is NestJs + FrontendHooks.
-        assert_eq!(detected.len(), 2);
+        assert!(!detected.contains(&Framework::FrontendHooks));
+        assert_eq!(detected.len(), 1);
     }
 
     #[test]
@@ -921,16 +916,16 @@ mod tests {
     }
 
     #[test]
-    fn detect_frameworks_returns_only_frontend_hooks_for_plain_repo() {
-        // A plain repo with no recognised framework still gets FrontendHooks.
+    fn detect_frameworks_does_not_report_always_active_packs_as_frameworks() {
+        // Always-active extractor packs are applied separately from detected
+        // framework labels.
         let dir = TempDir::new("detect-plain");
         dir.write(
             "package.json",
             r#"{ "dependencies": { "express": "^4.0.0" } }"#,
         );
         let detected = detect_frameworks(&dir.path);
-        assert!(detected.contains(&Framework::FrontendHooks));
-        assert_eq!(detected.len(), 1);
+        assert!(detected.is_empty());
     }
 
     #[test]
@@ -948,11 +943,9 @@ mod tests {
         .expect("manifest symlink");
 
         assert!(!is_nestjs(&dir.path));
-        // FrontendHooks is always-on, so the set is not empty even when NestJS
-        // detection correctly rejects the symlinked manifest.
         let detected = detect_frameworks(&dir.path);
         assert!(!detected.contains(&Framework::NestJs));
-        assert!(detected.contains(&Framework::FrontendHooks));
+        assert!(detected.is_empty());
     }
 
     #[test]
@@ -1058,7 +1051,7 @@ dependencies = [
 
         let detected = detect_frameworks(&pyproject_dir.path);
         assert!(detected.contains(&Framework::FastApi));
-        assert!(detected.contains(&Framework::FrontendHooks));
+        assert!(!detected.contains(&Framework::FrontendHooks));
     }
 
     #[test]
@@ -1204,9 +1197,8 @@ dependencies = [
         let detected = detect_frameworks(&dir.path);
         assert!(detected.contains(&Framework::NestJs));
         assert!(detected.contains(&Framework::Mongoose));
-        assert!(detected.contains(&Framework::FrontendHooks));
-        // NestJs + Mongoose + FrontendHooks (always-on).
-        assert_eq!(detected.len(), 3);
+        assert!(!detected.contains(&Framework::FrontendHooks));
+        assert_eq!(detected.len(), 2);
     }
 
     // --- is_ai_typescript prefix-match tests ---

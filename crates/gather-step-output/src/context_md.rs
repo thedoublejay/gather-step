@@ -313,7 +313,7 @@ fn planning_guidance_block() -> &'static str {
      - **Before assuming a contract is safe to change**, call `breaking_change_candidates` and `get_shared_type_usage` for the symbol.\n\
      - **Before reviewing a PR**, run `pr_review` (CLI: `gather-step pr-review`) to get a graph-aware delta report instead of skimming the diff.\n\
      - **For deployment questions**, reach for `where_deployed`, `service_env`, and `shared_infra`.\n\
-     - **Weight results by `confidence_band`** — trace and cross-repo edges carry `extracted` (directly observed, trust it), `inferred` (strong heuristic), or `hint` (weak; verify from source before acting).\n\
+     - **Weight results by `confidence_band`** — trace and cross-repo edges carry `extracted` (source-observed; verify source scope and semantic support), `inferred` (strong heuristic), or `hint` (weak; verify from source before acting).\n\
      - **Heed `index_stale`** — when a response's metadata lists repos under `index_stale`, their index lags git HEAD; re-run `gather-step index` and re-query before trusting an empty or negative result.\n\n"
 }
 

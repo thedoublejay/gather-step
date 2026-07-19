@@ -710,7 +710,7 @@ mod tests {
         assert!(tool_names.contains(&"get_dead_code"));
         assert!(tool_names.contains(&"get_conventions"));
         assert!(tool_names.contains(&"get_overview"));
-        assert!(tool_names.contains(&"get_context_pack"));
+        assert!(!tool_names.contains(&"get_context_pack"));
         assert!(tool_names.contains(&"projection_impact"));
         assert!(tool_names.contains(&"plan_change"));
         assert!(
@@ -722,7 +722,7 @@ mod tests {
             "debug_event alias must be removed"
         );
         assert!(tool_names.contains(&"fix_surface"));
-        assert!(tool_names.contains(&"get_change_impact_pack"));
+        assert!(!tool_names.contains(&"get_change_impact_pack"));
 
         let schema_tool = tools
             .tools

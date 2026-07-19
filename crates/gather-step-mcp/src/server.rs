@@ -785,23 +785,6 @@ impl GatherStepMcpServer {
     }
 
     #[tool(
-        name = "get_context_pack",
-        description = "Return a bounded planning, debug, fix, review, or change-impact pack for a target symbol.",
-        annotations(read_only_hint = true)
-    )]
-    pub async fn get_context_pack_tool(
-        &self,
-        Parameters(request): Parameters<ContextPackRequest>,
-    ) -> Result<Json<ContextPackResponse>, String> {
-        let args = serde_json::to_value(&request).unwrap_or_default();
-        let ctx = Arc::clone(&self.ctx);
-        self.traced_call("get_context_pack", &args, move || {
-            pack_with_freshness(&ctx, run_context_pack(&ctx, request))
-        })
-        .await
-    }
-
-    #[tool(
         name = "planning_pack",
         description = "Return a bounded planning pack for a target symbol.",
         annotations(read_only_hint = true)
@@ -917,23 +900,6 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("change_impact_pack", &args, move || {
-            pack_with_freshness(&ctx, run_change_impact_pack(&ctx, request))
-        })
-        .await
-    }
-
-    #[tool(
-        name = "get_change_impact_pack",
-        description = "Return a bounded change-impact pack for a target symbol.",
-        annotations(read_only_hint = true)
-    )]
-    pub async fn get_change_impact_pack_tool(
-        &self,
-        Parameters(request): Parameters<ModePackRequest>,
-    ) -> Result<Json<ContextPackResponse>, String> {
-        let args = serde_json::to_value(&request).unwrap_or_default();
-        let ctx = Arc::clone(&self.ctx);
-        self.traced_call("get_change_impact_pack", &args, move || {
             pack_with_freshness(&ctx, run_change_impact_pack(&ctx, request))
         })
         .await
