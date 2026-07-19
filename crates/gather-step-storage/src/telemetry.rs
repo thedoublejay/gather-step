@@ -1207,17 +1207,23 @@ enum ProcessIdentity {
     Unknown,
 }
 
+enum ProcessLiveness {
+    Alive,
+    Dead,
+    Unknown,
+}
+
 fn process_identity(pid: u32, expected_start_token: Option<&str>) -> ProcessIdentity {
     match process_liveness(pid) {
-        Some(false) => return ProcessIdentity::Dead,
-        None => {
+        ProcessLiveness::Dead => return ProcessIdentity::Dead,
+        ProcessLiveness::Unknown => {
             tracing::warn!(
                 pid,
                 "process liveness is unsupported on this platform; stale-run identity remains unknown"
             );
             return ProcessIdentity::Unknown;
         }
-        Some(true) => {}
+        ProcessLiveness::Alive => {}
     }
     let Some(expected_start_token) = expected_start_token else {
         tracing::warn!(
@@ -1259,22 +1265,29 @@ fn alive_process_identity(expected: Option<&str>, actual: Option<&str>) -> Proce
 }
 
 #[cfg(target_os = "linux")]
-fn process_liveness(pid: u32) -> Option<bool> {
-    Some(Path::new("/proc").join(pid.to_string()).exists())
+fn process_liveness(pid: u32) -> ProcessLiveness {
+    if Path::new("/proc").join(pid.to_string()).exists() {
+        ProcessLiveness::Alive
+    } else {
+        ProcessLiveness::Dead
+    }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn process_liveness(pid: u32) -> Option<bool> {
-    process::Command::new("kill")
+fn process_liveness(pid: u32) -> ProcessLiveness {
+    match process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .status()
-        .ok()
-        .map(|status| status.success())
+    {
+        Ok(status) if status.success() => ProcessLiveness::Alive,
+        Ok(_) => ProcessLiveness::Dead,
+        Err(_) => ProcessLiveness::Unknown,
+    }
 }
 
 #[cfg(not(unix))]
-fn process_liveness(_pid: u32) -> Option<bool> {
-    None
+fn process_liveness(_pid: u32) -> ProcessLiveness {
+    ProcessLiveness::Unknown
 }
 
 fn u64_to_i64(value: u64) -> Option<i64> {
