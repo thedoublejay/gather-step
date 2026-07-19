@@ -26,13 +26,15 @@ const RETENTION_DAYS: i64 = 90;
 /// without writing its finish row (crash, `kill -9`, power loss) and is
 /// finalized as `abandoned` so the dashboard stops counting it as in-flight.
 const STALE_RUNNING_THRESHOLD_MS: i64 = 6 * 60 * 60 * 1000;
-const BUSY_RETRY_ATTEMPTS: u32 = 8;
-const BUSY_RETRY_BASE_DELAY: Duration = Duration::from_millis(25);
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+const BUSY_RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
+const BUSY_RETRY_MAX_DELAY: Duration = Duration::from_millis(50);
+const BUSY_RETRY_JITTER_MS: u32 = 20;
 /// Total wall-clock budget for busy retries: telemetry is best-effort, so a
 /// contended database fails open instead of stalling the user's command.
-/// 2s rides out a full concurrent-CLI burst (500ms loses runs under the
-/// 32-process concurrency test) while bounding the worst-case stall at
-/// roughly budget + one in-flight `busy_timeout`.
+/// Short `SQLite` waits plus jittered retries let a concurrent-CLI burst make
+/// progress within this budget while bounding the worst-case stall at roughly
+/// budget + one in-flight `busy_timeout`.
 const BUSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
 const IDENTITY_KEY_READ_RETRIES: u32 = 20;
 const IDENTITY_KEY_READ_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -703,7 +705,7 @@ impl TelemetryStore {
 
     fn connection(&self) -> Result<Connection, TelemetryError> {
         let connection = Connection::open(&self.path)?;
-        connection.busy_timeout(Duration::from_millis(500))?;
+        connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(connection)
     }
@@ -722,15 +724,21 @@ impl TelemetryStore {
         loop {
             match operation() {
                 Ok(value) => return Ok(value),
-                Err(error) if is_sqlite_busy(&error) && attempt < BUSY_RETRY_ATTEMPTS => {
+                Err(error) if is_sqlite_busy(&error) => {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         return Err(error);
                     }
                     self.busy_retries.fetch_add(1, Ordering::Relaxed);
-                    let delay = BUSY_RETRY_BASE_DELAY * 2_u32.saturating_pow(attempt);
+                    let exponential = BUSY_RETRY_BASE_DELAY * 2_u32.saturating_pow(attempt.min(4));
+                    let jitter_ms = process::id()
+                        .wrapping_mul(31)
+                        .wrapping_add(attempt.wrapping_mul(17))
+                        % (BUSY_RETRY_JITTER_MS + 1);
+                    let delay = exponential.min(BUSY_RETRY_MAX_DELAY)
+                        + Duration::from_millis(u64::from(jitter_ms));
                     std::thread::sleep(delay.min(remaining));
-                    attempt += 1;
+                    attempt = attempt.saturating_add(1);
                 }
                 Err(error) => return Err(error),
             }
