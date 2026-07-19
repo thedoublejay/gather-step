@@ -52,7 +52,11 @@ jobs:
       - name: Unused dependencies
         run: cargo shear
       - name: Nextest
-        run: cargo nextest run --all-features
+        # Keep the profiling-only `dhat-heap` feature out of the release gate;
+        # otherwise every integration subprocess writes a DHAT profile.
+        run: >-
+          cargo nextest run --features
+          gather-step-parser/test-support,gather-step-mcp/test-support,gather-step-storage/test-support
 
   build:
     name: Build (${{ matrix.target }})
