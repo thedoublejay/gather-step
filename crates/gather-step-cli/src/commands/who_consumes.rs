@@ -52,7 +52,14 @@ pub(crate) fn execute(
 
     let mut lines = Vec::new();
     if data.consumers.is_empty() {
-        lines.push(format!("No repos consume `{}`.", data.symbol));
+        lines.push(format!(
+            "No indexed production consumer edges were observed for `{}`.",
+            data.symbol
+        ));
+        lines.push(
+            "Coverage: possible_extraction_gap; verify dynamic, external, and unsupported paths."
+                .to_owned(),
+        );
     } else {
         lines.push(format!("Repos consuming `{}`:", data.symbol));
         for consumer in &data.consumers {
@@ -64,10 +71,29 @@ pub(crate) fn execute(
         }
     }
 
+    let edges_contributed = data.consumers.len();
+    let verdict = if edges_contributed == 0 {
+        "possible_extraction_gap"
+    } else {
+        "ok"
+    };
     let payload = json!({
         "event": "who_consumes_completed",
         "symbol": data.symbol,
         "consumers": data.consumers,
+        "coverage": {
+            "repos_considered": repo.into_iter().collect::<Vec<_>>(),
+            "matching_frameworks": [],
+            "extractors_run": ["symbol_consumer_traversal"],
+            "source_scopes": ["production", "unknown"],
+            "edges_contributed": edges_contributed,
+            "verdict": verdict,
+            "limitations": if edges_contributed == 0 {
+                vec!["Dynamic dispatch, external packages, or unsupported framework paths may not be represented."]
+            } else {
+                Vec::<&str>::new()
+            },
+        },
     });
     Ok(RenderedCommand::success(payload, lines))
 }

@@ -72,7 +72,19 @@ struct EventsOutput {
     producers: Vec<TopologyMatchOutput>,
     consumers: Vec<TopologyMatchOutput>,
     blast_radius: Vec<BlastRadiusNodeOutput>,
+    coverage: CoverageOutput,
     truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CoverageOutput {
+    repos_considered: Vec<String>,
+    matching_frameworks: Vec<String>,
+    extractors_run: Vec<String>,
+    source_scopes: Vec<String>,
+    edges_contributed: usize,
+    verdict: &'static str,
+    limitations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +216,33 @@ pub(crate) fn execute_trace(
     }
 
     let trace = trace_event(storage.graph(), selection.target.id, args.limit)?;
+    let producers = trace
+        .producers
+        .into_iter()
+        .map(|item| TopologyMatchOutput {
+            repo: item.repo,
+            file_path: item.file_path,
+            line_number: item.line_number,
+            symbol_name: item.symbol_name,
+            node_kind: item.node_kind.to_string(),
+            edge_kind: item.edge_kind.to_string(),
+            confidence: item.confidence,
+        })
+        .collect::<Vec<_>>();
+    let consumers = trace
+        .consumers
+        .into_iter()
+        .map(|item| TopologyMatchOutput {
+            repo: item.repo,
+            file_path: item.file_path,
+            line_number: item.line_number,
+            symbol_name: item.symbol_name,
+            node_kind: item.node_kind.to_string(),
+            edge_kind: item.edge_kind.to_string(),
+            confidence: item.confidence,
+        })
+        .collect::<Vec<_>>();
+    let coverage = topology_coverage(repo_filter, &producers, &consumers);
     let payload = EventsOutput {
         event: "events_trace_completed",
         target: EventTargetOutput {
@@ -213,33 +252,10 @@ pub(crate) fn execute_trace(
             node_kind: trace.target.kind.to_string(),
         },
         alternates: selection.alternates,
-        producers: trace
-            .producers
-            .into_iter()
-            .map(|item| TopologyMatchOutput {
-                repo: item.repo,
-                file_path: item.file_path,
-                line_number: item.line_number,
-                symbol_name: item.symbol_name,
-                node_kind: item.node_kind.to_string(),
-                edge_kind: item.edge_kind.to_string(),
-                confidence: item.confidence,
-            })
-            .collect(),
-        consumers: trace
-            .consumers
-            .into_iter()
-            .map(|item| TopologyMatchOutput {
-                repo: item.repo,
-                file_path: item.file_path,
-                line_number: item.line_number,
-                symbol_name: item.symbol_name,
-                node_kind: item.node_kind.to_string(),
-                edge_kind: item.edge_kind.to_string(),
-                confidence: item.confidence,
-            })
-            .collect(),
+        producers,
+        consumers,
         blast_radius: Vec::new(),
+        coverage,
         truncated: trace.truncated,
     };
 
@@ -260,7 +276,7 @@ pub(crate) fn execute_trace(
     }
     lines.push("Consumers:".to_owned());
     if payload.consumers.is_empty() {
-        lines.push("  none".to_owned());
+        lines.push("  no indexed production edges observed".to_owned());
     } else {
         for consumer in &payload.consumers {
             lines.push(format!(
@@ -268,6 +284,13 @@ pub(crate) fn execute_trace(
                 consumer.symbol_name, consumer.repo, consumer.file_path
             ));
         }
+    }
+    if payload.coverage.verdict != "ok" {
+        lines.push(format!(
+            "Coverage: {}; {}",
+            payload.coverage.verdict,
+            payload.coverage.limitations.join(" ")
+        ));
     }
     if !payload.alternates.is_empty() {
         lines.push("Alternates:".to_owned());
@@ -280,6 +303,43 @@ pub(crate) fn execute_trace(
     }
 
     Ok(RenderedCommand::success(json!(payload), lines))
+}
+
+fn topology_coverage(
+    repo_filter: Option<&str>,
+    producers: &[TopologyMatchOutput],
+    consumers: &[TopologyMatchOutput],
+) -> CoverageOutput {
+    let mut repos_considered = std::collections::BTreeSet::new();
+    repos_considered.extend(repo_filter.map(str::to_owned));
+    repos_considered.extend(producers.iter().map(|item| item.repo.clone()));
+    repos_considered.extend(consumers.iter().map(|item| item.repo.clone()));
+    let mut limitations = Vec::new();
+    if producers.is_empty() {
+        limitations.push(
+            "No producer edge was observed; the source may be external, dynamic, or unsupported."
+                .to_owned(),
+        );
+    }
+    if consumers.is_empty() {
+        limitations.push(
+            "No consumer edge was observed; verify detected frameworks and dynamic registration."
+                .to_owned(),
+        );
+    }
+    CoverageOutput {
+        repos_considered: repos_considered.into_iter().collect(),
+        matching_frameworks: Vec::new(),
+        extractors_run: vec!["event_topology".to_owned()],
+        source_scopes: vec!["production".to_owned(), "unknown".to_owned()],
+        edges_contributed: producers.len() + consumers.len(),
+        verdict: if limitations.is_empty() {
+            "ok"
+        } else {
+            "possible_extraction_gap"
+        },
+        limitations,
+    }
 }
 
 fn run_blast_radius_rendered(
@@ -301,6 +361,20 @@ pub(crate) fn execute_blast_radius(
 
     let blast_radius =
         event_blast_radius(storage.graph(), selection.target.id, args.depth, args.limit)?;
+    let blast_radius_nodes = blast_radius
+        .nodes
+        .into_iter()
+        .map(|node| BlastRadiusNodeOutput {
+            repo: node.repo,
+            file_path: node.file_path,
+            line_number: node.line_number,
+            name: node.name,
+            node_kind: node.node_kind.to_string(),
+            depth: node.depth,
+            cumulative_confidence: node.cumulative_confidence,
+        })
+        .collect::<Vec<_>>();
+    let edges_contributed = blast_radius_nodes.len();
     let payload = EventsOutput {
         event: "events_blast_radius_completed",
         target: EventTargetOutput {
@@ -312,19 +386,16 @@ pub(crate) fn execute_blast_radius(
         alternates: selection.alternates,
         producers: Vec::new(),
         consumers: Vec::new(),
-        blast_radius: blast_radius
-            .nodes
-            .into_iter()
-            .map(|node| BlastRadiusNodeOutput {
-                repo: node.repo,
-                file_path: node.file_path,
-                line_number: node.line_number,
-                name: node.name,
-                node_kind: node.node_kind.to_string(),
-                depth: node.depth,
-                cumulative_confidence: node.cumulative_confidence,
-            })
-            .collect(),
+        blast_radius: blast_radius_nodes,
+        coverage: CoverageOutput {
+            repos_considered: repo_filter.into_iter().map(str::to_owned).collect(),
+            matching_frameworks: Vec::new(),
+            extractors_run: vec!["event_blast_radius".to_owned()],
+            source_scopes: vec!["production".to_owned(), "unknown".to_owned()],
+            edges_contributed,
+            verdict: "ok",
+            limitations: Vec::new(),
+        },
         truncated: blast_radius.truncated,
     };
 
