@@ -805,14 +805,14 @@ app.include_router(router, prefix="/v1")
         .expect("project manifest");
         fs::write(
             temp.path().join("schemas.py"),
-            r#"
+            r"
 from pydantic import BaseModel
 
 
 class AssetRequest(BaseModel):
     asset_id: str
     priority: int | None = None
-"#,
+",
         )
         .expect("schema fixture");
         let source = r#"

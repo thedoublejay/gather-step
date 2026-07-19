@@ -19,7 +19,7 @@ use crate::freshness::{RepoFreshness, workspace_freshness};
 use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
-#[derive(Debug, Args, Default)]
+#[derive(Debug, Args, Clone, Copy, Default)]
 pub struct DoctorArgs {
     #[arg(long, help = "Validate configuration without opening graph storage")]
     pub config_only: bool,

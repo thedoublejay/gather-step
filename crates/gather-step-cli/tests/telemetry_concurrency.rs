@@ -36,19 +36,23 @@ fn concurrent_cli_runs_are_all_finalized_in_shared_telemetry() {
             .env("GATHER_STEP_TELEMETRY", "on")
             .env("GATHER_STEP_TELEMETRY_ROOT", &telemetry_root)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn gather-step child");
         children.push((child, should_succeed));
     }
 
-    for (mut child, should_succeed) in children {
-        let status = child.wait().expect("wait for gather-step child");
+    for (child, should_succeed) in children {
+        let output = child
+            .wait_with_output()
+            .expect("wait for gather-step child");
         assert_eq!(
-            status.success(),
+            output.status.success(),
             should_succeed,
-            "child exit status should match fixture validity"
+            "child exit status should match fixture validity; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
     }
 

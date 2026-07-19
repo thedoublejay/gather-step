@@ -1117,14 +1117,14 @@ export class Orders {
         .expect("project manifest");
         fs::write(
             repo_root.join("schemas.py"),
-            r#"
+            r"
 from pydantic import BaseModel
 
 
 class AssetEvent(BaseModel):
     asset_id: str
     revision: int
-"#,
+",
         )
         .expect("schema fixture");
         let source = r#"

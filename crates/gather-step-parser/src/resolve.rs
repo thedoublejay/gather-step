@@ -993,10 +993,7 @@ impl<'a> SymbolIndex<'a> {
             return cached.clone();
         }
 
-        let relative = resolved_path
-            .strip_prefix(self.repo_root)
-            .ok()?
-            .to_path_buf();
+        let relative = path_relative_to_repo(self.repo_root, resolved_path)?;
         let language = language_for_path(&relative)?;
         let file = FileEntry {
             path: relative,
@@ -1849,10 +1846,27 @@ fn encode_confidence(confidence: f32) -> u16 {
 }
 
 fn relative_to_repo(root: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
+    let relative = path_relative_to_repo(root, path);
+    let rel = relative.as_deref().unwrap_or(path);
     Utf8PathBuf::from_path_buf(rel.to_path_buf())
         .unwrap_or_else(|p| Utf8PathBuf::from(p.to_string_lossy().replace('\\', "/")))
         .into_string()
+}
+
+/// Return a repo-relative path even when the operating system presents the
+/// same directory through an alias (for example `/var` and `/private/var` on
+/// macOS). The direct path is kept as the fast path; canonicalization is only
+/// used when lexical prefix matching fails.
+fn path_relative_to_repo(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical_path = std::fs::canonicalize(path).ok()?;
+    canonical_path
+        .strip_prefix(canonical_root)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -1860,7 +1874,9 @@ mod tests {
     #![expect(clippy::float_cmp)]
 
     use std::{
-        env, fs,
+        env,
+        fmt::Write as _,
+        fs,
         path::{Path, PathBuf},
         process,
         sync::atomic::{AtomicU64, Ordering},
@@ -2431,14 +2447,14 @@ class Handler:
         );
         temp.write(
             "src/asset_repository.py",
-            r#"
+            r"
 class BaseRepository:
     def remove(self, asset_id: str):
         pass
 
 class AssetRepository(BaseRepository):
     pass
-"#,
+",
         );
         let root = temp.path();
         let owner = function_node("src/handler.py", "handle");
@@ -2479,18 +2495,20 @@ class AssetRepository(BaseRepository):
         );
         temp.write(
             "src/ports.py",
-            r#"
+            r"
 from typing import Protocol
 
 class JobSink(Protocol):
     def publish(self, payload): ...
-"#,
+",
         );
         let mut sink_source = "from ports import JobSink\n\n".to_owned();
         for index in 0..10 {
-            sink_source.push_str(&format!(
+            write!(
+                sink_source,
                 "class JobSink{index:02}(JobSink):\n    def publish(self, payload):\n        pass\n\n"
-            ));
+            )
+            .expect("writing to String should succeed");
         }
         sink_source
             .push_str("class UnrelatedPublisher:\n    def publish(self, payload):\n        pass\n");

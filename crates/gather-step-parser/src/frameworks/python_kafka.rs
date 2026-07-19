@@ -841,14 +841,14 @@ async def queue_asset(producer, payload):
         let parsed = parse(
             &dir,
             "publisher.py",
-            r#"
+            r"
 async def publish(producer, topic, payload):
     await producer.send_and_wait(topic, payload)
 
 
 async def forward(producer, topic, payload):
     await publish(producer, topic, payload)
-"#,
+",
         );
 
         assert!(event_ids(&parsed).is_empty());
@@ -861,7 +861,7 @@ async def forward(producer, topic, payload):
         let parsed = parse(
             &dir,
             "events.py",
-            r#"
+            r"
 from broker_runtime import BrokerTopic, KafkaRuntime, kafka_event
 
 
@@ -873,7 +873,7 @@ async def consume(message):
     await KafkaRuntime.get().send_message(
         BrokerTopic.SystemAuditEvents, message
     )
-"#,
+",
         );
 
         assert_eq!(
@@ -905,14 +905,14 @@ class StreamTopic(str, Enum):
         let parsed = parse(
             &dir,
             "events.py",
-            r#"
+            r"
 from topic_defs import StreamTopic
 
 
 @kafka_event(StreamTopic.JobQueued)
 async def consume(message):
     await KafkaRuntime.get().send_message(StreamTopic.JobQueued, message)
-"#,
+",
         );
 
         assert_eq!(

@@ -274,10 +274,12 @@ impl TelemetryStore {
             .or(option_env!("GITHUB_SHA"))
             .map(ToOwned::to_owned);
         self.with_busy_retry(|| {
-            let connection = self.connection()?;
-            finalize_stale_running(&connection, now_ms(), Some(workspace_hash.clone()))?;
-            prune_old_rows(&connection, &workspace_hash)?;
-            connection.execute(
+            let mut connection = self.connection()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            finalize_stale_running(&transaction, now_ms(), Some(workspace_hash.clone()))?;
+            prune_old_rows(&transaction, &workspace_hash)?;
+            transaction.execute(
                 "INSERT INTO run_log (
                     run_id, started_at_ms, command, workspace_hash, cli_version,
                     build_provenance, binary_path, build_sha, schema_versions,
@@ -298,6 +300,7 @@ impl TelemetryStore {
                     now_ms(),
                 ],
             )?;
+            transaction.commit()?;
             Ok(())
         })?;
         Ok(TelemetryRun { run_id })
@@ -316,7 +319,8 @@ impl TelemetryStore {
             let extra_json = (!extra.is_empty())
                 .then(|| serde_json::to_string(&extra))
                 .transpose()?;
-            let transaction = connection.transaction()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute(
                 "UPDATE run_log
                  SET ended_at_ms = ?1,
@@ -606,6 +610,13 @@ impl TelemetryStore {
                     supported: TELEMETRY_SCHEMA_VERSION,
                 });
             }
+            // `user_version` is committed in the same transaction as the full
+            // schema. Once it reaches the current version, initialization is
+            // complete and concurrent CLI processes can avoid competing for a
+            // write lock merely to replay idempotent DDL.
+            if observed_version == TELEMETRY_SCHEMA_VERSION {
+                return Ok(());
+            }
             let journal_mode: String =
                 connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
             if !journal_mode.eq_ignore_ascii_case("wal") {
@@ -620,6 +631,10 @@ impl TelemetryStore {
                     stored: stored_version,
                     supported: TELEMETRY_SCHEMA_VERSION,
                 });
+            }
+            if stored_version == TELEMETRY_SCHEMA_VERSION {
+                transaction.commit()?;
+                return Ok(());
             }
             transaction.execute_batch(SCHEMA)?;
             migrate_schema(&transaction, stored_version)?;

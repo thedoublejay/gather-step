@@ -351,7 +351,7 @@ fn topology_coverage(
         );
     }
     if producers.is_empty() || consumers.is_empty() {
-        coverage.verdict = "possible_extraction_gap".to_owned();
+        "possible_extraction_gap".clone_into(&mut coverage.verdict);
     }
     coverage
 }

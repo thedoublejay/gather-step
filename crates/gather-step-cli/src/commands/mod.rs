@@ -327,8 +327,7 @@ impl CliOutcome {
     #[must_use]
     pub fn exit_code(self) -> ExitCode {
         match self {
-            Self::Success => ExitCode::from(0),
-            Self::AlreadyRunning => ExitCode::from(0),
+            Self::Success | Self::AlreadyRunning => ExitCode::from(0),
             Self::ReviewThresholdExceeded => ExitCode::from(2),
         }
     }
@@ -551,7 +550,6 @@ fn telemetry_finish_fields(command: &str, result: &Result<CliOutcome>) -> Teleme
         extra_json: app::telemetry_extra(),
         events,
         error,
-        ..TelemetryRunFinish::default()
     }
 }
 

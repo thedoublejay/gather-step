@@ -10,6 +10,10 @@ use serde::Serialize;
 
 use crate::app::AppContext;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent clap flags model orthogonal log filters and actions"
+)]
 #[derive(Debug, Args)]
 pub struct LogArgs {
     #[arg(
