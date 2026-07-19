@@ -1,7 +1,12 @@
-use std::{cmp::Ordering, collections::BTreeSet, fmt::Write as _, path::PathBuf};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt::Write as _,
+    path::PathBuf,
+};
 
 use chrono::{SecondsFormat, Utc};
-use gather_step_analysis::{cross_repo_deps, list_orphan_topics, trace_event, trace_route};
+use gather_step_analysis::{cross_repo_deps, list_orphan_topics_paged, trace_event, trace_route};
 use gather_step_core::{NodeKind, RegisteredRepo, WorkspaceRegistry};
 use gather_step_storage::{GraphStore, GraphStoreDb, MetadataStore};
 use thiserror::Error;
@@ -308,7 +313,7 @@ fn planning_guidance_block() -> &'static str {
      - **Before assuming a contract is safe to change**, call `breaking_change_candidates` and `get_shared_type_usage` for the symbol.\n\
      - **Before reviewing a PR**, run `pr_review` (CLI: `gather-step pr-review`) to get a graph-aware delta report instead of skimming the diff.\n\
      - **For deployment questions**, reach for `where_deployed`, `service_env`, and `shared_infra`.\n\
-     - **Weight results by `confidence_band`** — trace and cross-repo edges carry `extracted` (directly observed, trust it), `inferred` (strong heuristic), or `hint` (weak; verify from source before acting).\n\
+     - **Weight results by `confidence_band`** — trace and cross-repo edges carry `extracted` (source-observed; verify source scope and semantic support), `inferred` (strong heuristic), or `hint` (weak; verify from source before acting).\n\
      - **Heed `index_stale`** — when a response's metadata lists repos under `index_stale`, their index lags git HEAD; re-run `gather-step index` and re-query before trusting an empty or negative result.\n\n"
 }
 
@@ -346,7 +351,7 @@ fn push_cli_command_surface(body: &mut String, commands: &[(&str, &str)]) {
 fn push_mcp_tool_surface(body: &mut String, tools: &[(&str, &str)]) {
     body.push_str("## MCP Tools\n\n");
     body.push_str(
-        "Run `gather-step mcp serve` (or register via `gather-step setup-mcp`) to expose these to your AI tool over MCP.\n\n",
+        "Run `gather-step serve` (or register via `gather-step setup-mcp`) to expose these to your AI tool over MCP.\n\n",
     );
     if tools.is_empty() {
         body.push_str("_No MCP tools registered._\n\n");
@@ -468,15 +473,15 @@ fn render_architecture_rule(
     write_header(&mut out, "Architecture");
     out.push_str("# Codebase Intelligence\n\n");
     out.push_str("## Repository Map\n");
-    out.push_str("| Repo | Frameworks | Files | Symbols | Depth | Routes | Topics |\n");
+    out.push_str("| Repo | Frameworks | Files | Symbols | Depth | Routes | Event Surfaces |\n");
     out.push_str("|---|---|---:|---:|---|---:|---:|\n");
     let mut repo_rows = 0_usize;
     for repo_name in repo_names {
         if let Some(repo) = registry.repo(repo_name) {
-            let (routes, topics) = count_virtual_surfaces(graph, repo_name)?;
+            let (routes, event_surfaces) = count_virtual_surfaces(graph, repo_name)?;
             let _ = writeln!(
                 out,
-                "| {repo} | {frameworks} | {files} | {symbols} | {depth} | {routes} | {topics} |",
+                "| {repo} | {frameworks} | {files} | {symbols} | {depth} | {routes} | {event_surfaces} |",
                 repo = sanitize_table_cell(repo_name),
                 frameworks = if repo.frameworks.is_empty() {
                     "-".to_owned()
@@ -498,9 +503,9 @@ fn render_architecture_rule(
         );
     }
 
-    out.push_str("\n## Cross-Repo Dependencies\n");
+    out.push_str("\n## Runtime And Contract Dependencies\n");
     out.push_str(
-        "One row per source repo. Targets are listed with the edge kinds that connect them, so dense workspaces stay readable.\n\n",
+        "Directional code, API, event, persistence, and shared-contract edges only. Ownership and co-change evidence are intentionally excluded.\n\n",
     );
     out.push_str("| Source Repo | Depends On |\n");
     out.push_str("|---|---|\n");
@@ -626,13 +631,16 @@ fn render_events_rule(
     write_header(&mut out, "Events");
     out.push_str("# Event Surface\n\n");
     out.push_str("## Topics And Events\n");
+    let targets = event_targets(graph, repo_names)?;
+    let total_targets = targets.len();
+    let targets = representative_by_repo(targets, DEFAULT_LIMIT);
+    write_logical_limit_notice(&mut out, "event targets", targets.len(), total_targets);
     out.push_str("| Target | Producers | Consumers |\n");
     out.push_str("|---|---|---|\n");
-    let targets = event_targets(graph, repo_names)?;
     if targets.is_empty() {
         out.push_str("| _No event or topic nodes detected_ | - | - |\n");
     }
-    for target in targets.into_iter().take(DEFAULT_LIMIT) {
+    for target in targets {
         let trace = trace_event(graph, target.id, DEFAULT_LIMIT)?;
         let _ = writeln!(
             out,
@@ -644,9 +652,7 @@ fn render_events_rule(
     }
 
     out.push_str("\n## Orphans\n");
-    out.push_str("| Target | Producers | Consumers | Classification |\n");
-    out.push_str("|---|---:|---:|---|\n");
-    let orphans = list_orphan_topics(
+    let orphans_page = list_orphan_topics_paged(
         graph,
         repo_names
             .first()
@@ -654,6 +660,15 @@ fn render_events_rule(
             .filter(|_| repo_names.len() == 1),
         DEFAULT_LIMIT,
     )?;
+    let orphans = orphans_page.items;
+    write_logical_limit_notice(
+        &mut out,
+        "orphan targets",
+        orphans.len(),
+        orphans_page.total_seen,
+    );
+    out.push_str("| Target | Producers | Consumers | Classification |\n");
+    out.push_str("|---|---:|---:|---|\n");
     if orphans.is_empty() {
         out.push_str("| _No orphan topics detected_ | - | - | - |\n");
     }
@@ -678,13 +693,16 @@ fn render_routes_rule(
     let mut out = String::new();
     write_header(&mut out, "Routes");
     out.push_str("# Route Surface\n\n");
+    let routes = route_targets(graph, repo_names)?;
+    let total_routes = routes.len();
+    let routes = representative_routes(routes, DEFAULT_LIMIT);
+    write_logical_limit_notice(&mut out, "routes", routes.len(), total_routes);
     out.push_str("| Route | Handler Repos | Caller Repos |\n");
     out.push_str("|---|---|---|\n");
-    let routes = route_targets(graph, repo_names)?;
     if routes.is_empty() {
         out.push_str("| _No route nodes detected_ | - | - |\n");
     }
-    for route in routes.into_iter().take(DEFAULT_LIMIT) {
+    for route in routes {
         let trace = trace_route(graph, route.id, DEFAULT_LIMIT)?;
         let _ = writeln!(
             out,
@@ -695,6 +713,65 @@ fn render_routes_rule(
         );
     }
     Ok(out)
+}
+
+fn write_logical_limit_notice(out: &mut String, noun: &str, shown: usize, total: usize) {
+    if total > shown {
+        let _ = writeln!(
+            out,
+            "_Showing {shown} of {total} indexed {noun}; use the live query for the complete set._\n"
+        );
+    }
+}
+
+fn representative_by_repo(
+    nodes: Vec<gather_step_core::NodeData>,
+    limit: usize,
+) -> Vec<gather_step_core::NodeData> {
+    let mut buckets = BTreeMap::<String, VecDeque<gather_step_core::NodeData>>::new();
+    for node in nodes {
+        buckets
+            .entry(node.repo.clone())
+            .or_default()
+            .push_back(node);
+    }
+    round_robin_buckets(buckets, limit)
+}
+
+fn representative_routes(
+    routes: Vec<gather_step_core::NodeData>,
+    limit: usize,
+) -> Vec<gather_step_core::NodeData> {
+    let mut buckets = BTreeMap::<String, VecDeque<gather_step_core::NodeData>>::new();
+    for route in routes {
+        let method =
+            canonical_route_key(&route).map_or_else(|| "UNKNOWN".to_owned(), |(method, _)| method);
+        buckets.entry(method).or_default().push_back(route);
+    }
+    round_robin_buckets(buckets, limit)
+}
+
+fn round_robin_buckets(
+    mut buckets: BTreeMap<String, VecDeque<gather_step_core::NodeData>>,
+    limit: usize,
+) -> Vec<gather_step_core::NodeData> {
+    let mut selected = Vec::with_capacity(limit.min(buckets.values().map(VecDeque::len).sum()));
+    while selected.len() < limit {
+        let mut advanced = false;
+        for bucket in buckets.values_mut() {
+            if let Some(node) = bucket.pop_front() {
+                selected.push(node);
+                advanced = true;
+                if selected.len() == limit {
+                    break;
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    selected
 }
 
 fn render_repo_rule(
@@ -725,7 +802,10 @@ fn render_repo_rule(
         depth_label(registered.depth_level),
     );
 
-    out.push_str("## Cross-Repo Dependencies\n");
+    out.push_str("## Runtime And Contract Dependencies\n");
+    out.push_str(
+        "Ownership and co-change evidence are excluded from this directional dependency view.\n",
+    );
     let dependencies = cross_repo_deps(graph, repo_name)?;
     if dependencies.is_empty() {
         out.push_str("- No cross-repo dependencies detected.\n");
@@ -814,7 +894,7 @@ fn count_virtual_surfaces(
     repo_name: &str,
 ) -> Result<(usize, usize), ContextMdError> {
     let mut routes = 0_usize;
-    let mut topics = 0_usize;
+    let mut event_surfaces = 0_usize;
     let repo_names = [repo_name.to_owned()];
     for node in graph.nodes_by_type(NodeKind::Route)? {
         if node.is_virtual && virtual_node_relevant_to_repos(graph, &node, &repo_names)? {
@@ -830,11 +910,11 @@ fn count_virtual_surfaces(
     ] {
         for node in graph.nodes_by_type(kind)? {
             if node.is_virtual && virtual_node_relevant_to_repos(graph, &node, &repo_names)? {
-                topics += 1;
+                event_surfaces += 1;
             }
         }
     }
-    Ok((routes, topics))
+    Ok((routes, event_surfaces))
 }
 
 fn virtual_node_relevant_to_repos(
@@ -1032,4 +1112,173 @@ fn relativize_path_to_workspace(
         |_| "<outside-workspace>".to_owned(),
         |rel| rel.display().to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        path::PathBuf,
+        process,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use gather_step_core::{
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, node_id, topic_qn,
+        virtual_node,
+    };
+    use gather_step_storage::{GraphStore, GraphStoreDb};
+
+    use super::{
+        render_events_rule, representative_routes, route_name, write_logical_limit_notice,
+    };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDb {
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(name: &str) -> Self {
+            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gather-step-context-md-{name}-{}-{counter}.redb",
+                process::id()
+            ));
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn producer(repo: &str, file_path: &str, name: &str) -> NodeData {
+        NodeData {
+            id: node_id(repo, file_path, NodeKind::Function, name),
+            kind: NodeKind::Function,
+            repo: repo.to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(format!("{repo}::{name}")),
+            external_id: None,
+            signature: Some(format!("{name}()")),
+            visibility: Some(Visibility::Public),
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        }
+    }
+
+    fn route(method: &str, path: &str) -> gather_step_core::NodeData {
+        let qualified_name = format!("__route__{method}__{path}");
+        virtual_node(
+            NodeKind::Route,
+            "__virtual__",
+            "",
+            format!("{method} {path}"),
+            &qualified_name,
+        )
+    }
+
+    #[test]
+    fn representative_routes_do_not_let_one_method_exhaust_the_limit() {
+        let mut routes = (0..40)
+            .map(|index| route("DELETE", &format!("/assets/{index}")))
+            .collect::<Vec<_>>();
+        routes.push(route("GET", "/assets"));
+        routes.push(route("POST", "/assets"));
+
+        let selected = representative_routes(routes, 32);
+        let names = selected.iter().map(route_name).collect::<Vec<_>>();
+        assert_eq!(selected.len(), 32);
+        assert!(names.iter().any(|name| name == "GET /assets"));
+        assert!(names.iter().any(|name| name == "POST /assets"));
+    }
+
+    #[test]
+    fn events_rule_orphan_notice_precedes_table_and_rows_stay_paged() {
+        let temp = TempDb::new("orphan-notice");
+        let store = GraphStoreDb::open(&temp.path).expect("graph should open");
+        let source_file = NodeData {
+            id: node_id(
+                "backend_standard",
+                "src/events.ts",
+                NodeKind::File,
+                "src/events.ts",
+            ),
+            kind: NodeKind::File,
+            repo: "backend_standard".to_owned(),
+            file_path: "src/events.ts".to_owned(),
+            name: "src/events.ts".to_owned(),
+            qualified_name: Some("backend_standard::src/events.ts".to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        };
+        let emitter = producer("backend_standard", "src/events.ts", "emitOrders");
+        let mut nodes = vec![source_file.clone(), emitter.clone()];
+        let mut edges = Vec::new();
+        for index in 0..40 {
+            let name = format!("order.created.{index:02}");
+            let topic = virtual_node(
+                NodeKind::Topic,
+                "backend_standard",
+                "src/events.ts",
+                &name,
+                topic_qn("kafka", &name),
+            );
+            edges.push(EdgeData {
+                source: emitter.id,
+                target: topic.id,
+                kind: EdgeKind::Publishes,
+                metadata: EdgeMetadata::default(),
+                owner_file: source_file.id,
+                is_cross_file: false,
+            });
+            nodes.push(topic);
+        }
+        store
+            .bulk_insert(&nodes, &edges)
+            .expect("graph should write");
+
+        let out = render_events_rule(&store, &[]).expect("events rule should render");
+
+        let notice_at = out
+            .find("Showing 32 of 40 indexed orphan targets")
+            .expect("orphan truncation notice should be disclosed");
+        let header_at = out
+            .find("| Target | Producers | Consumers | Classification |")
+            .expect("orphan table header should render");
+        assert!(
+            notice_at < header_at,
+            "notice must precede the orphan table header, not break the table body"
+        );
+        assert!(
+            out.contains("|---|---:|---:|---|\n| "),
+            "orphan separator row must be immediately followed by a data row"
+        );
+        assert_eq!(
+            out.matches("| 1 | 0 | produce_only |").count(),
+            32,
+            "exactly one page of orphan rows should render"
+        );
+    }
+
+    #[test]
+    fn logical_limit_notice_discloses_omitted_items() {
+        let mut output = String::new();
+        write_logical_limit_notice(&mut output, "routes", 32, 33);
+        assert!(output.contains("Showing 32 of 33 indexed routes"));
+
+        output.clear();
+        write_logical_limit_notice(&mut output, "routes", 32, 32);
+        assert!(output.is_empty());
+    }
 }

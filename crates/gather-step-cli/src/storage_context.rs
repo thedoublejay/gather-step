@@ -499,10 +499,28 @@ impl StorageContext {
     /// - [`TantivyOpenMode::ReadOnly`] → [`StorageCoordinator::open_read_only`]
     ///   (no write lock; safe for concurrent read commands).
     pub fn open_storage_coordinator(&self) -> Result<StorageCoordinator, StorageCoordinatorError> {
-        match self.tantivy_mode {
+        let result = match self.tantivy_mode {
             TantivyOpenMode::ReadWrite => StorageCoordinator::open(&self.storage_root),
             TantivyOpenMode::ReadOnly => StorageCoordinator::open_read_only(&self.storage_root),
+        };
+        match &result {
+            Ok(_) => crate::app::mark_graph_availability("available"),
+            Err(error) => {
+                let message = error.to_string();
+                if contains_ascii_case_insensitive(&message, "lock")
+                    || contains_ascii_case_insensitive(&message, "already open")
+                {
+                    crate::app::mark_graph_availability("locked");
+                } else if contains_ascii_case_insensitive(&message, "not found")
+                    || contains_ascii_case_insensitive(&message, "no such file")
+                {
+                    crate::app::mark_graph_availability("missing");
+                } else {
+                    crate::app::mark_graph_availability("corrupt");
+                }
+            }
         }
+        result
     }
 
     /// Build an [`McpServerConfig`] from the paths in this context.
@@ -515,6 +533,13 @@ impl StorageContext {
     pub fn mcp_server_config(&self) -> McpServerConfig {
         McpServerConfig::new(self.registry_path.clone(), self.graph_path.clone())
     }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]

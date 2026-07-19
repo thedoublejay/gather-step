@@ -36,7 +36,9 @@ impl Drop for TempDir {
 }
 
 fn gather_step() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_gather-step"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gather-step"));
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
 }
 
 fn run_ok(workspace: &Path, args: &[&str]) -> process::Output {
@@ -638,7 +640,10 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .as_str()
             .expect("each repo should carry a freshness verdict");
         assert!(
-            matches!(freshness, "fresh" | "stale" | "never_indexed" | "unknown"),
+            matches!(
+                freshness,
+                "fresh" | "stale" | "never_indexed" | "history_not_synced" | "unknown"
+            ),
             "unexpected freshness verdict in status output: {freshness}"
         );
     }

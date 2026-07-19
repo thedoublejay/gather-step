@@ -12,7 +12,8 @@ use gather_step_analysis::{
 };
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
 use gather_step_storage::{
-    GraphStore, MetadataStore, PayloadContractQuery, SearchStore, StorageCoordinator,
+    GraphStore, MetadataStore, PayloadContractQuery, SearchFilters, SearchStore,
+    StorageCoordinator, TantivySearchStore,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -347,6 +348,12 @@ pub fn execute(
             .map(|candidate| candidate.output)
             .collect(),
     };
+    let result_count = payload
+        .matches
+        .iter()
+        .flat_map(|item| &item.impacted_files)
+        .map(|repo| repo.files.len())
+        .sum();
 
     let mut lines = vec![format!("Impact for symbol {}:", payload.symbol)];
     for item in &payload.matches {
@@ -399,7 +406,12 @@ pub fn execute(
         }
     }
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::ImpactedFiles,
+            result_count,
+        ),
+    )
 }
 
 fn render_field_impact_lines(report: &ProjectionImpactReport) -> Vec<String> {
@@ -734,18 +746,36 @@ fn node_kind_matches_shape(kind: NodeKind, shape: QueryShape) -> bool {
 
 fn is_strict_impact_match(hit: &gather_step_storage::SearchHit, query: &str) -> bool {
     let tail = impact_query_tail(query);
-    hit.symbol_name == query || hit.symbol_name == tail
+    hit.symbol_name == query
+        || hit.symbol_name == tail
+        || is_canonical_shared_impact_match(hit, tail)
 }
 
 fn search_impact_hits(
-    search: &impl SearchStore,
+    search: &TantivySearchStore,
     query: &str,
     limit: usize,
 ) -> Result<Vec<gather_step_storage::SearchHit>> {
-    let hits = search
+    let mut hits = search
         .search(query, limit)
         .with_context(|| format!("searching for `{query}`"))?;
     if !hits.is_empty() {
+        if !is_qualified_impact_query(query) {
+            let broad_hits = search
+                .search_ranked_candidates_filtered(query, limit, SearchFilters::default())
+                .with_context(|| format!("searching for canonical aliases of `{query}`"))?;
+            let mut merged = broad_hits
+                .into_iter()
+                .filter(|hit| is_canonical_shared_impact_match(hit, query))
+                .collect::<Vec<_>>();
+            let mut seen = merged
+                .iter()
+                .map(|hit| hit.node_id)
+                .collect::<BTreeSet<_>>();
+            merged.extend(hits.drain(..).filter(|hit| seen.insert(hit.node_id)));
+            merged.truncate(limit);
+            hits = merged;
+        }
         return Ok(hits);
     }
 
@@ -757,6 +787,15 @@ fn search_impact_hits(
     search
         .search(tail, limit)
         .with_context(|| format!("searching for `{tail}` as fallback for `{query}`"))
+}
+
+fn is_canonical_shared_impact_match(hit: &gather_step_storage::SearchHit, target: &str) -> bool {
+    hit.node_kind == NodeKind::SharedSymbol
+        && hit
+            .symbol_name
+            .rsplit("__")
+            .next()
+            .is_some_and(|name| name == target)
 }
 
 fn impact_query_tail(query: &str) -> &str {
@@ -1025,14 +1064,17 @@ mod tests {
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, node_id,
     };
-    use gather_step_storage::{GraphStore, GraphStoreDb, SearchHit};
+    use gather_step_storage::{
+        GraphStore, GraphStoreDb, SearchDocument, SearchHit, SearchStore, TantivySearchStore,
+    };
 
     use gather_step_analysis::shared_contract::looks_like_guard_entrypoint;
 
     use super::{
         CandidateKey, ImpactCandidate, ImpactMatchOutput, VirtualImpactOutput,
         canonical_source_bonus, impact_candidate_key, is_strict_impact_match,
-        node_qualified_name_matches_query, rerank_impact_candidates, shared_contract_match,
+        node_qualified_name_matches_query, rerank_impact_candidates, search_impact_hits,
+        shared_contract_match,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2226,6 +2268,95 @@ mod tests {
             canonical_key < local_key,
             "canonical_boundary candidate must have lower (better) key than non-canonical"
         );
+    }
+
+    struct TempSearchDir {
+        path: PathBuf,
+    }
+
+    impl TempSearchDir {
+        fn new(name: &str) -> Self {
+            let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gather-step-cli-impact-search-{name}-{}-{counter}",
+                process::id()
+            ));
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempSearchDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn canonical_shared_symbol(name: &str) -> NodeData {
+        let mut canonical = node("__virtual__", name, NodeKind::SharedSymbol, name, 0);
+        canonical.qualified_name = Some(name.to_owned());
+        canonical.is_virtual = true;
+        canonical
+    }
+
+    #[test]
+    fn search_impact_hits_merges_canonical_shared_symbol_for_bare_query() {
+        let temp = TempSearchDir::new("canonical-merge");
+        let store = TantivySearchStore::open(temp.path()).expect("store should open");
+        let declaration = node(
+            "service_a",
+            "src/order.ts",
+            NodeKind::Type,
+            "CreateOrderInput",
+            0,
+        );
+        let canonical = canonical_shared_symbol("__shared__sample-contracts__CreateOrderInput");
+        store
+            .index_symbols(&[
+                SearchDocument::from_node(&declaration, 1),
+                SearchDocument::from_node(&canonical, 1),
+            ])
+            .expect("documents should index");
+
+        let hits = search_impact_hits(&store, "CreateOrderInput", 10)
+            .expect("impact search should succeed");
+        let hit_ids = hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>();
+
+        assert!(
+            hit_ids.contains(&canonical.id),
+            "the canonical shared symbol must reach ranked hits via the bare-query fallback; got {hit_ids:?}"
+        );
+        assert!(hit_ids.contains(&declaration.id));
+        let unique_ids = hit_ids.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique_ids.len(),
+            hit_ids.len(),
+            "merged hits must be deduplicated by node id"
+        );
+    }
+
+    #[test]
+    fn search_impact_hits_dedupes_canonical_hit_returned_by_both_paths() {
+        let temp = TempSearchDir::new("canonical-dedupe");
+        let store = TantivySearchStore::open(temp.path()).expect("store should open");
+        let canonical = canonical_shared_symbol("__shared__sample-contracts__CreateOrderInput");
+        store
+            .index_symbols(&[SearchDocument::from_node(&canonical, 1)])
+            .expect("document should index");
+
+        let hits = search_impact_hits(&store, "CreateOrderInput", 10)
+            .expect("impact search should succeed");
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "a canonical hit returned by both the exact and fallback paths must appear once; got {:?}",
+            hits.iter().map(|hit| &hit.symbol_name).collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].node_id, canonical.id);
     }
 
     fn file(repo: &str, file_path: &str) -> NodeData {

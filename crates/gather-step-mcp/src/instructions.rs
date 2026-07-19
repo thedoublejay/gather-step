@@ -25,13 +25,19 @@ trace_agent, cross_repo_deps, who_consumes) -> verify before acting.
 
 Response signals to act on:
 - confidence_band: edges carry a band derived from numeric confidence — \
-`extracted` (>=900, directly observed; trust it), `inferred` (500-899, strong \
+`extracted` (>=900, source-observed; verify source scope and semantic support), `inferred` (500-899, strong \
 heuristic), or `hint` (<500, weak; verify before relying on it). Prefer \
 higher-band edges and confirm `hint` edges from source before acting.
 - index_stale: query-response metadata includes this list of repos whose index \
 lags their current git HEAD. When it is present the result may be incomplete or \
 outdated — re-run `gather-step index` and re-query before trusting an empty or \
 negative answer.
+- coverage: list-shaped topology responses disclose registered repo scope, registry-detected \
+frameworks, source scopes, concrete contributed edges when retained, verdict, and limitations. \
+Index-time extractor provenance is not persisted, so `extractors_run` is empty. A \
+`possible_extraction_gap` verdict is not proof of absence. Source scope is \
+classified from indexed paths; verify `unknown` evidence and runtime registration before relying \
+on negative results.
 
 Results are read-only and derived on demand; nothing you call here mutates the \
 workspace or the graph.";

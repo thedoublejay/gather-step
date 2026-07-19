@@ -22,9 +22,43 @@ First-class languages produce a complete graph: file nodes, module nodes, class 
 - Absolute current-package imports for `src/<pkg>` and flat `<pkg>` layouts.
 - Sibling-package imports across configured repos.
 - Standalone repo identity from `pyproject.toml [project].name`.
-- Detection-only FastAPI pack.
+- FastAPI routes, nested/cross-file router mounts, WebSockets, and static ASGI
+  mount surfaces.
+- HTTP-client routes from safe literal/local/f-string expressions; test-client
+  traffic is excluded from production consumers.
+- Kafka literals, local enums, runtime `send_message` producers,
+  `@kafka_event` consumers, instance-bound topics, and one-hop producer proxies.
+- Typed receiver calls from annotations, dependency factories, instance fields,
+  and declared base classes.
+- Local/imported Pydantic, TypedDict, and dataclass payload contracts.
+- LangGraph snake-case node, edge, and conditional-edge topology.
+- `pyproject.toml` and requirements dependencies for shared-package/version
+  surfaces.
 
 Emits cross-repo edges.
+
+## Python Semantic Support Matrix
+
+`extracted` means the identity is directly represented in source. `inferred`
+means a bounded, evidence-backed link is added. `hint` preserves an unresolved
+symbolic identity without guessing its wire value. Unsupported paths remain
+absent and should be treated as coverage limits, not proof the code path does
+not exist.
+
+| Feature | Level | Important boundary |
+|---|---|---|
+| Symbols, imports, decorators | extracted | Dynamic imports are unsupported |
+| FastAPI routes/router mounts/WebSockets | extracted | Dynamic prefixes are unsupported |
+| FastAPI `app.mount` | extracted | Stored as a mount surface, not a Python handler |
+| HTTP literals, local strings, f-strings, concatenation | extracted/inferred | Unstable runtime expressions are skipped |
+| Kafka literal/local enum topics | extracted | Runtime namespace prefixes are not guessed |
+| External Kafka enum members | hint | Remain symbolic until an authoritative value is indexed |
+| Typed receiver and MRO calls | inferred | Untyped dotted receivers stay unresolved |
+| Imported Python payload models | inferred | Runtime schema factories are unsupported |
+| LangGraph topology | extracted/inferred | Dynamic destination maps are unsupported |
+| Protocol/ABC implementation dispatch | unsupported | No arbitrary implementation is selected |
+| Dynamic registry dispatch | unsupported | Requires a stable registry key and handler mapping |
+| Temporal child workflow/activity dispatch | unsupported | Decorated symbols remain searchable as ordinary Python symbols |
 
 Python is first-class as of v2.1.0. TypeScript and JavaScript have been first-class since v1.0.0; v3.5.0 swapped the underlying TS/JS parser from SWC to Oxc with no observable change to the emitted graph.
 

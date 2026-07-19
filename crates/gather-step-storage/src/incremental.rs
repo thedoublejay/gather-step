@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use crate::{
     MetadataStoreDb,
+    indexer::indexable_manifest_path,
     metadata::{MetadataStoreError, stored_content_hash},
 };
 
@@ -134,7 +135,9 @@ pub fn snapshot_repo_files(
             path: path.to_path_buf(),
             source,
         })?;
-        if file_metadata.len() > traverse.max_file_size_bytes() {
+        if file_metadata.len() < traverse.min_file_size_bytes()
+            || file_metadata.len() > traverse.max_file_size_bytes()
+        {
             continue;
         }
 
@@ -225,12 +228,13 @@ pub fn snapshot_selected_repo_files(
 ) -> Result<RepoSnapshot, IncrementalError> {
     let selected_paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
     let traversal = collect_selected_repo_files(repo_root, &selected_paths, traverse)?;
-    let include_manifest = paths.iter().any(|path| path == "package.json");
+    let manifest_path = indexable_manifest_path(repo_root)
+        .filter(|manifest| paths.iter().any(|path| path == manifest));
     snapshot_from_traversal(
         repo_root,
         traversal.files,
         traversal.file_stats,
-        include_manifest,
+        manifest_path,
     )
 }
 
@@ -238,7 +242,7 @@ fn snapshot_from_traversal(
     repo_root: &Path,
     source_files: Vec<SourceFileEntry>,
     file_stats: FxHashMap<Vec<u8>, FileStat>,
-    include_manifest: bool,
+    manifest_path: Option<&str>,
 ) -> Result<RepoSnapshot, IncrementalError> {
     let mut files_by_path: BTreeMap<Vec<u8>, IncrementalFileEntry> = BTreeMap::new();
     for file in &source_files {
@@ -258,12 +262,14 @@ fn snapshot_from_traversal(
         );
     }
 
-    if include_manifest && let Some(bytes) = read_manifest_bytes(repo_root)? {
+    if let Some(manifest) = manifest_path
+        && let Some(bytes) = read_manifest_bytes(repo_root, manifest)?
+    {
         files_by_path.insert(
-            b"package.json".to_vec(),
+            manifest.as_bytes().to_vec(),
             IncrementalFileEntry {
-                path: "package.json".to_owned(),
-                path_id_bytes: b"package.json".to_vec(),
+                path: manifest.to_owned(),
+                path_id_bytes: manifest.as_bytes().to_vec(),
                 content_hash: blake3::hash(&bytes).as_bytes().to_vec(),
             },
         );
@@ -280,7 +286,10 @@ fn snapshot_manifest_entry(
     repo_root: &Path,
     stored_states: &BTreeMap<Vec<u8>, crate::FileIndexState>,
 ) -> Result<Option<IncrementalFileEntry>, IncrementalError> {
-    let manifest_path = repo_root.join("package.json");
+    let Some(relative) = indexable_manifest_path(repo_root) else {
+        return Ok(None);
+    };
+    let manifest_path = repo_root.join(relative);
     let metadata = match fs::symlink_metadata(&manifest_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -295,25 +304,25 @@ fn snapshot_manifest_entry(
         return Ok(None);
     }
 
-    let path_id_bytes = b"package.json".to_vec();
+    let path_id_bytes = relative.as_bytes().to_vec();
     let size_bytes = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
     let mtime_ns = metadata_mtime_ns(&metadata);
     let content_hash = if let Some(existing) = stored_states.get(&path_id_bytes) {
         if existing.size_bytes == size_bytes && mtime_matches(existing.mtime_ns, mtime_ns) {
             existing.content_hash.clone()
         } else {
-            read_manifest_bytes(repo_root)?
+            read_manifest_bytes(repo_root, relative)?
                 .map(|bytes| blake3::hash(&bytes).as_bytes().to_vec())
                 .unwrap_or_default()
         }
     } else {
-        read_manifest_bytes(repo_root)?
+        read_manifest_bytes(repo_root, relative)?
             .map(|bytes| blake3::hash(&bytes).as_bytes().to_vec())
             .unwrap_or_default()
     };
 
     Ok(Some(IncrementalFileEntry {
-        path: "package.json".to_owned(),
+        path: relative.to_owned(),
         path_id_bytes,
         content_hash,
     }))
@@ -443,7 +452,7 @@ pub mod test_support {
     /// Returns the snapshot so callers can inspect `files_by_path` directly.
     pub fn snapshot_for_test(root: &Path) -> Result<RepoSnapshot, IncrementalError> {
         let traversal = collect_repo_files(root, &TraverseConfig::default())?;
-        snapshot_from_traversal(root, traversal.files, traversal.file_stats, false)
+        snapshot_from_traversal(root, traversal.files, traversal.file_stats, None)
     }
 }
 
@@ -456,8 +465,11 @@ impl RepoSnapshot {
     }
 }
 
-fn read_manifest_bytes(repo_root: &Path) -> Result<Option<Vec<u8>>, IncrementalError> {
-    let manifest_path = repo_root.join("package.json");
+fn read_manifest_bytes(
+    repo_root: &Path,
+    relative: &str,
+) -> Result<Option<Vec<u8>>, IncrementalError> {
+    let manifest_path = repo_root.join(relative);
     let metadata = match fs::symlink_metadata(&manifest_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

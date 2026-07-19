@@ -14,6 +14,6 @@ min_confidence = 0
 required_ambiguity_codes = []
 expected_primary_symbol_name = "useAuthentication"
 expected_primary_repo = "frontend_standard"
-expected_primary_file = "src/auth_local.ts"
+expected_primary_file = "src/auth_api.ts"
 expected_impact_repos = ["frontend_standard"]
 max_response_bytes = 12000

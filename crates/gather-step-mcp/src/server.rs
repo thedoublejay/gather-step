@@ -370,7 +370,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_event",
-        description = "Trace producer and consumer symbols attached to a topic, queue, subject, stream, or event. Edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
+        description = "Trace producer and consumer symbols attached to a topic, queue, subject, stream, or event. Includes path-classified source scope and coverage limitations. Edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_event_tool(
@@ -389,7 +389,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_agent",
-        description = "Trace an AI agent's forward flow (agent graph, nodes, LLM calls, tools, prompts, vector indexes, MCP tools) from a target node. Edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
+        description = "Trace an AI agent's forward flow (agent graph, nodes, LLM calls, tools, prompts, vector indexes, MCP tools) from a target node. Includes path-classified source scope and coverage limitations. Edges carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_agent_tool(
@@ -408,7 +408,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "trace_route",
-        description = "Trace server handlers and client callers attached to a route virtual node. Symbols carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
+        description = "Trace server handlers and client callers attached to a route virtual node. Includes path-classified source scope and coverage limitations. Symbols carry a `confidence_band` (extracted/inferred/hint); response meta includes `index_stale` when any repo's index lags git HEAD.",
         annotations(read_only_hint = true)
     )]
     pub async fn trace_route_tool(
@@ -427,7 +427,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "crud_trace",
-        description = "Trace frontend callers, backend handlers, and persistence touchpoints for a CRUD route.",
+        description = "Trace frontend callers, backend handlers, and persistence touchpoints for a CRUD route. Includes path-classified source scope and coverage limitations.",
         annotations(read_only_hint = true)
     )]
     pub async fn crud_trace_tool(
@@ -465,7 +465,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "list_orphan_topics",
-        description = "List topic, event, queue, subject, or stream targets with only producers or only consumers.",
+        description = "List topic, event, queue, subject, or stream targets with indexed producer/consumer asymmetry. Includes coverage limitations; classifications are not proof that a path is dead.",
         annotations(read_only_hint = true)
     )]
     pub async fn list_orphan_topics_tool(
@@ -503,7 +503,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "who_consumes",
-        description = "Find which repos consume an exact symbol, directly or via a transport boundary.",
+        description = "Find which repos consume an exact symbol, directly or via a transport boundary. Includes path-classified source scope and coverage limitations.",
         annotations(read_only_hint = true)
     )]
     pub async fn who_consumes_tool(
@@ -522,7 +522,7 @@ impl GatherStepMcpServer {
 
     #[tool(
         name = "get_shared_type_usage",
-        description = "Find shared symbol nodes matching a type name and summarize which repos use them.",
+        description = "Find shared symbol nodes matching a type name and summarize which repos use them. Includes path-classified source scope and coverage limitations.",
         annotations(read_only_hint = true)
     )]
     pub async fn get_shared_type_usage_tool(
@@ -785,23 +785,6 @@ impl GatherStepMcpServer {
     }
 
     #[tool(
-        name = "get_context_pack",
-        description = "Return a bounded planning, debug, fix, review, or change-impact pack for a target symbol.",
-        annotations(read_only_hint = true)
-    )]
-    pub async fn get_context_pack_tool(
-        &self,
-        Parameters(request): Parameters<ContextPackRequest>,
-    ) -> Result<Json<ContextPackResponse>, String> {
-        let args = serde_json::to_value(&request).unwrap_or_default();
-        let ctx = Arc::clone(&self.ctx);
-        self.traced_call("get_context_pack", &args, move || {
-            pack_with_freshness(&ctx, run_context_pack(&ctx, request))
-        })
-        .await
-    }
-
-    #[tool(
         name = "planning_pack",
         description = "Return a bounded planning pack for a target symbol.",
         annotations(read_only_hint = true)
@@ -917,23 +900,6 @@ impl GatherStepMcpServer {
         let args = serde_json::to_value(&request).unwrap_or_default();
         let ctx = Arc::clone(&self.ctx);
         self.traced_call("change_impact_pack", &args, move || {
-            pack_with_freshness(&ctx, run_change_impact_pack(&ctx, request))
-        })
-        .await
-    }
-
-    #[tool(
-        name = "get_change_impact_pack",
-        description = "Return a bounded change-impact pack for a target symbol.",
-        annotations(read_only_hint = true)
-    )]
-    pub async fn get_change_impact_pack_tool(
-        &self,
-        Parameters(request): Parameters<ModePackRequest>,
-    ) -> Result<Json<ContextPackResponse>, String> {
-        let args = serde_json::to_value(&request).unwrap_or_default();
-        let ctx = Arc::clone(&self.ctx);
-        self.traced_call("get_change_impact_pack", &args, move || {
             pack_with_freshness(&ctx, run_change_impact_pack(&ctx, request))
         })
         .await

@@ -111,6 +111,16 @@ impl McpContext {
         Ok(Self::from_workspace_stores(config, stores))
     }
 
+    #[cfg(test)]
+    pub(crate) fn open_test(config: McpServerConfig) -> Result<Self, McpServerError> {
+        // Unit fixtures frequently construct only the graph they exercise.
+        // Seed the complete workspace layout first, then reopen through the
+        // production read-only graph/search path so the test still verifies
+        // that query contexts do not retain an IndexWriter.
+        drop(WorkspaceStores::open(config.storage_root())?);
+        Self::open(config)
+    }
+
     /// Return the tracer for this context.
     #[must_use]
     pub fn tracer(&self) -> &Tracer {

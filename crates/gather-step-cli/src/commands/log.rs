@@ -5,25 +5,34 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
-use gather_step_storage::{TelemetryRunRecord, TelemetryStore, telemetry::TELEMETRY_DB_NAME};
+use gather_step_storage::{TelemetryRunRecord, TelemetryStore};
 use serde::Serialize;
 
 use crate::app::AppContext;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent clap flags model orthogonal log filters and actions"
+)]
 #[derive(Debug, Args)]
 pub struct LogArgs {
     #[arg(
         long,
-        default_value_t = 20,
-        help = "Maximum number of run rows to consider (also caps the --summary window)"
+        help = "Maximum number of run rows (defaults to 20; summaries with a time window are uncapped)"
     )]
-    pub last: usize,
-    #[arg(long, help = "Only show runs since an age such as 7d")]
+    pub last: Option<usize>,
+    #[arg(long, help = "Only show runs since an age such as 12h or 7d")]
     pub since: Option<String>,
+    #[arg(long, help = "Only show runs older than an age such as 12h or 7d")]
+    pub before: Option<String>,
     #[arg(long, help = "Only show runs with errors or non-success status")]
     pub errors_only: bool,
     #[arg(long, help = "Only show runs for this command")]
     pub command: Option<String>,
+    #[arg(long, help = "Only show runs with this exact status")]
+    pub status: Option<String>,
+    #[arg(long, help = "Only show runs containing this error category")]
+    pub category: Option<String>,
     #[arg(
         long,
         help = "Print an aggregate summary (status, graph availability, slowest commands) instead of rows"
@@ -36,6 +45,18 @@ pub struct LogArgs {
     pub repair: bool,
     #[arg(long, help = "Delete telemetry rows older than an age such as 90d")]
     pub clear_before: Option<String>,
+    #[arg(long, help = "Read or delete telemetry across every workspace")]
+    pub all_workspaces: bool,
+    #[arg(
+        long,
+        requires = "all_workspaces",
+        help = "Confirm a destructive --all-workspaces deletion"
+    )]
+    pub yes: bool,
+    #[arg(long, help = "Show retained WARN/ERROR events instead of run rows")]
+    pub events: bool,
+    #[arg(long, requires = "events", help = "Limit --events to one run ID")]
+    pub run: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,9 +86,20 @@ struct LogSummary {
     cleared_rows: usize,
     by_status: BTreeMap<String, usize>,
     by_graph_availability: BTreeMap<String, usize>,
+    by_error_category: BTreeMap<String, usize>,
     abandoned: usize,
     peak_rss_bytes_max: Option<u64>,
     slowest_commands: Vec<CommandDuration>,
+}
+
+#[derive(Debug, Serialize)]
+struct LogEventsOutput {
+    event: &'static str,
+    telemetry_db: String,
+    cleared_rows: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repaired_stale: Option<usize>,
+    events: Vec<gather_step_storage::TelemetryEventRecord>,
 }
 
 const SLOWEST_COMMANDS: usize = 5;
@@ -76,9 +108,11 @@ fn summarize(
     records: &[TelemetryRunRecord],
     repaired_stale: Option<usize>,
     cleared_rows: usize,
+    telemetry_db: String,
 ) -> LogSummary {
     let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_graph_availability: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_error_category: BTreeMap<String, usize> = BTreeMap::new();
     let mut max_by_command: BTreeMap<String, (usize, i64)> = BTreeMap::new();
     let mut peak_rss_bytes_max: Option<u64> = None;
 
@@ -87,13 +121,20 @@ fn summarize(
         let availability = record
             .graph_availability
             .clone()
-            .unwrap_or_else(|| "unknown".to_owned());
+            .unwrap_or_else(|| "unrecorded".to_owned());
         *by_graph_availability.entry(availability).or_default() += 1;
-        let entry = max_by_command
-            .entry(record.command.clone())
-            .or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 = entry.1.max(record.duration_ms.unwrap_or(0));
+        for category in &record.error_categories {
+            *by_error_category.entry(category.clone()).or_default() += 1;
+        }
+        if record.exit_status != "abandoned"
+            && let Some(duration_ms) = record.duration_ms
+        {
+            let entry = max_by_command
+                .entry(record.command.clone())
+                .or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 = entry.1.max(duration_ms);
+        }
         if let Some(rss) = record.peak_rss_bytes {
             peak_rss_bytes_max = Some(peak_rss_bytes_max.map_or(rss, |current| current.max(rss)));
         }
@@ -118,12 +159,13 @@ fn summarize(
 
     LogSummary {
         event: "log_summary",
-        telemetry_db: TELEMETRY_DB_NAME.to_owned(),
+        telemetry_db,
         total_runs: records.len(),
         repaired_stale,
         cleared_rows,
         by_status,
         by_graph_availability,
+        by_error_category,
         abandoned,
         peak_rss_bytes_max,
         slowest_commands,
@@ -135,8 +177,9 @@ fn emit_summary(
     records: &[TelemetryRunRecord],
     repaired_stale: Option<usize>,
     cleared_rows: usize,
+    telemetry_db: String,
 ) -> Result<()> {
-    let summary = summarize(records, repaired_stale, cleared_rows);
+    let summary = summarize(records, repaired_stale, cleared_rows, telemetry_db);
     if app.json_output {
         app.output().emit(&summary)?;
         return Ok(());
@@ -176,6 +219,16 @@ fn emit_summary(
     }
     app.output().line(graph_table.to_string());
 
+    if !summary.by_error_category.is_empty() {
+        let mut category_table = Table::new();
+        category_table.load_preset(UTF8_BORDERS_ONLY);
+        category_table.set_header(vec!["Error category", "Events"]);
+        for (category, count) in &summary.by_error_category {
+            category_table.add_row(vec![Cell::new(category), Cell::new(count)]);
+        }
+        app.output().line(category_table.to_string());
+    }
+
     let mut command_table = Table::new();
     command_table.load_preset(UTF8_BORDERS_ONLY);
     command_table.set_content_arrangement(ContentArrangement::Dynamic);
@@ -196,45 +249,97 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
         bail!("Could not locate the user data directory for telemetry.");
     };
     let store = TelemetryStore::open(&root).context("opening telemetry database")?;
+    let telemetry_db = store.path().display().to_string();
+
+    if args.events && args.all_workspaces {
+        bail!("--events cannot be combined with --all-workspaces; select a workspace");
+    }
 
     let repaired_stale = if args.repair {
         Some(
-            store
-                .repair_stale_running()
-                .context("finalizing stale running rows")?,
+            if args.all_workspaces {
+                store.repair_stale_running_all_workspaces()
+            } else {
+                store.repair_stale_running(&app.workspace_path)
+            }
+            .context("finalizing stale running rows")?,
         )
     } else {
         None
     };
 
     let cleared_rows = if let Some(age) = args.clear_before.as_deref() {
+        if args.all_workspaces && !args.yes {
+            bail!("deleting telemetry across all workspaces requires --yes");
+        }
         let cutoff = cutoff_from_age(age)?;
-        store
-            .clear_before(cutoff)
-            .with_context(|| format!("clearing telemetry rows older than {age}"))?
+        if args.all_workspaces {
+            store.clear_before_all_workspaces(cutoff)
+        } else {
+            store.clear_before(&app.workspace_path, cutoff)
+        }
+        .with_context(|| format!("clearing telemetry rows older than {age}"))?
     } else {
         0
     };
+
+    if args.events {
+        return emit_events(
+            app,
+            &store,
+            args,
+            repaired_stale,
+            cleared_rows,
+            telemetry_db,
+        );
+    }
+
     let since_ms = args
         .since
         .as_deref()
         .map(cutoff_from_age)
         .transpose()
         .context("parsing --since")?;
-    let mut records = store
-        .list_runs(args.last, since_ms, args.errors_only)
-        .context("listing telemetry runs")?;
-    if let Some(command) = args.command.as_deref() {
-        records.retain(|record| record.command == command);
+    let before_ms = args
+        .before
+        .as_deref()
+        .map(cutoff_from_age)
+        .transpose()
+        .context("parsing --before")?;
+    let limit = effective_limit(args);
+    let records = if args.all_workspaces {
+        store.list_runs_all_workspaces(
+            limit,
+            since_ms,
+            before_ms,
+            args.errors_only,
+            args.command.as_deref(),
+            args.status.as_deref(),
+            args.category.as_deref(),
+            None,
+        )
+    } else {
+        store.list_runs(
+            &app.workspace_path,
+            limit,
+            since_ms,
+            before_ms,
+            args.errors_only,
+            args.command.as_deref(),
+            args.status.as_deref(),
+            args.category.as_deref(),
+            None,
+        )
     }
+    .context("listing telemetry runs")?;
 
     if args.summary {
-        return emit_summary(app, &records, repaired_stale, cleared_rows);
+        return emit_summary(app, &records, repaired_stale, cleared_rows, telemetry_db);
     }
 
     let output = LogOutput {
         event: "log_completed",
-        telemetry_db: TELEMETRY_DB_NAME.to_owned(),
+        telemetry_db,
         cleared_rows,
         repaired_stale,
         records,
@@ -281,16 +386,88 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
     Ok(())
 }
 
+fn emit_events(
+    app: &AppContext,
+    store: &TelemetryStore,
+    args: &LogArgs,
+    repaired_stale: Option<usize>,
+    cleared_rows: usize,
+    telemetry_db: String,
+) -> Result<()> {
+    let events = store
+        .list_events(
+            &app.workspace_path,
+            args.run.as_deref(),
+            args.last.unwrap_or(100),
+        )
+        .context("listing telemetry events")?;
+    let output = LogEventsOutput {
+        event: "log_events",
+        telemetry_db,
+        cleared_rows,
+        repaired_stale,
+        events,
+    };
+    if app.json_output {
+        app.output().emit(&output)?;
+        return Ok(());
+    }
+
+    if let Some(repaired) = output.repaired_stale {
+        app.output()
+            .line(format!("Finalized {repaired} stale running row(s)."));
+    }
+    if output.cleared_rows > 0 {
+        app.output()
+            .line(format!("Cleared {} telemetry row(s).", output.cleared_rows));
+    }
+    if output.events.is_empty() {
+        app.output().line("No telemetry events found.");
+        return Ok(());
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_BORDERS_ONLY);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["Occurred", "Level", "Category", "Run", "Message"]);
+    for event in &output.events {
+        table.add_row(vec![
+            Cell::new(format_ms(event.occurred_at_ms)),
+            Cell::new(&event.level),
+            Cell::new(&event.category),
+            Cell::new(&event.run_id),
+            Cell::new(event.message_excerpt.as_deref().unwrap_or("-")),
+        ]);
+    }
+    app.output().line(table.to_string());
+    Ok(())
+}
+
+fn effective_limit(args: &LogArgs) -> usize {
+    args.last.unwrap_or_else(|| {
+        if args.summary && (args.since.is_some() || args.before.is_some()) {
+            usize::MAX
+        } else {
+            20
+        }
+    })
+}
+
 fn cutoff_from_age(value: &str) -> Result<i64> {
-    let days = value
-        .strip_suffix('d')
-        .unwrap_or(value)
+    let (amount, unit_ms) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1_000_i64),
+        Some('m') => (&value[..value.len() - 1], 60_000_i64),
+        Some('h') => (&value[..value.len() - 1], 60 * 60 * 1_000_i64),
+        Some('d') => (&value[..value.len() - 1], 24 * 60 * 60 * 1_000_i64),
+        _ => (value, 24 * 60 * 60 * 1_000_i64),
+    };
+    let amount = amount
         .parse::<i64>()
-        .with_context(|| format!("expected an age in days like 7d, got `{value}`"))?;
-    if days < 0 {
+        .with_context(|| format!("expected an age such as 12h or 7d, got `{value}`"))?;
+    if amount < 0 {
         bail!("Age must be non-negative, got `{value}`.");
     }
-    Ok(now_ms().saturating_sub(days.saturating_mul(24 * 60 * 60 * 1000)))
+    Ok(now_ms().saturating_sub(amount.saturating_mul(unit_ms)))
 }
 
 fn now_ms() -> i64 {
@@ -338,6 +515,7 @@ mod tests {
     ) -> TelemetryRunRecord {
         TelemetryRunRecord {
             run_id: format!("{command}-{status}-{duration_ms}"),
+            workspace_hash: "workspace".to_owned(),
             started_at_ms: 0,
             ended_at_ms: Some(duration_ms),
             command: command.to_owned(),
@@ -351,6 +529,13 @@ mod tests {
             result_count: None,
             graph_availability: Some(availability.to_owned()),
             build_provenance: Some("release".to_owned()),
+            binary_path: Some("/opt/gather-step".to_owned()),
+            build_sha: Some("fixture-sha".to_owned()),
+            repo_count: None,
+            files_parsed: None,
+            nodes_created: None,
+            extra_json: None,
+            error_categories: Vec::new(),
         }
     }
 
@@ -363,7 +548,7 @@ mod tests {
             record("status", "abandoned", 0, "unknown"),
         ];
 
-        let summary = summarize(&records, Some(1), 0);
+        let summary = summarize(&records, Some(1), 0, "/tmp/telemetry.db".to_owned());
 
         assert_eq!(summary.total_runs, 4);
         assert_eq!(summary.by_status.get("success"), Some(&2));
@@ -378,5 +563,61 @@ mod tests {
         assert_eq!(slowest.command, "index");
         assert_eq!(slowest.runs, 2);
         assert_eq!(slowest.max_duration_ms, 1200);
+    }
+
+    fn base_args() -> LogArgs {
+        LogArgs {
+            last: None,
+            since: None,
+            before: None,
+            errors_only: false,
+            command: None,
+            status: None,
+            category: None,
+            summary: false,
+            repair: false,
+            clear_before: None,
+            all_workspaces: false,
+            yes: false,
+            events: false,
+            run: None,
+        }
+    }
+
+    #[test]
+    fn summary_time_windows_uncap_the_row_limit() {
+        let mut args = base_args();
+        args.summary = true;
+        assert_eq!(effective_limit(&args), 20);
+
+        args.since = Some("12h".to_owned());
+        assert_eq!(effective_limit(&args), usize::MAX);
+
+        args.since = None;
+        args.before = Some("7d".to_owned());
+        assert_eq!(effective_limit(&args), usize::MAX);
+
+        args.last = Some(5);
+        assert_eq!(effective_limit(&args), 5);
+
+        let mut without_summary = base_args();
+        without_summary.before = Some("7d".to_owned());
+        assert_eq!(effective_limit(&without_summary), 20);
+    }
+
+    #[test]
+    fn age_strings_parse_or_reject() {
+        for valid in ["30s", "5m", "12h", "7d", "0h", "90"] {
+            assert!(cutoff_from_age(valid).is_ok(), "`{valid}` should parse");
+        }
+        for invalid in ["12x", "h", "garbage", "-5d", ""] {
+            assert!(
+                cutoff_from_age(invalid).is_err(),
+                "`{invalid}` should be rejected"
+            );
+        }
+        let zero_age = cutoff_from_age("0h").expect("0h parses");
+        let twelve_hours = cutoff_from_age("12h").expect("12h parses");
+        assert!(zero_age > twelve_hours, "older ages must cut off earlier");
     }
 }

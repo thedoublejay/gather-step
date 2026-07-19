@@ -6,11 +6,17 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_gather-step")
 }
 
+fn command() -> Command {
+    let mut command = Command::new(bin());
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
+}
+
 #[test]
 fn no_args_non_interactive_prints_help() {
     let tmp = tempdir().expect("temp dir");
 
-    let output = Command::new(bin())
+    let output = command()
         .args(["--workspace", tmp.path().to_str().expect("utf-8 temp path")])
         .output()
         .expect("command should run");
@@ -31,7 +37,7 @@ fn no_args_non_interactive_prints_help() {
 fn no_args_json_mode_prints_help_without_prompting() {
     let tmp = tempdir().expect("temp dir");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),

@@ -14,7 +14,6 @@ gather-step-deploy.workspace = true
 gather-step-parser.workspace = true
 bitcode.workspace = true
 blake3.workspace = true
-chrono.workspace = true
 kanal.workspace = true
 rkyv.workspace = true
 globset.workspace = true
@@ -35,6 +34,8 @@ libc.workspace = true
 rustix.workspace = true
 parking_lot.workspace = true
 smallvec.workspace = true
+rand.workspace = true
+regex.workspace = true
 
 [features]
 ## Exposes test-seam helpers (e.g. crash-injection methods) for integration

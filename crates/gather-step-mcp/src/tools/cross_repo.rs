@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gather_step_analysis::{confidence::band_label, cross_repo_deps, trace_across_repos};
-use gather_step_core::{NodeId, NodeKind};
+use gather_step_core::{NodeId, NodeKind, classify_source_scope};
 use gather_step_storage::GraphStore;
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
@@ -16,7 +16,10 @@ use crate::{
         EvidenceSupportMethod,
     },
     ids::{decode_node_id, encode_node_id},
-    tools::labels::edge_kind_label,
+    tools::{
+        coverage::{QueryCoverage, ZeroEdgeSemantics},
+        labels::edge_kind_label,
+    },
 };
 
 const DEFAULT_TRACE_DEPTH: usize = 2;
@@ -117,6 +120,7 @@ pub struct SharedTypeUsageResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SharedTypeUsageData {
+    pub coverage: QueryCoverage,
     pub matches: Vec<SharedTypeMatch>,
     pub type_name: String,
 }
@@ -318,15 +322,17 @@ pub fn get_shared_type_usage_tool(
     validate_input_length("type_name", &request.type_name)?;
     let graph = ctx.graph();
     let needle = request.type_name.trim();
-    let matches = graph
+    let matched = graph
         .nodes_by_type(NodeKind::SharedSymbol)?
         .into_iter()
         .filter(|node| shared_symbol_matches(node, needle))
         .map(|node| {
             let mut per_repo = BTreeMap::<String, BTreeSet<String>>::new();
+            let mut contributed_edges = 0_usize;
 
             for edge in graph.get_incoming(node.id)? {
                 if let Some(source) = graph.get_node(edge.source)? {
+                    contributed_edges += 1;
                     per_repo
                         .entry(source.repo)
                         .or_default()
@@ -336,6 +342,7 @@ pub fn get_shared_type_usage_tool(
 
             for edge in graph.get_outgoing(node.id)? {
                 if let Some(target) = graph.get_node(edge.target)? {
+                    contributed_edges += 1;
                     per_repo
                         .entry(target.repo)
                         .or_default()
@@ -343,24 +350,47 @@ pub fn get_shared_type_usage_tool(
                 }
             }
 
-            Ok(SharedTypeMatch {
-                external_id: node.external_id,
-                qualified_name: node.qualified_name,
-                symbol_id: encode_node_id(node.id),
-                usages: per_repo
-                    .into_iter()
-                    .map(|(repo, files)| SharedTypeUsageRepo {
-                        files: files.into_iter().collect(),
-                        repo,
-                    })
-                    .collect(),
-            })
+            Ok((
+                SharedTypeMatch {
+                    external_id: node.external_id,
+                    qualified_name: node.qualified_name,
+                    symbol_id: encode_node_id(node.id),
+                    usages: per_repo
+                        .into_iter()
+                        .map(|(repo, files)| SharedTypeUsageRepo {
+                            files: files.into_iter().collect(),
+                            repo,
+                        })
+                        .collect(),
+                },
+                contributed_edges,
+            ))
         })
         .collect::<Result<Vec<_>, McpServerError>>()?;
+    let edges_contributed = matched.iter().map(|(_, edge_count)| edge_count).sum();
+    let type_matches = matched
+        .into_iter()
+        .map(|(matched, _)| matched)
+        .collect::<Vec<_>>();
+    let source_scopes = type_matches
+        .iter()
+        .flat_map(|matched| &matched.usages)
+        .flat_map(|usage| &usage.files)
+        .map(|file_path| classify_source_scope(file_path).as_str())
+        .collect::<Vec<_>>();
+    let registry = ctx.registry_snapshot()?;
 
     Ok(SharedTypeUsageResponse {
         data: SharedTypeUsageData {
-            matches,
+            coverage: QueryCoverage::scoped_with_zero_semantics(
+                &registry,
+                None,
+                "shared_type_usage",
+                edges_contributed,
+                ZeroEdgeSemantics::ExactZeroIsOk,
+            )
+            .with_source_scopes(source_scopes),
+            matches: type_matches,
             type_name: request.type_name,
         },
     })
@@ -495,7 +525,79 @@ fn strongest_repo_confidence(repo: &ImpactRepo) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CrossRepoDepsData, CrossRepoDepsResponse, ImpactHop, RepoDependency};
+    use std::{
+        env, fs,
+        path::PathBuf,
+        process,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use gather_step_core::{DepthLevel, RegistryStore};
+    use gather_step_storage::GraphStoreDb;
+
+    use crate::{McpServerConfig, config::McpContext};
+
+    use super::{
+        CrossRepoDepsData, CrossRepoDepsResponse, ImpactHop, RepoDependency,
+        SharedTypeUsageRequest, get_shared_type_usage_tool,
+    };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gather-step-cross-repo-{name}-{}-{id}",
+                process::id()
+            ));
+            fs::create_dir_all(&path).expect("temp dir should create");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn shared_type_usage_with_zero_usages_reports_ok_coverage() {
+        let temp = TempDir::new("shared-type-zero");
+        let graph_path = temp.path.join("graph.redb");
+        let registry_path = temp.path.join("registry.json");
+        drop(GraphStoreDb::open(&graph_path).expect("graph store should open"));
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                "backend_standard",
+                temp.path.join("repos/backend_standard"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let response = get_shared_type_usage_tool(
+            &ctx,
+            SharedTypeUsageRequest {
+                type_name: "UnusedSharedType".to_owned(),
+            },
+        )
+        .expect("tool should succeed");
+
+        assert!(response.data.matches.is_empty());
+        assert_eq!(
+            response.data.coverage.verdict, "ok",
+            "an exact zero-usage count over indexed repos must not read as an extraction gap"
+        );
+    }
 
     fn sample_hop(confidence: Option<u16>) -> ImpactHop {
         ImpactHop {

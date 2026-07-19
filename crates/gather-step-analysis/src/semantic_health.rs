@@ -129,6 +129,7 @@ pub fn semantic_health_for_repo(
 pub fn semantic_health_for_workspace(
     graph: &impl GraphStore,
     metadata: &impl MetadataStore,
+    unresolved_call_inputs: usize,
 ) -> Result<SemanticHealthReport, SemanticHealthError> {
     // See `semantic_health_for_repo` — routes use the loose classifier for
     // the same reason (server without indexed client is not a bug).
@@ -207,7 +208,7 @@ pub fn semantic_health_for_workspace(
         shared_symbol_links,
         payload_contract_links,
         orphan_topics: count_orphan_topics(graph, None)?,
-        unresolved_call_inputs: 0,
+        unresolved_call_inputs,
     })
 }
 

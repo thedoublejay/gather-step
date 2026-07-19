@@ -49,9 +49,9 @@ fn fresh_schema_stamps_current_metadata_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("The user_version pragma should read.");
-    // Tracks METADATA_SCHEMA_VERSION; bumped to 2 when checked bitcode blobs
-    // wrapped stored resolution inputs with schema/checksum bytes.
-    assert_eq!(version, 2);
+    // Tracks METADATA_SCHEMA_VERSION; v3 persists FastAPI mount facts used by
+    // incremental route recomposition.
+    assert_eq!(version, 3);
 }
 
 #[test]

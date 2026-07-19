@@ -102,6 +102,15 @@ enum Command {
         #[arg(long, default_value = "benchmark/results")]
         output_dir: PathBuf,
     },
+    /// Execute every alias-only repository in a Python external-corpus manifest.
+    PythonCorpus {
+        /// Local manifest copied from benchmark/python/external-corpus.example.yaml.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Directory where the comparable aggregate JSON is written.
+        #[arg(long, default_value = "benchmark/python/external-results")]
+        output_dir: PathBuf,
+    },
     /// Compare two result directories and report regressions.
     Compare {
         /// Baseline results directory.
@@ -290,6 +299,10 @@ fn main() -> anyhow::Result<()> {
             thresholds,
             output_dir,
         } => workspace_run_command(&fixture_path, &thresholds, &output_dir),
+        Command::PythonCorpus {
+            manifest,
+            output_dir,
+        } => python_corpus_command(&manifest, &output_dir),
         Command::Compare { from, to } => {
             let summary = compare_result_dirs(&from, &to)?;
             for line in &summary.lines {
@@ -638,6 +651,105 @@ fn run_command(
         anyhow::bail!(failures.join("; "));
     }
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PythonCorpusManifest {
+    version: u32,
+    corpora: Vec<PythonCorpusEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PythonCorpusEntry {
+    alias: String,
+    path: PathBuf,
+    indexability: PythonCorpusIndexability,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PythonCorpusIndexability {
+    status: String,
+    blocker: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PythonCorpusResult {
+    alias: String,
+    status: String,
+    blocker: Option<String>,
+    metrics: Option<gather_step_bench::harness::IndexMetrics>,
+}
+
+fn python_corpus_command(manifest_path: &Path, output_dir: &Path) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("reading Python corpus manifest {}", manifest_path.display()))?;
+    let manifest: PythonCorpusManifest = serde_norway::from_str(&raw)
+        .with_context(|| format!("parsing Python corpus manifest {}", manifest_path.display()))?;
+    if manifest.version != 1 {
+        anyhow::bail!(
+            "unsupported Python corpus manifest version {}; expected 1",
+            manifest.version
+        );
+    }
+
+    let mut aliases = BTreeSet::new();
+    let mut results = Vec::new();
+    for corpus in manifest.corpora {
+        if corpus.alias.is_empty()
+            || !corpus.alias.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, '-' | '_')
+            })
+        {
+            anyhow::bail!(
+                "corpus alias `{}` must contain only lowercase ASCII letters, digits, '-' or '_'",
+                corpus.alias
+            );
+        }
+        if !aliases.insert(corpus.alias.clone()) {
+            anyhow::bail!("duplicate corpus alias `{}`", corpus.alias);
+        }
+        if corpus.indexability.status != "ready" {
+            results.push(PythonCorpusResult {
+                alias: corpus.alias,
+                status: corpus.indexability.status,
+                blocker: corpus.indexability.blocker,
+                metrics: None,
+            });
+            continue;
+        }
+        if !corpus.path.is_dir() {
+            anyhow::bail!(
+                "ready corpus alias `{}` does not point to a directory",
+                corpus.alias
+            );
+        }
+        print_status(&format!("Indexing Python corpus alias: {}", corpus.alias));
+        let metrics = run_index_pass(&corpus.path, &corpus.alias)?;
+        results.push(PythonCorpusResult {
+            alias: corpus.alias,
+            status: "indexed".to_owned(),
+            blocker: None,
+            metrics: Some(metrics),
+        });
+    }
+
+    let date = chrono::Utc::now().to_rfc3339();
+    let result = BenchmarkResult {
+        environment: Some(Environment::current()),
+        date: date.clone(),
+        sample_sizes: [("python_corpora".to_owned(), results.len())]
+            .into_iter()
+            .collect(),
+        comparison_window: None,
+        metrics: serde_json::json!({
+            "manifest_version": manifest.version,
+            "corpora": results,
+        }),
+        thresholds_applied: Vec::new(),
+    };
+    write_result(output_dir, "python_corpus", &date, &result)
 }
 
 fn workspace_run_command(

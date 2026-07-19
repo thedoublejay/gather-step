@@ -66,7 +66,9 @@ impl Drop for TempDir {
 }
 
 fn gather_step() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_gather-step"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gather-step"));
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
 }
 
 fn fixture_root() -> PathBuf {

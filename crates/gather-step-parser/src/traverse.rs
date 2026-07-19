@@ -111,6 +111,7 @@ pub struct TraversalSummary {
     /// avoids the O(log n) `BTreeMap` cost at the call sites in the indexer.
     pub file_stats: FxHashMap<Vec<u8>, FileStat>,
     pub skipped_binary: usize,
+    pub skipped_too_small: usize,
     pub skipped_too_large: usize,
     pub skipped_unsupported: usize,
     pub skipped_excluded: usize,
@@ -140,8 +141,11 @@ pub struct TraverseConfig {
     /// `is_index_relevant_path` (called per-path from the file-system watcher)
     /// never re-compiles the patterns.
     exclude_matcher: GlobSet,
+    language_excludes: Vec<(Language, Vec<String>)>,
+    language_exclude_matchers: Vec<(Language, GlobSet)>,
     include_languages: Vec<Language>,
     include_dotfiles: bool,
+    min_file_size_bytes: u64,
     max_file_size_bytes: u64,
 }
 
@@ -151,8 +155,10 @@ pub struct TraverseConfig {
 impl PartialEq for TraverseConfig {
     fn eq(&self, other: &Self) -> bool {
         self.exclude == other.exclude
+            && self.language_excludes == other.language_excludes
             && self.include_languages == other.include_languages
             && self.include_dotfiles == other.include_dotfiles
+            && self.min_file_size_bytes == other.min_file_size_bytes
             && self.max_file_size_bytes == other.max_file_size_bytes
     }
 }
@@ -223,14 +229,48 @@ impl TraverseConfig {
                 value: config.max_file_size.clone(),
             }
         })?;
+        let min_file_size_bytes = match config.min_file_size.as_deref() {
+            Some(value) => {
+                parse_byte_size(value).ok_or_else(|| TraverseError::InvalidSizeThreshold {
+                    value: value.to_owned(),
+                })?
+            }
+            None => 0,
+        };
+        if min_file_size_bytes > max_file_size_bytes {
+            return Err(TraverseError::InvalidSizeRange {
+                min: min_file_size_bytes,
+                max: max_file_size_bytes,
+            });
+        }
+
+        let language_excludes = config
+            .language_excludes
+            .iter()
+            .map(|entry| {
+                let language = Language::from_str(&entry.language).map_err(|()| {
+                    TraverseError::UnsupportedLanguageFilter {
+                        value: entry.language.clone(),
+                    }
+                })?;
+                Ok((language, entry.patterns.clone()))
+            })
+            .collect::<Result<Vec<_>, TraverseError>>()?;
+        let language_exclude_matchers = language_excludes
+            .iter()
+            .map(|(language, patterns)| (*language, build_exclude_matcher(patterns)))
+            .collect();
 
         let exclude_matcher = build_exclude_matcher(&config.exclude);
 
         Ok(Self {
             exclude_matcher,
             exclude: config.exclude.clone(),
+            language_excludes,
+            language_exclude_matchers,
             include_languages,
             include_dotfiles: config.include_dotfiles,
+            min_file_size_bytes,
             max_file_size_bytes,
         })
     }
@@ -246,10 +286,18 @@ impl TraverseConfig {
         Self {
             exclude,
             exclude_matcher,
+            language_excludes: Vec::new(),
+            language_exclude_matchers: Vec::new(),
             include_languages,
             include_dotfiles,
+            min_file_size_bytes: 0,
             max_file_size_bytes,
         }
+    }
+
+    #[must_use]
+    pub const fn min_file_size_bytes(&self) -> u64 {
+        self.min_file_size_bytes
     }
 
     #[must_use]
@@ -260,6 +308,12 @@ impl TraverseConfig {
     #[must_use]
     pub const fn include_dotfiles(&self) -> bool {
         self.include_dotfiles
+    }
+
+    fn is_language_excluded(&self, language: Language, path: &Path) -> bool {
+        self.language_exclude_matchers
+            .iter()
+            .any(|(candidate, matcher)| *candidate == language && matcher.is_match(path))
     }
 }
 
@@ -318,6 +372,10 @@ impl TraverseConfig {
             return false;
         };
 
+        if self.is_language_excluded(language, &normalized) {
+            return false;
+        }
+
         self.include_languages.is_empty() || self.include_languages.contains(&language)
     }
 }
@@ -338,6 +396,8 @@ pub enum TraverseError {
     },
     #[error("invalid max file size threshold `{value}`")]
     InvalidSizeThreshold { value: String },
+    #[error("minimum file size {min} bytes exceeds maximum file size {max} bytes")]
+    InvalidSizeRange { min: u64, max: u64 },
     #[error("unsupported include_languages value `{value}`")]
     UnsupportedLanguageFilter { value: String },
     #[error("walk error while traversing {root}: {source}")]
@@ -413,6 +473,7 @@ pub fn collect_repo_files(
                 files: Vec::new(),
                 file_stats: FxHashMap::default(),
                 skipped_binary: 0,
+                skipped_too_small: 0,
                 skipped_too_large: 0,
                 skipped_unsupported: 0,
                 skipped_excluded: 0,
@@ -466,6 +527,10 @@ pub fn collect_repo_files(
                 guard.summary.skipped_excluded += 1;
                 return WalkState::Continue;
             }
+            if config.is_language_excluded(language, &relative_path) {
+                guard.summary.skipped_excluded += 1;
+                return WalkState::Continue;
+            }
 
             let mut file = match fs::File::open(path) {
                 Ok(file) => file,
@@ -487,6 +552,10 @@ pub fn collect_repo_files(
                     return WalkState::Quit;
                 }
             };
+            if metadata.len() < config.min_file_size_bytes {
+                guard.summary.skipped_too_small += 1;
+                return WalkState::Continue;
+            }
             if metadata.len() > config.max_file_size_bytes {
                 guard.summary.skipped_too_large += 1;
                 return WalkState::Continue;
@@ -545,6 +614,7 @@ pub fn collect_repo_files(
             acc.files.extend(part.files);
             acc.file_stats.extend(part.file_stats);
             acc.skipped_binary += part.skipped_binary;
+            acc.skipped_too_small += part.skipped_too_small;
             acc.skipped_too_large += part.skipped_too_large;
             acc.skipped_unsupported += part.skipped_unsupported;
             acc.skipped_excluded += part.skipped_excluded;
@@ -572,6 +642,7 @@ pub fn collect_selected_repo_files(
         files: Vec::new(),
         file_stats: FxHashMap::default(),
         skipped_binary: 0,
+        skipped_too_small: 0,
         skipped_too_large: 0,
         skipped_unsupported: 0,
         skipped_excluded: 0,
@@ -621,6 +692,10 @@ pub fn collect_selected_repo_files(
             summary.skipped_excluded += 1;
             continue;
         }
+        if config.is_language_excluded(language, &normalized) {
+            summary.skipped_excluded += 1;
+            continue;
+        }
         let mut file = match fs::File::open(&full_path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -640,6 +715,10 @@ pub fn collect_selected_repo_files(
                 });
             }
         };
+        if file_metadata.len() < config.min_file_size_bytes {
+            summary.skipped_too_small += 1;
+            continue;
+        }
         if file_metadata.len() > config.max_file_size_bytes {
             summary.skipped_too_large += 1;
             continue;
@@ -807,7 +886,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use gather_step_core::IndexingConfig;
+    use gather_step_core::{IndexingConfig, LanguageExcludeConfig};
     use pretty_assertions::assert_eq;
 
     use super::{
@@ -1162,6 +1241,85 @@ mod tests {
                 2 * 1024 * 1024,
             )
         );
+    }
+
+    #[test]
+    fn language_excludes_and_minimum_size_affect_full_and_selected_walks() {
+        let temp_dir = TestDir::new("language-excludes-min-size");
+        fs::create_dir_all(temp_dir.path().join("generated")).expect("generated dir");
+        fs::create_dir_all(temp_dir.path().join("src")).expect("source dir");
+        fs::write(
+            temp_dir.path().join("generated/ignored.py"),
+            "value = 'ignored'\n",
+        )
+        .expect("ignored python");
+        fs::write(
+            temp_dir.path().join("generated/kept.ts"),
+            "export const kept = true;\n",
+        )
+        .expect("kept typescript");
+        fs::write(temp_dir.path().join("src/kept.py"), "value = 'kept'\n").expect("kept python");
+        fs::write(temp_dir.path().join("src/tiny.py"), "x=1\n").expect("tiny python");
+
+        let config = IndexingConfig {
+            language_excludes: vec![LanguageExcludeConfig {
+                language: "python".to_owned(),
+                patterns: vec!["generated/**".to_owned()],
+            }],
+            min_file_size: Some("8B".to_owned()),
+            max_file_size: "1MB".to_owned(),
+            ..IndexingConfig::default()
+        };
+        let traverse =
+            TraverseConfig::from_indexing_config(&config).expect("config should convert");
+
+        let full = collect_repo_files(temp_dir.path(), &traverse).expect("full walk");
+        let selected = collect_selected_repo_files(
+            temp_dir.path(),
+            &[
+                PathBuf::from("generated/ignored.py"),
+                PathBuf::from("generated/kept.ts"),
+                PathBuf::from("src/kept.py"),
+                PathBuf::from("src/tiny.py"),
+            ],
+            &traverse,
+        )
+        .expect("selected walk");
+
+        let expected = vec![
+            PathBuf::from("generated/kept.ts"),
+            PathBuf::from("src/kept.py"),
+        ];
+        assert_eq!(
+            full.files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            selected
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(full.skipped_too_small, 1);
+        assert_eq!(selected.skipped_too_small, 1);
+    }
+
+    #[test]
+    fn minimum_size_cannot_exceed_maximum_size() {
+        let config = IndexingConfig {
+            min_file_size: Some("2MB".to_owned()),
+            max_file_size: "1MB".to_owned(),
+            ..IndexingConfig::default()
+        };
+        assert!(matches!(
+            TraverseConfig::from_indexing_config(&config),
+            Err(TraverseError::InvalidSizeRange { .. })
+        ));
     }
 
     #[test]

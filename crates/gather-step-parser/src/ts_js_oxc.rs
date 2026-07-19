@@ -2031,21 +2031,18 @@ fn visit_call_expression(
     state: &mut ParseState<'_>,
     ctx: &mut VisitCtx<'_>,
 ) {
-    if let Some(owner) = ctx.owner {
-        let (callee_name, qualified_hint) = expression_name_from_expr(&call.callee);
-        if !callee_name.is_empty() {
-            let literal_argument =
-                first_literal_argument_from_arguments(&call.arguments, ctx.source);
-            let raw_arguments = raw_arguments_from_arguments(&call.arguments, ctx.source);
-            state.push_call_site_with_span(
-                owner,
-                callee_name,
-                qualified_hint,
-                literal_argument,
-                Some(raw_arguments),
-                ctx.span(call.span),
-            );
-        }
+    let (callee_name, qualified_hint) = expression_name_from_expr(&call.callee);
+    if !callee_name.is_empty() {
+        let literal_argument = first_literal_argument_from_arguments(&call.arguments, ctx.source);
+        let raw_arguments = raw_arguments_from_arguments(&call.arguments, ctx.source);
+        state.push_call_site_with_span(
+            ctx.enclosing_owner_id(state),
+            callee_name,
+            qualified_hint,
+            literal_argument,
+            Some(raw_arguments),
+            ctx.span(call.span),
+        );
     }
     for arg in &call.arguments {
         visit_argument(arg, state, ctx);

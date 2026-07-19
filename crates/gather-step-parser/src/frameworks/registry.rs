@@ -87,7 +87,7 @@ pub enum PackId {
     /// `aiohttp` deps.  Emits `Route` + `ConsumesApiFrom` for statically
     /// resolvable client-call URLs.
     PythonHttp,
-    /// LangChain-style TypeScript/JavaScript AI extraction (v5).
+    /// LangChain/LangGraph extraction for TypeScript, JavaScript, and Python.
     AiTypescript,
     /// Shared-library / shared-lib contract detection.  This pack is always
     /// active for TypeScript/JavaScript files; it has no detection predicate.
@@ -139,6 +139,10 @@ impl PackId {
             Self::Fastapi | Self::PythonKafka | Self::PythonHttp => {
                 matches!(language, Language::Python)
             }
+            Self::AiTypescript => matches!(
+                language,
+                Language::TypeScript | Language::JavaScript | Language::Python
+            ),
             Self::Nestjs
             | Self::Mongoose
             | Self::Nextjs
@@ -154,7 +158,6 @@ impl PackId {
             | Self::Redux
             | Self::Zustand
             | Self::LaunchDarkly
-            | Self::AiTypescript
             | Self::SharedLib
             | Self::GatewayProxy
             | Self::FrontendHooks => {

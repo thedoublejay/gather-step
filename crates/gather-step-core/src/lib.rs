@@ -10,6 +10,7 @@ pub mod process_metrics;
 pub mod registry;
 pub mod resolver;
 pub mod schema;
+pub mod source_scope;
 pub mod virtual_nodes;
 pub mod workspace;
 
@@ -39,6 +40,7 @@ pub use resolver::{ResolverStrategy, strategy_weight};
 pub use schema::{
     AccessMechanism, EdgeKind, NodeKind, PlanningProof, ProofHop, ProofKind, proof_sort_key,
 };
+pub use source_scope::{SourceScope, classify_source_scope};
 pub use virtual_nodes::{
     VIRTUAL_NODE_REPO, VirtualNodeKind, broker_qn, canonical_route_path, canonical_topology_part,
     canonical_topology_part_or, config_map_qn, database_qn, deployment_qn, env_var_qn,

@@ -7,7 +7,7 @@ use gather_step_analysis::{
 };
 use gather_step_core::EdgeKind;
 use gather_step_core::NodeKind;
-use gather_step_core::RegistryStore;
+use gather_step_core::{GatherStepConfig, RegistryStore};
 use gather_step_parser::resolve::{ResolutionInput, is_non_actionable_unresolved_call};
 use gather_step_storage::{GraphStore, MetadataStore, SearchStore, StorageCoordinator};
 use serde::Serialize;
@@ -19,8 +19,19 @@ use crate::freshness::{RepoFreshness, workspace_freshness};
 use crate::storage_context::StorageContext;
 use crate::{app::AppContext, daemon_proxy};
 
-#[derive(Debug, Args, Default)]
-pub struct DoctorArgs {}
+#[derive(Debug, Args, Clone, Copy, Default)]
+pub struct DoctorArgs {
+    #[arg(long, help = "Validate configuration without opening graph storage")]
+    pub config_only: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigDoctorOutput {
+    event: &'static str,
+    ok: bool,
+    config_path: String,
+    repo_count: usize,
+}
 
 #[derive(Debug, Serialize)]
 struct DoctorOutput {
@@ -124,7 +135,10 @@ fn collect_mongo_findings(
     Ok(out)
 }
 
-pub fn run(app: &AppContext, _args: DoctorArgs) -> Result<()> {
+pub fn run(app: &AppContext, args: DoctorArgs) -> Result<()> {
+    if args.config_only {
+        return run_config_only(app);
+    }
     daemon_proxy::run_read_only_command(
         app,
         &DaemonRequest::Doctor {
@@ -132,6 +146,31 @@ pub fn run(app: &AppContext, _args: DoctorArgs) -> Result<()> {
         },
         |app| run_rendered(app, &StorageContext::workspace_read_only(app)),
     )
+}
+
+fn run_config_only(app: &AppContext) -> Result<()> {
+    let config_path = app.workspace_paths().config_path;
+    let config = GatherStepConfig::from_yaml_file(&config_path)
+        .with_context(|| format!("opening {}", config_path.display()))?;
+    let config_root = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    config.validate_repo_roots_against_config_root(config_root)?;
+    let output = ConfigDoctorOutput {
+        event: "doctor_config_completed",
+        ok: true,
+        config_path: config_path.display().to_string(),
+        repo_count: config.repos.len(),
+    };
+    if app.json_output {
+        app.output().emit(&output)?;
+    } else {
+        app.output().line(format!(
+            "Configuration is valid: {} ({} repos)",
+            output.config_path, output.repo_count
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<RenderedCommand> {

@@ -87,5 +87,10 @@ pub(crate) fn execute(
         "event": "cross_repo_deps_completed",
         "repos": repos,
     });
-    Ok(RenderedCommand::success(payload, lines))
+    Ok(
+        RenderedCommand::success(payload, lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::DependencyEdges,
+            total_edges,
+        ),
+    )
 }

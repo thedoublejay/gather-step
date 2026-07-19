@@ -49,15 +49,23 @@ impl DaemonClient {
     }
 
     pub fn call(&self, request: &DaemonRequest) -> Result<RenderedCommand> {
+        self.call_with_timeout(request, DAEMON_RPC_TIMEOUT)
+    }
+
+    pub fn call_with_timeout(
+        &self,
+        request: &DaemonRequest,
+        timeout: Duration,
+    ) -> Result<RenderedCommand> {
         #[cfg(unix)]
         {
             let mut stream = std::os::unix::net::UnixStream::connect(&self.socket_path)
                 .with_context(|| format!("connecting to {}", self.socket_path.display()))?;
             stream
-                .set_read_timeout(Some(DAEMON_RPC_TIMEOUT))
+                .set_read_timeout(Some(timeout))
                 .context("setting daemon read timeout")?;
             stream
-                .set_write_timeout(Some(DAEMON_RPC_TIMEOUT))
+                .set_write_timeout(Some(timeout))
                 .context("setting daemon write timeout")?;
             let request_json =
                 serde_json::to_string(request).context("serializing daemon request")?;
@@ -83,6 +91,20 @@ impl DaemonClient {
         {
             let _ = request;
             anyhow::bail!("Daemon IPC is unsupported on this platform.");
+        }
+    }
+
+    /// Check whether the daemon socket is accepting connections without
+    /// issuing an RPC. Used by `serve` preflight before opening lockable stores.
+    #[must_use]
+    pub fn is_reachable(&self) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::connect(&self.socket_path).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     }
 }

@@ -4,7 +4,8 @@
 //!
 //! 1. **React Router** — `createBrowserRouter`, `createHashRouter`,
 //!    `createMemoryRouter`, navigation hooks (`useNavigate`, `useLocation`,
-//!    `useParams`, `useSearchParams`), and JSX `<Route path="…">` components.
+//!    `useParams`, `useSearchParams`), JSX `<Route path="…">` components, and
+//!    `TanStack` Router `createFileRoute("…")` declarations.
 //! 2. **Zustand** — `create(…)` store factories detected by owner-name or
 //!    qualified-hint heuristics.
 //! 3. **Redux / Redux Saga** — `createStore`, `configureStore`, `createSlice`,
@@ -104,6 +105,18 @@ fn add_react_router_edges(parsed: &ParsedFile, aug: &mut FrontendRouterAugmentat
             }
             "Route" => {
                 // Only emit when a path string argument is present.
+                let Some(raw_path) = call.literal_argument.as_deref() else {
+                    continue;
+                };
+                let path = sanitize_string(raw_path);
+                if path.is_empty() {
+                    continue;
+                }
+                let qn = format!("__frontend_route__{path}");
+                let node = virtual_node_from_call(NodeKind::Route, &qn, &path, parsed, call);
+                push_node_and_edge(node, call, parsed, aug, EdgeKind::Defines);
+            }
+            "createFileRoute" => {
                 let Some(raw_path) = call.literal_argument.as_deref() else {
                     continue;
                 };
@@ -559,6 +572,40 @@ export function makeRouter() {
             !defines_edges.is_empty(),
             "expected at least one Defines edge"
         );
+    }
+
+    #[test]
+    fn tanstack_file_route_produces_frontend_route_node() {
+        let temp_dir = TestDir::new("tanstack-file-route");
+        fs::write(
+            temp_dir.path().join("assets.tsx"),
+            r#"
+import { createFileRoute } from '@tanstack/react-router';
+
+export const Route = createFileRoute('/assets/$assetId')({
+  component: AssetPage,
+});
+"#,
+        )
+        .expect("fixture should write");
+
+        let parsed = parse_file(
+            "frontend-app",
+            temp_dir.path(),
+            &crate::FileEntry {
+                path: "assets.tsx".into(),
+                language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+        )
+        .expect("fixture should parse");
+
+        assert!(parsed.nodes.iter().any(|node| {
+            node.kind == gather_step_core::NodeKind::Route
+                && node.external_id.as_deref() == Some("__frontend_route__/assets/$assetId")
+        }));
     }
 
     // -----------------------------------------------------------------------

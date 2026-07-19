@@ -26,7 +26,17 @@ pub mod tui;
 pub mod watch;
 pub mod who_consumes;
 
-use std::{panic::PanicHookInfo, path::PathBuf, process::ExitCode};
+use std::{
+    panic::PanicHookInfo,
+    path::PathBuf,
+    process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use clap::{
@@ -50,6 +60,43 @@ const VERSION_LONG: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\nCopyright (c) 2026 JJ Adonis. Licensed under the MIT License.",
 );
+
+struct TelemetryHeartbeat {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl TelemetryHeartbeat {
+    fn start(store: TelemetryStore, run: TelemetryRun) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                thread::park_timeout(Duration::from_secs(30));
+                if worker_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Err(error) = store.heartbeat(&run) {
+                    warn!(%error, "failed to refresh telemetry heartbeat");
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for TelemetryHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
 
 /// Canonical catalog of user-visible CLI subcommands.
 ///
@@ -75,7 +122,7 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "Run health checks against the workspace"),
     ("log", "Inspect local run and error telemetry"),
     ("search", "Search indexed symbols, files, and concepts"),
-    ("trace", "Trace impact, events, or routes from a target"),
+    ("trace", "Trace CRUD reachability from a symbol or route"),
     ("impact", "Inspect change-impact for a symbol or file"),
     (
         "cross-repo-deps",
@@ -83,7 +130,7 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "who-consumes",
-        "Find which repos consume what a symbol's file produces",
+        "Find repos with dependency paths to an exact symbol",
     ),
     (
         "projection-impact",
@@ -180,36 +227,74 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(about = "Discover repos, write a config, and run the setup wizard")]
     Init(init::InitArgs),
+    #[command(about = "Index configured repos into the workspace graph")]
     Index(index::IndexArgs),
+    #[command(about = "Remove indexed state and storage artifacts")]
     Clean(clean::CleanArgs),
+    #[command(about = "Compact storage in place to reclaim space")]
     Compact(compact::CompactArgs),
+    #[command(about = "Re-index repos with full or selective coverage")]
     Reindex(reindex::ReindexArgs),
+    #[command(about = "Search indexed symbols, files, and concepts")]
     Search(search::SearchArgs),
+    #[command(about = "Trace CRUD reachability from a symbol or route")]
     Trace(trace::TraceArgs),
+    #[command(about = "Run the long-lived JSON-API server")]
     Serve(serve::ServeArgs),
+    #[command(about = "Watch repos for changes and incrementally re-index")]
     Watch(watch::WatchArgs),
+    #[command(about = "Launch the interactive terminal UI")]
     Tui(tui::TuiArgs),
+    #[command(about = "Register gather-step as an MCP server")]
     SetupMcp(setup_mcp::SetupMcpArgs),
+    #[command(about = "Show indexing status and counts per repo")]
     Status(status::StatusArgs),
-    #[command(name = "storage-report")]
+    #[command(
+        name = "storage-report",
+        about = "Print storage size and segment breakdown"
+    )]
     StorageReport(storage_report::StorageReportArgs),
+    #[command(about = "Run health checks against the workspace")]
     Doctor(doctor::DoctorArgs),
+    #[command(about = "Inspect local run and error telemetry")]
     Log(log::LogArgs),
+    #[command(about = "Generate AI docs (claude-md, agents-md, codeowners)")]
     Generate(generate::GenerateCommand),
+    #[command(about = "Inspect change impact for a symbol or file")]
     Impact(impact::ImpactArgs),
-    #[command(name = "cross-repo-deps", visible_alias = "cross_repo_deps")]
+    #[command(
+        name = "cross-repo-deps",
+        visible_alias = "cross_repo_deps",
+        about = "Inspect cross-repo dependency edges per configured repo"
+    )]
     CrossRepoDeps(cross_repo_deps::CrossRepoDepsArgs),
-    #[command(name = "who-consumes", visible_alias = "who_consumes")]
+    #[command(
+        name = "who-consumes",
+        visible_alias = "who_consumes",
+        about = "Find repos with dependency paths to an exact symbol"
+    )]
     WhoConsumes(who_consumes::WhoConsumesArgs),
+    #[command(about = "Trace projected fields, filters, and backfill evidence")]
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
+    #[command(about = "Inspect deployment topology and shared infra")]
     DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
-    #[command(name = "qa-evidence")]
+    #[command(
+        name = "qa-evidence",
+        about = "Emit canonical code-evidence metadata for QA planning"
+    )]
     QaEvidence(qa_evidence::QaEvidenceArgs),
+    #[command(about = "Render task, planning, debug, and review context packs")]
     Pack(pack::PackArgs),
+    #[command(about = "Inspect events, queues, and orphan topics")]
     Events(events::EventsArgs),
+    #[command(about = "Summarize detected workspace conventions")]
     Conventions(conventions::ConventionsArgs),
-    #[command(name = "pr-review")]
+    #[command(
+        name = "pr-review",
+        about = "Build a disposable PR-scoped review and emit the delta report"
+    )]
     PrReview(pr_review::PrReviewArgs),
     #[command(hide = true)]
     Mcp(McpCommand),
@@ -234,6 +319,7 @@ pub enum McpSubcommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliOutcome {
     Success,
+    AlreadyRunning,
     ReviewThresholdExceeded,
 }
 
@@ -241,7 +327,7 @@ impl CliOutcome {
     #[must_use]
     pub fn exit_code(self) -> ExitCode {
         match self {
-            Self::Success => ExitCode::from(0),
+            Self::Success | Self::AlreadyRunning => ExitCode::from(0),
             Self::ReviewThresholdExceeded => ExitCode::from(2),
         }
     }
@@ -257,6 +343,13 @@ impl CliOutcome {
 
 fn success(result: Result<()>) -> Result<CliOutcome> {
     result.map(|()| CliOutcome::Success)
+}
+
+fn serve_outcome(result: Result<serve::ServeOutcome>) -> Result<CliOutcome> {
+    result.map(|outcome| match outcome {
+        serve::ServeOutcome::Started => CliOutcome::Success,
+        serve::ServeOutcome::AlreadyRunning => CliOutcome::AlreadyRunning,
+    })
 }
 
 /// Map a command result to `Success` and, on success, best-effort auto-register
@@ -277,7 +370,11 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     let command_name = command_telemetry_name(cli.command.as_ref());
     app::reset_telemetry_run_state();
     let workspace_path = app.workspace_path.clone();
-    let telemetry = open_telemetry_store();
+    let telemetry = if matches!(cli.command, Some(Command::Log(_))) {
+        None
+    } else {
+        open_telemetry_store()?
+    };
     let run = telemetry.as_ref().and_then(|store| {
         match store.begin_run(
             command_name,
@@ -298,9 +395,19 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         install_telemetry_panic_hook(store.clone(), run.clone());
     }
 
+    let heartbeat = if matches!(command_name, "serve" | "watch" | "mcp") {
+        telemetry
+            .as_ref()
+            .zip(run.as_ref())
+            .map(|(store, run)| TelemetryHeartbeat::start(store.clone(), run.clone()))
+    } else {
+        None
+    };
+
     let outcome = run_inner(cli, app).await;
+    drop(heartbeat);
     if let (Some(store), Some(run)) = (&telemetry, &run) {
-        let finish = telemetry_finish_fields(&outcome);
+        let finish = telemetry_finish_fields(command_name, &outcome);
         if let Err(error) = store.finish_run(run, &finish) {
             warn!(%error, "failed to write telemetry run finish");
         }
@@ -317,7 +424,7 @@ async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         Some(Command::Reindex(args)) => {
             success_with_mcp_setup(&app, reindex::run(&app, args).await)
         }
-        Some(Command::Serve(args)) => success(serve::run(&app, args).await),
+        Some(Command::Serve(args)) => serve_outcome(serve::run(&app, args).await),
         Some(Command::Watch(args)) => success(watch::run(&app, args).await),
         Some(Command::Tui(args)) => success(tui::run(&app, args)),
         Some(Command::Search(args)) => success(search::run(&app, args)),
@@ -341,22 +448,28 @@ async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
             CliOutcome::from_pr_review_code(pr_review::run(&app, args)?)
         }
         Some(Command::Mcp(command)) => match command.command {
-            McpSubcommand::Serve(args) => success(serve::run(&app, args).await),
+            McpSubcommand::Serve(args) => serve_outcome(serve::run(&app, args).await),
         },
         None => success(no_args::run(&app).await),
     }
 }
 
-fn open_telemetry_store() -> Option<TelemetryStore> {
+fn open_telemetry_store() -> Result<Option<TelemetryStore>> {
+    if !telemetry_enabled() {
+        return Ok(None);
+    }
     let Some(telemetry_root) = telemetry_root() else {
         warn!("failed to locate data directory for telemetry store");
-        return None;
+        return Ok(None);
     };
     match TelemetryStore::open(&telemetry_root) {
-        Ok(store) => Some(store),
+        Ok(store) => Ok(Some(store)),
+        Err(error @ gather_step_storage::TelemetryError::UnsupportedSchemaVersion { .. }) => {
+            Err(error.into())
+        }
         Err(error) => {
             warn!(%error, "failed to open telemetry store");
-            None
+            Ok(None)
         }
     }
 }
@@ -376,6 +489,7 @@ fn command_telemetry_name(command: Option<&Command>) -> &'static str {
         Some(Command::SetupMcp(_)) => "setup-mcp",
         Some(Command::Status(_)) => "status",
         Some(Command::StorageReport(_)) => "storage-report",
+        Some(Command::Doctor(args)) if args.config_only => "doctor:config-only",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Log(_)) => "log",
         Some(Command::Generate(_)) => "generate",
@@ -388,16 +502,24 @@ fn command_telemetry_name(command: Option<&Command>) -> &'static str {
         Some(Command::Pack(_)) => "pack",
         Some(Command::Events(_)) => "events",
         Some(Command::Conventions(_)) => "conventions",
-        Some(Command::PrReview(_)) => "pr-review",
+        Some(Command::PrReview(args)) => match args.command.as_ref() {
+            Some(pr_review::PrReviewSubcommand::Clean(_)) => "pr-review:clean",
+            Some(pr_review::PrReviewSubcommand::InitSet(_)) => "pr-review:init-set",
+            None if args.pr_set.is_some() || args.from_gh.is_some() => "pr-review:set",
+            None => "pr-review:run",
+        },
         Some(Command::Mcp(_)) => "mcp",
         None => "no-args",
     }
 }
 
-fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
+fn telemetry_finish_fields(command: &str, result: &Result<CliOutcome>) -> TelemetryRunFinish {
     let (warn_count, traced_error_count) = app::telemetry_counts();
+    let events = app::take_telemetry_events();
+    let (repo_count, files_parsed, nodes_created, result_count) = app::telemetry_metrics();
     let (exit_status, error) = match result {
         Ok(CliOutcome::Success) => ("success".to_owned(), None),
+        Ok(CliOutcome::AlreadyRunning) => ("already_running".to_owned(), None),
         Ok(CliOutcome::ReviewThresholdExceeded) => ("review_threshold_exceeded".to_owned(), None),
         Err(error) => {
             let category = telemetry_error_category(error);
@@ -412,17 +534,22 @@ fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
             )
         }
     };
-    let graph_availability = graph_availability(result).map(str::to_owned);
+    let graph_availability = graph_availability(command, result).map(str::to_owned);
     let explicit_error_count = u32::from(error.is_some());
     TelemetryRunFinish {
         exit_status,
         peak_rss_bytes: capture_rss(),
+        repo_count,
+        files_parsed,
+        nodes_created,
         warn_count,
         error_count: traced_error_count.saturating_add(explicit_error_count),
         recovery_event: app::telemetry_recovery_event(),
         graph_availability,
+        result_count,
+        extra_json: app::telemetry_extra(),
+        events,
         error,
-        ..TelemetryRunFinish::default()
     }
 }
 
@@ -436,23 +563,27 @@ const fn build_provenance() -> &'static str {
     }
 }
 
-/// The dominant graph-availability signal for a finished run, derived from its
-/// outcome: `locked` / `not_indexed` on the matching error, `available` on
-/// success, and `None` when the error is unrelated to the graph (so telemetry
-/// never over-claims availability).
-fn graph_availability(result: &Result<CliOutcome>) -> Option<&'static str> {
-    match result {
-        Ok(_) => Some("available"),
-        Err(error) => {
-            if graph_lock_contention(error) {
-                Some("locked")
-            } else if is_not_indexed_error(error) {
-                Some("not_indexed")
-            } else {
-                None
-            }
-        }
+/// Graph availability observed by the storage-open path. Non-graph commands
+/// report `not_applicable`; legacy/unobserved graph runs remain NULL.
+fn graph_availability(command: &str, result: &Result<CliOutcome>) -> Option<&'static str> {
+    if !command_uses_graph(command) {
+        return Some("not_applicable");
     }
+    if let Some(observed) = app::telemetry_graph_availability() {
+        return Some(observed);
+    }
+    match result {
+        Err(error) if graph_lock_contention(error) => Some("locked"),
+        Err(error) if is_not_indexed_error(error) => Some("missing"),
+        _ => None,
+    }
+}
+
+fn command_uses_graph(command: &str) -> bool {
+    !matches!(
+        command,
+        "clean" | "doctor:config-only" | "log" | "no-args" | "setup-mcp"
+    )
 }
 
 /// Whether an error indicates the workspace (or a repo) has no usable index yet.
@@ -464,7 +595,18 @@ fn is_not_indexed_error(error: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn telemetry_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("GATHER_STEP_TELEMETRY_ROOT") {
+        return Some(PathBuf::from(root));
+    }
     dirs::data_local_dir().map(|root| root.join("gather-step"))
+}
+
+fn telemetry_enabled() -> bool {
+    std::env::var("GATHER_STEP_TELEMETRY").map_or(true, |value| {
+        !["off", "0", "false"]
+            .iter()
+            .any(|disabled| value.trim().eq_ignore_ascii_case(disabled))
+    })
 }
 
 fn telemetry_schema_versions() -> serde_json::Value {
@@ -618,6 +760,21 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(rendered_commands, clap_commands);
+    }
+
+    #[test]
+    fn visible_subcommands_have_discoverable_help_text() {
+        let command = Cli::command();
+        for subcommand in command
+            .get_subcommands()
+            .filter(|subcommand| subcommand.get_name() != "mcp")
+        {
+            assert!(
+                subcommand.get_about().is_some(),
+                "{} is missing its one-line help description",
+                subcommand.get_name()
+            );
+        }
     }
 
     #[test]

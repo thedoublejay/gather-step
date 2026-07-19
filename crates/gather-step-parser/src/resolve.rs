@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use camino::Utf8PathBuf;
@@ -16,6 +17,17 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// is internally sharded, so this capacity is spread across shards — individual
 /// shard locks are held for microseconds at most.
 const PARSED_FILE_CACHE_CAPACITY: usize = 4_096;
+
+/// Maximum number of concrete implementation edges emitted for one explicitly
+/// Protocol/ABC-typed Python call site. Keeping this small prevents a common
+/// interface method name from fanning out across an unbounded workspace.
+const PYTHON_INTERFACE_DISPATCH_LIMIT: usize = 8;
+
+/// Base confidence for Python calls resolved through explicit receiver-type
+/// evidence (annotation, constructor, or dependency factory). Sits between
+/// `SameModule` (0.90) and `ImportMap` (0.95) and is reduced through
+/// [`penalize`] when the method's qualified name is ambiguous.
+const PYTHON_TYPED_CALL_BASE_CONFIDENCE: f32 = 0.92;
 
 /// Cache key that namespaces parsed results by both the canonical file path and
 /// the repo root, preventing cross-workspace cache collisions when the same
@@ -61,6 +73,7 @@ pub enum ResolutionStrategy {
     SameModule,
     Unique,
     Suffix,
+    PythonInterfaceDispatch,
     FuzzyName,
     Fallback,
 }
@@ -73,6 +86,7 @@ impl ResolutionStrategy {
             Self::SameModule => 0.90,
             Self::Unique => 0.75,
             Self::Suffix => 0.55,
+            Self::PythonInterfaceDispatch => 0.65,
             Self::FuzzyName => 0.40,
             Self::Fallback => 0.30,
         }
@@ -85,6 +99,7 @@ impl ResolutionStrategy {
             Self::SameModule => "same_module",
             Self::Unique => "unique",
             Self::Suffix => "suffix",
+            Self::PythonInterfaceDispatch => "python_interface_dispatch",
             Self::FuzzyName => "fuzzy_name",
             Self::Fallback => "fallback",
         }
@@ -149,34 +164,85 @@ pub fn resolve_calls_with_unresolved<'a>(
             let mut unresolved_call_sites = Vec::new();
 
             for call_site in &file.call_sites {
+                // Runtime/builtin calls must be classified before generic
+                // resolution: resolving first lets common names such as Python
+                // `dict.get` attach to an unrelated in-workspace `Service.get`
+                // symbol. Exact Python receiver-type evidence overrides the
+                // name-based suppression so `repo.get(...)` with an annotated
+                // receiver still produces an edge.
+                if is_non_actionable_unresolved_call(call_site) {
+                    if python_receiver_type_evidence_applies(call_site) {
+                        if let Some((targets, candidate_count)) = index
+                            .resolve_python_interface_dispatch(call_site, &file.import_bindings)
+                        {
+                            let strategy = ResolutionStrategy::PythonInterfaceDispatch;
+                            let confidence = penalize(strategy.base_confidence(), candidate_count);
+                            file_resolved.extend(targets.into_iter().map(|target| {
+                                resolved_call(file, call_site, target, strategy, confidence)
+                            }));
+                        } else if let Some((target, confidence)) =
+                            index.resolve_python_typed_call(call_site, &file.import_bindings)
+                            && !is_invalid_python_nested_self_target(call_site, target)
+                        {
+                            file_resolved.push(resolved_call(
+                                file,
+                                call_site,
+                                target,
+                                ResolutionStrategy::Suffix,
+                                confidence,
+                            ));
+                        }
+                    }
+                    continue;
+                }
+
+                if let Some((targets, candidate_count)) =
+                    index.resolve_python_interface_dispatch(call_site, &file.import_bindings)
+                {
+                    if targets.is_empty() {
+                        unresolved_call_sites.push(call_site.clone());
+                        continue;
+                    }
+                    let strategy = ResolutionStrategy::PythonInterfaceDispatch;
+                    let confidence = penalize(strategy.base_confidence(), candidate_count);
+                    file_resolved.extend(targets.into_iter().map(|target| {
+                        resolved_call(file, call_site, target, strategy, confidence)
+                    }));
+                    continue;
+                }
+
+                if let Some((target, confidence)) =
+                    index.resolve_python_typed_call(call_site, &file.import_bindings)
+                {
+                    if is_invalid_python_nested_self_target(call_site, target) {
+                        unresolved_call_sites.push(call_site.clone());
+                        continue;
+                    }
+                    file_resolved.push(resolved_call(
+                        file,
+                        call_site,
+                        target,
+                        ResolutionStrategy::Suffix,
+                        confidence,
+                    ));
+                    continue;
+                }
+
                 if let Some((target, strategy, confidence)) =
                     index.resolve_call(call_site, &import_map, &file.import_bindings)
                 {
-                    file_resolved.push(ResolvedCall {
-                        edge: EdgeData {
-                            source: call_site.owner_id,
-                            target: target.id,
-                            kind: EdgeKind::Calls,
-                            metadata: EdgeMetadata {
-                                weight: None,
-                                confidence: Some(encode_confidence(confidence)),
-                                timestamp_unix: None,
-                                drift_kind: None,
-                                resolver: Some(strategy.as_str().to_owned()),
-                                guard_has_default: None,
-                                enum_qn: None,
-                                access_mechanism: None,
-                            },
-                            owner_file: file.file_node,
-                            is_cross_file: target.file_path
-                                != file.file_path.to_string_lossy().as_ref(),
-                        },
-                        confidence,
-                        strategy,
-                    });
-                } else if !is_external_call(call_site, &external_names)
-                    && !is_non_actionable_unresolved_call(call_site)
-                {
+                    // A nested dependency call such as
+                    // `self.collection.delete_one(...)` must not resolve back
+                    // to the enclosing `delete_one` method merely because the
+                    // leaf name is unique in the module. Direct
+                    // `self.delete_one(...)` recursion remains valid.
+                    if is_invalid_python_nested_self_target(call_site, target) {
+                        unresolved_call_sites.push(call_site.clone());
+                        continue;
+                    }
+                    file_resolved
+                        .push(resolved_call(file, call_site, target, strategy, confidence));
+                } else if !is_external_call(call_site, &external_names) {
                     unresolved_call_sites.push(call_site.clone());
                 }
             }
@@ -218,6 +284,36 @@ pub fn resolve_calls_with_unresolved<'a>(
     ResolutionOutcome {
         resolved,
         unresolved,
+    }
+}
+
+fn resolved_call(
+    file: &ResolutionInput,
+    call_site: &CallSite,
+    target: &NodeData,
+    strategy: ResolutionStrategy,
+    confidence: f32,
+) -> ResolvedCall {
+    ResolvedCall {
+        edge: EdgeData {
+            source: call_site.owner_id,
+            target: target.id,
+            kind: EdgeKind::Calls,
+            metadata: EdgeMetadata {
+                weight: None,
+                confidence: Some(encode_confidence(confidence)),
+                timestamp_unix: None,
+                drift_kind: None,
+                resolver: Some(strategy.as_str().to_owned()),
+                guard_has_default: None,
+                enum_qn: None,
+                access_mechanism: None,
+            },
+            owner_file: file.file_node,
+            is_cross_file: target.file_path != file.file_path.to_string_lossy().as_ref(),
+        },
+        confidence,
+        strategy,
     }
 }
 
@@ -290,6 +386,11 @@ pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
     }
 
     if is_global_runtime_function(call_site.callee_name.as_str()) {
+        return true;
+    }
+
+    if is_python_source(call_site.source_path.as_path()) && is_non_actionable_python_call(call_site)
+    {
         return true;
     }
 
@@ -369,22 +470,176 @@ pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
         return true;
     }
 
+    // Python service interfaces commonly expose a typed `delete(...)`
+    // operation. HTTP clients were already filtered above, so keep the
+    // remaining Python call available to receiver-type resolution instead of
+    // dropping it as a generic runtime method.
+    if is_python_source(call_site.source_path.as_path()) && name == "delete" {
+        return false;
+    }
+
     is_non_actionable_runtime_hint(hint.as_str(), name.as_str())
 }
 
 fn is_non_actionable_test_file(path: &Path) -> bool {
     let path = path.to_string_lossy();
+    let file_name = path.rsplit('/').next().unwrap_or(path.as_ref());
+    let file_path = Path::new(file_name);
+    let extension = file_path
+        .extension()
+        .and_then(|extension| extension.to_str());
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name);
+    let secondary_marker = Path::new(file_stem)
+        .extension()
+        .and_then(|marker| marker.to_str());
     path.contains("/cypress/")
         || path.contains("/__tests__/")
         || path.contains("/__mocks__/")
-        || path.ends_with(".cy.ts")
-        || path.ends_with(".cy.tsx")
-        || path.ends_with(".cy.js")
-        || path.ends_with(".cy.jsx")
-        || path.ends_with(".stories.ts")
-        || path.ends_with(".stories.tsx")
-        || path.ends_with(".stories.js")
-        || path.ends_with(".stories.jsx")
+        || path.contains("/tests/")
+        || path.starts_with("tests/")
+        || (extension == Some("py")
+            && (file_name.starts_with("test_") || file_stem.ends_with("_test")))
+        || (matches!(extension, Some("ts" | "tsx" | "js" | "jsx"))
+            && matches!(secondary_marker, Some("cy" | "stories")))
+}
+
+fn is_python_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| matches!(extension, "py" | "pyi"))
+}
+
+/// Whether a call site suppressed by the name-based runtime heuristics may
+/// still resolve through exact Python receiver-type evidence. Test files,
+/// global runtime functions, and `fetch` stay suppressed unconditionally.
+fn python_receiver_type_evidence_applies(call_site: &CallSite) -> bool {
+    if !is_python_source(call_site.source_path.as_path())
+        || is_non_actionable_test_file(call_site.source_path.as_path())
+        || is_global_runtime_function(call_site.callee_name.as_str())
+        || call_site.callee_name.eq_ignore_ascii_case("fetch")
+    {
+        return false;
+    }
+    call_site
+        .callee_qualified_hint
+        .as_deref()
+        .and_then(|hint| hint.rsplit_once('.'))
+        .is_some_and(|(receiver, _)| !matches!(receiver, "self" | "cls"))
+}
+
+fn is_invalid_python_nested_self_target(call_site: &CallSite, target: &NodeData) -> bool {
+    if target.id != call_site.owner_id || !is_python_source(call_site.source_path.as_path()) {
+        return false;
+    }
+
+    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let Some((receiver, _)) = hint.rsplit_once('.') else {
+        return false;
+    };
+
+    receiver.starts_with("self.") || receiver.starts_with("cls.")
+}
+
+fn is_non_actionable_python_call(call_site: &CallSite) -> bool {
+    let name = call_site.callee_name.as_str();
+    if matches!(
+        name,
+        "abs"
+            | "all"
+            | "any"
+            | "bool"
+            | "bytes"
+            | "callable"
+            | "dict"
+            | "enumerate"
+            | "filter"
+            | "float"
+            | "format"
+            | "frozenset"
+            | "getattr"
+            | "hasattr"
+            | "hash"
+            | "int"
+            | "isinstance"
+            | "issubclass"
+            | "iter"
+            | "len"
+            | "list"
+            | "map"
+            | "max"
+            | "min"
+            | "next"
+            | "object"
+            | "open"
+            | "print"
+            | "range"
+            | "repr"
+            | "reversed"
+            | "round"
+            | "set"
+            | "setattr"
+            | "sorted"
+            | "str"
+            | "sum"
+            | "super"
+            | "tuple"
+            | "type"
+            | "vars"
+            | "zip"
+    ) {
+        return true;
+    }
+
+    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let Some((receiver, _)) = hint.rsplit_once('.') else {
+        return false;
+    };
+    if matches!(receiver, "self" | "cls")
+        || receiver.starts_with("self.")
+        || receiver.starts_with("cls.")
+    {
+        return false;
+    }
+    matches!(
+        name,
+        "append"
+            | "capitalize"
+            | "casefold"
+            | "copy"
+            | "count"
+            | "discard"
+            | "endswith"
+            | "extend"
+            | "get"
+            | "index"
+            | "insert"
+            | "items"
+            | "keys"
+            | "lower"
+            | "lstrip"
+            | "pop"
+            | "popitem"
+            | "remove"
+            | "reverse"
+            | "rstrip"
+            | "setdefault"
+            | "sort"
+            | "splitlines"
+            | "startswith"
+            | "strip"
+            | "swapcase"
+            | "title"
+            | "upper"
+            | "update"
+            | "values"
+    )
 }
 
 fn is_global_runtime_function(name: &str) -> bool {
@@ -578,8 +833,21 @@ struct SymbolIndex<'a> {
     relative_paths: FxHashMap<PathBuf, String>,
     /// Bounded concurrent cache of parsed files encountered during re-export
     /// resolution.  Keyed by `(canonical_resolved_path, repo_root)` so entries
-    /// from different workspace scans never collide.
-    parsed_file_cache: Cache<CacheKey, Option<ParsedFile>>,
+    /// from different workspace scans never collide.  Values are shared via
+    /// `Arc` so cache hits never deep-clone a full `ParsedFile`.
+    parsed_file_cache: Cache<CacheKey, Arc<ParsedFile>>,
+    /// Bounded cache of raw source text keyed by absolute path, so
+    /// receiver-type inference reads each file at most once.
+    source_text_cache: Cache<PathBuf, Arc<str>>,
+    /// Memoized Python receiver-type inference keyed by
+    /// `(call_site_source_path, receiver)`, shared between the interface
+    /// dispatch and typed-call resolution paths.
+    receiver_type_cache: Cache<(PathBuf, String), Option<String>>,
+    /// Deterministically sorted Class nodes, built once on first use.
+    sorted_class_nodes: OnceLock<Vec<&'a NodeData>>,
+    /// Lazily built interface → concrete implementations map, reused across
+    /// call sites so the class universe is swept once per interface.
+    interface_implementations: RwLock<FxHashMap<NodeId, Arc<Vec<&'a NodeData>>>>,
     path_aliases: PathAliases,
 }
 
@@ -668,8 +936,34 @@ impl<'a> SymbolIndex<'a> {
             by_file,
             relative_paths,
             parsed_file_cache: Cache::new(PARSED_FILE_CACHE_CAPACITY),
+            source_text_cache: Cache::new(PARSED_FILE_CACHE_CAPACITY),
+            receiver_type_cache: Cache::new(PARSED_FILE_CACHE_CAPACITY),
+            sorted_class_nodes: OnceLock::new(),
+            interface_implementations: RwLock::new(FxHashMap::default()),
             path_aliases: PathAliases::from_repo_root(repo_root),
         }
+    }
+
+    /// Paths from call sites and import bindings may be traversal-relative
+    /// (production indexing) or absolute (tests); anchor relative ones to the
+    /// repo root so filesystem reads do not depend on the process CWD.
+    fn absolute_in_repo<'p>(&self, path: &'p Path) -> Cow<'p, Path> {
+        if path.is_absolute() {
+            Cow::Borrowed(path)
+        } else {
+            Cow::Owned(self.repo_root.join(path))
+        }
+    }
+
+    fn read_source(&self, path: &Path) -> Option<Arc<str>> {
+        let absolute = self.absolute_in_repo(path);
+        if let Some(cached) = self.source_text_cache.get(absolute.as_ref()) {
+            return Some(cached);
+        }
+        let source: Arc<str> = std::fs::read_to_string(absolute.as_ref()).ok()?.into();
+        self.source_text_cache
+            .insert(absolute.into_owned(), Arc::clone(&source));
+        Some(source)
     }
 
     fn get_relative_path(&self, path: &Path) -> Cow<'_, str> {
@@ -798,17 +1092,19 @@ impl<'a> SymbolIndex<'a> {
         candidates
     }
 
-    fn load_parsed_file(&self, source_file: &Path, resolved_path: &Path) -> Option<ParsedFile> {
+    fn load_parsed_file(
+        &self,
+        source_file: &Path,
+        resolved_path: &Path,
+    ) -> Option<Arc<ParsedFile>> {
+        let resolved_path = self.absolute_in_repo(resolved_path);
         let cache_key: CacheKey = (resolved_path.to_path_buf(), self.repo_root.to_path_buf());
 
         if let Some(cached) = self.parsed_file_cache.get(&cache_key) {
-            return cached.clone();
+            return Some(cached);
         }
 
-        let relative = resolved_path
-            .strip_prefix(self.repo_root)
-            .ok()?
-            .to_path_buf();
+        let relative = path_relative_to_repo(self.repo_root, &resolved_path)?;
         let language = language_for_path(&relative)?;
         let file = FileEntry {
             path: relative,
@@ -830,8 +1126,9 @@ impl<'a> SymbolIndex<'a> {
                     return None;
                 }
             };
+        let parsed = Arc::new(parsed);
         self.parsed_file_cache
-            .insert(cache_key, Some(parsed.clone()));
+            .insert(cache_key, Arc::clone(&parsed));
         Some(parsed)
     }
 
@@ -841,6 +1138,11 @@ impl<'a> SymbolIndex<'a> {
         import_map: &FxHashMap<String, Vec<&'a NodeData>>,
         import_bindings: &[ImportBinding],
     ) -> Option<(&'a NodeData, ResolutionStrategy, f32)> {
+        if is_python_source(call_site.source_path.as_path())
+            && !self.python_dotted_receiver_has_resolution_evidence(call_site, import_bindings)
+        {
+            return None;
+        }
         let qualified_hint_uses_import_head =
             qualified_hint_import_head_matches(call_site, import_bindings);
 
@@ -915,6 +1217,347 @@ impl<'a> SymbolIndex<'a> {
                 ),
             )
         })
+    }
+
+    fn resolve_python_typed_call(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> Option<(&'a NodeData, f32)> {
+        if !is_python_source(call_site.source_path.as_path()) {
+            return None;
+        }
+        let hint = call_site.callee_qualified_hint.as_deref()?;
+        let (receiver, method) = hint.rsplit_once('.')?;
+        if matches!(receiver, "self" | "cls") {
+            return None;
+        }
+        let receiver_type =
+            self.infer_python_receiver_type(&call_site.source_path, receiver, import_bindings)?;
+        // Python class qualified names are not module-prefixed, so same-named
+        // classes in different files collide in `by_qualified_name`. Scope the
+        // candidates to the file the receiver type actually resolves to
+        // (import binding or same file) whenever that file is known.
+        let preferred_file = self
+            .python_receiver_class_node(&call_site.source_path, &receiver_type, import_bindings)
+            .map(|node| node.file_path.as_str());
+        let (target, candidate_count) = self.resolve_python_method_with_mro(
+            &call_site.source_path,
+            receiver_type.as_str(),
+            method,
+            preferred_file,
+            0,
+            &mut FxHashSet::default(),
+        )?;
+        Some((
+            target,
+            penalize(PYTHON_TYPED_CALL_BASE_CONFIDENCE, candidate_count),
+        ))
+    }
+
+    /// Resolve an explicitly Protocol/ABC-typed receiver to a bounded,
+    /// deterministic set of concrete implementations. Returning `None` means
+    /// the receiver is not an interface and the ordinary concrete-type path
+    /// should run; `Some` prevents arbitrary leaf-name fallback for interface
+    /// dispatch even when no concrete method is available.
+    fn resolve_python_interface_dispatch(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> Option<(Vec<&'a NodeData>, usize)> {
+        if !is_python_source(call_site.source_path.as_path()) {
+            return None;
+        }
+        let hint = call_site.callee_qualified_hint.as_deref()?;
+        let (receiver, method) = hint.rsplit_once('.')?;
+        if matches!(receiver, "self" | "cls") {
+            return None;
+        }
+        let receiver_type =
+            self.infer_python_receiver_type(&call_site.source_path, receiver, import_bindings)?;
+        let interface_node = self.python_receiver_class_node(
+            &call_site.source_path,
+            &receiver_type,
+            import_bindings,
+        )?;
+        let interface = self.load_python_class(&call_site.source_path, interface_node)?;
+        let interface_bases = &interface.base_classes;
+        if !interface_bases.iter().any(|base| {
+            python_type_name(base)
+                .is_some_and(|base| matches!(base.as_str(), "Protocol" | "ABC" | "ABCMeta"))
+        }) {
+            return None;
+        }
+
+        let implementations =
+            self.python_interface_implementations(&call_site.source_path, interface_node);
+
+        let mut targets = Vec::new();
+        let mut seen_targets = FxHashSet::default();
+        for class_node in implementations.iter().copied() {
+            let class_qn = class_node
+                .qualified_name
+                .as_deref()
+                .unwrap_or(class_node.name.as_str());
+            let method_qn = format!("{class_qn}.{method}");
+            let Some(target) = self
+                .by_qualified_name
+                .get(method_qn.as_str())
+                .into_iter()
+                .flatten()
+                .find(|target| target.file_path == class_node.file_path)
+                .copied()
+            else {
+                continue;
+            };
+            if seen_targets.insert(target.id) {
+                targets.push(target);
+            }
+        }
+        let candidate_count = targets.len();
+        targets.truncate(PYTHON_INTERFACE_DISPATCH_LIMIT);
+        Some((targets, candidate_count))
+    }
+
+    fn sorted_class_nodes(&self) -> &[&'a NodeData] {
+        self.sorted_class_nodes.get_or_init(|| {
+            let mut classes = self
+                .by_name
+                .values()
+                .flatten()
+                .copied()
+                .filter(|node| node.kind == gather_step_core::NodeKind::Class)
+                .collect::<Vec<_>>();
+            classes.sort_unstable_by(|left, right| {
+                left.file_path
+                    .cmp(&right.file_path)
+                    .then(left.qualified_name.cmp(&right.qualified_name))
+                    .then(left.id.as_bytes().cmp(&right.id.as_bytes()))
+            });
+            classes.dedup_by_key(|node| node.id);
+            classes
+        })
+    }
+
+    fn python_interface_implementations(
+        &self,
+        source_file: &Path,
+        interface_node: &'a NodeData,
+    ) -> Arc<Vec<&'a NodeData>> {
+        if let Some(cached) = self
+            .interface_implementations
+            .read()
+            .expect("interface implementation cache lock should not be poisoned")
+            .get(&interface_node.id)
+        {
+            return Arc::clone(cached);
+        }
+        let implementations = Arc::new(
+            self.sorted_class_nodes()
+                .iter()
+                .copied()
+                .filter(|class_node| {
+                    class_node.id != interface_node.id
+                        && self.python_class_implements(source_file, class_node, interface_node)
+                })
+                .collect::<Vec<_>>(),
+        );
+        self.interface_implementations
+            .write()
+            .expect("interface implementation cache lock should not be poisoned")
+            .insert(interface_node.id, Arc::clone(&implementations));
+        implementations
+    }
+
+    fn python_receiver_class_node(
+        &self,
+        source_file: &Path,
+        receiver_type: &str,
+        import_bindings: &[ImportBinding],
+    ) -> Option<&'a NodeData> {
+        let local_name = python_type_name(receiver_type)?;
+        if let Some(binding) = import_bindings
+            .iter()
+            .find(|binding| binding.local_name == local_name)
+        {
+            let resolved = binding.resolved_path.as_ref()?;
+            let relative = self.get_relative_path(resolved);
+            let imported_name = binding
+                .imported_name
+                .as_deref()
+                .unwrap_or(local_name.as_str());
+            return self
+                .by_file_and_name
+                .get(&(relative.as_ref(), imported_name))?
+                .iter()
+                .find(|node| node.kind == gather_step_core::NodeKind::Class)
+                .copied();
+        }
+        let relative = self.get_relative_path(source_file);
+        self.by_file_and_name
+            .get(&(relative.as_ref(), local_name.as_str()))?
+            .iter()
+            .find(|node| node.kind == gather_step_core::NodeKind::Class)
+            .copied()
+    }
+
+    fn load_python_class(
+        &self,
+        source_file: &Path,
+        class_node: &NodeData,
+    ) -> Option<crate::tree_sitter::SymbolCapture> {
+        let path = self.repo_root.join(&class_node.file_path);
+        let parsed = self.load_parsed_file(source_file, &path)?;
+        parsed
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.node.kind == gather_step_core::NodeKind::Class
+                    && symbol.node.name == class_node.name
+                    && symbol.node.qualified_name == class_node.qualified_name
+            })
+            .cloned()
+    }
+
+    fn python_class_implements(
+        &self,
+        source_file: &Path,
+        class_node: &NodeData,
+        interface_node: &NodeData,
+    ) -> bool {
+        let path = self.repo_root.join(&class_node.file_path);
+        let Some(parsed) = self.load_parsed_file(source_file, &path) else {
+            return false;
+        };
+        let Some(class_symbol) = parsed.symbols.iter().find(|symbol| {
+            symbol.node.kind == gather_step_core::NodeKind::Class
+                && symbol.node.name == class_node.name
+                && symbol.node.qualified_name == class_node.qualified_name
+        }) else {
+            return false;
+        };
+        class_symbol.base_classes.iter().any(|base| {
+            let Some(base_name) = python_type_name(base) else {
+                return false;
+            };
+            if class_node.file_path == interface_node.file_path {
+                return base_name == interface_node.name;
+            }
+            parsed.import_bindings.iter().any(|binding| {
+                let binding_matches = binding.local_name == base_name
+                    || (binding.is_namespace && base.starts_with(&binding.local_name));
+                let imported_matches = binding
+                    .imported_name
+                    .as_deref()
+                    .unwrap_or(base_name.as_str())
+                    == interface_node.name;
+                let path_matches = binding.resolved_path.as_ref().is_some_and(|resolved| {
+                    self.get_relative_path(resolved).as_ref() == interface_node.file_path
+                });
+                binding_matches && imported_matches && path_matches
+            })
+        })
+    }
+
+    fn resolve_python_method_with_mro(
+        &self,
+        source_file: &Path,
+        class_name: &str,
+        method: &str,
+        preferred_file: Option<&str>,
+        depth: usize,
+        seen: &mut FxHashSet<String>,
+    ) -> Option<(&'a NodeData, usize)> {
+        if depth > 8 || !seen.insert(class_name.to_owned()) {
+            return None;
+        }
+        let qualified = format!("{class_name}.{method}");
+        if let Some(nodes) = self.by_qualified_name.get(qualified.as_str())
+            && !nodes.is_empty()
+        {
+            let mut candidates = nodes.clone();
+            if let Some(preferred) = preferred_file {
+                let scoped = candidates
+                    .iter()
+                    .copied()
+                    .filter(|node| node.file_path == preferred)
+                    .collect::<Vec<_>>();
+                if !scoped.is_empty() {
+                    candidates = scoped;
+                }
+            }
+            candidates.sort_unstable_by(|left, right| {
+                left.file_path
+                    .cmp(&right.file_path)
+                    .then(left.qualified_name.cmp(&right.qualified_name))
+                    .then(left.id.as_bytes().cmp(&right.id.as_bytes()))
+            });
+            let target = candidates.first().copied()?;
+            return Some((target, candidates.len()));
+        }
+        if let Some((node, _)) = self.resolve_by_suffix(&qualified) {
+            return Some((node, 1));
+        }
+
+        let class_nodes = self.by_name.get(class_name)?;
+        for class_node in class_nodes {
+            if class_node.kind != gather_step_core::NodeKind::Class {
+                continue;
+            }
+            let path = self.repo_root.join(&class_node.file_path);
+            let Some(parsed) = self.load_parsed_file(source_file, &path) else {
+                continue;
+            };
+            let Some(class_symbol) = parsed.symbols.iter().find(|symbol| {
+                symbol.node.kind == gather_step_core::NodeKind::Class
+                    && symbol.node.name == class_name
+            }) else {
+                continue;
+            };
+            for base in &class_symbol.base_classes {
+                let Some(base) = python_type_name(base) else {
+                    continue;
+                };
+                if let Some(target) = self.resolve_python_method_with_mro(
+                    source_file,
+                    &base,
+                    method,
+                    None,
+                    depth + 1,
+                    seen,
+                ) {
+                    return Some(target);
+                }
+            }
+        }
+        None
+    }
+
+    fn python_dotted_receiver_has_resolution_evidence(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> bool {
+        let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+            return true;
+        };
+        let Some((receiver, _)) = hint.rsplit_once('.') else {
+            return true;
+        };
+        if matches!(receiver, "self" | "cls")
+            || receiver.starts_with("self.")
+            || receiver.starts_with("cls.")
+        {
+            return true;
+        }
+        let head = receiver.split('.').next().unwrap_or(receiver);
+        if import_bindings
+            .iter()
+            .any(|binding| binding.local_name == head)
+        {
+            return true;
+        }
+        head.chars().next().is_some_and(char::is_uppercase) && self.by_name.contains_key(head)
     }
 
     fn resolve_qualified_import_call(
@@ -1127,6 +1770,82 @@ impl<'a> SymbolIndex<'a> {
 
         best
     }
+
+    fn infer_python_receiver_type(
+        &self,
+        source_path: &Path,
+        receiver: &str,
+        import_bindings: &[ImportBinding],
+    ) -> Option<String> {
+        let key = (source_path.to_path_buf(), receiver.to_owned());
+        if let Some(cached) = self.receiver_type_cache.get(&key) {
+            return cached;
+        }
+        let inferred = self.read_source(source_path).and_then(|source| {
+            self.infer_python_binding_type(&source, receiver, import_bindings, 0)
+        });
+        self.receiver_type_cache.insert(key, inferred.clone());
+        inferred
+    }
+
+    fn infer_python_binding_type(
+        &self,
+        source: &str,
+        binding: &str,
+        import_bindings: &[ImportBinding],
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 6 {
+            return None;
+        }
+
+        if let Some(annotation) = python_binding_annotation(source, binding) {
+            return python_type_name(annotation);
+        }
+
+        let assignment = python_binding_assignment(source, binding)?;
+        if let Some(factory) = python_dependency_factory(assignment) {
+            return self.python_factory_return_type(source, factory, import_bindings);
+        }
+        if let Some(constructor) = python_constructor_name(assignment) {
+            return Some(constructor);
+        }
+
+        let alias = assignment
+            .trim()
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .next()?;
+        if alias.is_empty() || alias == binding {
+            return None;
+        }
+        self.infer_python_binding_type(source, alias, import_bindings, depth + 1)
+    }
+
+    fn python_factory_return_type(
+        &self,
+        source: &str,
+        factory: &str,
+        import_bindings: &[ImportBinding],
+    ) -> Option<String> {
+        if let Some(return_type) = python_function_return_annotation(source, factory) {
+            return python_type_name(return_type);
+        }
+        // `Depends(module.factory)` binds the module; `Depends(factory)` binds
+        // the factory function itself.
+        let (binding_name, module_member) = match factory.rsplit_once('.') {
+            Some((module, member)) => (module, Some(member)),
+            None => (factory, None),
+        };
+        let binding = import_bindings
+            .iter()
+            .find(|binding| binding.local_name == binding_name)?;
+        let path = binding.resolved_path.as_ref()?;
+        let imported_source = self.read_source(path)?;
+        let imported_name =
+            module_member.unwrap_or_else(|| binding.imported_name.as_deref().unwrap_or(factory));
+        python_function_return_annotation(&imported_source, imported_name)
+            .and_then(python_type_name)
+    }
 }
 
 fn language_for_path(path: &Path) -> Option<Language> {
@@ -1160,6 +1879,115 @@ fn qualified_hint_import_head_matches(
     import_bindings
         .iter()
         .any(|binding| binding.local_name == head)
+}
+
+fn python_binding_annotation<'a>(source: &'a str, binding: &str) -> Option<&'a str> {
+    python_binding_suffixes(source, binding)
+        .into_iter()
+        .find_map(|suffix| {
+            let annotation = suffix.trim_start().strip_prefix(':')?.trim_start();
+            let end = annotation
+                .find(['=', ',', ')', '\n'])
+                .unwrap_or(annotation.len());
+            let annotation = annotation[..end].trim();
+            (!annotation.is_empty()).then_some(annotation)
+        })
+}
+
+fn python_binding_assignment<'a>(source: &'a str, binding: &str) -> Option<&'a str> {
+    python_binding_suffixes(source, binding)
+        .into_iter()
+        .find_map(|suffix| {
+            let suffix = suffix.trim_start();
+            let value = if let Some(value) = suffix.strip_prefix('=') {
+                value
+            } else if let Some(annotation) = suffix.strip_prefix(':') {
+                let equals = annotation.find('=')?;
+                &annotation[equals + 1..]
+            } else {
+                return None;
+            };
+            let end = value.find(['\n', '#']).unwrap_or(value.len());
+            let value = value[..end].trim();
+            (!value.is_empty()).then_some(value)
+        })
+}
+
+fn python_binding_suffixes<'a>(source: &'a str, binding: &str) -> Vec<&'a str> {
+    source
+        .match_indices(binding)
+        .filter_map(|(offset, _)| {
+            let before = source[..offset].chars().next_back();
+            let end = offset + binding.len();
+            let after = source[end..].chars().next();
+            let boundary_before = before.is_none_or(|character| {
+                !character.is_ascii_alphanumeric() && character != '_' && character != '.'
+            });
+            let boundary_after = after
+                .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_');
+            (boundary_before && boundary_after).then_some(&source[end..])
+        })
+        .collect()
+}
+
+fn python_dependency_factory(value: &str) -> Option<&str> {
+    let arguments = value.trim().strip_prefix("Depends")?.trim_start();
+    let arguments = arguments.strip_prefix('(')?.trim_start();
+    let end = arguments
+        .find(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '.'
+        })
+        .unwrap_or(arguments.len());
+    (end > 0).then_some(&arguments[..end])
+}
+
+fn python_constructor_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    let open = value.find('(')?;
+    python_type_name(&value[..open])
+}
+
+fn python_function_return_annotation<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let declaration = format!("def {name}");
+    source.match_indices(&declaration).find_map(|(offset, _)| {
+        let signature = &source[offset + declaration.len()..];
+        let parameters_end = signature.find(')')?;
+        let returns = signature[parameters_end + 1..].trim_start();
+        let returns = returns.strip_prefix("->")?.trim_start();
+        let body = returns.find([':', '\n'])?;
+        let annotation = returns[..body].trim();
+        (!annotation.is_empty()).then_some(annotation)
+    })
+}
+
+fn python_type_name(raw: &str) -> Option<String> {
+    const WRAPPERS: &[&str] = &[
+        "Annotated",
+        "Awaitable",
+        "Callable",
+        "ClassVar",
+        "Coroutine",
+        "Final",
+        "Iterable",
+        "Iterator",
+        "Literal",
+        "Mapping",
+        "Optional",
+        "Sequence",
+        "Type",
+        "Union",
+    ];
+
+    raw.trim_matches(|character: char| character.is_whitespace() || matches!(character, '\'' | '"'))
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '.'
+        })
+        .filter_map(|candidate| candidate.rsplit('.').next())
+        .find(|candidate| {
+            candidate.chars().next().is_some_and(char::is_uppercase)
+                && !WRAPPERS.contains(candidate)
+        })
+        .map(ToOwned::to_owned)
 }
 
 #[expect(
@@ -1223,10 +2051,32 @@ fn encode_confidence(confidence: f32) -> u16 {
 }
 
 fn relative_to_repo(root: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
+    let relative = path_relative_to_repo(root, path);
+    let rel = relative.as_deref().unwrap_or(path);
     Utf8PathBuf::from_path_buf(rel.to_path_buf())
         .unwrap_or_else(|p| Utf8PathBuf::from(p.to_string_lossy().replace('\\', "/")))
         .into_string()
+}
+
+/// Return a repo-relative path even when the operating system presents the
+/// same directory through an alias (for example `/var` and `/private/var` on
+/// macOS). The direct path is kept as the fast path; canonicalization is only
+/// used when lexical prefix matching fails.
+fn path_relative_to_repo(root: &Path, path: &Path) -> Option<PathBuf> {
+    // Traversal-relative paths are already repo-relative; resolving them
+    // through the CWD would silently point outside the repo.
+    if path.is_relative() {
+        return Some(path.to_path_buf());
+    }
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical_path = std::fs::canonicalize(path).ok()?;
+    canonical_path
+        .strip_prefix(canonical_root)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -1234,7 +2084,9 @@ mod tests {
     #![expect(clippy::float_cmp)]
 
     use std::{
-        env, fs,
+        env,
+        fmt::Write as _,
+        fs,
         path::{Path, PathBuf},
         process,
         sync::atomic::{AtomicU64, Ordering},
@@ -1245,9 +2097,9 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, SymbolIndex,
-        fuzzy_similarity, is_non_actionable_unresolved_call, resolve_calls,
-        resolve_calls_with_unresolved,
+        CallSite, ImportBinding, PYTHON_INTERFACE_DISPATCH_LIMIT, ResolutionInput,
+        ResolutionStrategy, SymbolIndex, fuzzy_similarity, is_non_actionable_unresolved_call,
+        resolve_calls, resolve_calls_with_unresolved,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1659,6 +2511,672 @@ mod tests {
         assert_eq!(resolved.len(), 1, "method call should resolve");
         assert_eq!(resolved[0].strategy, ResolutionStrategy::Unique);
         assert_eq!(resolved[0].edge.target, target.id);
+    }
+
+    #[test]
+    fn python_builtins_and_container_methods_cannot_resolve_to_app_symbols() {
+        let root = PathBuf::from("/repo");
+        let owner = function_node("src/handler.py", "handle");
+        let unrelated_get = function_node("src/state_service.py", "get");
+        let unrelated_str = function_node("src/string_helper.py", "str");
+        let service_class = class_node("src/query_service.py", "QueryService");
+        let mut real_search = function_node("src/query_service.py", "search");
+        real_search.qualified_name = Some("QueryService.search".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            &root,
+            &[
+                owner.clone(),
+                unrelated_get,
+                unrelated_str,
+                service_class,
+                real_search.clone(),
+            ],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "get".to_owned(),
+                        callee_qualified_hint: Some("state.get".to_owned()),
+                        span: None,
+                    },
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "str".to_owned(),
+                        callee_qualified_hint: Some("str".to_owned()),
+                        span: None,
+                    },
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "search".to_owned(),
+                        callee_qualified_hint: Some("QueryService.search".to_owned()),
+                        span: None,
+                    },
+                ],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, real_search.id);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_untyped_dotted_receiver_stays_unresolved() {
+        let root = PathBuf::from("/repo");
+        let owner = function_node("src/handler.py", "handle");
+        let target = function_node("src/query_service.py", "search");
+        let outcome = resolve_calls_with_unresolved(
+            &root,
+            &[owner.clone(), target],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "search".to_owned(),
+                    callee_qualified_hint: Some("service.search".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].call_sites[0].callee_name, "search");
+    }
+
+    #[test]
+    fn python_annotated_dependency_receiver_resolves_to_declared_type() {
+        let temp = TempDir::new("python-annotated-receiver");
+        temp.write(
+            "src/handler.py",
+            r#"
+def get_asset_service() -> AssetService:
+    return AssetService()
+
+def handle(service: AssetService = Depends(get_asset_service)):
+    service.delete("asset-1")
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let service_class = class_node("src/asset_service.py", "AssetService");
+        let mut target = function_node("src/asset_service.py", "delete");
+        target.qualified_name = Some("AssetService.delete".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), service_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "delete".to_owned(),
+                    callee_qualified_hint: Some("service.delete".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert_eq!(outcome.resolved[0].confidence, 0.92);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_instance_field_and_base_class_method_resolve_from_annotations() {
+        let temp = TempDir::new("python-inherited-receiver");
+        temp.write(
+            "src/handler.py",
+            r#"
+class Handler:
+    def __init__(self, repository: AssetRepository):
+        self.repository = repository
+
+    def handle(self):
+        self.repository.remove("asset-1")
+"#,
+        );
+        temp.write(
+            "src/asset_repository.py",
+            r"
+class BaseRepository:
+    def remove(self, asset_id: str):
+        pass
+
+class AssetRepository(BaseRepository):
+    pass
+",
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let repository_class = class_node("src/asset_repository.py", "AssetRepository");
+        let base_class = class_node("src/asset_repository.py", "BaseRepository");
+        let mut target = function_node("src/asset_repository.py", "remove");
+        target.qualified_name = Some("BaseRepository.remove".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), repository_class, base_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "remove".to_owned(),
+                    callee_qualified_hint: Some("self.repository.remove".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_protocol_dispatch_is_deterministically_capped_with_provenance() {
+        let temp = TempDir::new("python-protocol-dispatch");
+        temp.write(
+            "pyproject.toml",
+            "[project]\nname = \"python-protocol-dispatch\"\nversion = \"0.1.0\"\n",
+        );
+        temp.write(
+            "src/ports.py",
+            r"
+from typing import Protocol
+
+class JobSink(Protocol):
+    def publish(self, payload): ...
+",
+        );
+        let mut sink_source = "from ports import JobSink\n\n".to_owned();
+        for index in 0..10 {
+            write!(
+                sink_source,
+                "class JobSink{index:02}(JobSink):\n    def publish(self, payload):\n        pass\n\n"
+            )
+            .expect("writing to String should succeed");
+        }
+        sink_source
+            .push_str("class UnrelatedPublisher:\n    def publish(self, payload):\n        pass\n");
+        temp.write("src/sinks.py", &sink_source);
+        temp.write(
+            "src/handler.py",
+            r#"
+from ports import JobSink
+
+def handle(sink: JobSink):
+    sink.publish({"state": "ready"})
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let mut interface = class_node("src/ports.py", "JobSink");
+        interface.qualified_name = Some("JobSink".to_owned());
+        let mut unrelated = class_node("src/sinks.py", "UnrelatedPublisher");
+        unrelated.qualified_name = Some("UnrelatedPublisher".to_owned());
+        let mut unrelated_publish = function_node("src/sinks.py", "unrelated_publish");
+        unrelated_publish.name = "publish".to_owned();
+        unrelated_publish.qualified_name = Some("UnrelatedPublisher.publish".to_owned());
+
+        let mut symbols = vec![
+            owner.clone(),
+            interface,
+            unrelated,
+            unrelated_publish.clone(),
+        ];
+        let mut implementation_methods = Vec::new();
+        // Deliberately supply symbols in reverse declaration order. Dispatch
+        // must sort by stable class identity before applying the cap.
+        for index in (0..10).rev() {
+            let class_name = format!("JobSink{index:02}");
+            let mut implementation = class_node("src/sinks.py", &class_name);
+            implementation.qualified_name = Some(class_name.clone());
+            symbols.push(implementation);
+            let mut method = function_node("src/sinks.py", &format!("publish_{index:02}"));
+            method.name = "publish".to_owned();
+            method.qualified_name = Some(format!("{class_name}.publish"));
+            implementation_methods.push((index, method.clone()));
+            symbols.push(method);
+        }
+        implementation_methods.sort_unstable_by_key(|(index, _)| *index);
+        let expected_targets = implementation_methods
+            .iter()
+            .take(PYTHON_INTERFACE_DISPATCH_LIMIT)
+            .map(|(_, method)| method.id)
+            .collect::<Vec<_>>();
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &symbols,
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "JobSink".to_owned(),
+                    imported_name: Some("JobSink".to_owned()),
+                    source: "ports".to_owned(),
+                    resolved_path: Some(root.join("src/ports.py")),
+                    is_default: false,
+                    is_namespace: false,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "publish".to_owned(),
+                    callee_qualified_hint: Some("sink.publish".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        let targets = outcome
+            .resolved
+            .iter()
+            .map(|resolved| resolved.edge.target)
+            .collect::<Vec<_>>();
+        assert_eq!(targets, expected_targets);
+        assert_eq!(targets.len(), PYTHON_INTERFACE_DISPATCH_LIMIT);
+        assert!(!targets.contains(&unrelated_publish.id));
+        assert!(outcome.resolved.iter().all(|resolved| {
+            resolved.strategy == ResolutionStrategy::PythonInterfaceDispatch
+                && resolved.edge.metadata.resolver.as_deref() == Some("python_interface_dispatch")
+                && resolved.edge.metadata.confidence == Some(342)
+        }));
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_nested_self_dependency_call_cannot_resolve_to_enclosing_method() {
+        let temp = TempDir::new("python-nested-self-dependency");
+        temp.write(
+            "src/asset_repository.py",
+            r#"
+class AssetRepository:
+    def delete_one(self, asset_id: str):
+        return self.collection.delete_one({"asset_id": asset_id})
+"#,
+        );
+        let root = temp.path();
+        let mut owner = function_node("src/asset_repository.py", "delete_one");
+        owner.qualified_name = Some("AssetRepository.delete_one".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            std::slice::from_ref(&owner),
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/asset_repository.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/asset_repository.py"),
+                    callee_name: "delete_one".to_owned(),
+                    callee_qualified_hint: Some("self.collection.delete_one".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].call_sites.len(), 1);
+    }
+
+    #[test]
+    fn python_typed_resolution_resolves_relative_source_paths_against_repo_root() {
+        let temp = TempDir::new("python-relative-source");
+        temp.write(
+            "src/handler.py",
+            r#"
+def handle(service: AssetService):
+    service.delete("asset-1")
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let service_class = class_node("src/asset_service.py", "AssetService");
+        let mut target = function_node("src/asset_service.py", "delete");
+        target.qualified_name = Some("AssetService.delete".to_owned());
+
+        // Production indexing populates traversal-relative paths; the resolver
+        // must anchor them to the repo root instead of the process CWD.
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), service_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: PathBuf::from("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: PathBuf::from("src/handler.py"),
+                    callee_name: "delete".to_owned(),
+                    callee_qualified_hint: Some("service.delete".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_typed_call_prefers_import_binding_file_for_same_named_classes() {
+        let temp = TempDir::new("python-same-named-classes");
+        temp.write(
+            "src/handler.py",
+            r#"
+from a_service import AssetService
+
+def handle(service: AssetService):
+    service.delete("asset-1")
+"#,
+        );
+        temp.write(
+            "src/a_service.py",
+            "class AssetService:\n    def delete(self, asset_id):\n        pass\n",
+        );
+        temp.write(
+            "src/b_service.py",
+            "class AssetService:\n    def delete(self, asset_id):\n        pass\n",
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let mut class_a = class_node("src/a_service.py", "AssetService");
+        class_a.qualified_name = Some("AssetService".to_owned());
+        let mut class_b = class_node("src/b_service.py", "AssetService");
+        class_b.qualified_name = Some("AssetService".to_owned());
+        let mut delete_a = function_node("src/a_service.py", "delete");
+        delete_a.qualified_name = Some("AssetService.delete".to_owned());
+        let mut delete_b = function_node("src/b_service.py", "delete");
+        delete_b.qualified_name = Some("AssetService.delete".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), class_a, class_b, delete_a.clone(), delete_b],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "AssetService".to_owned(),
+                    imported_name: Some("AssetService".to_owned()),
+                    source: "a_service".to_owned(),
+                    resolved_path: Some(root.join("src/a_service.py")),
+                    is_default: false,
+                    is_namespace: false,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "delete".to_owned(),
+                    callee_qualified_hint: Some("service.delete".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, delete_a.id);
+        // The import binding disambiguates to a single candidate, so no
+        // ambiguity penalty applies.
+        assert_eq!(outcome.resolved[0].confidence, 0.92);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_typed_call_penalizes_undisambiguated_same_named_classes() {
+        let temp = TempDir::new("python-ambiguous-classes");
+        temp.write(
+            "src/handler.py",
+            r#"
+def handle(service: AssetService):
+    service.delete("asset-1")
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let mut class_a = class_node("src/a_service.py", "AssetService");
+        class_a.qualified_name = Some("AssetService".to_owned());
+        let mut class_b = class_node("src/b_service.py", "AssetService");
+        class_b.qualified_name = Some("AssetService".to_owned());
+        let mut delete_a = function_node("src/a_service.py", "delete");
+        delete_a.qualified_name = Some("AssetService.delete".to_owned());
+        let mut delete_b = function_node("src/b_service.py", "delete");
+        delete_b.qualified_name = Some("AssetService.delete".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), class_a, class_b, delete_a.clone(), delete_b],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "delete".to_owned(),
+                    callee_qualified_hint: Some("service.delete".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        // Deterministic choice: candidates sorted by file path, so the
+        // lexicographically first file wins.
+        assert_eq!(outcome.resolved[0].edge.target, delete_a.id);
+        // Two indistinguishable candidates: confidence drops below the base.
+        assert_eq!(outcome.resolved[0].confidence, 0.92 / 1.1);
+    }
+
+    #[test]
+    fn python_typed_receiver_overrides_container_method_suppression() {
+        let temp = TempDir::new("python-typed-container-override");
+        temp.write(
+            "src/handler.py",
+            r#"
+def handle(repo: AssetRepository, payload):
+    repo.get("asset-1")
+    payload.get("key")
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let repository_class = class_node("src/asset_repository.py", "AssetRepository");
+        let mut target = function_node("src/asset_repository.py", "get");
+        target.qualified_name = Some("AssetRepository.get".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), repository_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "get".to_owned(),
+                        callee_qualified_hint: Some("repo.get".to_owned()),
+                        span: None,
+                    },
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "get".to_owned(),
+                        callee_qualified_hint: Some("payload.get".to_owned()),
+                        span: None,
+                    },
+                ],
+            }],
+        );
+
+        // The annotated receiver resolves despite the container-method name.
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert_eq!(outcome.resolved[0].strategy, ResolutionStrategy::Suffix);
+        // The untyped `payload.get` stays suppressed: no edge, no unresolved.
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_typed_resolution_survives_syntax_errors_without_fabricated_edges() {
+        let temp = TempDir::new("python-syntax-error");
+        temp.write(
+            "src/handler.py",
+            r#"
+from broken import JobSink
+
+def broken(:
+    x =
+
+def handle(sink: JobSink, service: AssetService):
+    sink.publish("payload")
+    service.delete("asset-1")
+"#,
+        );
+        temp.write("src/broken.py", "class JobSink(:\n    def publish(self,\n");
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let service_class = class_node("src/asset_service.py", "AssetService");
+        let mut target = function_node("src/asset_service.py", "delete");
+        target.qualified_name = Some("AssetService.delete".to_owned());
+        let mut sink_class = class_node("src/broken.py", "JobSink");
+        sink_class.qualified_name = Some("JobSink".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), service_class, target.clone(), sink_class],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "JobSink".to_owned(),
+                    imported_name: Some("JobSink".to_owned()),
+                    source: "broken".to_owned(),
+                    resolved_path: Some(root.join("src/broken.py")),
+                    is_default: false,
+                    is_namespace: false,
+                    is_type_only: false,
+                }],
+                call_sites: vec![
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "publish".to_owned(),
+                        callee_qualified_hint: Some("sink.publish".to_owned()),
+                        span: None,
+                    },
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "delete".to_owned(),
+                        callee_qualified_hint: Some("service.delete".to_owned()),
+                        span: None,
+                    },
+                ],
+            }],
+        );
+
+        // No panic, and the only emitted edge is the genuinely typed one —
+        // the ERROR-node file must not fabricate a `JobSink.publish` target.
+        let targets = outcome
+            .resolved
+            .iter()
+            .map(|resolved| resolved.edge.target)
+            .collect::<Vec<_>>();
+        assert_eq!(targets, vec![target.id]);
+    }
+
+    #[test]
+    fn python_dotted_dependency_factory_resolves_module_qualified_factory() {
+        let temp = TempDir::new("python-dotted-depends");
+        temp.write(
+            "src/handler.py",
+            r#"
+import services as svc
+
+def handle(service = Depends(svc.get_asset_service)):
+    service.delete("asset-1")
+"#,
+        );
+        temp.write(
+            "src/services.py",
+            "def get_asset_service() -> AssetService:\n    return AssetService()\n",
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let service_class = class_node("src/asset_service.py", "AssetService");
+        let mut target = function_node("src/asset_service.py", "delete");
+        target.qualified_name = Some("AssetService.delete".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), service_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "svc".to_owned(),
+                    imported_name: None,
+                    source: "services".to_owned(),
+                    resolved_path: Some(root.join("src/services.py")),
+                    is_default: false,
+                    is_namespace: true,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "delete".to_owned(),
+                    callee_qualified_hint: Some("service.delete".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert!(outcome.unresolved.is_empty());
     }
 
     #[test]
@@ -2333,6 +3851,28 @@ mod tests {
         assert_eq!(
             first, second,
             "second call must return the cached value from the first call"
+        );
+    }
+
+    #[test]
+    fn parsed_file_cache_hits_share_the_same_allocation() {
+        let temp = TempDir::new("cache-arc-sharing");
+        temp.write("src/mod.ts", "export function X() { return 1; }\n");
+
+        let root = temp.path().to_path_buf();
+        let index = empty_index(&root);
+        let resolved_path = root.join("src/mod.ts");
+
+        let first = index
+            .load_parsed_file(&root, &resolved_path)
+            .expect("first parse should succeed");
+        let second = index
+            .load_parsed_file(&root, &resolved_path)
+            .expect("cache hit should succeed");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "cache hits must reuse the parsed allocation instead of deep-cloning"
         );
     }
 

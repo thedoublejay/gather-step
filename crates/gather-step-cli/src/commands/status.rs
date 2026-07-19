@@ -7,6 +7,7 @@ use gather_step_analysis::{
 };
 use gather_step_core::{DepthLevel, RegistryStore};
 use gather_step_mcp::output::redact::relativize_to_workspace;
+use gather_step_parser::frameworks::registry::{PackId, PackRegistry};
 use gather_step_storage::{ContextPackStats, GraphStore, MetadataStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -41,6 +42,8 @@ struct RepoStatusOutput {
     path_exists: bool,
     depth_level: String,
     freshness: String,
+    graph_index_state: &'static str,
+    git_anchor_state: &'static str,
     last_indexed_at: Option<String>,
     registry_file_count: u64,
     registry_symbol_count: u64,
@@ -48,6 +51,8 @@ struct RepoStatusOutput {
     metadata_file_count: usize,
     unresolved_inputs: usize,
     frameworks: Vec<String>,
+    eligible_extractor_packs: Vec<String>,
+    extractor_pack_basis: &'static str,
     semantic_health: SemanticHealthReport,
 }
 
@@ -178,6 +183,7 @@ pub(crate) fn execute(
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
 ) -> Result<RenderedCommand> {
+    let pack_registry = PackRegistry::builtin();
     let repos = registry
         .registry()
         .repos
@@ -198,6 +204,14 @@ pub(crate) fn execute(
                 .graph()
                 .count_nodes_by_repo(repo)
                 .with_context(|| format!("counting graph nodes for `{repo}`"))?;
+            let has_indexed_ts_js = metadata_rows.iter().any(|row| {
+                matches!(
+                    std::path::Path::new(&row.file_path)
+                        .extension()
+                        .and_then(std::ffi::OsStr::to_str),
+                    Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+                )
+            });
             let semantic_health = semantic_health_for_repo(
                 storage.graph(),
                 storage.metadata(),
@@ -209,8 +223,23 @@ pub(crate) fn execute(
                 .metadata()
                 .get_last_commit_sha(repo)
                 .with_context(|| format!("loading indexed commit SHA for `{repo}`"))?;
-            let freshness =
-                crate::freshness::repo_freshness(repo, &registered.path, indexed_sha.as_deref());
+            let graph_index_state = if graph_node_count > 0 || !metadata_rows.is_empty() {
+                "indexed"
+            } else {
+                "not_indexed"
+            };
+            let git_anchor_state = if indexed_sha.is_some() {
+                "history_synced"
+            } else if graph_index_state == "indexed" {
+                "commit_anchor_missing"
+            } else {
+                "not_synced"
+            };
+            let freshness = if graph_index_state == "indexed" && indexed_sha.is_none() {
+                "history_not_synced".to_owned()
+            } else {
+                crate::freshness::repo_freshness(repo, &registered.path, indexed_sha.as_deref())
+            };
 
             Ok(RepoStatusOutput {
                 repo: repo.clone(),
@@ -218,6 +247,8 @@ pub(crate) fn execute(
                 path_exists: registered.path.exists(),
                 depth_level: depth_label(registered.depth_level).to_owned(),
                 freshness,
+                graph_index_state,
+                git_anchor_state,
                 last_indexed_at: registered.last_indexed_at.clone(),
                 registry_file_count: registered.file_count,
                 registry_symbol_count: registered.symbol_count,
@@ -225,6 +256,12 @@ pub(crate) fn execute(
                 metadata_file_count: metadata_rows.len(),
                 unresolved_inputs,
                 frameworks: registered.frameworks.clone(),
+                eligible_extractor_packs: eligible_pack_names(
+                    &pack_registry,
+                    &registered.path,
+                    has_indexed_ts_js,
+                ),
+                extractor_pack_basis: "live_filesystem_detection_with_indexed_language_gate",
                 semantic_health,
             })
         })
@@ -262,6 +299,7 @@ pub(crate) fn execute(
     // absolutely rather than relativizing.
     let data_dir = storage_root.parent().unwrap_or(storage_root);
 
+    let workspace_unresolved_inputs = repos.iter().map(|repo| repo.unresolved_inputs).sum();
     let payload = StatusOutput {
         event: "status_completed",
         workspace: relativize_to_workspace(workspace_path, workspace_path),
@@ -275,8 +313,12 @@ pub(crate) fn execute(
         graph: GraphStatusOutput {
             node_kinds,
             edge_kinds,
-            semantic_health: semantic_health_for_workspace(storage.graph(), storage.metadata())
-                .context("computing workspace semantic health")?,
+            semantic_health: semantic_health_for_workspace(
+                storage.graph(),
+                storage.metadata(),
+                workspace_unresolved_inputs,
+            )
+            .context("computing workspace semantic health")?,
         },
         locks,
     };
@@ -319,17 +361,18 @@ pub(crate) fn execute(
         "Unresolved",
         "Semantic",
         "Frameworks",
+        "Eligible Extractors (live)",
     ]);
     for repo in &payload.repos {
         repo_table.add_row(vec![
             Cell::new(&repo.repo),
             Cell::new(&repo.depth_level),
-            Cell::new(&repo.freshness),
-            Cell::new(repo.last_indexed_at.as_deref().unwrap_or("never")),
             Cell::new(format!(
-                "{}/{}",
-                repo.registry_file_count, repo.metadata_file_count
+                "{} / {} / {}",
+                repo.graph_index_state, repo.git_anchor_state, repo.freshness
             )),
+            Cell::new(repo.last_indexed_at.as_deref().unwrap_or("never")),
+            Cell::new(repo.metadata_file_count),
             Cell::new(repo.registry_symbol_count),
             Cell::new(repo.graph_node_count),
             Cell::new(repo.unresolved_inputs),
@@ -338,6 +381,11 @@ pub(crate) fn execute(
                 "-".to_owned()
             } else {
                 repo.frameworks.join(",")
+            }),
+            Cell::new(if repo.eligible_extractor_packs.is_empty() {
+                "-".to_owned()
+            } else {
+                repo.eligible_extractor_packs.join(",")
             }),
         ]);
     }
@@ -358,6 +406,28 @@ pub(crate) fn execute(
     ));
 
     Ok(RenderedCommand::success(json!(payload), lines))
+}
+
+fn eligible_pack_names(
+    registry: &PackRegistry,
+    repo_path: &std::path::Path,
+    has_indexed_ts_js: bool,
+) -> Vec<String> {
+    if !repo_path.exists() {
+        return Vec::new();
+    }
+    registry
+        .detect(repo_path)
+        .into_iter()
+        .filter(|pack| {
+            has_indexed_ts_js || !matches!(*pack, PackId::SharedLib | PackId::FrontendHooks)
+        })
+        .filter_map(|pack| {
+            serde_json::to_value(pack)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+        })
+        .collect()
 }
 
 fn format_semantic_summary(health: &SemanticHealthReport) -> String {
@@ -581,9 +651,17 @@ mod tests {
                 .as_str()
                 .expect("each repo should carry a freshness verdict");
             assert!(
-                matches!(freshness, "fresh" | "stale" | "never_indexed" | "unknown"),
+                matches!(
+                    freshness,
+                    "fresh" | "stale" | "never_indexed" | "history_not_synced" | "unknown"
+                ),
                 "unexpected freshness verdict: {freshness}"
             );
+            if repo["graph_index_state"] == "indexed"
+                && repo["git_anchor_state"] == "commit_anchor_missing"
+            {
+                assert_eq!(freshness, "history_not_synced");
+            }
         }
     }
 

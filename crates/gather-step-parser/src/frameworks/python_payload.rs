@@ -19,9 +19,11 @@ use gather_step_core::{
     PayloadField, PayloadInferenceKind, PayloadSide, payload_contract_external_id,
     payload_contract_node_id, ref_node_id, route_qn,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::{fs, path::PathBuf};
 
 use crate::frameworks::fastapi::{HTTP_METHODS, route_method_and_path};
+use crate::path_guard::canonicalize_existing_file_under;
 use crate::payload::{InferredPayloadContract, payload_contract_node};
 use crate::top_level_split::split_top_level;
 use crate::traverse::Language;
@@ -44,6 +46,10 @@ pub fn infer(parsed: &ParsedFile) -> Vec<InferredPayloadContract> {
         if !fields.is_empty() {
             contracts.insert(symbol.node.name.clone(), fields);
         }
+    }
+    let referenced = route_annotation_names(parsed);
+    if !referenced.is_empty() {
+        contracts.extend(imported_contracts(parsed, &referenced));
     }
     if contracts.is_empty() {
         return Vec::new();
@@ -81,6 +87,164 @@ pub fn infer(parsed: &ParsedFile) -> Vec<InferredPayloadContract> {
         }
     }
     inferred
+}
+
+/// Contract type names a route handler in this file actually references
+/// (parameter annotations, `response_model=`, return annotations). Imports are
+/// only resolved and scanned for these names, so unrelated imports never cost
+/// a cross-file read.
+fn route_annotation_names(parsed: &ParsedFile) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
+    for symbol in &parsed.symbols {
+        if route_method_and_path(symbol, &parsed.router_prefixes).is_none() {
+            continue;
+        }
+        if let Some(name) = response_model_type(symbol) {
+            names.insert(name);
+        }
+        let Some(signature) = symbol.node.signature.as_deref() else {
+            continue;
+        };
+        if let Some(params) = signature_params(signature) {
+            for param in split_top_level(params, ',') {
+                if let Some((_, annotation)) = param.split_once(':') {
+                    names.insert(annotation_type_head(annotation));
+                }
+            }
+        }
+        if let Some(annotation) = return_annotation(signature) {
+            names.insert(annotation_type_head(annotation));
+        }
+    }
+    names
+}
+
+fn imported_contracts(
+    parsed: &ParsedFile,
+    referenced: &FxHashSet<String>,
+) -> FxHashMap<String, Vec<PayloadField>> {
+    let mut contracts = FxHashMap::default();
+    let mut imported_sources = FxHashMap::<PathBuf, Option<String>>::default();
+    let repo_root = repo_root_for(parsed);
+    for binding in &parsed.import_bindings {
+        if binding.is_namespace || binding.is_default || !referenced.contains(&binding.local_name) {
+            continue;
+        }
+        let Some(path) = binding.resolved_path.as_deref() else {
+            continue;
+        };
+        let Some(path) = canonicalize_existing_file_under(path, &repo_root) else {
+            continue;
+        };
+        let source = imported_sources
+            .entry(path.clone())
+            .or_insert_with(|| fs::read_to_string(path).ok());
+        let Some(source) = source.as_deref() else {
+            continue;
+        };
+        let imported_name = binding
+            .imported_name
+            .as_deref()
+            .unwrap_or(binding.local_name.as_str());
+        let Some(fields) = imported_python_contract_fields(source, imported_name) else {
+            continue;
+        };
+        if !fields.is_empty() {
+            contracts.insert(binding.local_name.clone(), fields);
+        }
+    }
+    contracts
+}
+
+fn repo_root_for(parsed: &ParsedFile) -> std::path::PathBuf {
+    let mut root = parsed.source_path.clone();
+    for _ in parsed.file.path.components() {
+        root.pop();
+    }
+    root
+}
+
+pub(crate) fn imported_python_contract_fields(
+    source: &str,
+    class_name: &str,
+) -> Option<Vec<PayloadField>> {
+    let class_marker = format!("class {class_name}");
+    let lines = source.lines().collect::<Vec<_>>();
+    let header_index = lines.iter().position(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with(&class_marker)
+            && trimmed[class_marker.len()..]
+                .chars()
+                .next()
+                .is_some_and(|character| {
+                    matches!(character, '(' | ':') || character.is_whitespace()
+                })
+    })?;
+    let header = lines[header_index];
+    let header_trimmed = header.trim_start();
+    let is_dataclass = lines[..header_index]
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .is_some_and(|line| line.starts_with("@dataclass"));
+    if !(header_trimmed.contains("BaseModel")
+        || header_trimmed.contains("TypedDict")
+        || is_dataclass)
+    {
+        return None;
+    }
+    let class_indent = header.len() - header_trimmed.len();
+    let mut fields = Vec::new();
+    let mut class_body_indent = None;
+    for line in &lines[header_index + 1..] {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= class_indent {
+            break;
+        }
+        let body_indent = *class_body_indent.get_or_insert(indent);
+        if indent != body_indent {
+            continue;
+        }
+        if trimmed.starts_with("def ")
+            || trimmed.starts_with("async def ")
+            || trimmed.starts_with("class ")
+        {
+            continue;
+        }
+        if trimmed.starts_with('@') {
+            continue;
+        }
+        let Some((name, annotation)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+        let (annotation, has_default) = annotation
+            .split_once('=')
+            .map_or((annotation, false), |(annotation, _)| (annotation, true));
+        let annotation = annotation.trim();
+        if is_class_var(annotation) {
+            continue;
+        }
+        fields.push(PayloadField {
+            name: name.to_owned(),
+            type_name: annotation.to_owned(),
+            optional: has_default || is_optional_annotation(annotation),
+            confidence: FIELD_CONFIDENCE,
+        });
+    }
+    Some(fields)
 }
 
 fn is_contract_class(symbol: &SymbolCapture) -> bool {
@@ -179,7 +343,7 @@ fn return_annotation(signature: &str) -> Option<&str> {
 }
 
 /// Reduce a raw annotation to the referenced contract type name.
-fn annotation_type_head(annotation: &str) -> String {
+pub(crate) fn annotation_type_head(annotation: &str) -> String {
     let annotation = split_top_level(annotation, '=')
         .into_iter()
         .next()
@@ -676,6 +840,126 @@ app.include_router(router, prefix="/v1")
                 .iter()
                 .all(|item| item.record.contract_target_node_id != bare_target),
             "contracts must not attach to the unmounted decorator path: {inferred:?}"
+        );
+    }
+
+    #[test]
+    fn imported_pydantic_model_supplies_route_contract_fields() {
+        let temp = TempDir::new("imported-model");
+        fs::write(
+            temp.path().join("pyproject.toml"),
+            "[project]\nname = \"asset-api\"\n",
+        )
+        .expect("project manifest");
+        fs::write(
+            temp.path().join("schemas.py"),
+            r"
+from pydantic import BaseModel
+
+
+class AssetRequest(BaseModel):
+    asset_id: str
+    priority: int | None = None
+
+
+class AssetResponse(BaseModel):
+    id: int
+    state: str
+",
+        )
+        .expect("schema fixture");
+        let source = r#"
+from fastapi import FastAPI
+from schemas import AssetRequest, AssetResponse
+
+app = FastAPI()
+
+
+@app.post("/assets", response_model=AssetResponse)
+def create_asset(payload: AssetRequest):
+    return payload
+"#;
+        fs::write(temp.path().join("api.py"), source).expect("API fixture");
+        let parsed = parse_file_with_frameworks(
+            "asset-api",
+            temp.path(),
+            &crate::FileEntry {
+                path: "api.py".into(),
+                language: Language::Python,
+                size_bytes: u64::try_from(source.len()).unwrap_or(u64::MAX),
+                content_hash: *blake3::hash(source.as_bytes()).as_bytes(),
+                source_bytes: None,
+            },
+            &[Framework::FastApi],
+        )
+        .expect("fixture should parse");
+
+        let inferred = infer_payload_contracts(&parsed);
+        let consumer = inferred
+            .iter()
+            .find(|item| item.record.side == PayloadSide::Consumer)
+            .expect("imported request model should infer a consumer contract");
+        assert_eq!(
+            consumer
+                .record
+                .contract
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.optional))
+                .collect::<Vec<_>>(),
+            vec![("asset_id", false), ("priority", true)]
+        );
+        let producer = inferred
+            .iter()
+            .find(|item| item.record.side == PayloadSide::Producer)
+            .expect("imported response model should infer a producer contract");
+        assert_eq!(
+            producer
+                .record
+                .contract
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "state"]
+        );
+    }
+
+    #[test]
+    fn imported_model_method_locals_are_not_contract_fields() {
+        let source = r#"
+from pydantic import BaseModel
+
+
+class AssetRequest(BaseModel):
+    asset_id: str
+
+    def refresh(self):
+        retry_count: int = 0
+        for attempt in range(3):
+            backoff_seconds: float = 1.5
+        return retry_count
+
+    def refresh_async(
+        self,
+        force: bool = False,
+    ) -> None:
+        async_retry_count: int = 0
+
+    class Config:
+        title: str = "AssetRequest"
+
+    priority: int | None = None
+"#;
+        let fields = super::imported_python_contract_fields(source, "AssetRequest")
+            .expect("model class should be a contract source");
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["asset_id", "priority"],
+            "method/nested-class locals must not become contract fields"
         );
     }
 

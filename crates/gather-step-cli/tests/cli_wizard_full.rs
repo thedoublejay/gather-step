@@ -6,6 +6,12 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_gather-step")
 }
 
+fn command() -> Command {
+    let mut command = Command::new(bin());
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
+}
+
 #[test]
 fn init_flag_overrides_run_full_setup_without_prompting() {
     let tmp = tempdir().expect("temp dir");
@@ -13,7 +19,7 @@ fn init_flag_overrides_run_full_setup_without_prompting() {
     fs::create_dir_all(tmp.path().join("src")).expect("src dir");
     fs::write(tmp.path().join("src/lib.rs"), "pub fn demo() -> u8 { 1 }\n").expect("source");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),
@@ -87,7 +93,7 @@ fn init_index_auto_recovers_existing_generated_state() {
     fs::write(storage_root.join("graph.redb"), b"not a redb database").expect("stale graph");
     fs::write(tmp.path().join(".gather-step/registry.json"), "{}\n").expect("stale registry");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),
@@ -117,7 +123,7 @@ fn init_flag_overrides_keep_setup_mcp_idempotent() {
     fs::create_dir_all(tmp.path().join(".git")).expect("git dir");
 
     for _ in 0..2 {
-        let output = Command::new(bin())
+        let output = command()
             .args([
                 "--workspace",
                 tmp.path().to_str().expect("utf-8 temp path"),

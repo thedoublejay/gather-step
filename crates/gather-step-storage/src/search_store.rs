@@ -58,7 +58,7 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 /// zero and does not carry migration or upgrade branches for older development
 /// indexes. When the schema changes before external users exist, rebuild the
 /// generated search index instead of carrying compatibility branches.
-pub const SEARCH_INDEX_VERSION: u32 = 0;
+pub const SEARCH_INDEX_VERSION: u32 = 1;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -75,6 +75,9 @@ const FIELD_FILE_PATH_TOKENS: &str = "file_path_tokens";
 /// parser so users can find symbols by repo prefix or by typing a CamelCase
 /// identifier in lowercase.
 const FIELD_QUALIFIED_NAME: &str = "qualified_name";
+/// Lowercased, untokenized qualified name used for deterministic exact lookup
+/// before the broader lexical and fuzzy passes.
+const FIELD_QUALIFIED_NAME_EXACT: &str = "qualified_name_exact";
 const FIELD_NODE_KIND: &str = "node_kind";
 const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
@@ -230,6 +233,7 @@ struct SearchFields {
     file_name: Field,
     file_path_tokens: Field,
     qualified_name: Field,
+    qualified_name_exact: Field,
     node_kind: Field,
     last_modified: Field,
     is_exported: Field,
@@ -297,15 +301,21 @@ impl TantivySearchStore {
         workload: Option<SearchWorkload>,
     ) -> Result<Self, SearchStoreError> {
         let path = path.as_ref().to_path_buf();
-        fs::create_dir_all(&path)?;
-        // Caller must have validated path via cli::path_safety before opening.
-        crate::fs_mode::apply_private_dir(&path)?;
+        if workload.is_some() {
+            fs::create_dir_all(&path)?;
+            // Caller must have validated path via cli::path_safety before opening.
+            crate::fs_mode::apply_private_dir(&path)?;
+        }
 
         // Stamp (non-test) or skip (test/RamDirectory) schema version metadata.
         // RamDirectory indexes are always fresh so the version file is not
         // written or read in test builds.
         #[cfg(not(test))]
-        stamp_schema_version_if_missing(&path)?;
+        if workload.is_some() {
+            stamp_schema_version_if_missing(&path)?;
+        } else {
+            validate_schema_version(&path)?;
+        }
 
         let schema = build_schema();
         #[cfg(test)]
@@ -313,7 +323,11 @@ impl TantivySearchStore {
         #[cfg(not(test))]
         let mut index = {
             let directory = MmapDirectory::open(&path)?;
-            Index::open_or_create(directory, schema)?
+            if workload.is_some() {
+                Index::open_or_create(directory, schema)?
+            } else {
+                Index::open(directory)?
+            }
         };
         register_tokenizers(&mut index);
 
@@ -534,6 +548,9 @@ impl TantivySearchStore {
         tantivy_doc.add_text(self.fields.file_path_tokens, &document.file_path);
         if !document.description.is_empty() {
             tantivy_doc.add_text(self.fields.qualified_name, &document.description);
+            let mut qualified_name_exact = document.description.clone();
+            qualified_name_exact.make_ascii_lowercase();
+            tantivy_doc.add_text(self.fields.qualified_name_exact, qualified_name_exact);
         }
         // Stored (not indexed) copy of the path for query-aware rerank.
         tantivy_doc.add_text(self.fields.file_path_stored, &document.file_path);
@@ -603,6 +620,32 @@ impl TantivySearchStore {
             .take(limit.max(1))
             .map(|scored| scored.hit)
             .collect())
+    }
+
+    fn execute_exact_qualified_name(
+        &self,
+        query_text: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let reader = self.reader.lock();
+        let searcher = reader.searcher();
+        let mut query_text_exact = query_text.to_owned();
+        query_text_exact.make_ascii_lowercase();
+        let query: Box<dyn Query> = Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.qualified_name_exact, &query_text_exact),
+            IndexRecordOption::Basic,
+        ));
+        let query = self.apply_filters(query, filters);
+        let collector = TopDocs::with_limit(limit.max(1)).order_by_score();
+        let docs: Vec<(f32, DocAddress)> = searcher.search(&query, &collector)?;
+
+        docs.into_iter()
+            .map(|(score, address)| {
+                self.decode_hit(&searcher, address, score, true)
+                    .map(|scored| scored.hit)
+            })
+            .collect()
     }
 
     fn apply_filters(&self, query: Box<dyn Query>, filters: SearchFilters<'_>) -> Box<dyn Query> {
@@ -757,6 +800,43 @@ impl TantivySearchStore {
             .map(|scored| scored.hit)
             .collect())
     }
+
+    /// Return the full ranked candidate set without the exact-qualified-name
+    /// early return. Planning tools use this to compare a concrete declaration
+    /// with canonical virtual aliases for the same bare symbol.
+    pub fn search_ranked_candidates_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_writer_health_for_reads();
+        self.refresh_reader_if_needed()?;
+        self.search_ranked_candidates_after_refresh(trimmed, limit, filters)
+    }
+
+    fn search_ranked_candidates_after_refresh(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let exact_hits = self.execute_search(query, limit, true, false, filters)?;
+        if !exact_hits.is_empty() {
+            return Ok(exact_hits);
+        }
+
+        let fuzzy_hits = self.execute_search(query, limit, false, true, filters)?;
+        if !fuzzy_hits.is_empty() {
+            return Ok(fuzzy_hits);
+        }
+
+        self.execute_search_disjunctive(query, limit, filters)
+    }
 }
 
 impl SearchStore for TantivySearchStore {
@@ -784,22 +864,12 @@ impl SearchStore for TantivySearchStore {
         self.ensure_writer_health_for_reads();
         self.refresh_reader_if_needed()?;
 
-        let exact_hits = self.execute_search(trimmed, limit, true, false, filters)?;
-        if !exact_hits.is_empty() {
-            return Ok(exact_hits);
+        let qualified_name_hits = self.execute_exact_qualified_name(trimmed, limit, filters)?;
+        if !qualified_name_hits.is_empty() {
+            return Ok(qualified_name_hits);
         }
 
-        let fuzzy_hits = self.execute_search(trimmed, limit, false, true, filters)?;
-        if !fuzzy_hits.is_empty() {
-            return Ok(fuzzy_hits);
-        }
-
-        // Both conjunctive passes require every query term to match, so a
-        // multi-word capability query ("email notification delivery") returns
-        // nothing when a symbol covers only some terms. Fall back to a
-        // disjunction with a majority floor so reuse-discovery queries still
-        // surface partial matches instead of an empty result.
-        self.execute_search_disjunctive(trimmed, limit, filters)
+        self.search_ranked_candidates_after_refresh(trimmed, limit, filters)
     }
 
     fn delete_by_files(&self, files: &[(&str, &str)]) -> Result<(), SearchStoreError> {
@@ -908,6 +978,20 @@ pub(crate) fn stamp_schema_version_if_missing(
     }
 }
 
+#[cfg(not(test))]
+fn validate_schema_version(dir: &std::path::Path) -> Result<(), SearchStoreError> {
+    let version_path = dir.join(SEARCH_VERSION_FILE);
+    let stored_raw = fs::read_to_string(&version_path).map_err(SearchStoreError::Io)?;
+    let stored = stored_raw.trim();
+    match stored.parse::<u32>() {
+        Ok(value) if value == SEARCH_INDEX_VERSION => Ok(()),
+        _ => Err(SearchStoreError::SchemaVersionMismatch {
+            stored: stored.to_owned(),
+            expected: SEARCH_INDEX_VERSION,
+        }),
+    }
+}
+
 fn build_schema() -> Schema {
     let mut builder = Schema::builder();
 
@@ -926,6 +1010,7 @@ fn build_schema() -> Schema {
     builder.add_text_field(FIELD_FILE_NAME, code_text_options(false, false));
     builder.add_text_field(FIELD_FILE_PATH_TOKENS, path_text_options(false, false));
     builder.add_text_field(FIELD_QUALIFIED_NAME, word_text_options());
+    builder.add_text_field(FIELD_QUALIFIED_NAME_EXACT, STRING);
     builder.add_u64_field(FIELD_NODE_KIND, fast_numeric_options(false));
     builder.add_u64_field(FIELD_LAST_MODIFIED, fast_numeric_options(false));
     builder.add_bool_field(FIELD_IS_EXPORTED, FAST);
@@ -1458,6 +1543,7 @@ impl SearchFields {
             file_name: field(FIELD_FILE_NAME)?,
             file_path_tokens: field(FIELD_FILE_PATH_TOKENS)?,
             qualified_name: field(FIELD_QUALIFIED_NAME)?,
+            qualified_name_exact: field(FIELD_QUALIFIED_NAME_EXACT)?,
             node_kind: field(FIELD_NODE_KIND)?,
             last_modified: field(FIELD_LAST_MODIFIED)?,
             is_exported: field(FIELD_IS_EXPORTED)?,
@@ -1969,6 +2055,75 @@ mod tests {
         assert!(exact.iter().all(|hit| hit.exact_match));
         assert!(fuzzy.iter().all(|hit| !hit.exact_match));
         assert_eq!(fuzzy[0].symbol_name, "createOrderUseCase");
+    }
+
+    #[test]
+    fn exact_qualified_name_lookup_precedes_token_search() {
+        let store = TantivySearchStore::open(temp_search_dir("qualified-exact"))
+            .expect("store should open");
+        let exact = SearchDocument::from_node(&node("publishAsset", "src/publish.ts"), 1);
+        let sibling = SearchDocument::from_node(&node("publishAssetPreview", "src/preview.ts"), 1);
+        store
+            .index_symbols(&[exact, sibling])
+            .expect("documents should index");
+
+        let hits = store
+            .search("SERVICE-A::PUBLISHASSET", 10)
+            .expect("qualified search should succeed");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "publishAsset");
+        assert!(hits[0].exact_match);
+    }
+
+    #[test]
+    fn ranked_bare_symbol_lookup_keeps_canonical_shared_candidates() {
+        let store = TantivySearchStore::open(temp_search_dir("bare-symbol-candidates"))
+            .expect("store should open");
+        let mut declaration = node("CreateOrderInput", "src/order.ts");
+        declaration.kind = NodeKind::Type;
+        declaration.id = node_id(
+            "service-a",
+            "src/order.ts",
+            NodeKind::Type,
+            "CreateOrderInput",
+        );
+        declaration.qualified_name = Some("CreateOrderInput".to_owned());
+
+        let canonical_name = "__shared__sample-contracts__CreateOrderInput";
+        let mut canonical = node(canonical_name, canonical_name);
+        canonical.kind = NodeKind::SharedSymbol;
+        canonical.id = node_id(
+            "__virtual__",
+            canonical_name,
+            NodeKind::SharedSymbol,
+            canonical_name,
+        );
+        canonical.repo = "__virtual__".to_owned();
+        canonical.qualified_name = Some(canonical_name.to_owned());
+        canonical.signature = None;
+        canonical.is_virtual = true;
+
+        store
+            .index_symbols(&[
+                SearchDocument::from_node(&declaration, 1),
+                SearchDocument::from_node(&canonical, 1),
+            ])
+            .expect("documents should index");
+
+        let hits = store
+            .search_ranked_candidates_filtered("CreateOrderInput", 10, SearchFilters::default())
+            .expect("bare symbol search should succeed");
+        let hit_ids = hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>();
+
+        assert!(hit_ids.contains(&declaration.id));
+        assert!(hit_ids.contains(&canonical.id));
+
+        let exact = store
+            .search("CreateOrderInput", 10)
+            .expect("ordinary search should preserve exact semantics");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].node_id, declaration.id);
     }
 
     #[test]

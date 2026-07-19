@@ -4,7 +4,7 @@
   "matches": [
     {
       "source_repo": "frontend_standard",
-      "source_file": "src/auth_local.ts",
+      "source_file": "src/auth_api.ts",
       "source_symbol": "useAuthentication",
       "primary": true,
       "impacted_files": [

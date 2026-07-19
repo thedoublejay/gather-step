@@ -91,22 +91,35 @@ pub const MCP_TOOLS: &[(&str, &str)] = &[
         "Find databases and brokers with service consumers",
     ),
     // Context packs
-    ("context_pack", "Get a task-shaped context pack"),
-    ("get_context_pack", "Alias for task-shaped context packs"),
+    (
+        "context_pack",
+        "Use for one bounded task-shaped pack when brief/context is too small",
+    ),
     (
         "planning_pack",
-        "Context pack for architecture and planning tasks",
+        "Use for a compact planning pack; prefer plan_change for the full typed plan",
     ),
     (
         "plan_change",
         "Typed plan-change product (twelve planning sections)",
     ),
-    ("debug_pack", "Context pack for debugging production issues"),
-    ("fix_pack", "Context pack scoped for a bug fix"),
-    ("fix_surface", "Get a narrower fix-oriented surface"),
+    (
+        "debug_pack",
+        "Use for broad failure-path evidence when the fault location is unknown",
+    ),
+    (
+        "fix_pack",
+        "Use after locating a bug to gather bounded implementation context",
+    ),
+    (
+        "fix_surface",
+        "Use for the smallest fix-oriented symbol and dependency surface",
+    ),
     ("review_pack", "Context pack scoped for code review"),
-    ("change_impact_pack", "Cross-repo change impact bundle"),
-    ("get_change_impact_pack", "Alias for change impact context"),
+    (
+        "change_impact_pack",
+        "Use for a bounded cross-repo impact bundle around one target",
+    ),
     (
         "batch_query",
         "Run multiple read-only graph queries together",

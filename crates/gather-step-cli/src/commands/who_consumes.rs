@@ -12,7 +12,7 @@ use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
 pub struct WhoConsumesArgs {
-    #[arg(help = "Symbol name to search for; reports the repos that consume what it produces")]
+    #[arg(help = "Symbol name to search for; reports repos with dependency paths to that symbol")]
     pub symbol: String,
 }
 
@@ -52,7 +52,15 @@ pub(crate) fn execute(
 
     let mut lines = Vec::new();
     if data.consumers.is_empty() {
-        lines.push(format!("No repos consume `{}`.", data.symbol));
+        lines.push(format!(
+            "No indexed consumer edges were observed for `{}`.",
+            data.symbol
+        ));
+        lines.push(format!(
+            "Coverage: {}; {}",
+            data.coverage.verdict,
+            data.coverage.limitations.join(" ")
+        ));
     } else {
         lines.push(format!("Repos consuming `{}`:", data.symbol));
         for consumer in &data.consumers {
@@ -64,12 +72,19 @@ pub(crate) fn execute(
         }
     }
 
+    let consumer_count = data.consumers.len();
     let payload = json!({
         "event": "who_consumes_completed",
         "symbol": data.symbol,
         "consumers": data.consumers,
+        "coverage": data.coverage,
     });
-    Ok(RenderedCommand::success(payload, lines))
+    Ok(
+        RenderedCommand::success(payload, lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::ConsumerRepos,
+            consumer_count,
+        ),
+    )
 }
 
 #[cfg(test)]

@@ -168,7 +168,22 @@ pub struct TraversalResponseData {
 
 pub fn search_symbols(
     ctx: &McpContext,
+    request: SearchRequest,
+) -> Result<SearchResponse, McpServerError> {
+    search_symbols_inner(ctx, request, false)
+}
+
+pub(crate) fn search_symbol_candidates(
+    ctx: &McpContext,
+    request: SearchRequest,
+) -> Result<SearchResponse, McpServerError> {
+    search_symbols_inner(ctx, request, true)
+}
+
+fn search_symbols_inner(
+    ctx: &McpContext,
     mut request: SearchRequest,
+    ranked_candidates: bool,
 ) -> Result<SearchResponse, McpServerError> {
     validate_input_length("query", &request.query)?;
     if let Some(ref cursor) = request.cursor {
@@ -190,18 +205,18 @@ pub fn search_symbols(
     let fetch_limit = offset.saturating_add(requested_limit).saturating_add(1);
     let requested_kind = request.kind.as_deref().and_then(parse_node_kind);
 
-    let mut results = search
-        .search_filtered(
-            &request.query,
-            fetch_limit,
-            SearchFilters {
-                repo: request.repo.as_deref(),
-                node_kind: requested_kind,
-                lang: request.language.as_deref(),
-            },
-        )?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let filters = SearchFilters {
+        repo: request.repo.as_deref(),
+        node_kind: requested_kind,
+        lang: request.language.as_deref(),
+    };
+    let mut results = if ranked_candidates {
+        search.search_ranked_candidates_filtered(&request.query, fetch_limit, filters)?
+    } else {
+        search.search_filtered(&request.query, fetch_limit, filters)?
+    }
+    .into_iter()
+    .collect::<Vec<_>>();
 
     if offset > 0 {
         results = results.into_iter().skip(offset).collect();

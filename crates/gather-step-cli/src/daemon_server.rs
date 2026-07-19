@@ -222,7 +222,13 @@ pub fn dispatch_request_with_runtime(
             let args = TraceArgs { subject, limit };
             if let Some(runtime) = runtime {
                 let storage = runtime.storage();
-                events::execute_trace(&storage, app.repo_filter.as_deref(), &args)
+                let registry = RegistryStore::open(&runtime.registry_path)?;
+                events::execute_trace(
+                    &storage,
+                    registry.registry(),
+                    app.repo_filter.as_deref(),
+                    &args,
+                )
             } else {
                 events::run_rendered(
                     &app,
@@ -247,7 +253,13 @@ pub fn dispatch_request_with_runtime(
             };
             if let Some(runtime) = runtime {
                 let storage = runtime.storage();
-                events::execute_blast_radius(&storage, app.repo_filter.as_deref(), &args)
+                let registry = RegistryStore::open(&runtime.registry_path)?;
+                events::execute_blast_radius(
+                    &storage,
+                    registry.registry(),
+                    app.repo_filter.as_deref(),
+                    &args,
+                )
             } else {
                 events::run_rendered(
                     &app,
@@ -263,7 +275,13 @@ pub fn dispatch_request_with_runtime(
             let args = OrphansArgs { limit };
             if let Some(runtime) = runtime {
                 let storage = runtime.storage();
-                events::execute_orphans(&storage, app.repo_filter.as_deref(), &args)
+                let registry = RegistryStore::open(&runtime.registry_path)?;
+                events::execute_orphans(
+                    &storage,
+                    registry.registry(),
+                    app.repo_filter.as_deref(),
+                    &args,
+                )
             } else {
                 events::run_rendered(
                     &app,
@@ -288,7 +306,13 @@ pub fn dispatch_request_with_runtime(
             };
             if let Some(runtime) = runtime {
                 let storage = runtime.storage();
-                events::execute_agent_trace(&storage, app.repo_filter.as_deref(), &args)
+                let registry = RegistryStore::open(&runtime.registry_path)?;
+                events::execute_agent_trace(
+                    &storage,
+                    registry.registry(),
+                    app.repo_filter.as_deref(),
+                    &args,
+                )
             } else {
                 events::run_rendered(
                     &app,
@@ -1102,6 +1126,7 @@ mod tests {
     async fn daemon_serves_status_requests_and_cleans_up_runtime_files() -> Result<()> {
         let workspace = TestWorkspace::new("status");
         let app = app(workspace.path());
+        drop(WorkspaceStores::open(app.data_dir.join("storage"))?);
         let Some(daemon) = bind_daemon_or_skip(&app)? else {
             return Ok(());
         };

@@ -44,6 +44,7 @@ These flags apply to every command. Pass them before the subcommand name.
 - [`events trace`](#events-trace) — Show producers and consumers for an event-like target.
 - [`events blast-radius`](#events-blast-radius) — Trace transitive downstream impact from an event-like target.
 - [`events orphans`](#events-orphans) — List event-like targets that have only producers or only consumers.
+- [`events agent`](#events-agent) — Trace an indexed AI/agent flow from a named target.
 - [`impact`](#impact) — Summarize which repos are touched by a symbol's cross-repo virtual targets.
 - [`cross-repo-deps`](#cross-repo-deps) — List repositories connected to a repo through shared virtual nodes.
 - [`who-consumes`](#who-consumes) — Find which repos consume an exact symbol.
@@ -253,7 +254,7 @@ want to reclaim generated-state space without a destructive `clean`.
 
 ### `status`
 
-Reads the registry and opens the storage coordinator to report per-repo freshness, file and symbol counts, graph node counts, unresolved call inputs, and semantic health summaries. Also reports workspace-level graph node and edge kind counts.
+Reads the registry and opens the storage coordinator to report per-repo freshness, file and symbol counts, graph node counts, unresolved call inputs, semantic health summaries, detected frameworks, and extractor packs eligible under current filesystem detection. Eligible packs are live diagnostics, not persisted proof of which extractors produced the stored graph. Also reports workspace-level graph node and edge kind counts.
 
 ```bash
 gather-step [GLOBAL FLAGS] status
@@ -271,7 +272,7 @@ gather-step --workspace /path/to/workspace --repo backend_standard status --json
 **Output shape (`--json`)** — emits one line:
 
 ```json
-{"event":"status_completed","workspace":"...","registry_path":"...","storage_root":"...","repos":[{"repo":"backend_standard","path":"...","path_exists":true,"depth_level":"full","last_indexed_at":"1713200000","registry_file_count":400,"registry_symbol_count":2800,"graph_node_count":2800,"metadata_file_count":400,"unresolved_inputs":12,"frameworks":["nestjs","mongoose"],"semantic_health":{...}}],"graph":{...}}
+{"event":"status_completed","workspace":"...","registry_path":"...","storage_root":"...","repos":[{"repo":"backend_standard","path":"...","path_exists":true,"depth_level":"full","last_indexed_at":"1713200000","registry_file_count":400,"registry_symbol_count":2800,"graph_node_count":2800,"metadata_file_count":400,"unresolved_inputs":12,"frameworks":["nestjs","mongoose"],"eligible_extractor_packs":["nestjs","mongoose","shared_lib","frontend_hooks"],"extractor_pack_basis":"live_filesystem_detection_with_indexed_language_gate","semantic_health":{...}}],"graph":{...}}
 ```
 
 **When to use** — to check whether a workspace is fresh before running analysis commands.
@@ -360,7 +361,7 @@ gather-step --workspace /path/to/workspace --repo backend_standard search OrderS
 **Output shape (`--json`)** — emits one line:
 
 ```json
-{"event":"search_completed","query":"createOrder","total_hits":3,"hits":[{"repo":"backend_standard","file_path":"src/orders/orders.service.ts","line":42,"symbol_name":"createOrder","qualified_name":"OrdersService.createOrder","node_kind":"function","exact_match":true,"adjusted_score":1.0}]}
+{"event":"search_completed","query":"createOrder","total_hits":3,"hits":[{"repo":"backend_standard","file_path":"src/orders/orders.service.ts","line":42,"symbol_name":"createOrder","qualified_name":"OrdersService.createOrder","node_kind":"function","match_mode":"exact","matched_field":"symbol_name","symbol_name_exact":true,"adjusted_score":1.0}]}
 ```
 
 **When to use** — to find a `symbol_id` for use in MCP traversal tools, or to verify that a symbol was indexed correctly.
@@ -392,7 +393,7 @@ gather-step --workspace /path/to/workspace trace crud --method POST --path /orde
 gather-step --workspace /path/to/workspace trace crud --symbol-id deadbeefdeadbeef
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "trace_crud_completed"` and fields for `callers`, `handlers`, `continuation`, `entities`, `database_hints`, `method`, `path`, `target_id`, `target_name`, and `truncated`.
+**Output shape (`--json`)** — emits one line with `event: "trace_crud_completed"` and fields for `callers`, `handlers`, `continuation`, `entities`, `database_hints`, `method`, `path`, `target_id`, `target_name`, `coverage`, and `truncated`.
 
 **When to use** — when investigating how a specific HTTP endpoint is called and what it touches.
 
@@ -418,7 +419,7 @@ gather-step --workspace /path/to/workspace events trace order.created
 gather-step --workspace /path/to/workspace --repo backend_standard events trace order.created --limit 5
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "events_trace_completed"` and fields for `target`, `producers`, `consumers`, and `truncated`.
+**Output shape (`--json`)** — emits one line with `event: "events_trace_completed"` and fields for `target`, `producers`, `consumers`, `coverage`, and `truncated`. Coverage reports registered repo scope, registry-detected frameworks, path-classified source scopes, concrete contributed edges when retained, a verdict, and limitations. Index-time extractor provenance is not persisted, so `extractors_run` is empty. Virtual, external, or unresolved evidence can remain `unknown`.
 
 **When to use** — to map which services emit and which services consume a specific messaging event.
 
@@ -444,7 +445,7 @@ gather-step [GLOBAL FLAGS] events blast-radius <SUBJECT> [--limit <N>] [--depth 
 gather-step --workspace /path/to/workspace events blast-radius order.created --depth 3
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "events_blast_radius_completed"` and `blast_radius` array items with `depth`, `name`, `repo`, `file_path`, `node_kind`, and `cumulative_confidence`.
+**Output shape (`--json`)** — emits one line with `event: "events_blast_radius_completed"`, a `coverage` block, and `blast_radius` array items with `depth`, `name`, `repo`, `file_path`, `node_kind`, and `cumulative_confidence`.
 
 **When to use** — before modifying a Kafka topic or shared event shape to estimate cross-repo change surface.
 
@@ -452,7 +453,7 @@ gather-step --workspace /path/to/workspace events blast-radius order.created --d
 
 ### `events orphans`
 
-Lists event-like virtual nodes that have producers but no consumers, consumers but no producers, or neither. These represent likely dead event pathways or incomplete integrations.
+Lists event-like virtual nodes whose indexed edges contain producers but no consumers, consumers but no producers, or neither. These are audit candidates, not proof of dead pathways: dynamic registration, external systems, unsupported syntax, and unknown source scope can leave one side unobserved.
 
 ```bash
 gather-step [GLOBAL FLAGS] events orphans [--limit <N>]
@@ -468,9 +469,29 @@ gather-step [GLOBAL FLAGS] events orphans [--limit <N>]
 gather-step --workspace /path/to/workspace events orphans --limit 50
 ```
 
-**Output shape (`--json`)** — emits one line with `event: "events_orphans_completed"` and `orphans` array items with `name`, `kind`, `producers`, `consumers`, `classification`, and `severity`.
+**Output shape (`--json`)** — emits one line with `event: "events_orphans_completed"`, a `coverage` block, and `orphans` array items with `name`, `kind`, `producers`, `consumers`, `classification`, and `severity`.
 
-**When to use** — during event topology audits to find stale or incomplete message flows.
+**When to use** — during event topology audits to find flows that need source or runtime verification.
+
+---
+
+### `events agent`
+
+Resolves an indexed agent graph, model, prompt, or tool-like target and walks its forward AI-flow edges.
+
+```bash
+gather-step [GLOBAL FLAGS] events agent <TARGET> [--limit <N>] [--depth <N>]
+```
+
+| Argument/Flag | Type | Default | Description |
+|---|---|---|---|
+| `<TARGET>` | string (positional) | required | Agent graph, model, prompt, or tool identifier. |
+| `--limit <N>` | usize | 25 | Maximum nodes to return. |
+| `--depth <N>` | usize | 8 | Maximum AI-flow traversal depth. |
+
+**Output shape (`--json`)** — emits one line with `event: "events_agent_trace_completed"`, `target`, `nodes`, `edges`, `coverage`, and `truncated`.
+
+**When to use** — to inspect a statically extracted AI/agent flow while retaining explicit coverage limitations for dynamic construction.
 
 ---
 
@@ -547,7 +568,7 @@ The command also accepts the `who_consumes` alias for parity with the MCP tool n
 gather-step --workspace /path/to/workspace who-consumes OrderCreatedDto --json
 ```
 
-**Output shape (`--json`)** — emits the queried symbol and consuming repos. Each consumer includes `linking_symbols`, the exact matched symbols that connect it.
+**Output shape (`--json`)** — emits the queried symbol, consuming repos, and a `coverage` block. Each consumer includes `linking_symbols`, the exact matched symbols that connect it. With global `--repo`, producer resolution is scoped to that repo before consumers are collected.
 
 **When to use** — to find downstream consumers of a producer symbol before changing or removing it.
 

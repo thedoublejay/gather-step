@@ -93,6 +93,25 @@ pub struct RouterPrefixBindings {
     pub ctor: FxHashMap<String, String>,
     /// `parent.include_router(var, prefix="…")` → `var` → prefix literal.
     pub include: FxHashMap<String, String>,
+    /// Every static router mount, including multiple mounts of one router and
+    /// nested router composition. The map above remains as the same-file fast
+    /// path; this lossless list feeds the repo-level fixed-point pass.
+    pub mounts: Vec<RouterMountBinding>,
+    /// Static `app.mount("/prefix", sub_app)` ASGI application mounts.
+    pub asgi_mounts: Vec<AsgiMountBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouterMountBinding {
+    pub parent: String,
+    pub child: String,
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AsgiMountBinding {
+    pub receiver: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1271,9 +1290,27 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    fn record_router_include_prefix(&mut self, variable: String, prefix: String) {
-        if !variable.is_empty() && !prefix.is_empty() {
-            self.router_prefixes.include.insert(variable, prefix);
+    fn record_router_include_prefix(&mut self, parent: String, variable: String, prefix: String) {
+        if !parent.is_empty() && !variable.is_empty() {
+            if !prefix.is_empty() {
+                self.router_prefixes
+                    .include
+                    .entry(variable.clone())
+                    .or_insert_with(|| prefix.clone());
+            }
+            self.router_prefixes.mounts.push(RouterMountBinding {
+                parent,
+                child: variable,
+                prefix,
+            });
+        }
+    }
+
+    fn record_asgi_mount(&mut self, receiver: String, path: String) {
+        if !receiver.is_empty() && !path.is_empty() {
+            self.router_prefixes
+                .asgi_mounts
+                .push(AsgiMountBinding { receiver, path });
         }
     }
 
@@ -2034,10 +2071,17 @@ fn visit_python(
             // prefix to a router variable. Captured regardless of scope so
             // module-level mounts (owner-less) are seen too.
             if python_callee_name(node, state.source).as_deref() == Some("include_router")
-                && let Some(prefix) = python_prefix_kwarg(node, state.source)
+                && let Some(prefix) = python_optional_prefix_kwarg(node, state.source)
                 && let Some(variable) = python_first_positional_ident(node, state.source)
+                && let Some(parent) = python_call_receiver(node, state.source)
             {
-                state.record_router_include_prefix(variable, prefix);
+                state.record_router_include_prefix(parent, variable, prefix);
+            }
+            if python_callee_name(node, state.source).as_deref() == Some("mount")
+                && let Some(path) = first_literal_argument(node, state.source)
+                && let Some(receiver) = python_call_receiver(node, state.source)
+            {
+                state.record_asgi_mount(receiver, path);
             }
             if let Some(owner_id) = owner
                 && let Some(function_node) = node
@@ -3133,6 +3177,10 @@ fn resolve_import_path(
     {
         return Some(absolute);
     } else if language == Language::Python
+        && let Some(absolute) = resolve_python_repo_relative_import(repo_root, source)
+    {
+        return Some(absolute);
+    } else if language == Language::Python
         && let Some(absolute) =
             resolve_python_sibling_package_import(repo_root, current_file, source)
     {
@@ -3518,6 +3566,15 @@ fn resolve_python_current_package_import(repo_root: &Path, source: &str) -> Opti
         return None;
     }
     resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
+}
+
+/// Prefer an existing module inside the indexed repository before scanning
+/// sibling Python projects. Repositories without Python project metadata still
+/// commonly use flat imports such as `from schemas import Model`; resolving a
+/// same-named sibling first can bind the import to an unrelated repository.
+fn resolve_python_repo_relative_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+    let (package_name, tail) = python_package_root_and_tail(source)?;
+    resolve_python_package_subpath(repo_root, package_name, tail.as_deref())
 }
 
 fn has_python_project_marker(package_dir: &Path) -> bool {
@@ -4801,6 +4858,20 @@ fn python_callee_name(call: Node<'_>, source: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+fn python_call_receiver(call: Node<'_>, source: &str) -> Option<String> {
+    let function = call
+        .child_by_field_name("function")
+        .or_else(|| call.child(0))?;
+    if function.kind() != "attribute" {
+        return None;
+    }
+    let object = function
+        .child_by_field_name("object")
+        .or_else(|| function.named_child(0))?;
+    let receiver = node_text(object, source).trim();
+    (!receiver.is_empty()).then(|| receiver.to_owned())
+}
+
 /// String literal passed to the `prefix=` keyword argument of a Python call.
 /// Returns `None` when the call has no `prefix=` argument or its value is not a
 /// plain string literal (dynamic prefixes are intentionally skipped).
@@ -4827,6 +4898,33 @@ fn python_prefix_kwarg(call: Node<'_>, source: &str) -> Option<String> {
         return (!literal.is_empty()).then_some(literal);
     }
     None
+}
+
+/// Static `prefix=` value for an include call. `Some("")` means the keyword
+/// is absent (a valid zero-prefix mount); `None` means it is present but
+/// dynamic and therefore unsafe to compose.
+fn python_optional_prefix_kwarg(call: Node<'_>, source: &str) -> Option<String> {
+    let arguments = call
+        .child_by_field_name("arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            continue;
+        }
+        let Some(name) = child.child_by_field_name("name") else {
+            continue;
+        };
+        if node_text(name, source).trim() != "prefix" {
+            continue;
+        }
+        let value = child.child_by_field_name("value")?;
+        if value.kind() != "string" {
+            return None;
+        }
+        return Some(sanitize_string_literal(node_text(value, source)));
+    }
+    Some(String::new())
 }
 
 /// First positional identifier argument of a Python call, e.g. `router` for
@@ -6400,6 +6498,38 @@ class ItemCreate:
             resolved,
             canonical(shared_root.join("src/shared_models/records.py"))
         );
+    }
+
+    #[test]
+    fn python_repo_relative_import_wins_over_same_named_sibling_package() {
+        let temp_dir = TestDir::new("python-local-before-sibling");
+        let app_root = temp_dir.path().join("api_service");
+        let sibling_root = temp_dir.path().join("schemas_service");
+        fs::create_dir_all(&app_root).expect("app repo should exist");
+        fs::create_dir_all(&sibling_root).expect("sibling repo should exist");
+        fs::write(app_root.join("schemas.py"), "class LocalModel: ...\n")
+            .expect("local schema should write");
+        fs::write(
+            sibling_root.join("pyproject.toml"),
+            "[project]\nname = \"schemas-service\"\n",
+        )
+        .expect("sibling pyproject should write");
+        fs::write(
+            sibling_root.join("schemas.py"),
+            "class UnrelatedModel: ...\n",
+        )
+        .expect("sibling schema should write");
+
+        let resolved = resolve_import_path(
+            &app_root,
+            Path::new("events.py"),
+            "schemas",
+            Language::Python,
+            &PathAliases::empty(),
+        )
+        .expect("repo-relative Python module should resolve");
+
+        assert_eq!(resolved, canonical(app_root.join("schemas.py")));
     }
 
     #[test]

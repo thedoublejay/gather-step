@@ -1,10 +1,11 @@
 use std::{
+    collections::VecDeque,
     env,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
     },
 };
 
@@ -13,7 +14,10 @@ use clap::ValueEnum;
 use console::{set_colors_enabled, set_colors_enabled_stderr, style};
 use gather_step_core::GatherStepConfig;
 use indicatif::{MultiProgress, ProgressDrawTarget};
-use tracing::{Event, Level, Subscriber};
+use tracing::{
+    Event, Level, Subscriber,
+    field::{Field, Visit},
+};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{MakeWriter, time::ChronoLocal},
@@ -30,6 +34,36 @@ const BANNER: &str = include_str!("../assets/banner.txt");
 static TELEMETRY_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static TELEMETRY_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 static TELEMETRY_RECOVERY_EVENT: AtomicBool = AtomicBool::new(false);
+static TELEMETRY_GRAPH_AVAILABILITY: AtomicU8 = AtomicU8::new(0);
+static TELEMETRY_REPO_COUNT: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_FILES_PARSED: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_NODES_CREATED: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_RESULT_COUNT: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_RESULT_KIND: AtomicU8 = AtomicU8::new(0);
+const TELEMETRY_EVENT_LIMIT: usize = 32;
+static TELEMETRY_EVENTS: LazyLock<Mutex<VecDeque<gather_step_storage::TelemetryErrorEvent>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::with_capacity(TELEMETRY_EVENT_LIMIT)));
+
+#[derive(Default)]
+struct TelemetryEventVisitor {
+    message: Option<String>,
+    category: Option<String>,
+}
+
+impl Visit for TelemetryEventVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "message" => self.message = Some(value.to_owned()),
+            "category" => self.category = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let value = format!("{value:?}");
+        self.record_str(field, value.trim_matches('"'));
+    }
+}
 
 #[derive(Debug)]
 struct TelemetryCounterLayer;
@@ -39,15 +73,38 @@ where
     S: Subscriber,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
-        match *event.metadata().level() {
+        let level = match *event.metadata().level() {
             Level::WARN => {
                 TELEMETRY_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                "WARN"
             }
             Level::ERROR => {
                 TELEMETRY_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                "ERROR"
             }
-            _ => {}
+            _ => return,
+        };
+        let mut visitor = TelemetryEventVisitor::default();
+        event.record(&mut visitor);
+        let telemetry_event = gather_step_storage::TelemetryErrorEvent {
+            level: level.to_owned(),
+            category: visitor
+                .category
+                .unwrap_or_else(|| event.metadata().target().to_owned()),
+            message: visitor
+                .message
+                .unwrap_or_else(|| event.metadata().name().to_owned()),
+            context_json: None,
+        };
+        // The guarded VecDeque stays valid across a poisoning panic, so
+        // recover it rather than silently dropping events out of the counts.
+        let mut events = TELEMETRY_EVENTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if events.len() == TELEMETRY_EVENT_LIMIT {
+            events.pop_front();
         }
+        events.push_back(telemetry_event);
     }
 }
 
@@ -59,6 +116,14 @@ pub fn telemetry_counts() -> (u32, u32) {
     )
 }
 
+pub fn take_telemetry_events() -> Vec<gather_step_storage::TelemetryErrorEvent> {
+    TELEMETRY_EVENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .collect()
+}
+
 pub fn mark_telemetry_recovery_event() {
     TELEMETRY_RECOVERY_EVENT.store(true, Ordering::Relaxed);
 }
@@ -67,11 +132,111 @@ pub fn reset_telemetry_run_state() {
     TELEMETRY_WARN_COUNT.store(0, Ordering::Relaxed);
     TELEMETRY_ERROR_COUNT.store(0, Ordering::Relaxed);
     TELEMETRY_RECOVERY_EVENT.store(false, Ordering::Relaxed);
+    TELEMETRY_GRAPH_AVAILABILITY.store(0, Ordering::Relaxed);
+    TELEMETRY_REPO_COUNT.store(-1, Ordering::Relaxed);
+    TELEMETRY_FILES_PARSED.store(-1, Ordering::Relaxed);
+    TELEMETRY_NODES_CREATED.store(-1, Ordering::Relaxed);
+    TELEMETRY_RESULT_COUNT.store(-1, Ordering::Relaxed);
+    TELEMETRY_RESULT_KIND.store(0, Ordering::Relaxed);
+    gather_step_storage::graph_store::reset_graph_open_retry_count();
+    TELEMETRY_EVENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 #[must_use]
 pub fn telemetry_recovery_event() -> bool {
     TELEMETRY_RECOVERY_EVENT.load(Ordering::Relaxed)
+}
+
+pub fn mark_graph_availability(value: &'static str) {
+    let code = match value {
+        "available" => 1,
+        "locked" => 2,
+        "missing" => 3,
+        "corrupt" => 4,
+        _ => 0,
+    };
+    TELEMETRY_GRAPH_AVAILABILITY.store(code, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn telemetry_graph_availability() -> Option<&'static str> {
+    match TELEMETRY_GRAPH_AVAILABILITY.load(Ordering::Relaxed) {
+        1 => Some("available"),
+        2 => Some("locked"),
+        3 => Some("missing"),
+        4 => Some("corrupt"),
+        _ => None,
+    }
+}
+
+pub fn mark_telemetry_index_metrics(repo_count: usize, files_parsed: u64, nodes_created: u64) {
+    TELEMETRY_REPO_COUNT.store(
+        i64::try_from(repo_count).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+    TELEMETRY_FILES_PARSED.store(
+        i64::try_from(files_parsed).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+    TELEMETRY_NODES_CREATED.store(
+        i64::try_from(nodes_created).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+pub fn mark_telemetry_result(result: gather_step_storage::TelemetryCommandResult) {
+    TELEMETRY_RESULT_COUNT.store(result.count.max(0), Ordering::Relaxed);
+    let kind = match result.kind {
+        gather_step_storage::TelemetryResultKind::AgentTraceNodes => 1,
+        gather_step_storage::TelemetryResultKind::ConsumerRepos => 2,
+        gather_step_storage::TelemetryResultKind::DependencyEdges => 3,
+        gather_step_storage::TelemetryResultKind::EventLinks => 4,
+        gather_step_storage::TelemetryResultKind::ImpactedFiles => 5,
+        gather_step_storage::TelemetryResultKind::OrphanTargets => 6,
+        gather_step_storage::TelemetryResultKind::SearchHits => 7,
+        gather_step_storage::TelemetryResultKind::TraceNodes => 8,
+    };
+    TELEMETRY_RESULT_KIND.store(kind, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn telemetry_extra() -> Option<gather_step_storage::TelemetryExtra> {
+    let result_kind = match TELEMETRY_RESULT_KIND.load(Ordering::Relaxed) {
+        1 => Some(gather_step_storage::TelemetryResultKind::AgentTraceNodes),
+        2 => Some(gather_step_storage::TelemetryResultKind::ConsumerRepos),
+        3 => Some(gather_step_storage::TelemetryResultKind::DependencyEdges),
+        4 => Some(gather_step_storage::TelemetryResultKind::EventLinks),
+        5 => Some(gather_step_storage::TelemetryResultKind::ImpactedFiles),
+        6 => Some(gather_step_storage::TelemetryResultKind::OrphanTargets),
+        7 => Some(gather_step_storage::TelemetryResultKind::SearchHits),
+        8 => Some(gather_step_storage::TelemetryResultKind::TraceNodes),
+        _ => None,
+    };
+    let graph_open_retries = gather_step_storage::graph_store::graph_open_retry_count();
+    (result_kind.is_some() || graph_open_retries > 0).then_some(
+        gather_step_storage::TelemetryExtra {
+            result_kind,
+            graph_open_retries,
+            telemetry_busy_retries: 0,
+        },
+    )
+}
+
+#[must_use]
+pub fn telemetry_metrics() -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    let optional = |value: &AtomicI64| {
+        let value = value.load(Ordering::Relaxed);
+        (value >= 0).then_some(value)
+    };
+    (
+        optional(&TELEMETRY_REPO_COUNT),
+        optional(&TELEMETRY_FILES_PARSED),
+        optional(&TELEMETRY_NODES_CREATED),
+        optional(&TELEMETRY_RESULT_COUNT),
+    )
 }
 
 #[expect(

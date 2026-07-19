@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::app::Output;
+use gather_step_storage::{TelemetryCommandResult, TelemetryResultKind};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RenderedCommand {
@@ -12,6 +13,8 @@ pub struct RenderedCommand {
     pub lines: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_result: Option<TelemetryCommandResult>,
 }
 
 impl RenderedCommand {
@@ -21,6 +24,7 @@ impl RenderedCommand {
             payload: Some(payload),
             lines,
             error: None,
+            telemetry_result: None,
         }
     }
 
@@ -30,7 +34,17 @@ impl RenderedCommand {
             payload,
             lines,
             error: Some(error.into()),
+            telemetry_result: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_telemetry_result(mut self, kind: TelemetryResultKind, count: usize) -> Self {
+        self.telemetry_result = Some(TelemetryCommandResult {
+            kind,
+            count: i64::try_from(count).unwrap_or(i64::MAX),
+        });
+        self
     }
 
     pub fn success_serialized<T: Serialize>(payload: &T, lines: Vec<String>) -> Result<Self> {
@@ -47,6 +61,9 @@ impl RenderedCommand {
     }
 
     pub fn emit(self, output: &Output) -> Result<()> {
+        if let Some(result) = self.telemetry_result {
+            crate::app::mark_telemetry_result(result);
+        }
         if let Some(payload) = &self.payload {
             output.emit(payload)?;
         }

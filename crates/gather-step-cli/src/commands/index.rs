@@ -1181,6 +1181,12 @@ pub async fn run(app: &AppContext, args: IndexArgs) -> Result<()> {
         "Indexing from directory finished.",
     );
 
+    crate::app::mark_telemetry_index_metrics(
+        payload.stats.indexed_repos,
+        payload.stats.total_files,
+        payload.stats.total_symbols,
+    );
+
     output.emit(&payload)?;
     let repo_label = if payload.stats.indexed_repos == 1 {
         "repository"
