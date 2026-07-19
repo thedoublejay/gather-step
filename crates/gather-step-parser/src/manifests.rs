@@ -322,7 +322,6 @@ fn is_shared_dependency(package: &str) -> bool {
         || normalized.contains("contract")
         || normalized.contains("schema")
         || normalized.contains("types")
-        || normalized.ends_with("common-lib")
 }
 
 #[cfg(test)]
@@ -388,7 +387,7 @@ name = "asset-api"
 dependencies = [
   "shared-schemas>=2.3",
   "httpx>=0.28",
-  "common-lib @ git+https://example.invalid/common-lib@1.4.0",
+  "foundation-kit @ git+https://example.invalid/foundation-kit@1.4.0",
 ]
 
 [project.optional-dependencies]
@@ -398,7 +397,7 @@ worker = ["shared-events==3.1"]
         .expect("PEP 621 manifest should parse");
         assert_eq!(pep621.package_name.as_deref(), Some("asset-api"));
         assert!(pep621.dependencies.iter().any(|dependency| {
-            dependency.package == "common-lib" && dependency.version.contains("1.4.0")
+            dependency.package == "foundation-kit" && dependency.version.contains("1.4.0")
         }));
         assert!(
             pep621
@@ -429,7 +428,7 @@ shared-contracts = { version = "^4.0" }
             r#"
 # runtime dependencies
 shared-schemas==2.3.1
-common_lib @ git+https://example.invalid/common-lib@1.4.0
+foundation_kit @ git+https://example.invalid/foundation-kit@1.4.0
 httpx>=0.28 ; python_version >= "3.12"
 -r requirements/dev.txt
 "#,
