@@ -10,6 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use rand::RngExt as _;
 use regex::Regex;
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -720,6 +721,10 @@ fn is_sqlite_busy(error: &TelemetryError) -> bool {
     )
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive a shared reference"
+)]
 const fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
@@ -917,7 +922,7 @@ fn hash_text(value: &str) -> String {
 fn load_or_create_identity_key(state_root: &Path) -> Result<[u8; 32], TelemetryError> {
     let path = state_root.join(TELEMETRY_IDENTITY_KEY_NAME);
     match fs::read(&path) {
-        Ok(bytes) if bytes.len() == 32 => return identity_key_from_bytes(&path, bytes),
+        Ok(bytes) if bytes.len() == 32 => return identity_key_from_bytes(&path, &bytes),
         Ok(_) => return read_identity_key_retrying(&path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
@@ -925,7 +930,6 @@ fn load_or_create_identity_key(state_root: &Path) -> Result<[u8; 32], TelemetryE
         }
     }
 
-    use rand::RngExt as _;
     let generated = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
         .take(32)
@@ -945,7 +949,7 @@ fn load_or_create_identity_key(state_root: &Path) -> Result<[u8; 32], TelemetryE
                     path: path.clone(),
                     source,
                 })?;
-            identity_key_from_bytes(&path, generated)
+            identity_key_from_bytes(&path, &generated)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             read_identity_key_retrying(&path)
@@ -961,16 +965,15 @@ fn read_identity_key_retrying(path: &Path) -> Result<[u8; 32], TelemetryError> {
             source,
         })?;
         if bytes.len() == 32 || attempt == IDENTITY_KEY_READ_RETRIES {
-            return identity_key_from_bytes(path, bytes);
+            return identity_key_from_bytes(path, &bytes);
         }
         std::thread::sleep(IDENTITY_KEY_READ_RETRY_DELAY);
     }
     unreachable!("bounded identity-key read loop always returns")
 }
 
-fn identity_key_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<[u8; 32], TelemetryError> {
+fn identity_key_from_bytes(path: &Path, bytes: &[u8]) -> Result<[u8; 32], TelemetryError> {
     bytes
-        .as_slice()
         .try_into()
         .map_err(|_| TelemetryError::InvalidIdentityKey {
             path: path.to_path_buf(),
@@ -1015,7 +1018,7 @@ fn process_start_token(pid: u32) -> Option<String> {
     {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after_name = stat.rsplit_once(')')?.1;
-        return after_name.split_whitespace().nth(19).map(ToOwned::to_owned);
+        after_name.split_whitespace().nth(19).map(ToOwned::to_owned)
     }
     #[cfg(target_os = "macos")]
     {
@@ -1028,7 +1031,7 @@ fn process_start_token(pid: u32) -> Option<String> {
         }
         let token = String::from_utf8(output.stdout).ok()?;
         let token = token.trim();
-        return (!token.is_empty()).then(|| token.to_owned());
+        (!token.is_empty()).then(|| token.to_owned())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

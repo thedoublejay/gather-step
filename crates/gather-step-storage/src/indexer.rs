@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::BTreeSet,
     fs,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -9,7 +9,7 @@ use std::{
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use gather_step_core::{
     DeploymentConfig, EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind,
@@ -484,7 +484,7 @@ fn mounted_prefixes(
     identity: &str,
     incoming: &FxHashMap<String, Vec<(String, String)>>,
     constructor_prefixes: &FxHashMap<String, String>,
-    visiting: &mut HashSet<String>,
+    visiting: &mut FxHashSet<String>,
 ) -> Vec<String> {
     if !visiting.insert(identity.to_owned()) {
         return Vec::new();
@@ -540,7 +540,7 @@ fn apply_fastapi_repo_routes(
         else {
             continue;
         };
-        let mut rewritten_handlers = HashSet::new();
+        let mut rewritten_handlers = FxHashSet::default();
         for route in &file_facts.routes {
             let identity = router_identity(&file_facts.file_path, &route.receiver);
             if !incoming.contains_key(&identity) {
@@ -548,7 +548,7 @@ fn apply_fastapi_repo_routes(
             }
 
             if rewritten_handlers.insert(route.handler.id) {
-                let mut old_targets = HashSet::new();
+                let mut old_targets = FxHashSet::default();
                 file.edges.retain(|edge| {
                     let remove = edge.source == route.handler.id && edge.kind == EdgeKind::Serves;
                     if remove {
@@ -565,7 +565,7 @@ fn apply_fastapi_repo_routes(
                 &identity,
                 &incoming,
                 &constructor_prefixes,
-                &mut HashSet::new(),
+                &mut FxHashSet::default(),
             ) {
                 let path = gather_step_parser::frameworks::join_route_path(
                     &mounted_prefix,

@@ -548,10 +548,9 @@ impl TantivySearchStore {
         tantivy_doc.add_text(self.fields.file_path_tokens, &document.file_path);
         if !document.description.is_empty() {
             tantivy_doc.add_text(self.fields.qualified_name, &document.description);
-            tantivy_doc.add_text(
-                self.fields.qualified_name_exact,
-                &document.description.to_lowercase(),
-            );
+            let mut qualified_name_exact = document.description.clone();
+            qualified_name_exact.make_ascii_lowercase();
+            tantivy_doc.add_text(self.fields.qualified_name_exact, qualified_name_exact);
         }
         // Stored (not indexed) copy of the path for query-aware rerank.
         tantivy_doc.add_text(self.fields.file_path_stored, &document.file_path);
@@ -631,8 +630,10 @@ impl TantivySearchStore {
     ) -> Result<Vec<SearchHit>, SearchStoreError> {
         let reader = self.reader.lock();
         let searcher = reader.searcher();
+        let mut query_text_exact = query_text.to_owned();
+        query_text_exact.make_ascii_lowercase();
         let query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.fields.qualified_name_exact, &query_text.to_lowercase()),
+            Term::from_field_text(self.fields.qualified_name_exact, &query_text_exact),
             IndexRecordOption::Basic,
         ));
         let query = self.apply_filters(query, filters);
