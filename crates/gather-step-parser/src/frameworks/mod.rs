@@ -32,7 +32,7 @@ pub use detect::{Framework, detect_frameworks, detect_frameworks_workspace_aware
 /// Compose two route segments into a single normalised path, collapsing
 /// surrounding slashes and quotes. Shared by the route-emitting framework
 /// passes (`NestJS` controllers, `FastAPI` router prefixes).
-pub(crate) fn join_route_path(base: &str, method_path: &str) -> String {
+pub fn join_route_path(base: &str, method_path: &str) -> String {
     let mut pieces = Vec::new();
     for piece in [base, method_path] {
         let trimmed = piece

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs,
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -13,18 +13,21 @@ use rustc_hash::FxHashMap;
 
 use gather_step_core::{
     DeploymentConfig, EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind,
-    node_id, normalize_path_separators, ref_node_id,
+    node_id, normalize_path_separators, ref_node_id, route_qn,
 };
 use gather_step_deploy::{
     DeploymentArtifactKind, DeploymentEdge, DeploymentNode, DeploymentParseError,
     DeploymentParseOutput, compose_env_file_refs, deployment_service_qn, detect_artifact_kind,
     is_dotenv_style, parse_deployment_artifact, parse_deployment_artifact_with_kind,
 };
+use gather_step_parser::tree_sitter::{RouterMountBinding, RouterPrefixBindings};
 use gather_step_parser::{
-    CallSite, FileEntry as SourceFileEntry, FileStat, ManifestError, ParseError, ParsedFile,
-    TraverseConfig, TraverseError, collect_repo_files, extract_package_manifest,
+    CallSite, FileEntry as SourceFileEntry, FileStat, ImportBinding, ManifestError, ParseError,
+    ParsedFile, TraverseConfig, TraverseError, collect_repo_files, extract_package_manifest,
     frameworks::{
-        Framework, detect_frameworks_workspace_aware, local_config::LocalConfig,
+        Framework, detect_frameworks_workspace_aware,
+        fastapi::{FastapiRouteBinding, route_bindings},
+        local_config::LocalConfig,
         mongo_safety::scan_parsed_file,
     },
     infer_ai_contracts, infer_payload_contracts, parse_file_with_context, parse_file_with_packs,
@@ -417,6 +420,173 @@ pub struct RepoIndexPayload {
     pub is_cold_index: bool,
     pub stats: IndexingStats,
     pub synthetic_file_count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FastapiFileFacts {
+    file_path: String,
+    imports: Vec<ImportBinding>,
+    prefixes: RouterPrefixBindings,
+    routes: Vec<FastapiRouteBinding>,
+}
+
+fn fastapi_file_facts(repo_root: &Path, parsed: &ParsedFile) -> FastapiFileFacts {
+    FastapiFileFacts {
+        file_path: normalized_repo_path(repo_root, &parsed.file.path),
+        imports: parsed.import_bindings.clone(),
+        prefixes: parsed.router_prefixes.clone(),
+        routes: route_bindings(parsed),
+    }
+}
+
+fn normalized_repo_path(repo_root: &Path, path: &Path) -> String {
+    let path = path.strip_prefix(repo_root).unwrap_or(path);
+    normalize_path_separators(&path.to_string_lossy()).into_owned()
+}
+
+fn router_identity(file_path: &str, variable: &str) -> String {
+    format!("{file_path}::{variable}")
+}
+
+fn resolve_mounted_router_identity(
+    repo_root: &Path,
+    facts: &FastapiFileFacts,
+    child: &str,
+) -> String {
+    if let Some(binding) = facts
+        .imports
+        .iter()
+        .find(|binding| binding.local_name == child)
+        && let Some(path) = binding.resolved_path.as_deref()
+    {
+        let imported_name = binding.imported_name.as_deref().unwrap_or(child);
+        return router_identity(&normalized_repo_path(repo_root, path), imported_name);
+    }
+    router_identity(&facts.file_path, child)
+}
+
+fn mounted_prefixes(
+    identity: &str,
+    incoming: &FxHashMap<String, Vec<(String, String)>>,
+    constructor_prefixes: &FxHashMap<String, String>,
+    visiting: &mut HashSet<String>,
+) -> Vec<String> {
+    if !visiting.insert(identity.to_owned()) {
+        return Vec::new();
+    }
+    let Some(mounts) = incoming.get(identity) else {
+        visiting.remove(identity);
+        return vec![String::new()];
+    };
+    let mut prefixes = BTreeSet::new();
+    for (parent, mount_prefix) in mounts {
+        let parent_ctor = constructor_prefixes.get(parent).map_or("", String::as_str);
+        for parent_prefix in mounted_prefixes(parent, incoming, constructor_prefixes, visiting) {
+            let prefix =
+                gather_step_parser::frameworks::join_route_path(&parent_prefix, parent_ctor);
+            prefixes.insert(gather_step_parser::frameworks::join_route_path(
+                &prefix,
+                mount_prefix,
+            ));
+        }
+    }
+    visiting.remove(identity);
+    prefixes.into_iter().collect()
+}
+
+fn apply_fastapi_repo_routes(
+    repo_root: &Path,
+    files: &mut [FileBatch],
+    facts: &[FastapiFileFacts],
+) {
+    let mut constructor_prefixes = FxHashMap::default();
+    let mut incoming = FxHashMap::<String, Vec<(String, String)>>::default();
+    for file in facts {
+        for (variable, prefix) in &file.prefixes.ctor {
+            constructor_prefixes.insert(router_identity(&file.file_path, variable), prefix.clone());
+        }
+        for RouterMountBinding {
+            parent,
+            child,
+            prefix,
+        } in &file.prefixes.mounts
+        {
+            incoming
+                .entry(resolve_mounted_router_identity(repo_root, file, child))
+                .or_default()
+                .push((router_identity(&file.file_path, parent), prefix.clone()));
+        }
+    }
+
+    for file_facts in facts {
+        let Some(file) = files
+            .iter_mut()
+            .find(|file| file.file_path == file_facts.file_path)
+        else {
+            continue;
+        };
+        let mut rewritten_handlers = HashSet::new();
+        for route in &file_facts.routes {
+            let identity = router_identity(&file_facts.file_path, &route.receiver);
+            if !incoming.contains_key(&identity) {
+                continue;
+            }
+
+            if rewritten_handlers.insert(route.handler.id) {
+                let mut old_targets = HashSet::new();
+                file.edges.retain(|edge| {
+                    let remove = edge.source == route.handler.id && edge.kind == EdgeKind::Serves;
+                    if remove {
+                        old_targets.insert(edge.target);
+                    }
+                    !remove
+                });
+                file.nodes.retain(|node| {
+                    !(old_targets.contains(&node.id) && node.kind == NodeKind::Route)
+                });
+            }
+
+            for mounted_prefix in mounted_prefixes(
+                &identity,
+                &incoming,
+                &constructor_prefixes,
+                &mut HashSet::new(),
+            ) {
+                let path = gather_step_parser::frameworks::join_route_path(
+                    &mounted_prefix,
+                    &route.local_path,
+                );
+                let qualified_name = route_qn(&route.method, &path);
+                let route_node = NodeData {
+                    id: ref_node_id(NodeKind::Route, &qualified_name),
+                    kind: NodeKind::Route,
+                    repo: route.handler.repo.clone(),
+                    file_path: route.handler.file_path.clone(),
+                    name: qualified_name.clone(),
+                    qualified_name: Some(qualified_name.clone()),
+                    external_id: Some(qualified_name),
+                    signature: None,
+                    visibility: None,
+                    span: route.handler.span.clone(),
+                    is_virtual: true,
+                    ai_role: None,
+                };
+                file.edges.push(EdgeData {
+                    source: route.handler.id,
+                    target: route_node.id,
+                    kind: EdgeKind::Serves,
+                    metadata: EdgeMetadata {
+                        confidence: Some(950),
+                        resolver: Some("fastapi_router_mount".to_owned()),
+                        ..EdgeMetadata::default()
+                    },
+                    owner_file: route.file_node,
+                    is_cross_file: true,
+                });
+                file.nodes.push(route_node);
+            }
+        }
+    }
 }
 
 /// Runs a per-file parse under `catch_unwind` so a parser panic on a single
@@ -1201,6 +1371,7 @@ impl RepoIndexer {
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
         let mut mongo_records = Vec::<MongoFindingStoreRecord>::new();
+        let mut fastapi_facts = Vec::<FastapiFileFacts>::new();
         let mut files = Vec::new();
         // Keyed by `Arc<[u8]>` of PathId bytes so two byte-distinct non-UTF-8
         // filenames are never collapsed to the same map entry.
@@ -1258,6 +1429,10 @@ impl RepoIndexer {
             for message in receiver {
                 let parsed = message?;
                 files_parsed += 1;
+                let route_facts = fastapi_file_facts(repo_root, &parsed);
+                if !route_facts.routes.is_empty() || !route_facts.prefixes.mounts.is_empty() {
+                    fastapi_facts.push(route_facts);
+                }
                 let inferred_payloads = infer_payload_contracts(&parsed);
                 ai_records.extend(
                     infer_ai_contracts(&parsed)
@@ -1362,6 +1537,8 @@ impl RepoIndexer {
                 .map_err(|_| RepoIndexerError::ChannelClosed)?;
             Ok(())
         })?;
+
+        apply_fastapi_repo_routes(repo_root, &mut files, &fastapi_facts);
 
         let resolution =
             resolve_calls_with_unresolved(repo_root, &symbol_nodes, &resolution_inputs);
@@ -1494,6 +1671,8 @@ impl RepoIndexer {
         let mut payload_records = Vec::<PayloadContractStoreRecord>::new();
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
         let mut mongo_records = Vec::<MongoFindingStoreRecord>::new();
+        let mut fastapi_facts = Vec::<FastapiFileFacts>::new();
+        let mut fastapi_pending = Vec::<FileBatch>::new();
         // Slim per-file metadata retained for reconcile and the metadata store.
         let mut file_states: Vec<FileIndexState> = Vec::new();
         let mut indexed_file_paths: Vec<String> = Vec::new();
@@ -1632,6 +1811,12 @@ impl RepoIndexer {
                     while let Ok(message) = parse_receiver.recv() {
                         let parsed = message?;
                         files_parsed += 1;
+                        let route_facts = fastapi_file_facts(repo_root, &parsed);
+                        let delay_for_route_composition = !route_facts.routes.is_empty()
+                            || !route_facts.prefixes.mounts.is_empty();
+                        if delay_for_route_composition {
+                            fastapi_facts.push(route_facts);
+                        }
                         let inferred_payloads = infer_payload_contracts(&parsed);
                         ai_records.extend(
                             infer_ai_contracts(&parsed)
@@ -1740,7 +1925,7 @@ impl RepoIndexer {
                         // Forward the FileBatch to the writer immediately (Pass 1
                         // streaming write) so node/edge allocations are freed
                         // before the next file arrives.
-                        pending.push(FileBatch {
+                        let file_batch = FileBatch {
                             repo: repo.to_owned(),
                             file_path: file_path_str,
                             path_id_bytes,
@@ -1753,7 +1938,13 @@ impl RepoIndexer {
                             indexed_at,
                             parse_ms: Some(parse_ms),
                             force: force_rewrite,
-                        });
+                        };
+
+                        if delay_for_route_composition {
+                            fastapi_pending.push(file_batch);
+                        } else {
+                            pending.push(file_batch);
+                        }
 
                         if pending.len() >= batch_size {
                             let batch = RepoBatch {
@@ -1780,6 +1971,34 @@ impl RepoIndexer {
                     producer
                         .join()
                         .map_err(|_| RepoIndexerError::ChannelClosed)?;
+
+                    apply_fastapi_repo_routes(repo_root, &mut fastapi_pending, &fastapi_facts);
+                    for file in &fastapi_pending {
+                        if let Some(state) = file_states
+                            .iter_mut()
+                            .find(|state| state.file_path == file.file_path)
+                        {
+                            state.node_count = i64::try_from(file.nodes.len()).unwrap_or(i64::MAX);
+                            state.edge_count = i64::try_from(file.edges.len()).unwrap_or(i64::MAX);
+                        }
+                    }
+                    let mut fastapi_files = fastapi_pending.drain(..);
+                    loop {
+                        let files = fastapi_files.by_ref().take(batch_size).collect::<Vec<_>>();
+                        if files.is_empty() {
+                            break;
+                        }
+                        if write_sender
+                            .send(WriteMessage::Batch(RepoBatch {
+                                repo: repo.to_owned(),
+                                files,
+                                test_hooks: RepoBatchHooks::default(),
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(())
                 })?;
 
@@ -3143,6 +3362,71 @@ def create_item():
             incoming.iter().any(|edge| edge.kind == EdgeKind::Serves),
             "FastAPI provider should Serve the shared route: {incoming:?}"
         );
+    }
+
+    #[test]
+    fn composes_nested_cross_file_fastapi_router_mounts() {
+        let repo_root = TestDir::new("fastapi-mount-repo");
+        let storage_root = TestDir::new("fastapi-mount-storage");
+        fs::write(
+            repo_root.path().join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\"]\n",
+        )
+        .expect("pyproject fixture should write");
+        fs::write(
+            repo_root.path().join("asset_routes.py"),
+            r#"
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/assets")
+
+@router.delete("/{asset_id}")
+def delete_asset(asset_id: str):
+    return {"id": asset_id}
+"#,
+        )
+        .expect("route fixture should write");
+        fs::write(
+            repo_root.path().join("api.py"),
+            r#"
+from fastapi import APIRouter
+from asset_routes import router as asset_router
+
+v1 = APIRouter(prefix="/v1")
+v1.include_router(asset_router, prefix="/catalog")
+"#,
+        )
+        .expect("nested router fixture should write");
+        fs::write(
+            repo_root.path().join("main.py"),
+            r#"
+from fastapi import FastAPI
+from api import v1
+
+app = FastAPI()
+app.include_router(v1, prefix="/api")
+app.include_router(v1, prefix="/internal")
+"#,
+        )
+        .expect("application fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("asset-api", repo_root.path(), None)
+            .expect("indexing should succeed");
+
+        let route_ids = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::Route)
+            .expect("route nodes should load")
+            .into_iter()
+            .filter_map(|node| node.external_id)
+            .collect::<BTreeSet<_>>();
+        assert!(route_ids.contains("__route__DELETE__/api/v1/catalog/assets/:asset_id"));
+        assert!(route_ids.contains("__route__DELETE__/internal/v1/catalog/assets/:asset_id"));
+        assert!(!route_ids.contains("__route__DELETE__/assets/:asset_id"));
     }
 
     /// Part A exit criterion / release demo: one trace walks

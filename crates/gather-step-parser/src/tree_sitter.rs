@@ -93,6 +93,17 @@ pub struct RouterPrefixBindings {
     pub ctor: FxHashMap<String, String>,
     /// `parent.include_router(var, prefix="…")` → `var` → prefix literal.
     pub include: FxHashMap<String, String>,
+    /// Every static router mount, including multiple mounts of one router and
+    /// nested router composition. The map above remains as the same-file fast
+    /// path; this lossless list feeds the repo-level fixed-point pass.
+    pub mounts: Vec<RouterMountBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouterMountBinding {
+    pub parent: String,
+    pub child: String,
+    pub prefix: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1271,9 +1282,19 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    fn record_router_include_prefix(&mut self, variable: String, prefix: String) {
-        if !variable.is_empty() && !prefix.is_empty() {
-            self.router_prefixes.include.insert(variable, prefix);
+    fn record_router_include_prefix(&mut self, parent: String, variable: String, prefix: String) {
+        if !parent.is_empty() && !variable.is_empty() {
+            if !prefix.is_empty() {
+                self.router_prefixes
+                    .include
+                    .entry(variable.clone())
+                    .or_insert_with(|| prefix.clone());
+            }
+            self.router_prefixes.mounts.push(RouterMountBinding {
+                parent,
+                child: variable,
+                prefix,
+            });
         }
     }
 
@@ -2034,10 +2055,11 @@ fn visit_python(
             // prefix to a router variable. Captured regardless of scope so
             // module-level mounts (owner-less) are seen too.
             if python_callee_name(node, state.source).as_deref() == Some("include_router")
-                && let Some(prefix) = python_prefix_kwarg(node, state.source)
+                && let Some(prefix) = python_optional_prefix_kwarg(node, state.source)
                 && let Some(variable) = python_first_positional_ident(node, state.source)
+                && let Some(parent) = python_call_receiver(node, state.source)
             {
-                state.record_router_include_prefix(variable, prefix);
+                state.record_router_include_prefix(parent, variable, prefix);
             }
             if let Some(owner_id) = owner
                 && let Some(function_node) = node
@@ -4801,6 +4823,20 @@ fn python_callee_name(call: Node<'_>, source: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+fn python_call_receiver(call: Node<'_>, source: &str) -> Option<String> {
+    let function = call
+        .child_by_field_name("function")
+        .or_else(|| call.child(0))?;
+    if function.kind() != "attribute" {
+        return None;
+    }
+    let object = function
+        .child_by_field_name("object")
+        .or_else(|| function.named_child(0))?;
+    let receiver = node_text(object, source).trim();
+    (!receiver.is_empty()).then(|| receiver.to_owned())
+}
+
 /// String literal passed to the `prefix=` keyword argument of a Python call.
 /// Returns `None` when the call has no `prefix=` argument or its value is not a
 /// plain string literal (dynamic prefixes are intentionally skipped).
@@ -4827,6 +4863,33 @@ fn python_prefix_kwarg(call: Node<'_>, source: &str) -> Option<String> {
         return (!literal.is_empty()).then_some(literal);
     }
     None
+}
+
+/// Static `prefix=` value for an include call. `Some("")` means the keyword
+/// is absent (a valid zero-prefix mount); `None` means it is present but
+/// dynamic and therefore unsafe to compose.
+fn python_optional_prefix_kwarg(call: Node<'_>, source: &str) -> Option<String> {
+    let arguments = call
+        .child_by_field_name("arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut cursor = arguments.walk();
+    for child in arguments.named_children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            continue;
+        }
+        let Some(name) = child.child_by_field_name("name") else {
+            continue;
+        };
+        if node_text(name, source).trim() != "prefix" {
+            continue;
+        }
+        let value = child.child_by_field_name("value")?;
+        if value.kind() != "string" {
+            return None;
+        }
+        return Some(sanitize_string_literal(node_text(value, source)));
+    }
+    Some(String::new())
 }
 
 /// First positional identifier argument of a Python call, e.g. `router` for

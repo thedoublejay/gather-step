@@ -27,10 +27,29 @@ pub struct FastapiAugmentation {
     pub edges: Vec<EdgeData>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FastapiRouteBinding {
+    pub handler: NodeData,
+    pub file_node: gather_step_core::NodeId,
+    pub receiver: String,
+    pub method: String,
+    /// Router-constructor prefix plus decorator path. Repo-level mounts are
+    /// deliberately excluded and composed by the fixed-point indexer pass.
+    pub local_path: String,
+}
+
 /// HTTP-method decorator names `FastAPI` exposes on `app`/`router`. Lowercase
 /// because Python uses `@app.get`, unlike `NestJS`'s `@Get`.
 pub(crate) const HTTP_METHODS: &[&str] = &[
-    "get", "post", "put", "delete", "patch", "options", "head", "trace",
+    "get",
+    "post",
+    "put",
+    "delete",
+    "patch",
+    "options",
+    "head",
+    "trace",
+    "websocket",
 ];
 
 #[must_use]
@@ -40,6 +59,37 @@ pub fn augment(parsed: &ParsedFile) -> FastapiAugmentation {
         add_route(symbol, &parsed.router_prefixes, &mut augmentation);
     }
     augmentation
+}
+
+#[must_use]
+pub fn route_bindings(parsed: &ParsedFile) -> Vec<FastapiRouteBinding> {
+    parsed
+        .symbols
+        .iter()
+        .filter_map(|symbol| route_binding(symbol, &parsed.router_prefixes))
+        .collect()
+}
+
+fn route_binding(
+    symbol: &SymbolCapture,
+    prefixes: &RouterPrefixBindings,
+) -> Option<FastapiRouteBinding> {
+    let decorator = symbol
+        .decorators
+        .iter()
+        .find(|decorator| HTTP_METHODS.contains(&decorator.name.as_str()))?;
+    let receiver = decorator.receiver.clone()?;
+    let mut local_path = decorator.arguments.first()?.to_string();
+    if let Some(prefix) = prefixes.ctor.get(&receiver) {
+        local_path = join_route_path(prefix, &local_path);
+    }
+    Some(FastapiRouteBinding {
+        handler: symbol.node.clone(),
+        file_node: symbol.file_node,
+        receiver,
+        method: decorator.name.to_ascii_uppercase(),
+        local_path,
+    })
 }
 
 fn add_route(
