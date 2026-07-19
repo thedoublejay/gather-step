@@ -540,6 +540,16 @@ CREATE TABLE IF NOT EXISTS mongo_findings (
 );
 CREATE INDEX IF NOT EXISTS idx_mongo_findings_repo
     ON mongo_findings(repo, file_path);
+
+-- Per-file FastAPI router facts (constructor prefixes + router mounts with
+-- pre-resolved identities). Lets incremental reindex compose cross-file
+-- mounted routes without reparsing every mount ancestor.
+CREATE TABLE IF NOT EXISTS fastapi_router_facts (
+    repo      TEXT NOT NULL,
+    file_path BLOB NOT NULL,
+    facts     TEXT NOT NULL,
+    PRIMARY KEY (repo, file_path)
+);
 ";
 
 const UPSERT_FILE_STATE_SQL: &str = r"
@@ -858,6 +868,33 @@ impl FileIndexState {
     }
 }
 
+/// Per-file `FastAPI` router facts persisted so incremental reindex can
+/// compose cross-file mounted routes without reparsing every mount
+/// ancestor or descendant. Identities are pre-resolved to the
+/// `"<repo-relative file>::<variable>"` form used by route composition.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FastapiRouterFacts {
+    /// Router-constructor prefixes keyed by router identity.
+    pub ctor: Vec<(String, String)>,
+    pub mounts: Vec<FastapiRouterMount>,
+    pub has_routes: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FastapiRouterMount {
+    pub parent_identity: String,
+    pub child_identity: String,
+    /// Repo-relative path of the file defining the mounted router.
+    pub child_file: String,
+    pub prefix: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FastapiRouterFactsRecord {
+    pub file_path: String,
+    pub facts: FastapiRouterFacts,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitRecord {
     pub sha: String,
@@ -1070,7 +1107,10 @@ pub enum MetadataStoreError {
 ///
 /// Bumped 1→2 in v5.3: unresolved-call bitcode blobs are wrapped with a schema
 /// byte and BLAKE3 checksum. Reindex required because older rows lack it.
-pub const METADATA_SCHEMA_VERSION: i64 = 2;
+///
+/// Bumped 2→3 in v5.16: added the `fastapi_router_facts` table. Reindex
+/// required so incremental route composition sees facts for every file.
+pub const METADATA_SCHEMA_VERSION: i64 = 3;
 
 impl MetadataStoreDb {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MetadataStoreError> {
@@ -1642,6 +1682,75 @@ impl MetadataStoreDb {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn fastapi_router_facts_by_repo(
+        &self,
+        repo: &str,
+    ) -> Result<Vec<FastapiRouterFactsRecord>, MetadataStoreError> {
+        let connection = self.read_connection()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT file_path, facts FROM fastapi_router_facts WHERE repo = ?1 ORDER BY file_path ASC",
+        )?;
+        let rows = statement.query_map(params![repo], |row| {
+            let path_bytes: Vec<u8> = row.get(0)?;
+            let facts_json: String = row.get(1)?;
+            Ok((path_bytes, facts_json))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (path_bytes, facts_json) = row?;
+            // Undecodable rows self-heal when the owning file is reparsed.
+            let Ok(facts) = serde_json::from_str::<FastapiRouterFacts>(&facts_json) else {
+                continue;
+            };
+            records.push(FastapiRouterFactsRecord {
+                file_path: String::from_utf8_lossy(&path_bytes).into_owned(),
+                facts,
+            });
+        }
+        Ok(records)
+    }
+
+    /// Replace the stored router facts for every file parsed in this pass:
+    /// rows for `parsed_file_paths` are dropped (files that no longer carry
+    /// router facts lose their row) and `records` are re-inserted.
+    pub fn replace_fastapi_router_facts(
+        &self,
+        repo: &str,
+        parsed_file_paths: &[String],
+        records: &[FastapiRouterFactsRecord],
+    ) -> Result<(), MetadataStoreError> {
+        if parsed_file_paths.is_empty() && records.is_empty() {
+            return Ok(());
+        }
+        let mut encoded = Vec::with_capacity(records.len());
+        for record in records {
+            let facts_json = serde_json::to_string(&record.facts)
+                .map_err(|error| MetadataStoreError::Io(std::io::Error::other(error)))?;
+            encoded.push((record.file_path.as_str(), facts_json));
+        }
+        self.with_write_txn(|tx| {
+            {
+                let mut delete = tx.prepare_cached(
+                    "DELETE FROM fastapi_router_facts WHERE repo = ?1 AND file_path = ?2",
+                )?;
+                for path in parsed_file_paths {
+                    delete.execute(params![repo, path.as_bytes()])?;
+                }
+            }
+            {
+                let mut upsert = tx.prepare_cached(
+                    "INSERT INTO fastapi_router_facts (repo, file_path, facts)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(repo, file_path) DO UPDATE SET facts = excluded.facts",
+                )?;
+                for (path, facts_json) in &encoded {
+                    upsert.execute(params![repo, path.as_bytes(), facts_json])?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn delete_file_state(&self, repo: &str, file_path: &str) -> Result<(), MetadataStoreError> {
         self.with_write_txn(|tx| {
             tx.execute(
@@ -1688,6 +1797,10 @@ impl MetadataStoreDb {
                 "DELETE FROM file_dependencies WHERE target_repo = ?1 AND target_path = ?2",
                 params![repo, file_path.as_bytes()],
             )?;
+            tx.execute(
+                "DELETE FROM fastapi_router_facts WHERE repo = ?1 AND file_path = ?2",
+                params![repo, file_path.as_bytes()],
+            )?;
             Ok(())
         })
     }
@@ -1718,6 +1831,9 @@ impl MetadataStoreDb {
             let mut del_deps_tgt = tx.prepare_cached(
                 "DELETE FROM file_dependencies WHERE target_repo = ?1 AND target_path = ?2",
             )?;
+            let mut del_router_facts = tx.prepare_cached(
+                "DELETE FROM fastapi_router_facts WHERE repo = ?1 AND file_path = ?2",
+            )?;
             for path_id in file_path_ids {
                 del_unresolved.execute(params![repo, path_id])?;
                 del_unresolved_keys.execute(params![repo, path_id])?;
@@ -1726,6 +1842,7 @@ impl MetadataStoreDb {
                 del_state.execute(params![repo, path_id])?;
                 del_deps_src.execute(params![repo, path_id])?;
                 del_deps_tgt.execute(params![repo, path_id])?;
+                del_router_facts.execute(params![repo, path_id])?;
             }
             Ok(())
         })
@@ -3816,6 +3933,7 @@ mod tests {
         "commit_file_deltas",
         "commits",
         "conventions",
+        "fastapi_router_facts",
         "file_analytics",
         "file_dependencies",
         "file_index_state",

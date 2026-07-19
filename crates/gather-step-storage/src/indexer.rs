@@ -49,8 +49,9 @@ use crate::{
     compute_affected_set,
     incremental::{TrackedPath, snapshot_repo_files, snapshot_selected_repo_files},
     metadata::{
-        AiContractStoreRecord, FileIndexState, MetadataStoreDb, MetadataStoreError,
-        MongoFindingStoreRecord, PayloadContractStoreRecord,
+        AiContractStoreRecord, FastapiRouterFacts, FastapiRouterFactsRecord, FastapiRouterMount,
+        FileIndexState, MetadataStoreDb, MetadataStoreError, MongoFindingStoreRecord,
+        PayloadContractStoreRecord,
     },
     reconcile_changed_files_with_mode,
 };
@@ -420,6 +421,13 @@ pub struct RepoIndexPayload {
     pub is_cold_index: bool,
     pub stats: IndexingStats,
     pub synthetic_file_count: usize,
+    /// Router facts for every route/mount-bearing file parsed in this
+    /// payload; persisted at commit time for incremental route composition.
+    pub fastapi_facts_records: Vec<FastapiRouterFactsRecord>,
+    /// Route nodes previously served by handlers reparsed in this payload.
+    /// After the replacement write, targets with no remaining incoming edges
+    /// are stale composed routes and can be removed safely.
+    pub prior_fastapi_route_targets: Vec<gather_step_core::NodeId>,
 }
 
 #[derive(Clone, Debug)]
@@ -430,13 +438,88 @@ struct FastapiFileFacts {
     routes: Vec<FastapiRouteBinding>,
 }
 
-fn fastapi_file_facts(repo_root: &Path, parsed: &ParsedFile) -> FastapiFileFacts {
-    FastapiFileFacts {
+/// Returns `None` for files without routes or router mounts so the
+/// import/prefix clones are only paid for files that route composition
+/// actually keeps.
+fn fastapi_file_facts(repo_root: &Path, parsed: &ParsedFile) -> Option<FastapiFileFacts> {
+    let routes = route_bindings(parsed);
+    if routes.is_empty() && parsed.router_prefixes.mounts.is_empty() {
+        return None;
+    }
+    Some(FastapiFileFacts {
         file_path: normalized_repo_path(repo_root, &parsed.file.path),
         imports: parsed.import_bindings.clone(),
         prefixes: parsed.router_prefixes.clone(),
-        routes: route_bindings(parsed),
+        routes,
+    })
+}
+
+fn fastapi_facts_record(repo_root: &Path, facts: &FastapiFileFacts) -> FastapiRouterFactsRecord {
+    let ctor = facts
+        .prefixes
+        .ctor
+        .iter()
+        .map(|(variable, prefix)| (router_identity(&facts.file_path, variable), prefix.clone()))
+        .collect();
+    let mounts = facts
+        .prefixes
+        .mounts
+        .iter()
+        .map(|mount| {
+            let child_identity = resolve_mounted_router_identity(repo_root, facts, &mount.child);
+            let child_file = child_identity
+                .rsplit_once("::")
+                .map_or_else(String::new, |(file, _)| file.to_owned());
+            FastapiRouterMount {
+                parent_identity: router_identity(&facts.file_path, &mount.parent),
+                child_identity,
+                child_file,
+                prefix: mount.prefix.clone(),
+            }
+        })
+        .collect();
+    FastapiRouterFactsRecord {
+        file_path: facts.file_path.clone(),
+        facts: FastapiRouterFacts {
+            ctor,
+            mounts,
+            has_routes: !facts.routes.is_empty(),
+        },
     }
+}
+
+fn prior_fastapi_route_targets(
+    graph: &GraphStoreDb,
+    facts: &FastapiFileFacts,
+) -> Result<Vec<gather_step_core::NodeId>, GraphStoreError> {
+    let mut targets = Vec::new();
+    for route in &facts.routes {
+        targets.extend(
+            graph
+                .get_outgoing(route.handler.id)?
+                .into_iter()
+                .filter(|edge| edge.kind == EdgeKind::Serves)
+                .map(|edge| edge.target),
+        );
+    }
+    Ok(targets)
+}
+
+fn purge_orphaned_fastapi_route_targets(
+    graph: &GraphStoreDb,
+    targets: &[gather_step_core::NodeId],
+) -> Result<(), GraphStoreError> {
+    let unique = targets.iter().copied().collect::<FxHashSet<_>>();
+    for target in unique {
+        if graph.get_incoming(target)?.is_empty()
+            && graph
+                .get_node(target)?
+                .is_some_and(|node| node.kind == NodeKind::Route)
+        {
+            graph.delete_node(target)?;
+        }
+    }
+    Ok(())
 }
 
 fn normalized_repo_path(repo_root: &Path, path: &Path) -> String {
@@ -513,9 +596,27 @@ fn apply_fastapi_repo_routes(
     repo_root: &Path,
     files: &mut [FileBatch],
     facts: &[FastapiFileFacts],
+    stored_facts: &[FastapiRouterFactsRecord],
+    fresh_file_paths: &FxHashSet<String>,
 ) {
     let mut constructor_prefixes = FxHashMap::default();
     let mut incoming = FxHashMap::<String, Vec<(String, String)>>::default();
+    // Stored facts stand in for files not reparsed in this pass, so a
+    // partial reparse still composes against the full repo mount graph.
+    for record in stored_facts {
+        if fresh_file_paths.contains(record.file_path.as_str()) {
+            continue;
+        }
+        for (identity, prefix) in &record.facts.ctor {
+            constructor_prefixes.insert(identity.clone(), prefix.clone());
+        }
+        for mount in &record.facts.mounts {
+            incoming
+                .entry(mount.child_identity.clone())
+                .or_default()
+                .push((mount.parent_identity.clone(), mount.prefix.clone()));
+        }
+    }
     for file in facts {
         for (variable, prefix) in &file.prefixes.ctor {
             constructor_prefixes.insert(router_identity(&file.file_path, variable), prefix.clone());
@@ -602,6 +703,74 @@ fn apply_fastapi_repo_routes(
             }
         }
     }
+}
+
+/// Adds transitive `FastAPI` mount descendants of the changed files to the
+/// affected set, using the stored mount graph. A change to a mounting file
+/// (prefix edit, mount removal, deletion) must rewrite every mounted child's
+/// composed routes even though no import points from the child to the parent.
+fn expand_affected_with_fastapi_mount_descendants(
+    metadata: &MetadataStoreDb,
+    repo: &str,
+    changed_paths: &[TrackedPath],
+    affected_paths: &mut Vec<TrackedPath>,
+) -> Result<(), RepoIndexerError> {
+    if changed_paths.is_empty() {
+        return Ok(());
+    }
+    let stored = metadata.fastapi_router_facts_by_repo(repo)?;
+    if stored.is_empty() {
+        return Ok(());
+    }
+    let mut children_by_parent: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
+    for record in &stored {
+        for mount in &record.facts.mounts {
+            if mount.child_file.is_empty() || mount.child_file == record.file_path {
+                continue;
+            }
+            children_by_parent
+                .entry(record.file_path.as_str())
+                .or_default()
+                .push(mount.child_file.as_str());
+        }
+    }
+    if children_by_parent.is_empty() {
+        return Ok(());
+    }
+    let files_with_facts: FxHashSet<&str> = stored
+        .iter()
+        .map(|record| record.file_path.as_str())
+        .collect();
+    let mut queue: Vec<&str> = changed_paths
+        .iter()
+        .map(|path| path.path.as_str())
+        .collect();
+    let mut visited: FxHashSet<&str> = queue.iter().copied().collect();
+    let mut descendants = BTreeSet::new();
+    while let Some(file) = queue.pop() {
+        let Some(children) = children_by_parent.get(file) else {
+            continue;
+        };
+        for child in children {
+            if visited.insert(*child) {
+                if files_with_facts.contains(*child) {
+                    descendants.insert((*child).to_owned());
+                }
+                queue.push(*child);
+            }
+        }
+    }
+    for path in descendants {
+        if affected_paths.iter().any(|tracked| tracked.path == path) {
+            continue;
+        }
+        let path_id_bytes = gather_step_core::PathId::from_path(Path::new(&path)).into_bytes();
+        affected_paths.push(TrackedPath {
+            path,
+            path_id_bytes,
+        });
+    }
+    Ok(())
 }
 
 /// Runs a per-file parse under `catch_unwind` so a parser panic on a single
@@ -714,6 +883,7 @@ impl RepoIndexer {
                 &traversal.file_stats,
                 include_manifest_batch,
                 false,
+                &[],
                 detected_frameworks,
             );
         }
@@ -769,10 +939,19 @@ impl RepoIndexer {
                 is_cold_index: false,
                 stats: IndexingStats::default(),
                 synthetic_file_count: 0,
+                fastapi_facts_records: Vec::new(),
+                prior_fastapi_route_targets: Vec::new(),
             });
         }
 
-        let affected_paths = compute_affected_set(self.storage.metadata(), repo, &changed_paths)?;
+        let mut affected_paths =
+            compute_affected_set(self.storage.metadata(), repo, &changed_paths)?;
+        expand_affected_with_fastapi_mount_descendants(
+            self.storage.metadata(),
+            repo,
+            &changed_paths,
+            &mut affected_paths,
+        )?;
         let source_files_by_path = snapshot
             .source_files
             .into_iter()
@@ -789,12 +968,10 @@ impl RepoIndexer {
                     .cloned()
             })
             .collect::<Vec<_>>();
-        let include_manifest_batch = affected_paths
-            .iter()
-            .any(|path| path.path == "package.json")
-            && snapshot
-                .files_by_path
-                .contains_key(b"package.json".as_ref());
+        let include_manifest_batch = indexable_manifest_path(&repo_root).is_some_and(|manifest| {
+            affected_paths.iter().any(|path| path.path == manifest)
+                && snapshot.files_by_path.contains_key(manifest.as_bytes())
+        });
         let mut payload = self.prepare_repo_files(
             repo,
             &repo_root,
@@ -802,6 +979,7 @@ impl RepoIndexer {
             &snapshot.file_stats,
             include_manifest_batch,
             true,
+            &deleted_file_paths,
             detected_frameworks,
         )?;
         payload.deleted_file_paths = deleted_file_paths;
@@ -874,6 +1052,10 @@ impl RepoIndexer {
             // `_bulk` drops here, restoring normal durability.
         };
         let write_elapsed = write_start.elapsed();
+        purge_orphaned_fastapi_route_targets(
+            self.storage.graph(),
+            &payload.prior_fastapi_route_targets,
+        )?;
         info!(
             repo,
             write_ms = millis_u64(write_elapsed),
@@ -911,6 +1093,11 @@ impl RepoIndexer {
             &payload.unresolved_inputs,
             &payload.payload_records,
             &payload.file_states,
+        )?;
+        self.storage.metadata().replace_fastapi_router_facts(
+            repo,
+            &payload.indexed_file_paths,
+            &payload.fastapi_facts_records,
         )?;
         write_ai_contracts(self.storage.metadata(), repo, &payload.ai_records)?;
         write_mongo_findings(self.storage.metadata(), repo, &payload.mongo_records)?;
@@ -1260,7 +1447,14 @@ impl RepoIndexer {
             return Ok((changed, stats));
         }
 
-        let affected_paths = compute_affected_set(self.storage.metadata(), repo, &changed_paths)?;
+        let mut affected_paths =
+            compute_affected_set(self.storage.metadata(), repo, &changed_paths)?;
+        expand_affected_with_fastapi_mount_descendants(
+            self.storage.metadata(),
+            repo,
+            &changed_paths,
+            &mut affected_paths,
+        )?;
         Self::check_cancel(cancel)?;
         let affected_path_strings = affected_paths
             .iter()
@@ -1292,12 +1486,12 @@ impl RepoIndexer {
                     .cloned()
             })
             .collect::<Vec<_>>();
-        let include_manifest_batch = affected_paths
-            .iter()
-            .any(|path| path.path == "package.json")
-            && indexing_snapshot
-                .files_by_path
-                .contains_key(b"package.json".as_ref());
+        let include_manifest_batch = indexable_manifest_path(&repo_root).is_some_and(|manifest| {
+            affected_paths.iter().any(|path| path.path == manifest)
+                && indexing_snapshot
+                    .files_by_path
+                    .contains_key(manifest.as_bytes())
+        });
 
         let deleted_paths = changed
             .deleted
@@ -1362,6 +1556,7 @@ impl RepoIndexer {
         traversal_stats: &FxHashMap<Vec<u8>, FileStat>,
         include_manifest_batch: bool,
         force_rewrite: bool,
+        deleted_file_paths: &[String],
         detected_frameworks: &[Framework],
     ) -> Result<RepoIndexPayload, RepoIndexerError> {
         let started_at = Instant::now();
@@ -1387,6 +1582,7 @@ impl RepoIndexer {
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
         let mut mongo_records = Vec::<MongoFindingStoreRecord>::new();
         let mut fastapi_facts = Vec::<FastapiFileFacts>::new();
+        let mut prior_fastapi_route_target_ids = Vec::new();
         let mut files = Vec::new();
         // Keyed by `Arc<[u8]>` of PathId bytes so two byte-distinct non-UTF-8
         // filenames are never collapsed to the same map entry.
@@ -1444,8 +1640,11 @@ impl RepoIndexer {
             for message in receiver {
                 let parsed = message?;
                 files_parsed += 1;
-                let route_facts = fastapi_file_facts(repo_root, &parsed);
-                if !route_facts.routes.is_empty() || !route_facts.prefixes.mounts.is_empty() {
+                if let Some(route_facts) = fastapi_file_facts(repo_root, &parsed) {
+                    prior_fastapi_route_target_ids.extend(prior_fastapi_route_targets(
+                        self.storage.graph(),
+                        &route_facts,
+                    )?);
                     fastapi_facts.push(route_facts);
                 }
                 let inferred_payloads = infer_payload_contracts(&parsed);
@@ -1553,7 +1752,24 @@ impl RepoIndexer {
             Ok(())
         })?;
 
-        apply_fastapi_repo_routes(repo_root, &mut files, &fastapi_facts);
+        let mut stored_fastapi_facts =
+            self.storage.metadata().fastapi_router_facts_by_repo(repo)?;
+        stored_fastapi_facts.retain(|record| !deleted_file_paths.contains(&record.file_path));
+        let fresh_file_paths = files
+            .iter()
+            .map(|file| file.file_path.clone())
+            .collect::<FxHashSet<_>>();
+        apply_fastapi_repo_routes(
+            repo_root,
+            &mut files,
+            &fastapi_facts,
+            &stored_fastapi_facts,
+            &fresh_file_paths,
+        );
+        let fastapi_facts_records = fastapi_facts
+            .iter()
+            .map(|facts| fastapi_facts_record(repo_root, facts))
+            .collect();
 
         let resolution =
             resolve_calls_with_unresolved(repo_root, &symbol_nodes, &resolution_inputs);
@@ -1626,6 +1842,8 @@ impl RepoIndexer {
             is_cold_index: false, // determined at commit time
             stats,
             synthetic_file_count,
+            fastapi_facts_records,
+            prior_fastapi_route_targets: prior_fastapi_route_target_ids,
         })
     }
 
@@ -1687,6 +1905,8 @@ impl RepoIndexer {
         let mut ai_records = Vec::<AiContractStoreRecord>::new();
         let mut mongo_records = Vec::<MongoFindingStoreRecord>::new();
         let mut fastapi_facts = Vec::<FastapiFileFacts>::new();
+        let stored_fastapi_facts = self.storage.metadata().fastapi_router_facts_by_repo(repo)?;
+        let mut prior_fastapi_route_target_ids = Vec::new();
         let mut fastapi_pending = Vec::<FileBatch>::new();
         // Slim per-file metadata retained for reconcile and the metadata store.
         let mut file_states: Vec<FileIndexState> = Vec::new();
@@ -1827,9 +2047,12 @@ impl RepoIndexer {
                         let parsed = message?;
                         files_parsed += 1;
                         let route_facts = fastapi_file_facts(repo_root, &parsed);
-                        let delay_for_route_composition = !route_facts.routes.is_empty()
-                            || !route_facts.prefixes.mounts.is_empty();
-                        if delay_for_route_composition {
+                        let delay_for_route_composition = route_facts.is_some();
+                        if let Some(route_facts) = route_facts {
+                            prior_fastapi_route_target_ids.extend(prior_fastapi_route_targets(
+                                self.storage.graph(),
+                                &route_facts,
+                            )?);
                             fastapi_facts.push(route_facts);
                         }
                         let inferred_payloads = infer_payload_contracts(&parsed);
@@ -1987,7 +2210,15 @@ impl RepoIndexer {
                         .join()
                         .map_err(|_| RepoIndexerError::ChannelClosed)?;
 
-                    apply_fastapi_repo_routes(repo_root, &mut fastapi_pending, &fastapi_facts);
+                    let fresh_file_paths =
+                        indexed_file_paths.iter().cloned().collect::<FxHashSet<_>>();
+                    apply_fastapi_repo_routes(
+                        repo_root,
+                        &mut fastapi_pending,
+                        &fastapi_facts,
+                        &stored_fastapi_facts,
+                        &fresh_file_paths,
+                    );
                     for file in &fastapi_pending {
                         if let Some(state) = file_states
                             .iter_mut()
@@ -2141,6 +2372,10 @@ impl RepoIndexer {
         )?;
 
         drop(bulk_guard); // Restore normal durability before reconcile.
+        purge_orphaned_fastapi_route_targets(
+            self.storage.graph(),
+            &prior_fastapi_route_target_ids,
+        )?;
         let write_elapsed = write_start.elapsed();
         info!(
             repo,
@@ -2199,6 +2434,15 @@ impl RepoIndexer {
             &payload_records,
             &file_states,
         )?;
+        let fastapi_facts_records = fastapi_facts
+            .iter()
+            .map(|facts| fastapi_facts_record(repo_root, facts))
+            .collect::<Vec<_>>();
+        self.storage.metadata().replace_fastapi_router_facts(
+            repo,
+            &indexed_file_paths,
+            &fastapi_facts_records,
+        )?;
         write_ai_contracts(self.storage.metadata(), repo, &ai_records)?;
         write_mongo_findings(self.storage.metadata(), repo, &mongo_records)?;
         let metadata_elapsed = metadata_start.elapsed();
@@ -2237,8 +2481,31 @@ impl RepoIndexer {
 }
 
 fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option<FileBatch> {
-    let (file_path, raw) = read_indexable_manifest(repo_root)?;
-    let manifest_meta = file_metadata_stamp(repo_root.join(&file_path)).ok();
+    let file_path = indexable_manifest_path(repo_root)?.to_owned();
+    let raw = match fs::read_to_string(repo_root.join(&file_path)) {
+        Ok(raw) => raw,
+        Err(error) => {
+            warn!(
+                repo,
+                path = %file_path,
+                error = %error,
+                "Skipping a package manifest that could not be read during indexing.",
+            );
+            return None;
+        }
+    };
+    let manifest_meta = match file_metadata_stamp(repo_root.join(&file_path)) {
+        Ok(metadata) => Some(metadata),
+        Err(error) => {
+            warn!(
+                repo,
+                path = %file_path,
+                error = %error,
+                "Package manifest metadata could not be read after its contents were loaded; using content-derived fallback metadata.",
+            );
+            None
+        }
+    };
 
     let file_node = NodeData {
         id: node_id(repo, &file_path, NodeKind::File, &file_path),
@@ -2275,6 +2542,7 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
             Err(error) => {
                 warn!(
                     repo,
+                    path = %file_path,
                     error = %error,
                     "Skipping a malformed package manifest during indexing.",
                 );
@@ -2295,10 +2563,11 @@ fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option
     }];
     edges.extend(extraction.edges);
 
+    let path_id_bytes = gather_step_core::PathId::from_path(Path::new(&file_path)).into_bytes();
     Some(FileBatch {
         repo: repo.to_owned(),
         file_path,
-        path_id_bytes: vec![], // package.json is always ASCII — fallback is correct
+        path_id_bytes,
         nodes,
         edges,
         value_mirror_candidates: vec![],
@@ -2858,19 +3127,13 @@ fn has_indexable_manifest(repo_root: &Path) -> bool {
     indexable_manifest_path(repo_root).is_some()
 }
 
-fn indexable_manifest_path(repo_root: &Path) -> Option<&'static str> {
+pub(crate) fn indexable_manifest_path(repo_root: &Path) -> Option<&'static str> {
     ["package.json", "pyproject.toml", "requirements.txt"]
         .into_iter()
         .find(|relative| {
             fs::symlink_metadata(repo_root.join(relative))
                 .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
         })
-}
-
-fn read_indexable_manifest(repo_root: &Path) -> Option<(String, String)> {
-    let relative = indexable_manifest_path(repo_root)?;
-    let raw = fs::read_to_string(repo_root.join(relative)).ok()?;
-    Some((relative.to_owned(), raw))
 }
 
 /// Whether a path's Mongo findings are noise rather than live-code signal:
@@ -3446,6 +3709,303 @@ app.include_router(v1, prefix="/internal")
         assert!(route_ids.contains("__route__DELETE__/api/v1/catalog/assets/:asset_id"));
         assert!(route_ids.contains("__route__DELETE__/internal/v1/catalog/assets/:asset_id"));
         assert!(!route_ids.contains("__route__DELETE__/assets/:asset_id"));
+    }
+
+    fn write_fastapi_mount_fixture(repo_root: &Path) {
+        fs::write(
+            repo_root.join("pyproject.toml"),
+            "[project]\ndependencies = [\"fastapi>=0.115\"]\n",
+        )
+        .expect("pyproject fixture should write");
+        fs::write(
+            repo_root.join("asset_routes.py"),
+            r#"
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/assets")
+
+@router.delete("/{asset_id}")
+def delete_asset(asset_id: str):
+    return {"id": asset_id}
+"#,
+        )
+        .expect("route fixture should write");
+        fs::write(
+            repo_root.join("api.py"),
+            r#"
+from fastapi import APIRouter
+from asset_routes import router as asset_router
+
+v1 = APIRouter(prefix="/v1")
+v1.include_router(asset_router, prefix="/catalog")
+"#,
+        )
+        .expect("nested router fixture should write");
+        write_fastapi_mount_fixture_main(repo_root, "/api");
+    }
+
+    fn write_fastapi_mount_fixture_main(repo_root: &Path, prefix: &str) {
+        fs::write(
+            repo_root.join("main.py"),
+            format!(
+                r#"
+from fastapi import FastAPI
+from api import v1
+
+app = FastAPI()
+app.include_router(v1, prefix="{prefix}")
+"#
+            ),
+        )
+        .expect("application fixture should write");
+    }
+
+    fn route_external_ids(indexer: &RepoIndexer) -> BTreeSet<String> {
+        indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::Route)
+            .expect("route nodes should load")
+            .into_iter()
+            .filter_map(|node| node.external_id)
+            .collect()
+    }
+
+    #[test]
+    fn incremental_reindex_of_leaf_route_file_keeps_cross_file_mount_prefixes() {
+        let repo_root = TestDir::new("fastapi-incr-leaf-repo");
+        let storage_root = TestDir::new("fastapi-incr-leaf-storage");
+        write_fastapi_mount_fixture(repo_root.path());
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("asset-api", repo_root.path(), None)
+            .expect("cold indexing should succeed");
+
+        fs::write(
+            repo_root.path().join("asset_routes.py"),
+            r#"
+from fastapi import APIRouter
+
+router = APIRouter(prefix="/assets")
+
+@router.delete("/{asset_id}")
+def delete_asset(asset_id: str):
+    return {"id": asset_id, "deleted": True}
+"#,
+        )
+        .expect("leaf update should write");
+        indexer
+            .index_repo_incremental("asset-api", repo_root.path(), None)
+            .expect("incremental indexing should succeed");
+
+        let route_ids = route_external_ids(&indexer);
+        assert!(
+            route_ids.contains("__route__DELETE__/api/v1/catalog/assets/:asset_id"),
+            "leaf edit should keep the full composed mount prefix: {route_ids:?}"
+        );
+        assert!(
+            !route_ids.contains("__route__DELETE__/v1/catalog/assets/:asset_id"),
+            "leaf edit should not drop the outer /api mount prefix: {route_ids:?}"
+        );
+    }
+
+    #[test]
+    fn incremental_reindex_recomposes_child_routes_when_parent_mount_prefix_changes() {
+        let repo_root = TestDir::new("fastapi-incr-prefix-repo");
+        let storage_root = TestDir::new("fastapi-incr-prefix-storage");
+        write_fastapi_mount_fixture(repo_root.path());
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("asset-api", repo_root.path(), None)
+            .expect("cold indexing should succeed");
+
+        write_fastapi_mount_fixture_main(repo_root.path(), "/v2");
+        indexer
+            .index_repo_incremental("asset-api", repo_root.path(), None)
+            .expect("incremental indexing should succeed");
+
+        let route_ids = route_external_ids(&indexer);
+        assert!(
+            route_ids.contains("__route__DELETE__/v2/v1/catalog/assets/:asset_id"),
+            "parent prefix change should re-prefix mounted child routes: {route_ids:?}"
+        );
+        assert!(
+            !route_ids.contains("__route__DELETE__/api/v1/catalog/assets/:asset_id"),
+            "parent prefix change should remove the stale /api route: {route_ids:?}"
+        );
+    }
+
+    #[test]
+    fn incremental_reindex_recomposes_child_routes_when_parent_mount_is_removed() {
+        let repo_root = TestDir::new("fastapi-incr-unmount-repo");
+        let storage_root = TestDir::new("fastapi-incr-unmount-storage");
+        write_fastapi_mount_fixture(repo_root.path());
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("asset-api", repo_root.path(), None)
+            .expect("cold indexing should succeed");
+
+        fs::write(
+            repo_root.path().join("main.py"),
+            r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+"#,
+        )
+        .expect("unmounted application fixture should write");
+        indexer
+            .index_repo_incremental("asset-api", repo_root.path(), None)
+            .expect("incremental indexing should succeed");
+
+        let route_ids = route_external_ids(&indexer);
+        assert!(
+            !route_ids.contains("__route__DELETE__/api/v1/catalog/assets/:asset_id"),
+            "removing the mount should remove the stale /api route: {route_ids:?}"
+        );
+        assert!(
+            route_ids.contains("__route__DELETE__/v1/catalog/assets/:asset_id"),
+            "unmounted v1 router should compose from its own root: {route_ids:?}"
+        );
+    }
+
+    #[test]
+    fn prepared_incremental_payload_excludes_deleted_parent_mount_facts() {
+        let repo_root = TestDir::new("fastapi-prepared-unmount-repo");
+        let storage_root = TestDir::new("fastapi-prepared-unmount-storage");
+        write_fastapi_mount_fixture(repo_root.path());
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("asset-api", repo_root.path(), None)
+            .expect("cold indexing should succeed");
+
+        fs::remove_file(repo_root.path().join("main.py"))
+            .expect("parent mounting file should be removed");
+        let payload = indexer
+            .prepare_repo_payload("asset-api", repo_root.path())
+            .expect("incremental payload should prepare");
+        indexer
+            .commit_repo_payload(payload)
+            .expect("incremental payload should commit");
+
+        let route_ids = route_external_ids(&indexer);
+        assert!(
+            !route_ids.contains("__route__DELETE__/api/v1/catalog/assets/:asset_id"),
+            "deleted parent facts must not retain the stale /api route: {route_ids:?}"
+        );
+        assert!(
+            route_ids.contains("__route__DELETE__/v1/catalog/assets/:asset_id"),
+            "the child router should compose from its own root after deletion: {route_ids:?}"
+        );
+    }
+
+    #[test]
+    fn incremental_reindex_keeps_python_manifest_dependencies() {
+        let repo_root = TestDir::new("py-manifest-keep-repo");
+        let storage_root = TestDir::new("py-manifest-keep-storage");
+        fs::write(
+            repo_root.path().join("requirements.txt"),
+            "shared-contracts==2.3.1\n",
+        )
+        .expect("requirements fixture should write");
+        fs::write(
+            repo_root.path().join("app.py"),
+            "def main():\n    return 1\n",
+        )
+        .expect("app fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("py-service", repo_root.path(), None)
+            .expect("cold indexing should succeed");
+
+        let has_dependency_symbol = |expected: &str| {
+            let expected_id = format!("__shared__{expected}__package");
+            indexer
+                .storage()
+                .graph()
+                .nodes_by_type(NodeKind::SharedSymbol)
+                .expect("shared symbols should load")
+                .iter()
+                .any(|node| node.external_id.as_deref() == Some(expected_id.as_str()))
+        };
+        assert!(
+            has_dependency_symbol("shared-contracts"),
+            "cold index should extract the python manifest dependency"
+        );
+
+        let (changed, _) = indexer
+            .index_repo_incremental("py-service", repo_root.path(), None)
+            .expect("incremental indexing should succeed");
+        assert!(
+            changed.deleted.is_empty(),
+            "no-op incremental should not classify the python manifest as deleted: {:?}",
+            changed.deleted
+        );
+        assert!(
+            has_dependency_symbol("shared-contracts"),
+            "python manifest dependency nodes should survive a no-op incremental"
+        );
+    }
+
+    #[test]
+    fn incremental_reindex_updates_python_manifest_dependencies() {
+        let repo_root = TestDir::new("py-manifest-update-repo");
+        let storage_root = TestDir::new("py-manifest-update-storage");
+        fs::write(
+            repo_root.path().join("requirements.txt"),
+            "shared-contracts==2.3.1\n",
+        )
+        .expect("requirements fixture should write");
+        fs::write(
+            repo_root.path().join("app.py"),
+            "def main():\n    return 1\n",
+        )
+        .expect("app fixture should write");
+
+        let indexer =
+            RepoIndexer::open(storage_root.path(), IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("py-service", repo_root.path(), None)
+            .expect("cold indexing should succeed");
+
+        fs::write(
+            repo_root.path().join("requirements.txt"),
+            "shared-contracts==2.3.1\nteam-schemas==1.0.0\n",
+        )
+        .expect("requirements update should write");
+        let (changed, _) = indexer
+            .index_repo_incremental("py-service", repo_root.path(), None)
+            .expect("incremental indexing should succeed");
+
+        assert!(
+            changed
+                .modified
+                .iter()
+                .any(|file| file.path == "requirements.txt"),
+            "editing requirements.txt should classify it as modified: {:?}",
+            changed.modified
+        );
+        let manifest_nodes = indexer
+            .storage()
+            .graph()
+            .nodes_by_type(NodeKind::SharedSymbol)
+            .expect("shared symbols should load");
+        assert!(
+            manifest_nodes
+                .iter()
+                .any(|node| node.external_id.as_deref() == Some("__shared__team-schemas__package")),
+            "incremental should index the newly added python dependency"
+        );
     }
 
     /// Part A exit criterion / release demo: one trace walks
