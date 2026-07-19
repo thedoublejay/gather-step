@@ -77,10 +77,14 @@ pub fn classify_source_scope(path: &str) -> SourceScope {
         .iter()
         .any(|component| matches!(*component, "test" | "tests" | "__tests__"))
         || (extension == Some("py")
-            && (file_name.starts_with("test_") || file_stem.ends_with("_test")))
-        || (matches!(extension, Some("ts" | "tsx")) && matches!(test_marker, Some("test" | "spec")))
-        || (matches!(extension, Some("js" | "jsx")) && test_marker == Some("test"))
-        || (extension == Some("rs") && file_stem.ends_with("_test"))
+            && (file_name.starts_with("test_")
+                || file_stem.ends_with("_test")
+                || file_stem == "conftest"))
+        || (matches!(extension, Some("ts" | "tsx" | "mts" | "cts"))
+            && matches!(test_marker, Some("test" | "spec")))
+        || (matches!(extension, Some("js" | "jsx" | "mjs" | "cjs"))
+            && matches!(test_marker, Some("test" | "spec")))
+        || (matches!(extension, Some("rs" | "go")) && file_stem.ends_with("_test"))
     {
         return SourceScope::Test;
     }
@@ -114,5 +118,26 @@ mod tests {
             SourceScope::Generated
         );
         assert_eq!(classify_source_scope(""), SourceScope::Unknown);
+    }
+
+    #[test]
+    fn classifies_language_specific_test_file_conventions() {
+        for (path, expected) in [
+            ("pkg/orders/service_test.go", SourceScope::Test),
+            ("pkg/orders/service.go", SourceScope::Production),
+            ("src/orders/service.spec.js", SourceScope::Test),
+            ("src/orders/service.spec.jsx", SourceScope::Test),
+            ("src/orders/service.spec.mjs", SourceScope::Test),
+            ("src/orders/service.spec.cjs", SourceScope::Test),
+            ("src/orders/service.test.mjs", SourceScope::Test),
+            ("src/orders/service.spec.mts", SourceScope::Test),
+            ("src/orders/service.test.cts", SourceScope::Test),
+            ("src/orders/service.js", SourceScope::Production),
+            ("conftest.py", SourceScope::Test),
+            ("app/conftest.py", SourceScope::Test),
+            ("app/service.py", SourceScope::Production),
+        ] {
+            assert_eq!(classify_source_scope(path), expected, "path: {path}");
+        }
     }
 }

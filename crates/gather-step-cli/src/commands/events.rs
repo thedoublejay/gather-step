@@ -5,7 +5,7 @@ use gather_step_analysis::{
     resolve_event_targets, trace_agent, trace_event,
 };
 use gather_step_core::{NodeData, NodeId, RegistryStore, WorkspaceRegistry, classify_source_scope};
-use gather_step_mcp::tools::coverage::QueryCoverage;
+use gather_step_mcp::tools::coverage::{QueryCoverage, ZeroEdgeSemantics};
 use gather_step_storage::GraphStore;
 use gather_step_storage::StorageCoordinator;
 use serde::Serialize;
@@ -658,16 +658,18 @@ pub(crate) fn execute_orphans(
         .iter()
         .map(|item| item.producers + item.consumers)
         .sum();
-    let coverage = QueryCoverage::scoped(
+    let mut coverage = QueryCoverage::scoped_with_zero_semantics(
         registry,
         repo_filter,
         "orphan_event_scan",
         edges_contributed,
-    )
-    .with_verdict("possible_extraction_gap")
-    .with_limitation(
-        "Orphan classifications describe indexed edges only; missing producers or consumers may be external, dynamic, or unsupported.",
+        ZeroEdgeSemantics::ExactZeroIsOk,
     );
+    if !orphans.is_empty() {
+        coverage = coverage.with_verdict("possible_extraction_gap").with_limitation(
+            "Orphan classifications describe indexed edges only; missing producers or consumers may be external, dynamic, or unsupported.",
+        );
+    }
     let payload = OrphansOutput {
         event: "events_orphans_completed",
         coverage,
@@ -761,17 +763,18 @@ fn event_target_has_repo_evidence(
     target_id: NodeId,
     repo: &str,
 ) -> Result<bool> {
-    for edge in graph.get_incoming(target_id)? {
-        if graph
-            .get_node(edge.source)?
+    let session = graph.read_session()?;
+    for edge in session.incoming(target_id)? {
+        if session
+            .node(edge.source)?
             .is_some_and(|node| !node.is_virtual && node.repo == repo)
         {
             return Ok(true);
         }
     }
-    for edge in graph.get_outgoing(target_id)? {
-        if graph
-            .get_node(edge.target)?
+    for edge in session.outgoing(target_id)? {
+        if session
+            .node(edge.target)?
             .is_some_and(|node| !node.is_virtual && node.repo == repo)
         {
             return Ok(true);
@@ -790,12 +793,14 @@ mod tests {
     };
 
     use gather_step_core::{
-        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, WorkspaceRegistry,
-        node_id, topic_qn, virtual_node,
+        DepthLevel, EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, RegisteredRepo,
+        Visibility, WorkspaceRegistry, node_id, topic_qn, virtual_node,
     };
     use gather_step_storage::{GraphStore, GraphStoreDb, StorageCoordinator};
 
-    use super::{AgentTraceArgs, execute_agent_trace, select_event_target};
+    use super::{
+        AgentTraceArgs, OrphansArgs, execute_agent_trace, execute_orphans, select_event_target,
+    };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -978,6 +983,146 @@ mod tests {
         )
         .expect("adjacent repo evidence should select the canonical target");
         assert_eq!(selected.target.id, target.id);
+    }
+
+    fn registry_with_repo(name: &str) -> WorkspaceRegistry {
+        let mut registry = WorkspaceRegistry::default();
+        registry.repos.insert(
+            name.to_owned(),
+            RegisteredRepo::new(format!("/tmp/{name}"), DepthLevel::Full),
+        );
+        registry
+    }
+
+    #[test]
+    fn execute_orphans_reports_ok_coverage_when_no_orphans_exist() {
+        let ws = TempWorkspace::new("orphans-none");
+        let storage = StorageCoordinator::open(ws.path()).expect("storage coordinator should open");
+        let file = file("backend_standard", "src/events.ts");
+        let topic = virtual_node(
+            NodeKind::Topic,
+            "backend_standard",
+            "src/events.ts",
+            "order.created",
+            topic_qn("kafka", "order.created"),
+        );
+        let producer = symbol("backend_standard", "src/events.ts", "emitOrder", 0);
+        let consumer = symbol("backend_standard", "src/consumer.ts", "handleOrder", 1);
+        storage
+            .graph()
+            .bulk_insert(
+                &[
+                    file.clone(),
+                    topic.clone(),
+                    producer.clone(),
+                    consumer.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: producer.id,
+                        target: topic.id,
+                        kind: EdgeKind::Publishes,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: consumer.id,
+                        target: topic.id,
+                        kind: EdgeKind::Consumes,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: file.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("graph should write");
+
+        let rendered = execute_orphans(
+            &storage,
+            &registry_with_repo("backend_standard"),
+            None,
+            &OrphansArgs { limit: 20 },
+        )
+        .expect("orphan scan should succeed");
+
+        let payload = rendered.payload.expect("payload should be present");
+        assert!(
+            payload["orphans"]
+                .as_array()
+                .expect("orphans should be an array")
+                .is_empty()
+        );
+        assert_eq!(payload["coverage"]["verdict"], "ok");
+        let limitations = payload["coverage"]["limitations"]
+            .as_array()
+            .expect("limitations should be an array");
+        assert!(
+            !limitations.iter().any(|limitation| {
+                limitation
+                    .as_str()
+                    .is_some_and(|text| text.contains("external, dynamic, or unsupported"))
+            }),
+            "zero orphans must not carry the orphan-classification limitation"
+        );
+    }
+
+    #[test]
+    fn execute_orphans_flags_possible_extraction_gap_when_orphans_exist() {
+        let ws = TempWorkspace::new("orphans-found");
+        let storage = StorageCoordinator::open(ws.path()).expect("storage coordinator should open");
+        let file = file("backend_standard", "src/events.ts");
+        let topic = virtual_node(
+            NodeKind::Topic,
+            "backend_standard",
+            "src/events.ts",
+            "order.created",
+            topic_qn("kafka", "order.created"),
+        );
+        let producer = symbol("backend_standard", "src/events.ts", "emitOrder", 0);
+        storage
+            .graph()
+            .bulk_insert(
+                &[file.clone(), topic.clone(), producer.clone()],
+                &[EdgeData {
+                    source: producer.id,
+                    target: topic.id,
+                    kind: EdgeKind::Publishes,
+                    metadata: EdgeMetadata::default(),
+                    owner_file: file.id,
+                    is_cross_file: true,
+                }],
+            )
+            .expect("graph should write");
+
+        let rendered = execute_orphans(
+            &storage,
+            &registry_with_repo("backend_standard"),
+            None,
+            &OrphansArgs { limit: 20 },
+        )
+        .expect("orphan scan should succeed");
+
+        let payload = rendered.payload.expect("payload should be present");
+        assert_eq!(
+            payload["orphans"]
+                .as_array()
+                .expect("orphans should be an array")
+                .len(),
+            1
+        );
+        assert_eq!(payload["coverage"]["verdict"], "possible_extraction_gap");
+        let limitations = payload["coverage"]["limitations"]
+            .as_array()
+            .expect("limitations should be an array");
+        assert!(
+            limitations.iter().any(|limitation| {
+                limitation
+                    .as_str()
+                    .is_some_and(|text| text.contains("external, dynamic, or unsupported"))
+            }),
+            "found orphans must disclose the orphan-classification limitation"
+        );
     }
 
     fn file(repo: &str, file_path: &str) -> NodeData {

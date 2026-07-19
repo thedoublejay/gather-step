@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
-use gather_step_analysis::{cross_repo_deps, list_orphan_topics, trace_event, trace_route};
+use gather_step_analysis::{cross_repo_deps, list_orphan_topics_paged, trace_event, trace_route};
 use gather_step_core::{NodeKind, RegisteredRepo, WorkspaceRegistry};
 use gather_step_storage::{GraphStore, GraphStoreDb, MetadataStore};
 use thiserror::Error;
@@ -652,19 +652,23 @@ fn render_events_rule(
     }
 
     out.push_str("\n## Orphans\n");
-    out.push_str("| Target | Producers | Consumers | Classification |\n");
-    out.push_str("|---|---:|---:|---|\n");
-    let orphans = list_orphan_topics(
+    let orphans_page = list_orphan_topics_paged(
         graph,
         repo_names
             .first()
             .map(String::as_str)
             .filter(|_| repo_names.len() == 1),
-        usize::MAX,
+        DEFAULT_LIMIT,
     )?;
-    let total_orphans = orphans.len();
-    let orphans = orphans.into_iter().take(DEFAULT_LIMIT).collect::<Vec<_>>();
-    write_logical_limit_notice(&mut out, "orphan targets", orphans.len(), total_orphans);
+    let orphans = orphans_page.items;
+    write_logical_limit_notice(
+        &mut out,
+        "orphan targets",
+        orphans.len(),
+        orphans_page.total_seen,
+    );
+    out.push_str("| Target | Producers | Consumers | Classification |\n");
+    out.push_str("|---|---:|---:|---|\n");
     if orphans.is_empty() {
         out.push_str("| _No orphan topics detected_ | - | - | - |\n");
     }
@@ -1112,9 +1116,62 @@ fn relativize_path_to_workspace(
 
 #[cfg(test)]
 mod tests {
-    use gather_step_core::{NodeKind, virtual_node};
+    use std::{
+        env, fs,
+        path::PathBuf,
+        process,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
-    use super::{representative_routes, route_name, write_logical_limit_notice};
+    use gather_step_core::{
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, node_id, topic_qn,
+        virtual_node,
+    };
+    use gather_step_storage::{GraphStore, GraphStoreDb};
+
+    use super::{
+        render_events_rule, representative_routes, route_name, write_logical_limit_notice,
+    };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDb {
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(name: &str) -> Self {
+            let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gather-step-context-md-{name}-{}-{counter}.redb",
+                process::id()
+            ));
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn producer(repo: &str, file_path: &str, name: &str) -> NodeData {
+        NodeData {
+            id: node_id(repo, file_path, NodeKind::Function, name),
+            kind: NodeKind::Function,
+            repo: repo.to_owned(),
+            file_path: file_path.to_owned(),
+            name: name.to_owned(),
+            qualified_name: Some(format!("{repo}::{name}")),
+            external_id: None,
+            signature: Some(format!("{name}()")),
+            visibility: Some(Visibility::Public),
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        }
+    }
 
     fn route(method: &str, path: &str) -> gather_step_core::NodeData {
         let qualified_name = format!("__route__{method}__{path}");
@@ -1140,6 +1197,78 @@ mod tests {
         assert_eq!(selected.len(), 32);
         assert!(names.iter().any(|name| name == "GET /assets"));
         assert!(names.iter().any(|name| name == "POST /assets"));
+    }
+
+    #[test]
+    fn events_rule_orphan_notice_precedes_table_and_rows_stay_paged() {
+        let temp = TempDb::new("orphan-notice");
+        let store = GraphStoreDb::open(&temp.path).expect("graph should open");
+        let source_file = NodeData {
+            id: node_id(
+                "backend_standard",
+                "src/events.ts",
+                NodeKind::File,
+                "src/events.ts",
+            ),
+            kind: NodeKind::File,
+            repo: "backend_standard".to_owned(),
+            file_path: "src/events.ts".to_owned(),
+            name: "src/events.ts".to_owned(),
+            qualified_name: Some("backend_standard::src/events.ts".to_owned()),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        };
+        let emitter = producer("backend_standard", "src/events.ts", "emitOrders");
+        let mut nodes = vec![source_file.clone(), emitter.clone()];
+        let mut edges = Vec::new();
+        for index in 0..40 {
+            let name = format!("order.created.{index:02}");
+            let topic = virtual_node(
+                NodeKind::Topic,
+                "backend_standard",
+                "src/events.ts",
+                &name,
+                topic_qn("kafka", &name),
+            );
+            edges.push(EdgeData {
+                source: emitter.id,
+                target: topic.id,
+                kind: EdgeKind::Publishes,
+                metadata: EdgeMetadata::default(),
+                owner_file: source_file.id,
+                is_cross_file: false,
+            });
+            nodes.push(topic);
+        }
+        store
+            .bulk_insert(&nodes, &edges)
+            .expect("graph should write");
+
+        let out = render_events_rule(&store, &[]).expect("events rule should render");
+
+        let notice_at = out
+            .find("Showing 32 of 40 indexed orphan targets")
+            .expect("orphan truncation notice should be disclosed");
+        let header_at = out
+            .find("| Target | Producers | Consumers | Classification |")
+            .expect("orphan table header should render");
+        assert!(
+            notice_at < header_at,
+            "notice must precede the orphan table header, not break the table body"
+        );
+        assert!(
+            out.contains("|---|---:|---:|---|\n| "),
+            "orphan separator row must be immediately followed by a data row"
+        );
+        assert_eq!(
+            out.matches("| 1 | 0 | produce_only |").count(),
+            32,
+            "exactly one page of orphan rows should render"
+        );
     }
 
     #[test]

@@ -3629,7 +3629,16 @@ fn pack_target_matches_repo(graph: &impl GraphStore, node: &NodeData, selected_r
             } else {
                 edge.source
             };
-            graph.get_node(adjacent).ok().flatten()
+            match graph.get_node(adjacent) {
+                Ok(adjacent_node) => adjacent_node,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "failed to read adjacent node while repo-filtering a virtual pack target; treating it as absent"
+                    );
+                    None
+                }
+            }
         })
         .any(|participant| !participant.is_virtual && participant.repo == selected_repo)
 }
@@ -5210,9 +5219,17 @@ mod tests {
             )
             .expect("graph seed should succeed");
 
-        assert!(pack_target_matches_repo(&store, &route, "asset-api"));
-        assert!(!pack_target_matches_repo(&store, &route, "asset-worker"));
+        let matching_repos = ["asset-api", "asset-worker", "__virtual__"]
+            .into_iter()
+            .filter(|repo| pack_target_matches_repo(&store, &route, repo))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching_repos,
+            vec!["asset-api"],
+            "the virtual route must resolve to exactly its adjacent real handler repo"
+        );
         assert!(pack_target_matches_repo(&store, &handler, "asset-api"));
+        assert!(!pack_target_matches_repo(&store, &handler, "asset-worker"));
     }
 
     // Evidence-aware planning ranking

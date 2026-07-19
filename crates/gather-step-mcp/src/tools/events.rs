@@ -18,7 +18,7 @@ use crate::{
     },
     ids::encode_node_id,
     tools::{
-        coverage::QueryCoverage,
+        coverage::{QueryCoverage, ZeroEdgeSemantics},
         labels::{edge_kind_label, node_kind_label},
     },
 };
@@ -737,11 +737,12 @@ pub fn list_orphan_topics_tool(
         .iter()
         .map(|orphan| orphan.producers + orphan.consumers)
         .sum();
-    let mut coverage = QueryCoverage::scoped(
+    let mut coverage = QueryCoverage::scoped_with_zero_semantics(
         &registry,
         request.repo.as_deref(),
         "orphan_event_scan",
         edges_contributed,
+        ZeroEdgeSemantics::ExactZeroIsOk,
     );
     if !orphans.is_empty() {
         coverage = coverage
@@ -1261,6 +1262,220 @@ mod tests {
         assert_eq!(
             response.data.matches[0].consumers[0].evidence.source,
             EvidenceSource::TraceEvent
+        );
+    }
+
+    #[test]
+    fn trace_event_tool_flags_external_or_dynamic_when_consumer_is_missing() {
+        let temp = TempDir::new("trace-event-external");
+        let graph_path = temp.path().join("graph.redb");
+        let registry_path = temp.path().join("registry.json");
+        let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
+
+        let producer_file = file("backend_standard", "src/producer.ts");
+        let producer = symbol("backend_standard", "src/producer.ts", "emit_order", 0);
+        let topic = virtual_node(
+            NodeKind::Topic,
+            "backend_standard",
+            "src/events.ts",
+            "order.created",
+            topic_qn("kafka", "order.created"),
+        );
+
+        graph
+            .bulk_insert(
+                &[producer_file.clone(), producer.clone(), topic.clone()],
+                &[EdgeData {
+                    source: producer.id,
+                    target: topic.id,
+                    kind: EdgeKind::Publishes,
+                    metadata: EdgeMetadata::default(),
+                    owner_file: producer_file.id,
+                    is_cross_file: true,
+                }],
+            )
+            .expect("graph write should succeed");
+        drop(graph);
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                "backend_standard",
+                temp.path().join("repos/backend_standard"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let response = trace_event_tool(
+            &ctx,
+            TraceEventRequest {
+                budget_bytes: None,
+                limit: None,
+                target: "order.created".to_owned(),
+            },
+        )
+        .expect("tool should succeed");
+
+        assert_eq!(response.data.coverage.verdict, "external_or_dynamic");
+        assert!(
+            response
+                .data
+                .coverage
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("no indexed consumer")),
+            "the missing-consumer limitation must be disclosed; got {:?}",
+            response.data.coverage.limitations
+        );
+    }
+
+    #[test]
+    fn list_orphan_topics_tool_reports_ok_coverage_when_no_orphans_exist() {
+        let temp = TempDir::new("orphans-none");
+        let graph_path = temp.path().join("graph.redb");
+        let registry_path = temp.path().join("registry.json");
+        let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
+
+        let producer_file = file("backend_standard", "src/producer.ts");
+        let consumer_file = file("backend_standard", "src/consumer.ts");
+        let producer = symbol("backend_standard", "src/producer.ts", "emit_order", 0);
+        let consumer = symbol("backend_standard", "src/consumer.ts", "handle_order", 0);
+        let topic = virtual_node(
+            NodeKind::Topic,
+            "backend_standard",
+            "src/events.ts",
+            "order.created",
+            topic_qn("kafka", "order.created"),
+        );
+
+        graph
+            .bulk_insert(
+                &[
+                    producer_file.clone(),
+                    consumer_file.clone(),
+                    producer.clone(),
+                    consumer.clone(),
+                    topic.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: producer.id,
+                        target: topic.id,
+                        kind: EdgeKind::Publishes,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: producer_file.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: consumer.id,
+                        target: topic.id,
+                        kind: EdgeKind::Consumes,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: consumer_file.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("graph write should succeed");
+        drop(graph);
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                "backend_standard",
+                temp.path().join("repos/backend_standard"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let response = list_orphan_topics_tool(
+            &ctx,
+            ListOrphanTopicsRequest {
+                limit: None,
+                repo: None,
+            },
+        )
+        .expect("tool should succeed");
+
+        assert!(response.data.orphans.is_empty());
+        assert_eq!(response.data.coverage.verdict, "ok");
+        assert!(
+            !response
+                .data
+                .coverage
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("external, dynamic, or unsupported")),
+            "zero orphans must not carry the orphan-classification limitation"
+        );
+    }
+
+    #[test]
+    fn list_orphan_topics_tool_flags_possible_extraction_gap_when_orphans_exist() {
+        let temp = TempDir::new("orphans-found");
+        let graph_path = temp.path().join("graph.redb");
+        let registry_path = temp.path().join("registry.json");
+        let graph = GraphStoreDb::open(&graph_path).expect("graph store should open");
+
+        let producer_file = file("backend_standard", "src/producer.ts");
+        let producer = symbol("backend_standard", "src/producer.ts", "emit_order", 0);
+        let topic = virtual_node(
+            NodeKind::Topic,
+            "backend_standard",
+            "src/events.ts",
+            "order.created",
+            topic_qn("kafka", "order.created"),
+        );
+
+        graph
+            .bulk_insert(
+                &[producer_file.clone(), producer.clone(), topic.clone()],
+                &[EdgeData {
+                    source: producer.id,
+                    target: topic.id,
+                    kind: EdgeKind::Publishes,
+                    metadata: EdgeMetadata::default(),
+                    owner_file: producer_file.id,
+                    is_cross_file: true,
+                }],
+            )
+            .expect("graph write should succeed");
+        drop(graph);
+
+        let mut registry = RegistryStore::open(&registry_path).expect("registry should open");
+        registry
+            .register_repo(
+                "backend_standard",
+                temp.path().join("repos/backend_standard"),
+                Some(DepthLevel::Full),
+            )
+            .expect("repo registration should succeed");
+
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
+            .expect("context should open");
+        let response = list_orphan_topics_tool(
+            &ctx,
+            ListOrphanTopicsRequest {
+                limit: None,
+                repo: None,
+            },
+        )
+        .expect("tool should succeed");
+
+        assert_eq!(response.data.orphans.len(), 1);
+        assert_eq!(response.data.coverage.verdict, "possible_extraction_gap");
+        assert!(
+            response
+                .data
+                .coverage
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("external, dynamic, or unsupported")),
+            "found orphans must disclose the orphan-classification limitation"
         );
     }
 

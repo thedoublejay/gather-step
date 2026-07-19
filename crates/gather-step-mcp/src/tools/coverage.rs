@@ -5,6 +5,19 @@ use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// How a zero-edge result should be read when deriving the default verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZeroEdgeSemantics {
+    /// Zero edges may mean the extractor missed evidence, so the verdict
+    /// stays `possible_extraction_gap`. This is the conservative default.
+    PossibleExtractionGap,
+    /// The query counted its result exactly over indexed repos, so zero
+    /// edges is a healthy `ok` answer rather than a gap signal. When no
+    /// repos were considered the verdict still degrades to
+    /// `possible_extraction_gap` because nothing was actually scanned.
+    ExactZeroIsOk,
+}
+
 /// Disclosure attached to list-shaped graph responses.
 ///
 /// Coverage is intentionally descriptive rather than a completeness claim. The
@@ -46,11 +59,36 @@ impl QueryCoverage {
         query_path: impl Into<String>,
         edges_contributed: usize,
     ) -> Self {
+        Self::scoped_with_zero_semantics(
+            registry,
+            repo,
+            query_path,
+            edges_contributed,
+            ZeroEdgeSemantics::PossibleExtractionGap,
+        )
+    }
+
+    /// Like [`Self::scoped`], with explicit zero-edge semantics for callers
+    /// whose result is an exact count where zero is a healthy answer.
+    #[must_use]
+    pub fn scoped_with_zero_semantics(
+        registry: &WorkspaceRegistry,
+        repo: Option<&str>,
+        query_path: impl Into<String>,
+        edges_contributed: usize,
+        zero_semantics: ZeroEdgeSemantics,
+    ) -> Self {
         let repos = registry
             .repos
             .keys()
             .filter(|name| repo.is_none_or(|selected| name.as_str() == selected));
-        Self::for_repos(registry, repos, query_path, edges_contributed)
+        Self::for_repos_with_zero_semantics(
+            registry,
+            repos,
+            query_path,
+            edges_contributed,
+            zero_semantics,
+        )
     }
 
     /// Build coverage for an explicit set of registered repositories that
@@ -61,6 +99,29 @@ impl QueryCoverage {
         repos: I,
         query_path: impl Into<String>,
         edges_contributed: usize,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::for_repos_with_zero_semantics(
+            registry,
+            repos,
+            query_path,
+            edges_contributed,
+            ZeroEdgeSemantics::PossibleExtractionGap,
+        )
+    }
+
+    /// Like [`Self::for_repos`], with explicit zero-edge semantics for callers
+    /// whose result is an exact count where zero is a healthy answer.
+    #[must_use]
+    pub fn for_repos_with_zero_semantics<I, S>(
+        registry: &WorkspaceRegistry,
+        repos: I,
+        query_path: impl Into<String>,
+        edges_contributed: usize,
+        zero_semantics: ZeroEdgeSemantics,
     ) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -91,7 +152,9 @@ impl QueryCoverage {
                 "Query path `{query_path}` ran over the stored graph; index-time extractor provenance is not persisted, so extractors_run is empty."
             ),
         ];
-        if edges_contributed == 0 {
+        let zero_is_healthy =
+            zero_semantics == ZeroEdgeSemantics::ExactZeroIsOk && !repos_considered.is_empty();
+        if edges_contributed == 0 && !zero_is_healthy {
             limitations.push(
                 "No concrete edge contribution was recorded for this response; this can mean no match or an aggregate result whose exact edge identity is unavailable."
                     .to_owned(),
@@ -104,7 +167,7 @@ impl QueryCoverage {
             extractors_run: Vec::new(),
             source_scopes: vec!["unknown".to_owned()],
             edges_contributed,
-            verdict: if edges_contributed == 0 {
+            verdict: if edges_contributed == 0 && !zero_is_healthy {
                 "possible_extraction_gap"
             } else {
                 "ok"
@@ -137,5 +200,80 @@ impl QueryCoverage {
     pub fn with_limitation(mut self, limitation: impl Into<String>) -> Self {
         self.limitations.push(limitation.into());
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gather_step_core::{DepthLevel, RegisteredRepo, WorkspaceRegistry};
+
+    use super::{QueryCoverage, ZeroEdgeSemantics};
+
+    const ZERO_EDGE_LIMITATION_PREFIX: &str = "No concrete edge contribution was recorded";
+
+    fn registry_with(repos: &[&str]) -> WorkspaceRegistry {
+        let mut registry = WorkspaceRegistry::default();
+        for repo in repos {
+            registry.repos.insert(
+                (*repo).to_owned(),
+                RegisteredRepo::new(format!("/tmp/{repo}"), DepthLevel::Full),
+            );
+        }
+        registry
+    }
+
+    fn has_zero_edge_limitation(coverage: &QueryCoverage) -> bool {
+        coverage
+            .limitations
+            .iter()
+            .any(|limitation| limitation.starts_with(ZERO_EDGE_LIMITATION_PREFIX))
+    }
+
+    #[test]
+    fn zero_edges_over_indexed_repo_defaults_to_possible_extraction_gap() {
+        let registry = registry_with(&["backend_standard"]);
+        let coverage = QueryCoverage::scoped(&registry, None, "test_query", 0);
+
+        assert_eq!(coverage.verdict, "possible_extraction_gap");
+        assert!(has_zero_edge_limitation(&coverage));
+    }
+
+    #[test]
+    fn nonzero_edges_default_to_ok_without_zero_edge_limitation() {
+        let registry = registry_with(&["backend_standard"]);
+        let coverage = QueryCoverage::scoped(&registry, None, "test_query", 3);
+
+        assert_eq!(coverage.verdict, "ok");
+        assert!(!has_zero_edge_limitation(&coverage));
+    }
+
+    #[test]
+    fn exact_zero_over_indexed_repo_is_ok_without_zero_edge_limitation() {
+        let registry = registry_with(&["backend_standard"]);
+        let coverage = QueryCoverage::scoped_with_zero_semantics(
+            &registry,
+            None,
+            "test_query",
+            0,
+            ZeroEdgeSemantics::ExactZeroIsOk,
+        );
+
+        assert_eq!(coverage.verdict, "ok");
+        assert!(!has_zero_edge_limitation(&coverage));
+    }
+
+    #[test]
+    fn exact_zero_without_considered_repos_stays_possible_extraction_gap() {
+        let registry = registry_with(&[]);
+        let coverage = QueryCoverage::scoped_with_zero_semantics(
+            &registry,
+            None,
+            "test_query",
+            0,
+            ZeroEdgeSemantics::ExactZeroIsOk,
+        );
+
+        assert_eq!(coverage.verdict, "possible_extraction_gap");
+        assert!(has_zero_edge_limitation(&coverage));
     }
 }
