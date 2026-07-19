@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_BORDERS_ONLY};
-use gather_step_storage::{TelemetryRunRecord, TelemetryStore, telemetry::TELEMETRY_DB_NAME};
+use gather_step_storage::{TelemetryRunRecord, TelemetryStore};
 use serde::Serialize;
 
 use crate::app::AppContext;
@@ -14,11 +14,10 @@ use crate::app::AppContext;
 pub struct LogArgs {
     #[arg(
         long,
-        default_value_t = 20,
-        help = "Maximum number of run rows to consider (also caps the --summary window)"
+        help = "Maximum number of run rows (defaults to 20; summaries with a time window are uncapped)"
     )]
-    pub last: usize,
-    #[arg(long, help = "Only show runs since an age such as 7d")]
+    pub last: Option<usize>,
+    #[arg(long, help = "Only show runs since an age such as 12h or 7d")]
     pub since: Option<String>,
     #[arg(long, help = "Only show runs with errors or non-success status")]
     pub errors_only: bool,
@@ -36,6 +35,18 @@ pub struct LogArgs {
     pub repair: bool,
     #[arg(long, help = "Delete telemetry rows older than an age such as 90d")]
     pub clear_before: Option<String>,
+    #[arg(long, help = "Read or delete telemetry across every workspace")]
+    pub all_workspaces: bool,
+    #[arg(
+        long,
+        requires = "all_workspaces",
+        help = "Confirm a destructive --all-workspaces deletion"
+    )]
+    pub yes: bool,
+    #[arg(long, help = "Show retained WARN/ERROR events instead of run rows")]
+    pub events: bool,
+    #[arg(long, requires = "events", help = "Limit --events to one run ID")]
+    pub run: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,12 +81,20 @@ struct LogSummary {
     slowest_commands: Vec<CommandDuration>,
 }
 
+#[derive(Debug, Serialize)]
+struct LogEventsOutput {
+    event: &'static str,
+    telemetry_db: String,
+    events: Vec<gather_step_storage::TelemetryEventRecord>,
+}
+
 const SLOWEST_COMMANDS: usize = 5;
 
 fn summarize(
     records: &[TelemetryRunRecord],
     repaired_stale: Option<usize>,
     cleared_rows: usize,
+    telemetry_db: String,
 ) -> LogSummary {
     let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_graph_availability: BTreeMap<String, usize> = BTreeMap::new();
@@ -87,13 +106,17 @@ fn summarize(
         let availability = record
             .graph_availability
             .clone()
-            .unwrap_or_else(|| "unknown".to_owned());
+            .unwrap_or_else(|| "unrecorded".to_owned());
         *by_graph_availability.entry(availability).or_default() += 1;
-        let entry = max_by_command
-            .entry(record.command.clone())
-            .or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 = entry.1.max(record.duration_ms.unwrap_or(0));
+        if record.exit_status != "abandoned"
+            && let Some(duration_ms) = record.duration_ms
+        {
+            let entry = max_by_command
+                .entry(record.command.clone())
+                .or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 = entry.1.max(duration_ms);
+        }
         if let Some(rss) = record.peak_rss_bytes {
             peak_rss_bytes_max = Some(peak_rss_bytes_max.map_or(rss, |current| current.max(rss)));
         }
@@ -118,7 +141,7 @@ fn summarize(
 
     LogSummary {
         event: "log_summary",
-        telemetry_db: TELEMETRY_DB_NAME.to_owned(),
+        telemetry_db,
         total_runs: records.len(),
         repaired_stale,
         cleared_rows,
@@ -135,8 +158,9 @@ fn emit_summary(
     records: &[TelemetryRunRecord],
     repaired_stale: Option<usize>,
     cleared_rows: usize,
+    telemetry_db: String,
 ) -> Result<()> {
-    let summary = summarize(records, repaired_stale, cleared_rows);
+    let summary = summarize(records, repaired_stale, cleared_rows, telemetry_db);
     if app.json_output {
         app.output().emit(&summary)?;
         return Ok(());
@@ -196,22 +220,52 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
         bail!("Could not locate the user data directory for telemetry.");
     };
     let store = TelemetryStore::open(&root).context("opening telemetry database")?;
+    let telemetry_db = store.path().display().to_string();
+
+    if args.events {
+        if args.all_workspaces {
+            bail!("--events cannot be combined with --all-workspaces; select a workspace");
+        }
+        let events = store
+            .list_events(
+                &app.workspace_path,
+                args.run.as_deref(),
+                args.last.unwrap_or(100),
+            )
+            .context("listing telemetry events")?;
+        let output = LogEventsOutput {
+            event: "log_events",
+            telemetry_db,
+            events,
+        };
+        app.output().emit(&output)?;
+        return Ok(());
+    }
 
     let repaired_stale = if args.repair {
         Some(
-            store
-                .repair_stale_running()
-                .context("finalizing stale running rows")?,
+            if args.all_workspaces {
+                store.repair_stale_running_all_workspaces()
+            } else {
+                store.repair_stale_running(&app.workspace_path)
+            }
+            .context("finalizing stale running rows")?,
         )
     } else {
         None
     };
 
     let cleared_rows = if let Some(age) = args.clear_before.as_deref() {
+        if args.all_workspaces && !args.yes {
+            bail!("deleting telemetry across all workspaces requires --yes");
+        }
         let cutoff = cutoff_from_age(age)?;
-        store
-            .clear_before(cutoff)
-            .with_context(|| format!("clearing telemetry rows older than {age}"))?
+        if args.all_workspaces {
+            store.clear_before_all_workspaces(cutoff)
+        } else {
+            store.clear_before(&app.workspace_path, cutoff)
+        }
+        .with_context(|| format!("clearing telemetry rows older than {age}"))?
     } else {
         0
     };
@@ -221,20 +275,40 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
         .map(cutoff_from_age)
         .transpose()
         .context("parsing --since")?;
-    let mut records = store
-        .list_runs(args.last, since_ms, args.errors_only)
-        .context("listing telemetry runs")?;
-    if let Some(command) = args.command.as_deref() {
-        records.retain(|record| record.command == command);
+    let limit = args.last.unwrap_or_else(|| {
+        if args.summary && args.since.is_some() {
+            usize::MAX
+        } else {
+            20
+        }
+    });
+    let records = if args.all_workspaces {
+        store.list_runs_all_workspaces(
+            limit,
+            since_ms,
+            args.errors_only,
+            args.command.as_deref(),
+            None,
+        )
+    } else {
+        store.list_runs(
+            &app.workspace_path,
+            limit,
+            since_ms,
+            args.errors_only,
+            args.command.as_deref(),
+            None,
+        )
     }
+    .context("listing telemetry runs")?;
 
     if args.summary {
-        return emit_summary(app, &records, repaired_stale, cleared_rows);
+        return emit_summary(app, &records, repaired_stale, cleared_rows, telemetry_db);
     }
 
     let output = LogOutput {
         event: "log_completed",
-        telemetry_db: TELEMETRY_DB_NAME.to_owned(),
+        telemetry_db,
         cleared_rows,
         repaired_stale,
         records,
@@ -282,15 +356,20 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
 }
 
 fn cutoff_from_age(value: &str) -> Result<i64> {
-    let days = value
-        .strip_suffix('d')
-        .unwrap_or(value)
+    let (amount, unit_ms) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1_000_i64),
+        Some('m') => (&value[..value.len() - 1], 60_000_i64),
+        Some('h') => (&value[..value.len() - 1], 60 * 60 * 1_000_i64),
+        Some('d') => (&value[..value.len() - 1], 24 * 60 * 60 * 1_000_i64),
+        _ => (value, 24 * 60 * 60 * 1_000_i64),
+    };
+    let amount = amount
         .parse::<i64>()
-        .with_context(|| format!("expected an age in days like 7d, got `{value}`"))?;
-    if days < 0 {
+        .with_context(|| format!("expected an age such as 12h or 7d, got `{value}`"))?;
+    if amount < 0 {
         bail!("Age must be non-negative, got `{value}`.");
     }
-    Ok(now_ms().saturating_sub(days.saturating_mul(24 * 60 * 60 * 1000)))
+    Ok(now_ms().saturating_sub(amount.saturating_mul(unit_ms)))
 }
 
 fn now_ms() -> i64 {
@@ -338,6 +417,7 @@ mod tests {
     ) -> TelemetryRunRecord {
         TelemetryRunRecord {
             run_id: format!("{command}-{status}-{duration_ms}"),
+            workspace_hash: "workspace".to_owned(),
             started_at_ms: 0,
             ended_at_ms: Some(duration_ms),
             command: command.to_owned(),
@@ -351,6 +431,9 @@ mod tests {
             result_count: None,
             graph_availability: Some(availability.to_owned()),
             build_provenance: Some("release".to_owned()),
+            repo_count: None,
+            files_parsed: None,
+            nodes_created: None,
         }
     }
 
@@ -363,7 +446,7 @@ mod tests {
             record("status", "abandoned", 0, "unknown"),
         ];
 
-        let summary = summarize(&records, Some(1), 0);
+        let summary = summarize(&records, Some(1), 0, "/tmp/telemetry.db".to_owned());
 
         assert_eq!(summary.total_runs, 4);
         assert_eq!(summary.by_status.get("success"), Some(&2));

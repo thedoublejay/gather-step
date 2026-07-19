@@ -26,7 +26,17 @@ pub mod tui;
 pub mod watch;
 pub mod who_consumes;
 
-use std::{panic::PanicHookInfo, path::PathBuf, process::ExitCode};
+use std::{
+    panic::PanicHookInfo,
+    path::PathBuf,
+    process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 use clap::{
@@ -50,6 +60,43 @@ const VERSION_LONG: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\nCopyright (c) 2026 JJ Adonis. Licensed under the MIT License.",
 );
+
+struct TelemetryHeartbeat {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl TelemetryHeartbeat {
+    fn start(store: TelemetryStore, run: TelemetryRun) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                thread::park_timeout(Duration::from_secs(30));
+                if worker_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Err(error) = store.heartbeat(&run) {
+                    warn!(%error, "failed to refresh telemetry heartbeat");
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for TelemetryHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
 
 /// Canonical catalog of user-visible CLI subcommands.
 ///
@@ -277,7 +324,9 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
     let command_name = command_telemetry_name(cli.command.as_ref());
     app::reset_telemetry_run_state();
     let workspace_path = app.workspace_path.clone();
-    let telemetry = open_telemetry_store();
+    let telemetry = (!matches!(cli.command, Some(Command::Log(_))))
+        .then(open_telemetry_store)
+        .flatten();
     let run = telemetry.as_ref().and_then(|store| {
         match store.begin_run(
             command_name,
@@ -298,9 +347,19 @@ pub async fn run(cli: Cli, app: AppContext) -> Result<CliOutcome> {
         install_telemetry_panic_hook(store.clone(), run.clone());
     }
 
+    let heartbeat = if matches!(command_name, "serve" | "watch" | "mcp") {
+        telemetry
+            .as_ref()
+            .zip(run.as_ref())
+            .map(|(store, run)| TelemetryHeartbeat::start(store.clone(), run.clone()))
+    } else {
+        None
+    };
+
     let outcome = run_inner(cli, app).await;
+    drop(heartbeat);
     if let (Some(store), Some(run)) = (&telemetry, &run) {
-        let finish = telemetry_finish_fields(&outcome);
+        let finish = telemetry_finish_fields(command_name, &outcome);
         if let Err(error) = store.finish_run(run, &finish) {
             warn!(%error, "failed to write telemetry run finish");
         }
@@ -348,6 +407,9 @@ async fn run_inner(cli: Cli, app: AppContext) -> Result<CliOutcome> {
 }
 
 fn open_telemetry_store() -> Option<TelemetryStore> {
+    if !telemetry_enabled() {
+        return None;
+    }
     let Some(telemetry_root) = telemetry_root() else {
         warn!("failed to locate data directory for telemetry store");
         return None;
@@ -394,8 +456,9 @@ fn command_telemetry_name(command: Option<&Command>) -> &'static str {
     }
 }
 
-fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
+fn telemetry_finish_fields(command: &str, result: &Result<CliOutcome>) -> TelemetryRunFinish {
     let (warn_count, traced_error_count) = app::telemetry_counts();
+    let (repo_count, files_parsed, nodes_created, result_count) = app::telemetry_metrics();
     let (exit_status, error) = match result {
         Ok(CliOutcome::Success) => ("success".to_owned(), None),
         Ok(CliOutcome::ReviewThresholdExceeded) => ("review_threshold_exceeded".to_owned(), None),
@@ -412,15 +475,19 @@ fn telemetry_finish_fields(result: &Result<CliOutcome>) -> TelemetryRunFinish {
             )
         }
     };
-    let graph_availability = graph_availability(result).map(str::to_owned);
+    let graph_availability = graph_availability(command, result).map(str::to_owned);
     let explicit_error_count = u32::from(error.is_some());
     TelemetryRunFinish {
         exit_status,
         peak_rss_bytes: capture_rss(),
+        repo_count,
+        files_parsed,
+        nodes_created,
         warn_count,
         error_count: traced_error_count.saturating_add(explicit_error_count),
         recovery_event: app::telemetry_recovery_event(),
         graph_availability,
+        result_count,
         error,
         ..TelemetryRunFinish::default()
     }
@@ -436,23 +503,24 @@ const fn build_provenance() -> &'static str {
     }
 }
 
-/// The dominant graph-availability signal for a finished run, derived from its
-/// outcome: `locked` / `not_indexed` on the matching error, `available` on
-/// success, and `None` when the error is unrelated to the graph (so telemetry
-/// never over-claims availability).
-fn graph_availability(result: &Result<CliOutcome>) -> Option<&'static str> {
-    match result {
-        Ok(_) => Some("available"),
-        Err(error) => {
-            if graph_lock_contention(error) {
-                Some("locked")
-            } else if is_not_indexed_error(error) {
-                Some("not_indexed")
-            } else {
-                None
-            }
-        }
+/// Graph availability observed by the storage-open path. Non-graph commands
+/// report `not_applicable`; legacy/unobserved graph runs remain NULL.
+fn graph_availability(command: &str, result: &Result<CliOutcome>) -> Option<&'static str> {
+    if !command_uses_graph(command) {
+        return Some("not_applicable");
     }
+    if let Some(observed) = app::telemetry_graph_availability() {
+        return Some(observed);
+    }
+    match result {
+        Err(error) if graph_lock_contention(error) => Some("locked"),
+        Err(error) if is_not_indexed_error(error) => Some("missing"),
+        _ => None,
+    }
+}
+
+fn command_uses_graph(command: &str) -> bool {
+    !matches!(command, "clean" | "log" | "no-args" | "setup-mcp")
 }
 
 /// Whether an error indicates the workspace (or a repo) has no usable index yet.
@@ -464,7 +532,19 @@ fn is_not_indexed_error(error: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn telemetry_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("GATHER_STEP_TELEMETRY_ROOT") {
+        return Some(PathBuf::from(root));
+    }
     dirs::data_local_dir().map(|root| root.join("gather-step"))
+}
+
+fn telemetry_enabled() -> bool {
+    std::env::var("GATHER_STEP_TELEMETRY").map_or(true, |value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false"
+        )
+    })
 }
 
 fn telemetry_schema_versions() -> serde_json::Value {

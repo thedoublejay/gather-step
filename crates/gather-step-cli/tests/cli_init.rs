@@ -6,6 +6,12 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_gather-step")
 }
 
+fn command() -> Command {
+    let mut command = Command::new(bin());
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
+}
+
 #[test]
 fn init_existing_config_is_reused_without_force() {
     let tmp = tempdir().expect("temp dir");
@@ -15,7 +21,7 @@ fn init_existing_config_is_reused_without_force() {
     let config = "repos:\n- name: api\n  path: api\n  depth: level2\nindexing:\n  exclude:\n  - node_modules\n  - web\n";
     fs::write(&config_path, config).expect("config");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),
@@ -40,7 +46,7 @@ fn init_force_non_interactive_writes_config_without_optional_steps() {
     fs::create_dir_all(tmp.path().join(".git")).expect("git dir");
     fs::write(tmp.path().join("gather-step.config.yaml"), "repos: []\n").expect("config");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),
@@ -70,7 +76,7 @@ fn init_generate_ai_files_without_index_writes_summaries_and_skips_rules() {
     let tmp = tempdir().expect("temp dir");
     fs::create_dir_all(tmp.path().join(".git")).expect("git dir");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),

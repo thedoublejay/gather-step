@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::commands::watch::apply_repo_filter;
 use crate::{
     app::AppContext,
+    daemon_client::DaemonClient,
     daemon_server::{DaemonRuntime, DaemonServer},
     path_safety,
 };
@@ -99,6 +100,15 @@ fn emit_watch_line(line: &str) -> Result<()> {
 }
 
 pub async fn run(app: &AppContext, args: ServeArgs) -> Result<()> {
+    if DaemonClient::try_connect(&app.data_dir, &app.workspace_path)?
+        .is_some_and(|client| client.is_reachable())
+    {
+        tracing::info!(
+            outcome = "already_running",
+            "workspace daemon is already running"
+        );
+        return Ok(());
+    }
     let mcp_config = build_mcp_config(app, args.clone());
     if !args.watch {
         return run_serve_only(app, mcp_config).await;

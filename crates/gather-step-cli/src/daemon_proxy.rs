@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Error, Result};
 use gather_step_mcp::output::redact::relativize_to_workspace;
@@ -15,10 +15,12 @@ where
     F: FnOnce(&AppContext) -> Result<RenderedCommand>,
 {
     let output = app.output();
-    let mut rendered = match try_daemon_first(app, request) {
+    let (daemon_result, daemon_attempted) = try_daemon_first(app, request);
+    let mut rendered = match daemon_result {
         Some(rendered) => rendered,
         None => match local(app) {
             Ok(rendered) => rendered,
+            Err(error) if daemon_attempted => return Err(error),
             Err(error) => match try_daemon_after_lock(app, request, &error) {
                 Some(rendered) => rendered,
                 None => return Err(error),
@@ -57,10 +59,10 @@ fn inject_freshness(app: &AppContext, rendered: &mut RenderedCommand) {
     }
 }
 
-fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<RenderedCommand> {
+fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> (Option<RenderedCommand>, bool) {
     let client = match DaemonClient::try_connect(&app.data_dir, &app.workspace_path) {
         Ok(Some(client)) => client,
-        Ok(None) => return None,
+        Ok(None) => return (None, false),
         Err(error) => {
             warn!(
                 workspace = %relativize_to_workspace(&app.workspace_path, &app.workspace_path),
@@ -68,19 +70,22 @@ fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<Rendere
                 %error,
                 "failed to inspect daemon state; falling back to local execution"
             );
-            return None;
+            return (None, false);
         }
     };
 
-    match client.call(request) {
-        Ok(rendered) if !daemon_rejected_request(&rendered) => Some(rendered),
+    match client.call_with_timeout(request, daemon_timeout(request)) {
+        Ok(rendered) if !daemon_rejected_request(&rendered) => {
+            crate::app::mark_graph_availability("available");
+            (Some(rendered), true)
+        }
         Ok(_) => {
             warn!(
                 workspace = %app.workspace_path.display(),
                 request = request_name(request),
                 "daemon does not understand this request kind (older daemon binary?); falling back to local execution"
             );
-            None
+            (None, true)
         }
         Err(error) => {
             warn!(
@@ -89,8 +94,20 @@ fn try_daemon_first(app: &AppContext, request: &DaemonRequest) -> Option<Rendere
                 %error,
                 "daemon request failed; falling back to local execution"
             );
-            None
+            (None, true)
         }
+    }
+}
+
+fn daemon_timeout(request: &DaemonRequest) -> Duration {
+    match request {
+        DaemonRequest::Doctor { .. }
+        | DaemonRequest::Search { .. }
+        | DaemonRequest::Status { .. }
+        | DaemonRequest::CrossRepoDeps { .. }
+        | DaemonRequest::WhoConsumes { .. } => Duration::from_secs(2),
+        DaemonRequest::Pack { .. } | DaemonRequest::Impact { .. } => Duration::from_secs(10),
+        _ => Duration::from_secs(5),
     }
 }
 
@@ -141,7 +158,10 @@ fn try_daemon_after_lock(
     };
 
     match client.call(request) {
-        Ok(rendered) if !daemon_rejected_request(&rendered) => Some(rendered),
+        Ok(rendered) if !daemon_rejected_request(&rendered) => {
+            crate::app::mark_graph_availability("available");
+            Some(rendered)
+        }
         Ok(_) => {
             warn!(
                 workspace = %app.workspace_path.display(),

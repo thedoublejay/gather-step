@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, Ordering},
     },
 };
 
@@ -30,6 +30,11 @@ const BANNER: &str = include_str!("../assets/banner.txt");
 static TELEMETRY_WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 static TELEMETRY_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 static TELEMETRY_RECOVERY_EVENT: AtomicBool = AtomicBool::new(false);
+static TELEMETRY_GRAPH_AVAILABILITY: AtomicU8 = AtomicU8::new(0);
+static TELEMETRY_REPO_COUNT: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_FILES_PARSED: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_NODES_CREATED: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_RESULT_COUNT: AtomicI64 = AtomicI64::new(-1);
 
 #[derive(Debug)]
 struct TelemetryCounterLayer;
@@ -67,11 +72,86 @@ pub fn reset_telemetry_run_state() {
     TELEMETRY_WARN_COUNT.store(0, Ordering::Relaxed);
     TELEMETRY_ERROR_COUNT.store(0, Ordering::Relaxed);
     TELEMETRY_RECOVERY_EVENT.store(false, Ordering::Relaxed);
+    TELEMETRY_GRAPH_AVAILABILITY.store(0, Ordering::Relaxed);
+    TELEMETRY_REPO_COUNT.store(-1, Ordering::Relaxed);
+    TELEMETRY_FILES_PARSED.store(-1, Ordering::Relaxed);
+    TELEMETRY_NODES_CREATED.store(-1, Ordering::Relaxed);
+    TELEMETRY_RESULT_COUNT.store(-1, Ordering::Relaxed);
 }
 
 #[must_use]
 pub fn telemetry_recovery_event() -> bool {
     TELEMETRY_RECOVERY_EVENT.load(Ordering::Relaxed)
+}
+
+pub fn mark_graph_availability(value: &'static str) {
+    let code = match value {
+        "available" => 1,
+        "locked" => 2,
+        "missing" => 3,
+        "corrupt" => 4,
+        _ => 0,
+    };
+    TELEMETRY_GRAPH_AVAILABILITY.store(code, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn telemetry_graph_availability() -> Option<&'static str> {
+    match TELEMETRY_GRAPH_AVAILABILITY.load(Ordering::Relaxed) {
+        1 => Some("available"),
+        2 => Some("locked"),
+        3 => Some("missing"),
+        4 => Some("corrupt"),
+        _ => None,
+    }
+}
+
+pub fn mark_telemetry_index_metrics(repo_count: usize, files_parsed: u64, nodes_created: u64) {
+    TELEMETRY_REPO_COUNT.store(
+        i64::try_from(repo_count).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+    TELEMETRY_FILES_PARSED.store(
+        i64::try_from(files_parsed).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+    TELEMETRY_NODES_CREATED.store(
+        i64::try_from(nodes_created).unwrap_or(i64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+pub fn observe_command_payload(payload: &serde_json::Value) {
+    let count = ["result_count", "total_hits", "returned"]
+        .into_iter()
+        .find_map(|key| payload.get(key).and_then(serde_json::Value::as_i64))
+        .or_else(|| {
+            ["hits", "consumers", "dependencies", "items", "records"]
+                .into_iter()
+                .find_map(|key| {
+                    payload
+                        .get(key)
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|values| i64::try_from(values.len()).ok())
+                })
+        });
+    if let Some(count) = count {
+        TELEMETRY_RESULT_COUNT.store(count, Ordering::Relaxed);
+    }
+}
+
+#[must_use]
+pub fn telemetry_metrics() -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    let optional = |value: &AtomicI64| {
+        let value = value.load(Ordering::Relaxed);
+        (value >= 0).then_some(value)
+    };
+    (
+        optional(&TELEMETRY_REPO_COUNT),
+        optional(&TELEMETRY_FILES_PARSED),
+        optional(&TELEMETRY_NODES_CREATED),
+        optional(&TELEMETRY_RESULT_COUNT),
+    )
 }
 
 #[expect(
@@ -153,6 +233,9 @@ impl Output {
         reason = "Output::emit is the single structured-JSON funnel for CLI commands"
     )]
     pub fn emit<T: serde::Serialize>(&self, value: &T) -> Result<()> {
+        if let Ok(payload) = serde_json::to_value(value) {
+            observe_command_payload(&payload);
+        }
         if self.json {
             println!("{}", serde_json::to_string(value)?);
         }

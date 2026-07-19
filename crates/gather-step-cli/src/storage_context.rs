@@ -499,10 +499,24 @@ impl StorageContext {
     /// - [`TantivyOpenMode::ReadOnly`] → [`StorageCoordinator::open_read_only`]
     ///   (no write lock; safe for concurrent read commands).
     pub fn open_storage_coordinator(&self) -> Result<StorageCoordinator, StorageCoordinatorError> {
-        match self.tantivy_mode {
+        let result = match self.tantivy_mode {
             TantivyOpenMode::ReadWrite => StorageCoordinator::open(&self.storage_root),
             TantivyOpenMode::ReadOnly => StorageCoordinator::open_read_only(&self.storage_root),
+        };
+        match &result {
+            Ok(_) => crate::app::mark_graph_availability("available"),
+            Err(error) => {
+                let message = error.to_string().to_ascii_lowercase();
+                if message.contains("lock") || message.contains("already open") {
+                    crate::app::mark_graph_availability("locked");
+                } else if message.contains("not found") || message.contains("no such file") {
+                    crate::app::mark_graph_availability("missing");
+                } else {
+                    crate::app::mark_graph_availability("corrupt");
+                }
+            }
         }
+        result
     }
 
     /// Build an [`McpServerConfig`] from the paths in this context.

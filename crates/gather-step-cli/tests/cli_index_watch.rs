@@ -6,11 +6,17 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_gather-step")
 }
 
+fn command() -> Command {
+    let mut command = Command::new(bin());
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
+}
+
 #[test]
 fn index_accepts_watch_flag() {
     let tmp = tempdir().expect("temp dir");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),
@@ -34,7 +40,7 @@ fn index_accepts_watch_flag() {
 fn watch_help_does_not_advertise_tui_until_live_dashboard_exists() {
     let tmp = tempdir().expect("temp dir");
 
-    let output = Command::new(bin())
+    let output = command()
         .args([
             "--workspace",
             tmp.path().to_str().expect("utf-8 temp path"),

@@ -149,7 +149,9 @@ struct OracleExpectations {
 }
 
 fn gather_step() -> process::Command {
-    process::Command::new(env!("CARGO_BIN_EXE_gather-step"))
+    let mut command = process::Command::new(env!("CARGO_BIN_EXE_gather-step"));
+    command.env("GATHER_STEP_TELEMETRY", "off");
+    command
 }
 
 fn fixture_root() -> PathBuf {

@@ -81,8 +81,8 @@ pub use search_store::{
 };
 pub use stores::{WorkspaceStores, WorkspaceStoresError};
 pub use telemetry::{
-    TelemetryError, TelemetryErrorEvent, TelemetryRun, TelemetryRunFinish, TelemetryRunRecord,
-    TelemetryStore,
+    TelemetryError, TelemetryErrorEvent, TelemetryEventRecord, TelemetryRun, TelemetryRunFinish,
+    TelemetryRunRecord, TelemetryStore,
 };
 pub use watcher::{
     WatchCause, WatchEvent, Watcher, WatcherConfig, WatcherError, WatcherStatus, WorkspaceWatcher,
