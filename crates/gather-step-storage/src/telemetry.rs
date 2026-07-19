@@ -1210,12 +1210,14 @@ enum ProcessIdentity {
 enum ProcessLiveness {
     Alive,
     Dead,
+    #[cfg(not(target_os = "linux"))]
     Unknown,
 }
 
 fn process_identity(pid: u32, expected_start_token: Option<&str>) -> ProcessIdentity {
     match process_liveness(pid) {
         ProcessLiveness::Dead => return ProcessIdentity::Dead,
+        #[cfg(not(target_os = "linux"))]
         ProcessLiveness::Unknown => {
             tracing::warn!(
                 pid,
