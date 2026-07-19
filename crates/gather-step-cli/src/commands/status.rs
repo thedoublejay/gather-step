@@ -41,6 +41,8 @@ struct RepoStatusOutput {
     path_exists: bool,
     depth_level: String,
     freshness: String,
+    graph_index_state: &'static str,
+    git_anchor_state: &'static str,
     last_indexed_at: Option<String>,
     registry_file_count: u64,
     registry_symbol_count: u64,
@@ -211,6 +213,18 @@ pub(crate) fn execute(
                 .with_context(|| format!("loading indexed commit SHA for `{repo}`"))?;
             let freshness =
                 crate::freshness::repo_freshness(repo, &registered.path, indexed_sha.as_deref());
+            let graph_index_state = if graph_node_count > 0 || !metadata_rows.is_empty() {
+                "indexed"
+            } else {
+                "not_indexed"
+            };
+            let git_anchor_state = if indexed_sha.is_some() {
+                "history_synced"
+            } else if graph_index_state == "indexed" {
+                "commit_anchor_missing"
+            } else {
+                "not_synced"
+            };
 
             Ok(RepoStatusOutput {
                 repo: repo.clone(),
@@ -218,6 +232,8 @@ pub(crate) fn execute(
                 path_exists: registered.path.exists(),
                 depth_level: depth_label(registered.depth_level).to_owned(),
                 freshness,
+                graph_index_state,
+                git_anchor_state,
                 last_indexed_at: registered.last_indexed_at.clone(),
                 registry_file_count: registered.file_count,
                 registry_symbol_count: registered.symbol_count,
@@ -324,12 +340,12 @@ pub(crate) fn execute(
         repo_table.add_row(vec![
             Cell::new(&repo.repo),
             Cell::new(&repo.depth_level),
-            Cell::new(&repo.freshness),
-            Cell::new(repo.last_indexed_at.as_deref().unwrap_or("never")),
             Cell::new(format!(
-                "{}/{}",
-                repo.registry_file_count, repo.metadata_file_count
+                "{} / {} / {}",
+                repo.graph_index_state, repo.git_anchor_state, repo.freshness
             )),
+            Cell::new(repo.last_indexed_at.as_deref().unwrap_or("never")),
+            Cell::new(repo.metadata_file_count),
             Cell::new(repo.registry_symbol_count),
             Cell::new(repo.graph_node_count),
             Cell::new(repo.unresolved_inputs),

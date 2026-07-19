@@ -97,6 +97,8 @@ pub struct RouterPrefixBindings {
     /// nested router composition. The map above remains as the same-file fast
     /// path; this lossless list feeds the repo-level fixed-point pass.
     pub mounts: Vec<RouterMountBinding>,
+    /// Static `app.mount("/prefix", sub_app)` ASGI application mounts.
+    pub asgi_mounts: Vec<AsgiMountBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,6 +106,12 @@ pub struct RouterMountBinding {
     pub parent: String,
     pub child: String,
     pub prefix: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AsgiMountBinding {
+    pub receiver: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1298,6 +1306,14 @@ impl<'a> ParseState<'a> {
         }
     }
 
+    fn record_asgi_mount(&mut self, receiver: String, path: String) {
+        if !receiver.is_empty() && !path.is_empty() {
+            self.router_prefixes
+                .asgi_mounts
+                .push(AsgiMountBinding { receiver, path });
+        }
+    }
+
     fn push_call_site(
         &mut self,
         owner_id: gather_step_core::NodeId,
@@ -2060,6 +2076,12 @@ fn visit_python(
                 && let Some(parent) = python_call_receiver(node, state.source)
             {
                 state.record_router_include_prefix(parent, variable, prefix);
+            }
+            if python_callee_name(node, state.source).as_deref() == Some("mount")
+                && let Some(path) = first_literal_argument(node, state.source)
+                && let Some(receiver) = python_call_receiver(node, state.source)
+            {
+                state.record_asgi_mount(receiver, path);
             }
             if let Some(owner_id) = owner
                 && let Some(function_node) = node

@@ -473,15 +473,15 @@ fn render_architecture_rule(
     write_header(&mut out, "Architecture");
     out.push_str("# Codebase Intelligence\n\n");
     out.push_str("## Repository Map\n");
-    out.push_str("| Repo | Frameworks | Files | Symbols | Depth | Routes | Topics |\n");
+    out.push_str("| Repo | Frameworks | Files | Symbols | Depth | Routes | Event Surfaces |\n");
     out.push_str("|---|---|---:|---:|---|---:|---:|\n");
     let mut repo_rows = 0_usize;
     for repo_name in repo_names {
         if let Some(repo) = registry.repo(repo_name) {
-            let (routes, topics) = count_virtual_surfaces(graph, repo_name)?;
+            let (routes, event_surfaces) = count_virtual_surfaces(graph, repo_name)?;
             let _ = writeln!(
                 out,
-                "| {repo} | {frameworks} | {files} | {symbols} | {depth} | {routes} | {topics} |",
+                "| {repo} | {frameworks} | {files} | {symbols} | {depth} | {routes} | {event_surfaces} |",
                 repo = sanitize_table_cell(repo_name),
                 frameworks = if repo.frameworks.is_empty() {
                     "-".to_owned()
@@ -503,9 +503,9 @@ fn render_architecture_rule(
         );
     }
 
-    out.push_str("\n## Cross-Repo Dependencies\n");
+    out.push_str("\n## Runtime And Contract Dependencies\n");
     out.push_str(
-        "One row per source repo. Targets are listed with the edge kinds that connect them, so dense workspaces stay readable.\n\n",
+        "Directional code, API, event, persistence, and shared-contract edges only. Ownership and co-change evidence are intentionally excluded.\n\n",
     );
     out.push_str("| Source Repo | Depends On |\n");
     out.push_str("|---|---|\n");
@@ -799,7 +799,10 @@ fn render_repo_rule(
         depth_label(registered.depth_level),
     );
 
-    out.push_str("## Cross-Repo Dependencies\n");
+    out.push_str("## Runtime And Contract Dependencies\n");
+    out.push_str(
+        "Ownership and co-change evidence are excluded from this directional dependency view.\n",
+    );
     let dependencies = cross_repo_deps(graph, repo_name)?;
     if dependencies.is_empty() {
         out.push_str("- No cross-repo dependencies detected.\n");
@@ -888,7 +891,7 @@ fn count_virtual_surfaces(
     repo_name: &str,
 ) -> Result<(usize, usize), ContextMdError> {
     let mut routes = 0_usize;
-    let mut topics = 0_usize;
+    let mut event_surfaces = 0_usize;
     let repo_names = [repo_name.to_owned()];
     for node in graph.nodes_by_type(NodeKind::Route)? {
         if node.is_virtual && virtual_node_relevant_to_repos(graph, &node, &repo_names)? {
@@ -904,11 +907,11 @@ fn count_virtual_surfaces(
     ] {
         for node in graph.nodes_by_type(kind)? {
             if node.is_virtual && virtual_node_relevant_to_repos(graph, &node, &repo_names)? {
-                topics += 1;
+                event_surfaces += 1;
             }
         }
     }
-    Ok((routes, topics))
+    Ok((routes, event_surfaces))
 }
 
 fn virtual_node_relevant_to_repos(

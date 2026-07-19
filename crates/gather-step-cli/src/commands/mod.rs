@@ -488,7 +488,12 @@ fn command_telemetry_name(command: Option<&Command>) -> &'static str {
         Some(Command::Pack(_)) => "pack",
         Some(Command::Events(_)) => "events",
         Some(Command::Conventions(_)) => "conventions",
-        Some(Command::PrReview(_)) => "pr-review",
+        Some(Command::PrReview(args)) => match args.command.as_ref() {
+            Some(pr_review::PrReviewSubcommand::Clean(_)) => "pr-review:clean",
+            Some(pr_review::PrReviewSubcommand::InitSet(_)) => "pr-review:init-set",
+            None if args.pr_set.is_some() || args.from_gh.is_some() => "pr-review:set",
+            None => "pr-review:run",
+        },
         Some(Command::Mcp(_)) => "mcp",
         None => "no-args",
     }

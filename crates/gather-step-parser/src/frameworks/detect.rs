@@ -287,10 +287,13 @@ pub fn is_react(repo_root: &Path) -> bool {
     has_any_dependency(repo_root, &["react"])
 }
 
-/// Returns `true` when `react-router` or `react-router-dom` is present.
+/// Returns `true` when React Router or TanStack Router is present.
 #[must_use]
 pub fn is_react_router(repo_root: &Path) -> bool {
-    has_any_dependency(repo_root, &["react-router", "react-router-dom"])
+    has_any_dependency(
+        repo_root,
+        &["react-router", "react-router-dom", "@tanstack/react-router"],
+    )
 }
 
 /// Returns `true` when `react-hook-form` is present.

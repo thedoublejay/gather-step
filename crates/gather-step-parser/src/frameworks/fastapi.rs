@@ -58,6 +58,37 @@ pub fn augment(parsed: &ParsedFile) -> FastapiAugmentation {
     for symbol in &parsed.symbols {
         add_route(symbol, &parsed.router_prefixes, &mut augmentation);
     }
+    for mount in &parsed.router_prefixes.asgi_mounts {
+        let path = join_route_path(&mount.path, "/:path");
+        let qualified_name = route_qn("MOUNT", &path);
+        let route_node = NodeData {
+            id: ref_node_id(NodeKind::Route, &qualified_name),
+            kind: NodeKind::Route,
+            repo: parsed.file_node.repo.clone(),
+            file_path: parsed.file_node.file_path.clone(),
+            name: qualified_name.clone(),
+            qualified_name: Some(qualified_name.clone()),
+            external_id: Some(qualified_name),
+            signature: Some(format!("{}.mount({})", mount.receiver, mount.path)),
+            visibility: None,
+            span: None,
+            is_virtual: true,
+            ai_role: None,
+        };
+        augmentation.edges.push(EdgeData {
+            source: parsed.file_node.id,
+            target: route_node.id,
+            kind: EdgeKind::Serves,
+            metadata: EdgeMetadata {
+                confidence: Some(950),
+                resolver: Some("fastapi_asgi_mount".to_owned()),
+                ..EdgeMetadata::default()
+            },
+            owner_file: parsed.file_node.id,
+            is_cross_file: false,
+        });
+        augmentation.nodes.push(route_node);
+    }
     augmentation
 }
 
@@ -355,5 +386,19 @@ def list_things():
             vec!["__route__GET__/things".to_owned()],
             "a dynamic prefix should keep only the bare route: {routes:?}"
         );
+    }
+
+    #[test]
+    fn asgi_mount_emits_a_static_mount_surface() {
+        let routes = route_ids(
+            r#"
+from fastapi import FastAPI
+from starlette.staticfiles import StaticFiles
+
+app = FastAPI()
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
+"#,
+        );
+        assert_eq!(routes, vec!["__route__MOUNT__/assets/:path".to_owned()]);
     }
 }
