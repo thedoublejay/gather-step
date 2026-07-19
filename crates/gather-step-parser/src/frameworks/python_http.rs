@@ -11,10 +11,10 @@
 //! (`get`/`post`/`put`/`patch`/`delete`/`head`/`options`) invoked through a
 //! recognised client receiver (`requests`/`httpx`/`aiohttp` modules, or a
 //! `client`/`session`/`http`/`api` instance with a URL-shaped literal), and only
-//! when the URL argument is a statically resolvable string — a quoted literal, a
-//! module-level string constant, or a `+`-concatenation of those. Dynamic URLs
-//! (f-strings, variables, keyword-only `url=`) are skipped rather than
-//! fabricated.
+//! when the URL argument is a safely resolvable string — literals, single-
+//! assignment local/module constants, f-strings, adjacent literals, or `+`
+//! concatenation. Dynamic values that cannot preserve a stable route shape are
+//! skipped rather than fabricated.
 //!
 //! Known recall gaps mirror the Kafka pack: module-level calls (no owning
 //! function) are not captured, since call sites require an owner, and aliased
@@ -166,16 +166,23 @@ fn url_looks_like_http_target(url: &str) -> bool {
 fn resolve_url(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(String, bool)> {
     let raw = call_site.raw_arguments.as_deref()?;
     let first = split_top_level(raw, ',').into_iter().next()?;
-    resolve_url_expression(parsed, first)
+    resolve_url_expression(parsed, first, 0)
 }
 
 /// Resolve a URL expression: a single literal/constant, or a `+`-concatenation
 /// of literals/constants. Returns `None` if any component is dynamic.
-fn resolve_url_expression(parsed: &ParsedFile, expression: &str) -> Option<(String, bool)> {
+fn resolve_url_expression(
+    parsed: &ParsedFile,
+    expression: &str,
+    depth: usize,
+) -> Option<(String, bool)> {
+    if depth > 4 {
+        return None;
+    }
     let mut url = String::new();
     let mut literal_only = true;
     for atom in split_top_level(expression, '+') {
-        let (value, is_literal) = resolve_atom(parsed, atom)?;
+        let (value, is_literal) = resolve_atom(parsed, atom, depth)?;
         url.push_str(&value);
         literal_only &= is_literal;
     }
@@ -186,15 +193,22 @@ fn resolve_url_expression(parsed: &ParsedFile, expression: &str) -> Option<(Stri
 /// Resolve a single atom to its string value: a quoted literal (`is_literal`
 /// true) or a module-level string constant (`is_literal` false). Returns `None`
 /// for dynamic values (variables, f-strings) so junk routes are never invented.
-fn resolve_atom(parsed: &ParsedFile, atom: &str) -> Option<(String, bool)> {
+fn resolve_atom(parsed: &ParsedFile, atom: &str, depth: usize) -> Option<(String, bool)> {
     let atom = atom.trim();
+    if let Some(literal) = adjacent_string_literals(atom) {
+        return Some((literal, true));
+    }
     if let Some(literal) = string_literal(atom) {
         return Some((literal, true));
     }
-    parsed
-        .constant_strings
-        .get(atom)
-        .map(|value| (value.clone(), false))
+    if let Some(template) = f_string(parsed, atom, depth) {
+        return Some((template, false));
+    }
+    if let Some(value) = parsed.constant_strings.get(atom) {
+        return Some((value.clone(), false));
+    }
+    let assignment = single_assignment(&parsed.source, atom)?;
+    resolve_url_expression(parsed, assignment, depth + 1).map(|(value, _)| (value, false))
 }
 
 /// Inner text of a plain quoted string literal, or `None` for prefixed strings
@@ -209,6 +223,107 @@ fn string_literal(atom: &str) -> Option<String> {
         return Some(atom[1..atom.len() - 1].to_owned());
     }
     None
+}
+
+fn adjacent_string_literals(expression: &str) -> Option<String> {
+    let mut rest = expression.trim();
+    let mut value = String::new();
+    let mut count = 0_usize;
+    while !rest.is_empty() {
+        let quote = rest.as_bytes().first().copied()?;
+        if !matches!(quote, b'\'' | b'"') {
+            return None;
+        }
+        let mut escaped = false;
+        let mut end = None;
+        for (index, byte) in rest.as_bytes().iter().copied().enumerate().skip(1) {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == quote {
+                end = Some(index);
+                break;
+            }
+        }
+        let end = end?;
+        value.push_str(&rest[1..end]);
+        count += 1;
+        rest = rest[end + 1..].trim_start();
+    }
+    (count > 1).then_some(value)
+}
+
+fn f_string(parsed: &ParsedFile, expression: &str, depth: usize) -> Option<String> {
+    let expression = expression.trim();
+    let quote_offset = expression
+        .char_indices()
+        .find_map(|(index, character)| matches!(character, '\'' | '"').then_some(index))?;
+    let prefix = &expression[..quote_offset];
+    if !prefix
+        .chars()
+        .any(|character| matches!(character, 'f' | 'F'))
+    {
+        return None;
+    }
+    let quote = expression.as_bytes()[quote_offset];
+    if expression.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let template = &expression[quote_offset + 1..expression.len() - 1];
+    let mut output = String::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        output.push_str(&rest[..open]);
+        let expression = &rest[open + 1..];
+        let close = expression.find('}')?;
+        let interpolation = expression[..close]
+            .split(['!', ':'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if interpolation.is_empty() {
+            return None;
+        }
+        if let Some((resolved, _)) = resolve_atom(parsed, interpolation, depth + 1) {
+            output.push_str(&resolved);
+        } else {
+            let parameter = interpolation
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .filter(|part| !part.is_empty())
+                .next_back()?;
+            output.push(':');
+            output.push_str(parameter);
+        }
+        rest = &expression[close + 1..];
+    }
+    output.push_str(rest);
+    Some(output)
+}
+
+fn single_assignment<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let mut values = source.lines().filter_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix(name)?;
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return None;
+        }
+        let value = rest.trim_start().strip_prefix('=')?.trim();
+        (!value.is_empty()).then_some(value)
+    });
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
 }
 
 fn emit_route(
@@ -468,20 +583,46 @@ def handler(redis_client, db_session):
     }
 
     #[test]
-    fn dynamic_urls_are_skipped() {
+    fn local_string_and_f_string_preserve_static_route_shape() {
         let dir = TestDir::new("dynamic");
         let parsed = parse(
             &dir,
             "dynamic.py",
             r#"
 def load(client, path, item_id):
+    base_url = "https://assets.example"
     client.get(path)
-    client.get(f"/items/{item_id}")
+    client.get(f"{base_url}/items/{item_id}?include=owner#details")
 "#,
         );
 
-        assert!(route_ids(&parsed).is_empty());
-        assert_eq!(edge_count(&parsed, EdgeKind::ConsumesApiFrom), 0);
+        assert_eq!(
+            route_ids(&parsed),
+            vec!["__route__GET__/items/:item_id".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::ConsumesApiFrom), 1);
+    }
+
+    #[test]
+    fn adjacent_literals_and_concatenated_locals_form_one_clean_route() {
+        let dir = TestDir::new("adjacent-literals");
+        let parsed = parse(
+            &dir,
+            "client.py",
+            r#"
+import httpx
+
+
+def load_assets():
+    return httpx.get("/api" "/assets" "?sort=desc")
+"#,
+        );
+
+        assert_eq!(
+            route_ids(&parsed),
+            vec!["__route__GET__/api/assets".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::ConsumesApiFrom), 1);
     }
 
     #[test]
