@@ -37,11 +37,20 @@ pub fn classify_source_scope(path: &str) -> SourceScope {
     if path.is_empty() || path == "__virtual__" {
         return SourceScope::Unknown;
     }
-    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let mut normalized = path.replace('\\', "/");
+    normalized.make_ascii_lowercase();
     let file_name = Path::new(&normalized)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(normalized.as_str());
+    let file_path = Path::new(file_name);
+    let extension = file_path
+        .extension()
+        .and_then(|extension| extension.to_str());
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name);
     let components = normalized.split('/').collect::<Vec<_>>();
 
     if components.iter().any(|component| {
@@ -64,19 +73,12 @@ pub fn classify_source_scope(path: &str) -> SourceScope {
     if components
         .iter()
         .any(|component| matches!(*component, "test" | "tests" | "__tests__"))
-        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
-        || file_name.ends_with("_test.py")
-        || [
-            ".test.ts",
-            ".test.tsx",
-            ".test.js",
-            ".test.jsx",
-            ".spec.ts",
-            ".spec.tsx",
-        ]
-        .iter()
-        .any(|suffix| file_name.ends_with(suffix))
-        || file_name.ends_with("_test.rs")
+        || (extension == Some("py")
+            && (file_name.starts_with("test_") || file_stem.ends_with("_test")))
+        || (matches!(extension, Some("ts" | "tsx"))
+            && (file_stem.ends_with(".test") || file_stem.ends_with(".spec")))
+        || (matches!(extension, Some("js" | "jsx")) && file_stem.ends_with(".test"))
+        || (extension == Some("rs") && file_stem.ends_with("_test"))
     {
         return SourceScope::Test;
     }
