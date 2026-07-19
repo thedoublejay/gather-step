@@ -139,15 +139,12 @@ fn producer_proxy(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(
             .next()
             .is_some_and(|name| name.trim() == topic_parameter)
     })?;
-    let receiver_offset = if parameters
-        .first()
-        .and_then(|parameter| parameter.split([':', '=']).next())
-        .is_some_and(|name| matches!(name.trim(), "self" | "cls"))
-    {
-        1
-    } else {
-        0
-    };
+    let receiver_offset = usize::from(
+        parameters
+            .first()
+            .and_then(|parameter| parameter.split([':', '=']).next())
+            .is_some_and(|name| matches!(name.trim(), "self" | "cls")),
+    );
     let call_index = parameter_index.checked_sub(receiver_offset)?;
     Some((owner.node.name.clone(), call_index))
 }
