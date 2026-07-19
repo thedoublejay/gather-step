@@ -122,7 +122,7 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     ("doctor", "Run health checks against the workspace"),
     ("log", "Inspect local run and error telemetry"),
     ("search", "Search indexed symbols, files, and concepts"),
-    ("trace", "Trace impact, events, or routes from a target"),
+    ("trace", "Trace CRUD reachability from a symbol or route"),
     ("impact", "Inspect change-impact for a symbol or file"),
     (
         "cross-repo-deps",
@@ -227,36 +227,74 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(about = "Discover repos, write a config, and run the setup wizard")]
     Init(init::InitArgs),
+    #[command(about = "Index configured repos into the workspace graph")]
     Index(index::IndexArgs),
+    #[command(about = "Remove indexed state and storage artifacts")]
     Clean(clean::CleanArgs),
+    #[command(about = "Compact storage in place to reclaim space")]
     Compact(compact::CompactArgs),
+    #[command(about = "Re-index repos with full or selective coverage")]
     Reindex(reindex::ReindexArgs),
+    #[command(about = "Search indexed symbols, files, and concepts")]
     Search(search::SearchArgs),
+    #[command(about = "Trace CRUD reachability from a symbol or route")]
     Trace(trace::TraceArgs),
+    #[command(about = "Run the long-lived JSON-API server")]
     Serve(serve::ServeArgs),
+    #[command(about = "Watch repos for changes and incrementally re-index")]
     Watch(watch::WatchArgs),
+    #[command(about = "Launch the interactive terminal UI")]
     Tui(tui::TuiArgs),
+    #[command(about = "Register gather-step as an MCP server")]
     SetupMcp(setup_mcp::SetupMcpArgs),
+    #[command(about = "Show indexing status and counts per repo")]
     Status(status::StatusArgs),
-    #[command(name = "storage-report")]
+    #[command(
+        name = "storage-report",
+        about = "Print storage size and segment breakdown"
+    )]
     StorageReport(storage_report::StorageReportArgs),
+    #[command(about = "Run health checks against the workspace")]
     Doctor(doctor::DoctorArgs),
+    #[command(about = "Inspect local run and error telemetry")]
     Log(log::LogArgs),
+    #[command(about = "Generate AI docs (claude-md, agents-md, codeowners)")]
     Generate(generate::GenerateCommand),
+    #[command(about = "Inspect change impact for a symbol or file")]
     Impact(impact::ImpactArgs),
-    #[command(name = "cross-repo-deps", visible_alias = "cross_repo_deps")]
+    #[command(
+        name = "cross-repo-deps",
+        visible_alias = "cross_repo_deps",
+        about = "Inspect cross-repo dependency edges per configured repo"
+    )]
     CrossRepoDeps(cross_repo_deps::CrossRepoDepsArgs),
-    #[command(name = "who-consumes", visible_alias = "who_consumes")]
+    #[command(
+        name = "who-consumes",
+        visible_alias = "who_consumes",
+        about = "Find which repos consume what a symbol's file produces"
+    )]
     WhoConsumes(who_consumes::WhoConsumesArgs),
+    #[command(about = "Trace projected fields, filters, and backfill evidence")]
     ProjectionImpact(projection_impact::ProjectionImpactArgs),
+    #[command(about = "Inspect deployment topology and shared infra")]
     DeploymentTopology(deployment_topology::DeploymentTopologyArgs),
-    #[command(name = "qa-evidence")]
+    #[command(
+        name = "qa-evidence",
+        about = "Emit canonical code-evidence metadata for QA planning"
+    )]
     QaEvidence(qa_evidence::QaEvidenceArgs),
+    #[command(about = "Render task, planning, debug, and review context packs")]
     Pack(pack::PackArgs),
+    #[command(about = "Inspect events, queues, and orphan topics")]
     Events(events::EventsArgs),
+    #[command(about = "Summarize detected workspace conventions")]
     Conventions(conventions::ConventionsArgs),
-    #[command(name = "pr-review")]
+    #[command(
+        name = "pr-review",
+        about = "Build a disposable PR-scoped review and emit the delta report"
+    )]
     PrReview(pr_review::PrReviewArgs),
     #[command(hide = true)]
     Mcp(McpCommand),
@@ -698,6 +736,21 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(rendered_commands, clap_commands);
+    }
+
+    #[test]
+    fn visible_subcommands_have_discoverable_help_text() {
+        let command = Cli::command();
+        for subcommand in command
+            .get_subcommands()
+            .filter(|subcommand| subcommand.get_name() != "mcp")
+        {
+            assert!(
+                subcommand.get_about().is_some(),
+                "{} is missing its one-line help description",
+                subcommand.get_name()
+            );
+        }
     }
 
     #[test]
