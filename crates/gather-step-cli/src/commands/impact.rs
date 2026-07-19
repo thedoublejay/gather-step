@@ -12,7 +12,8 @@ use gather_step_analysis::{
 };
 use gather_step_core::{EdgeKind, NodeId, NodeKind};
 use gather_step_storage::{
-    GraphStore, MetadataStore, PayloadContractQuery, SearchStore, StorageCoordinator,
+    GraphStore, MetadataStore, PayloadContractQuery, SearchFilters, SearchStore,
+    StorageCoordinator, TantivySearchStore,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -745,18 +746,36 @@ fn node_kind_matches_shape(kind: NodeKind, shape: QueryShape) -> bool {
 
 fn is_strict_impact_match(hit: &gather_step_storage::SearchHit, query: &str) -> bool {
     let tail = impact_query_tail(query);
-    hit.symbol_name == query || hit.symbol_name == tail
+    hit.symbol_name == query
+        || hit.symbol_name == tail
+        || is_canonical_shared_impact_match(hit, tail)
 }
 
 fn search_impact_hits(
-    search: &impl SearchStore,
+    search: &TantivySearchStore,
     query: &str,
     limit: usize,
 ) -> Result<Vec<gather_step_storage::SearchHit>> {
-    let hits = search
+    let mut hits = search
         .search(query, limit)
         .with_context(|| format!("searching for `{query}`"))?;
     if !hits.is_empty() {
+        if !is_qualified_impact_query(query) {
+            let broad_hits = search
+                .search_ranked_candidates_filtered(query, limit, SearchFilters::default())
+                .with_context(|| format!("searching for canonical aliases of `{query}`"))?;
+            let mut merged = broad_hits
+                .into_iter()
+                .filter(|hit| is_canonical_shared_impact_match(hit, query))
+                .collect::<Vec<_>>();
+            let mut seen = merged
+                .iter()
+                .map(|hit| hit.node_id)
+                .collect::<BTreeSet<_>>();
+            merged.extend(hits.drain(..).filter(|hit| seen.insert(hit.node_id)));
+            merged.truncate(limit);
+            hits = merged;
+        }
         return Ok(hits);
     }
 
@@ -768,6 +787,15 @@ fn search_impact_hits(
     search
         .search(tail, limit)
         .with_context(|| format!("searching for `{tail}` as fallback for `{query}`"))
+}
+
+fn is_canonical_shared_impact_match(hit: &gather_step_storage::SearchHit, target: &str) -> bool {
+    hit.node_kind == NodeKind::SharedSymbol
+        && hit
+            .symbol_name
+            .rsplit("__")
+            .next()
+            .is_some_and(|name| name == target)
 }
 
 fn impact_query_tail(query: &str) -> &str {
