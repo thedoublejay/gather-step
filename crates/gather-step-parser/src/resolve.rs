@@ -958,10 +958,13 @@ impl<'a> SymbolIndex<'a> {
         import_map: &FxHashMap<String, Vec<&'a NodeData>>,
         import_bindings: &[ImportBinding],
     ) -> Option<(&'a NodeData, ResolutionStrategy, f32)> {
-        if is_python_source(call_site.source_path.as_path())
-            && !self.python_dotted_receiver_has_resolution_evidence(call_site, import_bindings)
-        {
-            return None;
+        if is_python_source(call_site.source_path.as_path()) {
+            if let Some(target) = self.resolve_python_typed_call(call_site, import_bindings) {
+                return Some((target, ResolutionStrategy::Suffix, 0.92));
+            }
+            if !self.python_dotted_receiver_has_resolution_evidence(call_site, import_bindings) {
+                return None;
+            }
         }
         let qualified_hint_uses_import_head =
             qualified_hint_import_head_matches(call_site, import_bindings);
@@ -1037,6 +1040,77 @@ impl<'a> SymbolIndex<'a> {
                 ),
             )
         })
+    }
+
+    fn resolve_python_typed_call(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> Option<&'a NodeData> {
+        let hint = call_site.callee_qualified_hint.as_deref()?;
+        let (receiver, method) = hint.rsplit_once('.')?;
+        if matches!(receiver, "self" | "cls") {
+            return None;
+        }
+        let receiver_type =
+            infer_python_receiver_type(&call_site.source_path, receiver, import_bindings)?;
+        self.resolve_python_method_with_mro(
+            &call_site.source_path,
+            receiver_type.as_str(),
+            method,
+            0,
+            &mut FxHashSet::default(),
+        )
+    }
+
+    fn resolve_python_method_with_mro(
+        &self,
+        source_file: &Path,
+        class_name: &str,
+        method: &str,
+        depth: usize,
+        seen: &mut FxHashSet<String>,
+    ) -> Option<&'a NodeData> {
+        if depth > 8 || !seen.insert(class_name.to_owned()) {
+            return None;
+        }
+        let qualified = format!("{class_name}.{method}");
+        if let Some(nodes) = self.by_qualified_name.get(qualified.as_str())
+            && let Some(node) = nodes.first().copied()
+        {
+            return Some(node);
+        }
+        if let Some((node, _)) = self.resolve_by_suffix(&qualified) {
+            return Some(node);
+        }
+
+        let class_nodes = self.by_name.get(class_name)?;
+        for class_node in class_nodes {
+            if class_node.kind != gather_step_core::NodeKind::Class {
+                continue;
+            }
+            let path = self.repo_root.join(&class_node.file_path);
+            let Some(parsed) = self.load_parsed_file(source_file, &path) else {
+                continue;
+            };
+            let Some(class_symbol) = parsed.symbols.iter().find(|symbol| {
+                symbol.node.kind == gather_step_core::NodeKind::Class
+                    && symbol.node.name == class_name
+            }) else {
+                continue;
+            };
+            for base in &class_symbol.base_classes {
+                let Some(base) = python_type_name(base) else {
+                    continue;
+                };
+                if let Some(target) =
+                    self.resolve_python_method_with_mro(source_file, &base, method, depth + 1, seen)
+                {
+                    return Some(target);
+                }
+            }
+        }
+        None
     }
 
     fn python_dotted_receiver_has_resolution_evidence(
@@ -1309,6 +1383,171 @@ fn qualified_hint_import_head_matches(
     import_bindings
         .iter()
         .any(|binding| binding.local_name == head)
+}
+
+fn infer_python_receiver_type(
+    source_path: &Path,
+    receiver: &str,
+    import_bindings: &[ImportBinding],
+) -> Option<String> {
+    let source = std::fs::read_to_string(source_path).ok()?;
+    infer_python_binding_type(&source, receiver, import_bindings, 0)
+}
+
+fn infer_python_binding_type(
+    source: &str,
+    binding: &str,
+    import_bindings: &[ImportBinding],
+    depth: usize,
+) -> Option<String> {
+    if depth > 6 {
+        return None;
+    }
+
+    if let Some(annotation) = python_binding_annotation(source, binding) {
+        return python_type_name(annotation);
+    }
+
+    let assignment = python_binding_assignment(source, binding)?;
+    if let Some(factory) = python_dependency_factory(assignment) {
+        return python_factory_return_type(source, factory, import_bindings);
+    }
+    if let Some(constructor) = python_constructor_name(assignment) {
+        return Some(constructor);
+    }
+
+    let alias = assignment
+        .trim()
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .next()?;
+    if alias.is_empty() || alias == binding {
+        return None;
+    }
+    infer_python_binding_type(source, alias, import_bindings, depth + 1)
+}
+
+fn python_binding_annotation<'a>(source: &'a str, binding: &str) -> Option<&'a str> {
+    python_binding_suffixes(source, binding)
+        .into_iter()
+        .find_map(|suffix| {
+            let annotation = suffix.trim_start().strip_prefix(':')?.trim_start();
+            let end = annotation
+                .find(['=', ',', ')', '\n'])
+                .unwrap_or(annotation.len());
+            let annotation = annotation[..end].trim();
+            (!annotation.is_empty()).then_some(annotation)
+        })
+}
+
+fn python_binding_assignment<'a>(source: &'a str, binding: &str) -> Option<&'a str> {
+    python_binding_suffixes(source, binding)
+        .into_iter()
+        .find_map(|suffix| {
+            let suffix = suffix.trim_start();
+            let value = if let Some(value) = suffix.strip_prefix('=') {
+                value
+            } else if let Some(annotation) = suffix.strip_prefix(':') {
+                let equals = annotation.find('=')?;
+                &annotation[equals + 1..]
+            } else {
+                return None;
+            };
+            let end = value.find(['\n', '#']).unwrap_or(value.len());
+            let value = value[..end].trim();
+            (!value.is_empty()).then_some(value)
+        })
+}
+
+fn python_binding_suffixes<'a>(source: &'a str, binding: &str) -> Vec<&'a str> {
+    source
+        .match_indices(binding)
+        .filter_map(|(offset, _)| {
+            let before = source[..offset].chars().next_back();
+            let end = offset + binding.len();
+            let after = source[end..].chars().next();
+            let boundary_before = before.is_none_or(|character| {
+                !character.is_ascii_alphanumeric() && character != '_' && character != '.'
+            });
+            let boundary_after = after
+                .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_');
+            (boundary_before && boundary_after).then_some(&source[end..])
+        })
+        .collect()
+}
+
+fn python_dependency_factory(value: &str) -> Option<&str> {
+    let arguments = value.trim().strip_prefix("Depends")?.trim_start();
+    let arguments = arguments.strip_prefix('(')?.trim_start();
+    let end = arguments
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .unwrap_or(arguments.len());
+    (end > 0).then_some(&arguments[..end])
+}
+
+fn python_constructor_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    let open = value.find('(')?;
+    python_type_name(&value[..open])
+}
+
+fn python_factory_return_type(
+    source: &str,
+    factory: &str,
+    import_bindings: &[ImportBinding],
+) -> Option<String> {
+    if let Some(return_type) = python_function_return_annotation(source, factory) {
+        return python_type_name(return_type);
+    }
+    let binding = import_bindings
+        .iter()
+        .find(|binding| binding.local_name == factory)?;
+    let path = binding.resolved_path.as_ref()?;
+    let imported_source = std::fs::read_to_string(path).ok()?;
+    let imported_name = binding.imported_name.as_deref().unwrap_or(factory);
+    python_function_return_annotation(&imported_source, imported_name).and_then(python_type_name)
+}
+
+fn python_function_return_annotation<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let declaration = format!("def {name}");
+    source.match_indices(&declaration).find_map(|(offset, _)| {
+        let signature = &source[offset + declaration.len()..];
+        let parameters_end = signature.find(')')?;
+        let returns = signature[parameters_end + 1..].trim_start();
+        let returns = returns.strip_prefix("->")?.trim_start();
+        let body = returns.find([':', '\n'])?;
+        let annotation = returns[..body].trim();
+        (!annotation.is_empty()).then_some(annotation)
+    })
+}
+
+fn python_type_name(raw: &str) -> Option<String> {
+    const WRAPPERS: &[&str] = &[
+        "Annotated",
+        "Awaitable",
+        "Callable",
+        "ClassVar",
+        "Coroutine",
+        "Final",
+        "Iterable",
+        "Iterator",
+        "Literal",
+        "Mapping",
+        "Optional",
+        "Sequence",
+        "Type",
+        "Union",
+    ];
+
+    raw.trim_matches(|character: char| character.is_whitespace() || matches!(character, '\'' | '"'))
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '.'
+        })
+        .filter_map(|candidate| candidate.rsplit('.').next())
+        .find(|candidate| {
+            candidate.chars().next().is_some_and(char::is_uppercase)
+                && !WRAPPERS.contains(candidate)
+        })
+        .map(ToOwned::to_owned)
 }
 
 #[expect(
@@ -1893,6 +2132,104 @@ mod tests {
         assert!(outcome.resolved.is_empty());
         assert_eq!(outcome.unresolved.len(), 1);
         assert_eq!(outcome.unresolved[0].call_sites[0].callee_name, "search");
+    }
+
+    #[test]
+    fn python_annotated_dependency_receiver_resolves_to_declared_type() {
+        let temp = TempDir::new("python-annotated-receiver");
+        temp.write(
+            "src/handler.py",
+            r#"
+def get_asset_service() -> AssetService:
+    return AssetService()
+
+def handle(service: AssetService = Depends(get_asset_service)):
+    service.delete("asset-1")
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let service_class = class_node("src/asset_service.py", "AssetService");
+        let mut target = function_node("src/asset_service.py", "delete");
+        target.qualified_name = Some("AssetService.delete".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), service_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "delete".to_owned(),
+                    callee_qualified_hint: Some("service.delete".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert_eq!(outcome.resolved[0].confidence, 0.92);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_instance_field_and_base_class_method_resolve_from_annotations() {
+        let temp = TempDir::new("python-inherited-receiver");
+        temp.write(
+            "src/handler.py",
+            r#"
+class Handler:
+    def __init__(self, repository: AssetRepository):
+        self.repository = repository
+
+    def handle(self):
+        self.repository.remove("asset-1")
+"#,
+        );
+        temp.write(
+            "src/asset_repository.py",
+            r#"
+class BaseRepository:
+    def remove(self, asset_id: str):
+        pass
+
+class AssetRepository(BaseRepository):
+    pass
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let repository_class = class_node("src/asset_repository.py", "AssetRepository");
+        let base_class = class_node("src/asset_repository.py", "BaseRepository");
+        let mut target = function_node("src/asset_repository.py", "remove");
+        target.qualified_name = Some("BaseRepository.remove".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &[owner.clone(), repository_class, base_class, target.clone()],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "remove".to_owned(),
+                    callee_qualified_hint: Some("self.repository.remove".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, target.id);
+        assert!(outcome.unresolved.is_empty());
     }
 
     #[test]
