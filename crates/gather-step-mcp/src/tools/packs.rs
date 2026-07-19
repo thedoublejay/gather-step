@@ -44,7 +44,7 @@ use crate::{
         labels::node_kind_label,
         search::{
             SearchRequest, SearchResultItem, SymbolRequest, SymbolResponseData, TraversalNode,
-            TraversalRequest, get_callees, get_callers, get_symbol, search_symbols,
+            TraversalRequest, get_callees, get_callers, get_symbol, search_symbol_candidates,
         },
     },
 };
@@ -3488,7 +3488,7 @@ fn resolve_pack_target(
     }
 
     // Anchor 2 & 5: symbol search
-    let search = search_symbols(
+    let search = search_symbol_candidates(
         ctx,
         SearchRequest {
             budget_bytes: None,

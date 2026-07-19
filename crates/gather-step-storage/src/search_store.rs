@@ -800,6 +800,43 @@ impl TantivySearchStore {
             .map(|scored| scored.hit)
             .collect())
     }
+
+    /// Return the full ranked candidate set without the exact-qualified-name
+    /// early return. Planning tools use this to compare a concrete declaration
+    /// with canonical virtual aliases for the same bare symbol.
+    pub fn search_ranked_candidates_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_writer_health_for_reads();
+        self.refresh_reader_if_needed()?;
+        self.search_ranked_candidates_after_refresh(trimmed, limit, filters)
+    }
+
+    fn search_ranked_candidates_after_refresh(
+        &self,
+        query: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let exact_hits = self.execute_search(query, limit, true, false, filters)?;
+        if !exact_hits.is_empty() {
+            return Ok(exact_hits);
+        }
+
+        let fuzzy_hits = self.execute_search(query, limit, false, true, filters)?;
+        if !fuzzy_hits.is_empty() {
+            return Ok(fuzzy_hits);
+        }
+
+        self.execute_search_disjunctive(query, limit, filters)
+    }
 }
 
 impl SearchStore for TantivySearchStore {
@@ -827,29 +864,12 @@ impl SearchStore for TantivySearchStore {
         self.ensure_writer_health_for_reads();
         self.refresh_reader_if_needed()?;
 
-        if is_qualified_name_query(trimmed) {
-            let qualified_name_hits = self.execute_exact_qualified_name(trimmed, limit, filters)?;
-            if !qualified_name_hits.is_empty() {
-                return Ok(qualified_name_hits);
-            }
+        let qualified_name_hits = self.execute_exact_qualified_name(trimmed, limit, filters)?;
+        if !qualified_name_hits.is_empty() {
+            return Ok(qualified_name_hits);
         }
 
-        let exact_hits = self.execute_search(trimmed, limit, true, false, filters)?;
-        if !exact_hits.is_empty() {
-            return Ok(exact_hits);
-        }
-
-        let fuzzy_hits = self.execute_search(trimmed, limit, false, true, filters)?;
-        if !fuzzy_hits.is_empty() {
-            return Ok(fuzzy_hits);
-        }
-
-        // Both conjunctive passes require every query term to match, so a
-        // multi-word capability query ("email notification delivery") returns
-        // nothing when a symbol covers only some terms. Fall back to a
-        // disjunction with a majority floor so reuse-discovery queries still
-        // surface partial matches instead of an empty result.
-        self.execute_search_disjunctive(trimmed, limit, filters)
+        self.search_ranked_candidates_after_refresh(trimmed, limit, filters)
     }
 
     fn delete_by_files(&self, files: &[(&str, &str)]) -> Result<(), SearchStoreError> {
@@ -877,10 +897,6 @@ impl SearchStore for TantivySearchStore {
         }
         self.commit()
     }
-}
-
-fn is_qualified_name_query(query: &str) -> bool {
-    query.contains("::") || query.contains('.') || query.contains('#')
 }
 
 impl SearchDocument {
@@ -2061,7 +2077,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_symbol_lookup_keeps_canonical_shared_candidates() {
+    fn ranked_bare_symbol_lookup_keeps_canonical_shared_candidates() {
         let store = TantivySearchStore::open(temp_search_dir("bare-symbol-candidates"))
             .expect("store should open");
         let mut declaration = node("CreateOrderInput", "src/order.ts");
@@ -2096,12 +2112,18 @@ mod tests {
             .expect("documents should index");
 
         let hits = store
-            .search("CreateOrderInput", 10)
+            .search_ranked_candidates_filtered("CreateOrderInput", 10, SearchFilters::default())
             .expect("bare symbol search should succeed");
         let hit_ids = hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>();
 
         assert!(hit_ids.contains(&declaration.id));
         assert!(hit_ids.contains(&canonical.id));
+
+        let exact = store
+            .search("CreateOrderInput", 10)
+            .expect("ordinary search should preserve exact semantics");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].node_id, declaration.id);
     }
 
     #[test]
