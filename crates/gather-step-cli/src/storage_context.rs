@@ -506,10 +506,14 @@ impl StorageContext {
         match &result {
             Ok(_) => crate::app::mark_graph_availability("available"),
             Err(error) => {
-                let message = error.to_string().to_ascii_lowercase();
-                if message.contains("lock") || message.contains("already open") {
+                let message = error.to_string();
+                if contains_ascii_case_insensitive(&message, "lock")
+                    || contains_ascii_case_insensitive(&message, "already open")
+                {
                     crate::app::mark_graph_availability("locked");
-                } else if message.contains("not found") || message.contains("no such file") {
+                } else if contains_ascii_case_insensitive(&message, "not found")
+                    || contains_ascii_case_insensitive(&message, "no such file")
+                {
                     crate::app::mark_graph_availability("missing");
                 } else {
                     crate::app::mark_graph_availability("corrupt");
@@ -529,6 +533,13 @@ impl StorageContext {
     pub fn mcp_server_config(&self) -> McpServerConfig {
         McpServerConfig::new(self.registry_path.clone(), self.graph_path.clone())
     }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[cfg(test)]

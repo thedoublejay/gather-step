@@ -139,12 +139,15 @@ fn producer_proxy(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(
             .next()
             .is_some_and(|name| name.trim() == topic_parameter)
     })?;
-    let receiver_offset = parameters
+    let receiver_offset = if parameters
         .first()
         .and_then(|parameter| parameter.split([':', '=']).next())
         .is_some_and(|name| matches!(name.trim(), "self" | "cls"))
-        .then_some(1)
-        .unwrap_or(0);
+    {
+        1
+    } else {
+        0
+    };
     let call_index = parameter_index.checked_sub(receiver_offset)?;
     Some((owner.node.name.clone(), call_index))
 }
@@ -492,7 +495,7 @@ fn imported_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<Str
 /// deliberately gated to enum type names containing event/topic/kafka so
 /// arbitrary dotted attributes do not become event nodes. A workspace-level
 /// enum-value reconciliation pass may later join the symbolic node to a
-/// canonical wire value; guessing a value from PascalCase would invent edges.
+/// canonical wire value; guessing a value from `PascalCase` would invent edges.
 fn external_enum_member_topic(argument: &str) -> Option<String> {
     let (enum_name, member) = argument.rsplit_once('.')?;
     if !["event", "topic", "kafka"]

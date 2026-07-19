@@ -20,7 +20,9 @@
 //! function) are not captured, since call sites require an owner, and aliased
 //! imports (`import requests as r`) are not tracked.
 
-use gather_step_core::{EdgeKind, NodeKind, canonical_route_path, route_qn};
+use gather_step_core::{
+    EdgeKind, NodeKind, SourceScope, canonical_route_path, classify_source_scope, route_qn,
+};
 use std::path::Path;
 
 use crate::{
@@ -78,13 +80,7 @@ fn resolve_consumed_route(
 }
 
 fn is_test_source(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    let file_name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
-    normalized.contains("/tests/")
-        || normalized.starts_with("tests/")
-        || normalized.contains("/__tests__/")
-        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
-        || file_name.ends_with("_test.py")
+    classify_source_scope(path.to_string_lossy().as_ref()) == SourceScope::Test
 }
 
 /// Upper-cased HTTP method for a call site, or `None` when the call is not an
@@ -311,8 +307,7 @@ fn f_string(
             }
             let parameter = interpolation
                 .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .filter(|part| !part.is_empty())
-                .next_back()?;
+                .rfind(|part| !part.is_empty())?;
             output.push(':');
             output.push_str(parameter);
         }

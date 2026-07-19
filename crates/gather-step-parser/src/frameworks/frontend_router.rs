@@ -5,7 +5,7 @@
 //! 1. **React Router** — `createBrowserRouter`, `createHashRouter`,
 //!    `createMemoryRouter`, navigation hooks (`useNavigate`, `useLocation`,
 //!    `useParams`, `useSearchParams`), JSX `<Route path="…">` components, and
-//!    TanStack Router `createFileRoute("…")` declarations.
+//!    `TanStack` Router `createFileRoute("…")` declarations.
 //! 2. **Zustand** — `create(…)` store factories detected by owner-name or
 //!    qualified-hint heuristics.
 //! 3. **Redux / Redux Saga** — `createStore`, `configureStore`, `createSlice`,

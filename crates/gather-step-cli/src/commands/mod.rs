@@ -605,10 +605,9 @@ pub(crate) fn telemetry_root() -> Option<PathBuf> {
 
 fn telemetry_enabled() -> bool {
     std::env::var("GATHER_STEP_TELEMETRY").map_or(true, |value| {
-        !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "off" | "0" | "false"
-        )
+        !["off", "0", "false"]
+            .iter()
+            .any(|disabled| value.trim().eq_ignore_ascii_case(disabled))
     })
 }
 

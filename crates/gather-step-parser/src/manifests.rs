@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, virtual_node,
 };
@@ -209,10 +211,18 @@ pub fn extract_package_manifest(
 ) -> Result<ManifestExtraction, ManifestError> {
     let parsed = if file_path.ends_with("pyproject.toml") {
         parse_python_project_manifest_str(raw)?
-    } else if file_path
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.starts_with("requirements") && name.ends_with(".txt"))
+    } else if Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            Path::new(name)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.starts_with("requirements"))
+                && Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+        })
     {
         parse_requirements_manifest_str(raw)
     } else {
@@ -315,7 +325,8 @@ fn manifest_edge(source: NodeId, target: NodeId, kind: EdgeKind, owner_file: Nod
 }
 
 fn is_shared_dependency(package: &str) -> bool {
-    let normalized = package.to_ascii_lowercase().replace('_', "-");
+    let mut normalized = package.replace('_', "-");
+    normalized.make_ascii_lowercase();
     package.starts_with("@workspace/")
         || package.starts_with("@shared/")
         || normalized.contains("shared")

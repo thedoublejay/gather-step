@@ -435,21 +435,26 @@ pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
 fn is_non_actionable_test_file(path: &Path) -> bool {
     let path = path.to_string_lossy();
     let file_name = path.rsplit('/').next().unwrap_or(path.as_ref());
+    let file_path = Path::new(file_name);
+    let extension = file_path
+        .extension()
+        .and_then(|extension| extension.to_str());
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name);
+    let secondary_marker = Path::new(file_stem)
+        .extension()
+        .and_then(|marker| marker.to_str());
     path.contains("/cypress/")
         || path.contains("/__tests__/")
         || path.contains("/__mocks__/")
         || path.contains("/tests/")
         || path.starts_with("tests/")
-        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
-        || file_name.ends_with("_test.py")
-        || path.ends_with(".cy.ts")
-        || path.ends_with(".cy.tsx")
-        || path.ends_with(".cy.js")
-        || path.ends_with(".cy.jsx")
-        || path.ends_with(".stories.ts")
-        || path.ends_with(".stories.tsx")
-        || path.ends_with(".stories.js")
-        || path.ends_with(".stories.jsx")
+        || (extension == Some("py")
+            && (file_name.starts_with("test_") || file_stem.ends_with("_test")))
+        || (matches!(extension, Some("ts" | "tsx" | "js" | "jsx"))
+            && matches!(secondary_marker, Some("cy" | "stories")))
 }
 
 fn is_python_source(path: &Path) -> bool {
@@ -474,9 +479,9 @@ fn is_invalid_python_nested_self_target(call_site: &CallSite, target: &NodeData)
 }
 
 fn is_non_actionable_python_call(call_site: &CallSite) -> bool {
-    let name = call_site.callee_name.to_ascii_lowercase();
+    let name = call_site.callee_name.as_str();
     if matches!(
-        name.as_str(),
+        name,
         "abs"
             | "all"
             | "any"
@@ -536,7 +541,7 @@ fn is_non_actionable_python_call(call_site: &CallSite) -> bool {
         return false;
     }
     matches!(
-        name.as_str(),
+        name,
         "append"
             | "capitalize"
             | "casefold"

@@ -287,7 +287,7 @@ pub fn is_react(repo_root: &Path) -> bool {
     has_any_dependency(repo_root, &["react"])
 }
 
-/// Returns `true` when React Router or TanStack Router is present.
+/// Returns `true` when React Router or `TanStack` Router is present.
 #[must_use]
 pub fn is_react_router(repo_root: &Path) -> bool {
     has_any_dependency(
