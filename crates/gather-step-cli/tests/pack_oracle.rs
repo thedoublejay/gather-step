@@ -1277,12 +1277,6 @@ fn run_projection_impact_oracle_suite(workspace: &Path) {
 }
 
 #[test]
-fn pack_oracle_suite_proves_pack_quality_on_fixture_workspace() {
-    let temp = stage_fixture_workspace("suite");
-    run_pack_oracle_suite(temp.path());
-}
-
-#[test]
 fn projection_impact_oracle_scenarios_prove_field_contracts() {
     let temp = stage_fixture_workspace("projection-impact");
     run_projection_impact_oracle_suite(temp.path());
@@ -1290,6 +1284,9 @@ fn projection_impact_oracle_scenarios_prove_field_contracts() {
 
 #[test]
 fn pack_oracle_suite_runs_under_two_minutes() {
+    // This is the single full fixture-oracle gate: run_pack_oracle_suite also
+    // proves every scenario's quality contract. Keeping a separate quality
+    // test would repeat the same fresh index and scenario sweep in CI.
     let temp = stage_fixture_workspace("timing");
     let started = Instant::now();
     run_pack_oracle_suite(temp.path());
