@@ -43,10 +43,16 @@ fn concurrent_cli_runs_are_all_finalized_in_shared_telemetry() {
         children.push((child, should_succeed));
     }
 
-    for (child, should_succeed) in children {
+    let mut child_diagnostics = Vec::with_capacity(PROCESS_COUNT);
+    for (index, (child, should_succeed)) in children.into_iter().enumerate() {
         let output = child
             .wait_with_output()
             .expect("wait for gather-step child");
+        child_diagnostics.push(format!(
+            "child {index}: stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
         assert_eq!(
             output.status.success(),
             should_succeed,
@@ -64,7 +70,8 @@ fn concurrent_cli_runs_are_all_finalized_in_shared_telemetry() {
     assert_eq!(
         runs.len(),
         PROCESS_COUNT,
-        "every child must persist one run"
+        "every child must persist one run\n{}",
+        child_diagnostics.join("\n")
     );
     assert!(
         runs.iter().all(|run| run.exit_status != "running"),

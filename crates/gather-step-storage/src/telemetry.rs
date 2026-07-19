@@ -291,9 +291,12 @@ impl TelemetryStore {
         let now = now_ms();
         // Process-liveness probes spawn subprocesses on some platforms, so
         // stale candidates are resolved before taking the write lock.
-        let stale_candidates = self.with_busy_retry(|| {
+        let (stale_candidates, needs_retention) = self.with_busy_retry(|| {
             let connection = self.connection()?;
-            stale_running_candidates(&connection, now, Some(&workspace_hash))
+            Ok((
+                stale_running_candidates(&connection, now, Some(&workspace_hash))?,
+                retention_needed(&connection, &workspace_hash)?,
+            ))
         })?;
         let abandoned_run_ids = dead_candidate_run_ids(stale_candidates);
         self.with_busy_retry(|| {
@@ -301,7 +304,9 @@ impl TelemetryStore {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             finalize_abandoned(&transaction, now, &abandoned_run_ids)?;
-            prune_old_rows(&transaction, &workspace_hash)?;
+            if needs_retention {
+                prune_old_rows(&transaction, &workspace_hash)?;
+            }
             transaction.execute(
                 "INSERT INTO run_log (
                     run_id, started_at_ms, command, workspace_hash, cli_version,
@@ -990,6 +995,33 @@ fn prune_old_rows(connection: &Connection, workspace_hash: &str) -> Result<(), T
         params![workspace_hash, MAX_RUN_ROWS],
     )?;
     Ok(())
+}
+
+fn retention_needed(connection: &Connection, workspace_hash: &str) -> Result<bool, TelemetryError> {
+    let cutoff_ms = now_ms().saturating_sub(RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    let has_expired = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM run_log
+             WHERE workspace_hash = ?1 AND started_at_ms < ?2
+         )",
+        params![workspace_hash, cutoff_ms],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if has_expired {
+        return Ok(true);
+    }
+
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM run_log
+                 WHERE workspace_hash = ?1
+                 LIMIT 1 OFFSET ?2
+             )",
+            params![workspace_hash, MAX_RUN_ROWS - 1],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(TelemetryError::Sqlite)
 }
 
 fn generate_run_id() -> String {
@@ -1953,6 +1985,39 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "busy retries exceeded their wall-clock budget: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn retention_scan_skips_fresh_rows_and_detects_expired_rows() {
+        let root = temp_root("retention-scan");
+        let store = TelemetryStore::open(&root).expect("open");
+        let connection = Connection::open(store.path()).expect("open raw");
+        let workspace_hash = store.workspace_hash(Path::new("/ws"));
+
+        connection
+            .execute(
+                "INSERT INTO run_log
+                    (run_id, started_at_ms, command, workspace_hash, cli_version,
+                     schema_versions, exit_status)
+                 VALUES ('fresh', ?1, 'status', ?2, '1.0.0', '{}', 'success')",
+                params![now_ms(), &workspace_hash],
+            )
+            .expect("seed fresh row");
+        assert!(
+            !retention_needed(&connection, &workspace_hash).expect("scan fresh rows"),
+            "a fresh store below the row cap must not schedule retention writes"
+        );
+
+        connection
+            .execute(
+                "UPDATE run_log SET started_at_ms = ?1 WHERE run_id = 'fresh'",
+                params![now_ms() - (RETENTION_DAYS + 1) * 24 * 60 * 60 * 1000],
+            )
+            .expect("expire row");
+        assert!(
+            retention_needed(&connection, &workspace_hash).expect("scan expired rows"),
+            "an expired row must schedule retention writes"
         );
     }
 
