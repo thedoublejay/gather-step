@@ -740,9 +740,8 @@ fn representative_routes(
 ) -> Vec<gather_step_core::NodeData> {
     let mut buckets = BTreeMap::<String, VecDeque<gather_step_core::NodeData>>::new();
     for route in routes {
-        let method = canonical_route_key(&route)
-            .map(|(method, _)| method)
-            .unwrap_or_else(|| "UNKNOWN".to_owned());
+        let method =
+            canonical_route_key(&route).map_or_else(|| "UNKNOWN".to_owned(), |(method, _)| method);
         buckets.entry(method).or_default().push_back(route);
     }
     round_robin_buckets(buckets, limit)
