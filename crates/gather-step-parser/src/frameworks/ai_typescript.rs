@@ -15,6 +15,7 @@ use gather_step_core::{
 };
 
 use crate::frameworks::nestjs::{extract_call_argument, extract_object_key_value};
+use crate::top_level_split::split_top_level;
 use crate::tree_sitter::{EnrichedCallSite, ParsedFile};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -465,7 +466,20 @@ fn agent_node_qn(file_path: &str, name: &str) -> String {
 /// `START`/`END` constants are already skipped upstream (they are not string
 /// literals); this guards the literal form.
 fn is_graph_sentinel(name: &str) -> bool {
-    matches!(name, "__start__" | "__end__")
+    matches!(name, "__start__" | "__end__" | "START" | "END")
+}
+
+fn graph_node_argument(raw: &str, index: usize) -> Option<String> {
+    let argument = extract_call_argument(raw, index)?.trim();
+    if let Some(literal) = string_literal(argument) {
+        return Some(literal);
+    }
+    let name = argument.rsplit('.').next().unwrap_or(argument).trim();
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'))
+    .then(|| name.to_owned())
 }
 
 /// `LangGraph` `StateGraph` wiring → `AgentGraph` + faceted `AgentNode`s +
@@ -490,15 +504,14 @@ fn emit_agent_graph(
                 None,
             ));
         }
-        "addNode" => {
+        "addNode" | "add_node" => {
             // Gate on arg 0 specifically being a string literal (mirror addEdge);
             // `literal_argument` is the first literal in *any* arg, which would
             // wrongly read `addNode(dynamicName, "label")` as a node named "label".
             let Some(name) = call_site
                 .raw_arguments
                 .as_deref()
-                .and_then(|raw| extract_call_argument(raw, 0))
-                .and_then(|arg| string_literal(arg.trim()))
+                .and_then(|raw| graph_node_argument(raw, 0))
             else {
                 return;
             };
@@ -523,12 +536,12 @@ fn emit_agent_graph(
                 EdgeKind::DefinesAgentNode,
             ));
         }
-        "addEdge" => {
+        "addEdge" | "add_edge" => {
             let Some(raw) = call_site.raw_arguments.as_deref() else {
                 return;
             };
-            let from = extract_call_argument(raw, 0).and_then(|arg| string_literal(arg.trim()));
-            let to = extract_call_argument(raw, 1).and_then(|arg| string_literal(arg.trim()));
+            let from = graph_node_argument(raw, 0);
+            let to = graph_node_argument(raw, 1);
             if let (Some(from), Some(to)) = (from, to)
                 && !is_graph_sentinel(&from)
                 && !is_graph_sentinel(&to)
@@ -539,6 +552,40 @@ fn emit_agent_graph(
                     ref_node_id(NodeKind::Function, &agent_node_qn(file_path, &to)),
                     EdgeKind::GraphTransitionsTo,
                 ));
+            }
+        }
+        "addConditionalEdges" | "add_conditional_edges" => {
+            let Some(raw) = call_site.raw_arguments.as_deref() else {
+                return;
+            };
+            let Some(from) = graph_node_argument(raw, 0) else {
+                return;
+            };
+            if is_graph_sentinel(&from) {
+                return;
+            }
+            for index in 2..16 {
+                let Some(to) = extract_call_argument(raw, index) else {
+                    break;
+                };
+                for destination in split_top_level(to.trim_matches(['[', ']', '{', '}']), ',') {
+                    let destination = destination
+                        .split_once(':')
+                        .map_or(destination, |(_, value)| value)
+                        .trim();
+                    let Some(to) = string_literal(destination) else {
+                        continue;
+                    };
+                    if is_graph_sentinel(&to) {
+                        continue;
+                    }
+                    augmentation.edges.push(ai_edge(
+                        parsed,
+                        ref_node_id(NodeKind::Function, &agent_node_qn(file_path, &from)),
+                        ref_node_id(NodeKind::Function, &agent_node_qn(file_path, &to)),
+                        EdgeKind::GraphTransitionsTo,
+                    ));
+                }
             }
         }
         _ => {}
@@ -888,6 +935,23 @@ mod tests {
             &crate::FileEntry {
                 path: file.into(),
                 language: Language::TypeScript,
+                size_bytes: 0,
+                content_hash: [0; 32],
+                source_bytes: None,
+            },
+            &[Framework::AiTypescript],
+        )
+        .expect("fixture should parse")
+    }
+
+    fn parse_python(dir: &TestDir, file: &str, body: &str) -> crate::tree_sitter::ParsedFile {
+        fs::write(dir.path().join(file), body).expect("fixture should write");
+        parse_file_with_frameworks(
+            "workflow-engine",
+            dir.path(),
+            &crate::FileEntry {
+                path: file.into(),
+                language: Language::Python,
                 size_bytes: 0,
                 content_hash: [0; 32],
                 source_bytes: None,
@@ -1555,5 +1619,45 @@ export function build(config: { provider: string }) {
 
         assert!(llm_model_ids(&parsed).is_empty());
         assert_eq!(edge_count(&parsed, EdgeKind::InvokesLlm), 0);
+    }
+
+    #[test]
+    fn python_langgraph_snake_case_calls_emit_nodes_and_transitions() {
+        let dir = TestDir::new("python-langgraph");
+        let parsed = parse_python(
+            &dir,
+            "workflow.py",
+            r#"
+from langgraph.graph import END, START, StateGraph
+
+
+def fetch_asset(state):
+    return state
+
+
+def enrich_asset(state):
+    return state
+
+
+def build_graph():
+    graph = StateGraph(dict)
+    graph.add_node(fetch_asset)
+    graph.add_node("enrich", enrich_asset)
+    graph.add_edge(START, fetch_asset)
+    graph.add_edge(fetch_asset, "enrich")
+    graph.add_conditional_edges("enrich", choose_next, {"retry": "fetch_asset", "done": END})
+    return graph
+"#,
+        );
+
+        let agent_nodes = parsed
+            .nodes
+            .iter()
+            .filter(|node| node.ai_role.as_deref() == Some("agent_node"))
+            .map(|node| node.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(agent_nodes.contains(&"fetch_asset"));
+        assert!(agent_nodes.contains(&"enrich"));
+        assert_eq!(edge_count(&parsed, EdgeKind::GraphTransitionsTo), 2);
     }
 }

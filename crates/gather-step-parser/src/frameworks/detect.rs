@@ -41,7 +41,7 @@ pub enum Framework {
     /// dependencies. Detection-only for now; the augmenter lands in a later
     /// task.
     PythonHttp,
-    /// LangChain-style TypeScript/JavaScript AI pack (v5).
+    /// LangChain/LangGraph AI pack for TypeScript, JavaScript, and Python.
     AiTypescript,
     /// Config-driven proxy-gateway pack: extracts proxy routes and
     /// `ConsumesApiFrom` edges from `src/serviceConfigs` definitions. Detected
@@ -371,13 +371,11 @@ pub fn is_python_http(repo_root: &Path) -> bool {
 /// search APIs handled by the same augmenter.
 #[must_use]
 pub fn is_ai_typescript(repo_root: &Path) -> bool {
-    let Some(manifest) = read_manifest_json(repo_root) else {
-        return false;
-    };
+    let manifest = read_manifest_json(repo_root);
     // Exact-match list: "langchain" bare must stay exact to avoid matching
     // unrelated packages like "my-langchain-helper".
     if has_dependency_in_manifest(
-        Some(&manifest),
+        manifest.as_ref(),
         &[
             "@langchain/core",
             "langchain",
@@ -404,7 +402,7 @@ pub fn is_ai_typescript(repo_root: &Path) -> bool {
     }
     // Prefix-match: any sibling in the scoped families also marks the repo.
     has_dependency_with_prefix(
-        Some(&manifest),
+        manifest.as_ref(),
         &[
             "@langchain/",
             "@openai/",
@@ -415,6 +413,9 @@ pub fn is_ai_typescript(repo_root: &Path) -> bool {
             "@modelcontextprotocol/",
             "@nestjs-mcp/",
         ],
+    ) || has_any_python_dependency(
+        repo_root,
+        &["langgraph", "langchain", "langchain-core", "temporalio"],
     )
 }
 
