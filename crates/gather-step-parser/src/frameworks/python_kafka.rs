@@ -7,17 +7,16 @@
 //! making a cross-language event round trip visible end to end.
 //!
 //! Detection is signature-based and deliberately conservative (the project's
-//! confidence-banding goal): only statically resolvable topic strings (quoted
-//! literals or module-level constants) become nodes — dynamic / f-string /
-//! variable topics are skipped rather than fabricated.
+//! confidence-banding goal): only statically resolvable topic strings, enum
+//! members, and simple class attribute bindings become nodes. Dynamic /
+//! f-string / unconstrained variable topics are skipped rather than fabricated.
 //!
 //! Idioms covered: `aiokafka` `producer.send`/`send_and_wait` and the
 //! `AIOKafkaConsumer(...)` constructor; `confluent-kafka` `producer.produce`
-//! and `consumer.subscribe([...])`. This runs under the Python augmentation
-//! arm (gated on the `FastAPI` repo dependency); a Python+Kafka repo without
-//! `FastAPI` is a known recall gap until a dedicated Kafka-dependency gate
-//! lands. Module-level consumer construction (no enclosing function) is also
-//! not captured, since call sites require an owning function.
+//! and `consumer.subscribe([...])`; plus wrapper-based
+//! `KafkaRuntime.get().send_message(...)` / `@kafka_event(...)` APIs.
+//! Module-level consumer construction (no enclosing function) is not captured,
+//! since call sites require an owning function.
 
 use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id};
 
@@ -43,6 +42,7 @@ pub fn augment(parsed: &ParsedFile) -> PythonKafkaAugmentation {
             emit_topic(parsed, call_site, &topic, false, &mut augmentation);
         }
     }
+    emit_decorator_consumers(parsed, &mut augmentation);
     augmentation
 }
 
@@ -57,6 +57,10 @@ fn producer_topic(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<S
     let is_producer = match operation {
         "send_and_wait" | "produce" => true,
         "send" => receiver_names_kafka(receiver, "producer"),
+        "send_message" => {
+            receiver_names_kafka(receiver, "producer")
+                || contains_ignore_ascii_case(receiver, "runtime")
+        }
         _ => false,
     };
     if !is_producer {
@@ -93,12 +97,52 @@ fn constructor_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<
     };
     let mut topics = Vec::new();
     for argument in split_top_level(raw, ',') {
+        if argument.contains('=') {
+            break;
+        }
         match resolve_topic(parsed, argument) {
             Some(topic) => topics.push(topic),
             None => break,
         }
     }
     topics
+}
+
+/// Some Kafka libraries register consumers through a decorator rather than an
+/// explicit `AIOKafkaConsumer.subscribe` call. Decorator captures already
+/// retain the raw expression, so this path shares the same topic resolver as
+/// producer calls and direct consumers.
+fn emit_decorator_consumers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugmentation) {
+    for symbol in &parsed.symbols {
+        for decorator in &symbol.decorators {
+            if !decorator
+                .name
+                .rsplit('.')
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("kafka_event"))
+            {
+                continue;
+            }
+            let Some(first) = split_top_level(decorator.raw.as_str(), ',')
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            let Some(topic) = resolve_topic(parsed, first) else {
+                continue;
+            };
+            emit_topic_for_owner(
+                parsed,
+                symbol.node.id,
+                symbol.file_node,
+                decorator.span.clone().or_else(|| symbol.node.span.clone()),
+                &topic,
+                false,
+                augmentation,
+            );
+        }
+    }
 }
 
 /// String-literal/constant topics inside the `subscribe([...])` list argument.
@@ -127,18 +171,39 @@ fn emit_topic(
     is_producer: bool,
     augmentation: &mut PythonKafkaAugmentation,
 ) {
+    emit_topic_for_owner(
+        parsed,
+        call_site.owner_id,
+        call_site.owner_file,
+        call_site.span.clone(),
+        topic,
+        is_producer,
+        augmentation,
+    );
+}
+
+fn emit_topic_for_owner(
+    parsed: &ParsedFile,
+    owner_id: gather_step_core::NodeId,
+    owner_file: gather_step_core::NodeId,
+    span: Option<gather_step_core::SourceSpan>,
+    topic: &str,
+    is_producer: bool,
+    augmentation: &mut PythonKafkaAugmentation,
+) {
     let qualified_name = format!("__event__kafka__{topic}");
+    let display_name = topic.strip_prefix("symbolic::").unwrap_or(topic);
     let node = NodeData {
         id: ref_node_id(NodeKind::Event, &qualified_name),
         kind: NodeKind::Event,
         repo: parsed.file_node.repo.clone(),
         file_path: parsed.file_node.file_path.clone(),
-        name: topic.to_owned(),
+        name: display_name.to_owned(),
         qualified_name: Some(qualified_name.clone()),
         external_id: Some(qualified_name),
         signature: None,
         visibility: None,
-        span: call_site.span.clone(),
+        span,
         is_virtual: true,
         ai_role: None,
     };
@@ -150,12 +215,21 @@ fn emit_topic(
         [EdgeKind::Consumes, EdgeKind::UsesEventFrom]
     };
     for kind in kinds {
+        let metadata = if topic.starts_with("symbolic::") {
+            EdgeMetadata {
+                confidence: Some(550),
+                resolver: Some("python_enum_symbolic".to_owned()),
+                ..EdgeMetadata::default()
+            }
+        } else {
+            EdgeMetadata::default()
+        };
         augmentation.edges.push(EdgeData {
-            source: call_site.owner_id,
+            source: owner_id,
             target: node_id,
             kind,
-            metadata: EdgeMetadata::default(),
-            owner_file: parsed.file_node.id,
+            metadata,
+            owner_file,
             is_cross_file: false,
         });
     }
@@ -179,11 +253,19 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-/// Resolve a call argument to a static topic name: a quoted string literal, or
-/// a module-level string constant referenced by bare name. Returns `None` for
-/// dynamic values (variables, f-strings, interpolated literals) so junk topic
-/// nodes are never fabricated.
+/// Resolve a call/decorator argument to a static topic name. In addition to
+/// literals and module constants, this supports local Enum members and the
+/// wrapper-library pattern where an external event/topic enum is the only stable
+/// static identity. A narrow `self.field = Enum.Member` scan handles producer
+/// classes that bind their topic once in `__init__`.
 fn resolve_topic(parsed: &ParsedFile, argument: &str) -> Option<String> {
+    resolve_topic_inner(parsed, argument, 0)
+}
+
+fn resolve_topic_inner(parsed: &ParsedFile, argument: &str, depth: usize) -> Option<String> {
+    if depth > 2 {
+        return None;
+    }
     let argument = argument.trim();
     if let Some(literal) = string_literal(argument) {
         if literal.is_empty() || literal.contains('{') {
@@ -191,7 +273,65 @@ fn resolve_topic(parsed: &ParsedFile, argument: &str) -> Option<String> {
         }
         return Some(literal);
     }
-    parsed.constant_strings.get(argument).cloned()
+    if let Some(value) = parsed.constant_strings.get(argument) {
+        return Some(value.clone());
+    }
+    if let Some(value) = local_enum_member_value(parsed, argument) {
+        return Some(value);
+    }
+    if let Some(bound) = python_self_attribute_binding(parsed, argument) {
+        return resolve_topic_inner(parsed, bound.as_str(), depth + 1);
+    }
+    external_enum_member_topic(argument)
+}
+
+fn local_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<String> {
+    let (enum_name, member) = argument.rsplit_once('.')?;
+    let enum_name = enum_name.rsplit('.').next().unwrap_or(enum_name);
+    parsed.value_mirror_candidates.iter().find_map(|candidate| {
+        let crate::ts_js_oxc::ValueMirrorKind::EnumMemberDef {
+            enum_qn,
+            member: candidate_member,
+        } = &candidate.kind
+        else {
+            return None;
+        };
+        let candidate_enum = enum_qn.rsplit('.').next().unwrap_or(enum_qn);
+        (candidate_enum == enum_name && candidate_member == member).then(|| candidate.value.clone())
+    })
+}
+
+fn python_self_attribute_binding(parsed: &ParsedFile, argument: &str) -> Option<String> {
+    if !argument.starts_with("self.") {
+        return None;
+    }
+    parsed.source.lines().find_map(|line| {
+        let (left, right) = line.trim().split_once('=')?;
+        (left.trim() == argument).then(|| right.trim().to_owned())
+    })
+}
+
+/// Preserve an external enum member as a symbolic topic identity. This is
+/// deliberately gated to enum type names containing event/topic/kafka so
+/// arbitrary dotted attributes do not become event nodes. A workspace-level
+/// enum-value reconciliation pass may later join the symbolic node to a
+/// canonical wire value; guessing a value from PascalCase would invent edges.
+fn external_enum_member_topic(argument: &str) -> Option<String> {
+    let (enum_name, member) = argument.rsplit_once('.')?;
+    if !["event", "topic", "kafka"]
+        .iter()
+        .any(|needle| contains_ignore_ascii_case(enum_name, needle))
+    {
+        return None;
+    }
+    if member.is_empty()
+        || !member
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    Some(format!("symbolic::{enum_name}.{member}"))
 }
 
 /// Inner text of a plain quoted string literal, or `None` for prefixed strings
@@ -261,7 +401,7 @@ mod tests {
                 content_hash: [0; 32],
                 source_bytes: None,
             },
-            &[Framework::FastApi],
+            &[Framework::PythonKafka],
         )
         .expect("fixture should parse")
     }
@@ -417,6 +557,103 @@ async def publish(producer, topic, value):
 
         assert!(event_ids(&parsed).is_empty());
         assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 0);
+    }
+
+    #[test]
+    fn decorator_and_runtime_wrapper_converge_on_enum_values() {
+        let dir = TestDir::new("decorator-runtime-wrapper");
+        let parsed = parse(
+            &dir,
+            "asset_events.py",
+            r#"
+from enum import Enum
+
+
+class BrokerTopic(str, Enum):
+    AssetUploaded = "asset.uploaded"
+    AssetProcessed = "asset.processed"
+
+
+@kafka_event(BrokerTopic.AssetUploaded)
+async def consume_asset_uploaded(message):
+    await KafkaRuntime.get().send_message(
+        BrokerTopic.AssetProcessed, message
+    )
+"#,
+        );
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec![
+                "__event__kafka__asset.processed".to_owned(),
+                "__event__kafka__asset.uploaded".to_owned(),
+            ]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Consumes), 1);
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+    }
+
+    #[test]
+    fn runtime_wrapper_producer_resolves_self_topic_assignment() {
+        let dir = TestDir::new("self-topic");
+        let parsed = parse(
+            &dir,
+            "asset_processed.py",
+            r#"
+from enum import Enum
+
+
+class BrokerTopic(str, Enum):
+    AssetProcessed = "asset.processed"
+
+
+class AssetProcessedPublisher:
+    def __init__(self):
+        self.event_topic = BrokerTopic.AssetProcessed
+
+    async def publish(self, message):
+        await KafkaRuntime.get().send_message(self.event_topic, message)
+"#,
+        );
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec!["__event__kafka__asset.processed".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+    }
+
+    #[test]
+    fn external_event_enum_members_remain_symbolic_until_value_reconciliation() {
+        let dir = TestDir::new("external-enum");
+        let parsed = parse(
+            &dir,
+            "events.py",
+            r#"
+from broker_runtime import BrokerTopic, KafkaRuntime, kafka_event
+
+
+@kafka_event(BrokerTopic.AssetUploaded)
+async def consume(message):
+    await KafkaRuntime.get().send_message(
+        BrokerTopic.ContentProcessingCompleted, message
+    )
+    await KafkaRuntime.get().send_message(
+        BrokerTopic.SystemAuditEvents, message
+    )
+"#,
+        );
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec![
+                "__event__kafka__symbolic::BrokerTopic.AssetUploaded".to_owned(),
+                "__event__kafka__symbolic::BrokerTopic.ContentProcessingCompleted".to_owned(),
+                "__event__kafka__symbolic::BrokerTopic.SystemAuditEvents".to_owned(),
+            ]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Consumes), 1);
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 2);
     }
 
     #[test]
