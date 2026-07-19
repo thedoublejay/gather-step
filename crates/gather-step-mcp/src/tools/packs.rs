@@ -4826,9 +4826,9 @@ mod tests {
         cap_change_impact_repos, clamp_margin_u16, compute_unresolved_gaps,
         file_path_packability_bonus, merge_probable_downstream_repos, pack_candidate_query_penalty,
         pack_is_structurally_weak, pack_recovery_score, pack_resolution_rationale,
-        pack_resolution_strategy, parse_route_target, planning_cross_repo_callers,
-        query_alignment_bonus, query_alignment_tokens, query_shape_match_bonus,
-        scaled_search_match_score, should_rank_global_pack_candidates,
+        pack_resolution_strategy, pack_target_matches_repo, parse_route_target,
+        planning_cross_repo_callers, query_alignment_bonus, query_alignment_tokens,
+        query_shape_match_bonus, scaled_search_match_score, should_rank_global_pack_candidates,
         symbol_kind_packability_bonus, symbol_kind_packability_bonus_for_query,
     };
     use crate::{

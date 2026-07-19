@@ -5,6 +5,31 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.16.0 (2026-07-19)
+
+**Python tracing, telemetry correctness, and honest empty-result reporting.** This release substantially expands source-derived Python graph coverage while making operational diagnostics and query limitations visible instead of silently returning misleading negatives.
+
+### Added
+
+- **Production Python Kafka wrapper tracing.** Producers using `send_message`, consumers using `@kafka_event`, enum-member topics, typed payloads, and safe same-file one-hop producer proxies now contribute event edges.
+- **Richer Python route and call resolution.** FastAPI routes compose across routers and mounted apps; typed receivers, dependency-return types, instance fields, constructors, inherited methods, imported payload contracts, and safe HTTP URL templates now resolve without speculative global name matching.
+- **Python package and agent topology support.** PEP 621, Poetry, and requirements manifests participate in dependency indexing, while Python LangGraph nodes, edges, conditional edges, and sentinel endpoints contribute agent topology.
+- **Executable Python corpus evidence.** `gather-step-bench python-corpus` emits a machine-readable neutral-fixture report, backed by a documented support matrix.
+
+### Fixed
+
+- **Empty graph answers now disclose coverage.** Consumer and event queries qualify negative results with matched-framework and extracted-edge coverage so missing extraction cannot masquerade as proof of absence.
+- **Telemetry is workspace-aware and diagnostically useful.** Runs retain recoverable error summaries, graph availability, command outcomes, and workspace identity; daemon duplicate starts and stale-run repair no longer inflate error reporting.
+- **Indexing and search correctness tightened.** Language and size exclusions are enforced consistently, generated-surface limits are balanced, search matching semantics are explicit, virtual pack targets require graph evidence, and runtime dependencies no longer imply source ownership.
+- **Framework false positives reduced.** Python test clients no longer appear as production API consumers, and unsupported always-on framework hints are not reported as detected source evidence.
+
+### Changed
+
+- **Every visible CLI command has a useful description.** Trace documentation now matches the implemented command surface, and redundant MCP aliases were removed from the advertised tool catalog.
+- **Status and route surfaces are more truthful.** Status separates graph state from git freshness, TanStack file routes and FastAPI mounts are recognized, and event/runtime/contract labels describe the evidence actually indexed.
+- **Dependencies refreshed.** Rust direct and transitive dependencies were updated, including Oxc 0.140.0 and Tokio 1.53.0; Astro moved to 7.1.1 with its Bun lockfile regenerated.
+- **Workspace packages report `5.16.0`.** Cargo workspace crates and website package metadata now carry the minor-release version.
+
 ## v5.15.1 (2026-07-13)
 
 **Internal cleanup for the symbol-accurate cross-repo path.** A maintenance release with no user-visible behavior change: identical query results, unchanged commands, tools, and index schema.

@@ -2939,6 +2939,7 @@ mod tests {
     #![expect(clippy::needless_raw_string_hashes)]
 
     use std::{
+        collections::BTreeSet,
         env, fs,
         path::{Path, PathBuf},
         process,
