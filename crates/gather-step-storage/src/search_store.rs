@@ -58,7 +58,7 @@ const MAX_RESULT_WINDOW: usize = 10_000;
 /// zero and does not carry migration or upgrade branches for older development
 /// indexes. When the schema changes before external users exist, rebuild the
 /// generated search index instead of carrying compatibility branches.
-pub const SEARCH_INDEX_VERSION: u32 = 0;
+pub const SEARCH_INDEX_VERSION: u32 = 1;
 
 /// File name written into the search directory to record the schema version.
 const SEARCH_VERSION_FILE: &str = "gather_step_schema_version";
@@ -75,6 +75,9 @@ const FIELD_FILE_PATH_TOKENS: &str = "file_path_tokens";
 /// parser so users can find symbols by repo prefix or by typing a CamelCase
 /// identifier in lowercase.
 const FIELD_QUALIFIED_NAME: &str = "qualified_name";
+/// Lowercased, untokenized qualified name used for deterministic exact lookup
+/// before the broader lexical and fuzzy passes.
+const FIELD_QUALIFIED_NAME_EXACT: &str = "qualified_name_exact";
 const FIELD_NODE_KIND: &str = "node_kind";
 const FIELD_LAST_MODIFIED: &str = "last_modified";
 const FIELD_IS_EXPORTED: &str = "is_exported";
@@ -230,6 +233,7 @@ struct SearchFields {
     file_name: Field,
     file_path_tokens: Field,
     qualified_name: Field,
+    qualified_name_exact: Field,
     node_kind: Field,
     last_modified: Field,
     is_exported: Field,
@@ -534,6 +538,10 @@ impl TantivySearchStore {
         tantivy_doc.add_text(self.fields.file_path_tokens, &document.file_path);
         if !document.description.is_empty() {
             tantivy_doc.add_text(self.fields.qualified_name, &document.description);
+            tantivy_doc.add_text(
+                self.fields.qualified_name_exact,
+                &document.description.to_lowercase(),
+            );
         }
         // Stored (not indexed) copy of the path for query-aware rerank.
         tantivy_doc.add_text(self.fields.file_path_stored, &document.file_path);
@@ -603,6 +611,30 @@ impl TantivySearchStore {
             .take(limit.max(1))
             .map(|scored| scored.hit)
             .collect())
+    }
+
+    fn execute_exact_qualified_name(
+        &self,
+        query_text: &str,
+        limit: usize,
+        filters: SearchFilters<'_>,
+    ) -> Result<Vec<SearchHit>, SearchStoreError> {
+        let reader = self.reader.lock();
+        let searcher = reader.searcher();
+        let query: Box<dyn Query> = Box::new(TermQuery::new(
+            Term::from_field_text(self.fields.qualified_name_exact, &query_text.to_lowercase()),
+            IndexRecordOption::Basic,
+        ));
+        let query = self.apply_filters(query, filters);
+        let collector = TopDocs::with_limit(limit.max(1)).order_by_score();
+        let docs: Vec<(f32, DocAddress)> = searcher.search(&query, &collector)?;
+
+        docs.into_iter()
+            .map(|(score, address)| {
+                self.decode_hit(&searcher, address, score, true)
+                    .map(|scored| scored.hit)
+            })
+            .collect()
     }
 
     fn apply_filters(&self, query: Box<dyn Query>, filters: SearchFilters<'_>) -> Box<dyn Query> {
@@ -784,6 +816,11 @@ impl SearchStore for TantivySearchStore {
         self.ensure_writer_health_for_reads();
         self.refresh_reader_if_needed()?;
 
+        let qualified_name_hits = self.execute_exact_qualified_name(trimmed, limit, filters)?;
+        if !qualified_name_hits.is_empty() {
+            return Ok(qualified_name_hits);
+        }
+
         let exact_hits = self.execute_search(trimmed, limit, true, false, filters)?;
         if !exact_hits.is_empty() {
             return Ok(exact_hits);
@@ -926,6 +963,7 @@ fn build_schema() -> Schema {
     builder.add_text_field(FIELD_FILE_NAME, code_text_options(false, false));
     builder.add_text_field(FIELD_FILE_PATH_TOKENS, path_text_options(false, false));
     builder.add_text_field(FIELD_QUALIFIED_NAME, word_text_options());
+    builder.add_text_field(FIELD_QUALIFIED_NAME_EXACT, STRING);
     builder.add_u64_field(FIELD_NODE_KIND, fast_numeric_options(false));
     builder.add_u64_field(FIELD_LAST_MODIFIED, fast_numeric_options(false));
     builder.add_bool_field(FIELD_IS_EXPORTED, FAST);
@@ -1458,6 +1496,7 @@ impl SearchFields {
             file_name: field(FIELD_FILE_NAME)?,
             file_path_tokens: field(FIELD_FILE_PATH_TOKENS)?,
             qualified_name: field(FIELD_QUALIFIED_NAME)?,
+            qualified_name_exact: field(FIELD_QUALIFIED_NAME_EXACT)?,
             node_kind: field(FIELD_NODE_KIND)?,
             last_modified: field(FIELD_LAST_MODIFIED)?,
             is_exported: field(FIELD_IS_EXPORTED)?,
@@ -1969,6 +2008,25 @@ mod tests {
         assert!(exact.iter().all(|hit| hit.exact_match));
         assert!(fuzzy.iter().all(|hit| !hit.exact_match));
         assert_eq!(fuzzy[0].symbol_name, "createOrderUseCase");
+    }
+
+    #[test]
+    fn exact_qualified_name_lookup_precedes_token_search() {
+        let store = TantivySearchStore::open(temp_search_dir("qualified-exact"))
+            .expect("store should open");
+        let exact = SearchDocument::from_node(&node("publishAsset", "src/publish.ts"), 1);
+        let sibling = SearchDocument::from_node(&node("publishAssetPreview", "src/preview.ts"), 1);
+        store
+            .index_symbols(&[exact, sibling])
+            .expect("documents should index");
+
+        let hits = store
+            .search("SERVICE-A::PUBLISHASSET", 10)
+            .expect("qualified search should succeed");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].symbol_name, "publishAsset");
+        assert!(hits[0].exact_match);
     }
 
     #[test]
