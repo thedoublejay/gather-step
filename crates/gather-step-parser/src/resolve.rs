@@ -149,6 +149,12 @@ pub fn resolve_calls_with_unresolved<'a>(
             let mut unresolved_call_sites = Vec::new();
 
             for call_site in &file.call_sites {
+                // Runtime/builtin calls must be classified before resolution.
+                // Resolving first lets common names such as Python `dict.get`
+                // attach to an unrelated in-workspace `Service.get` symbol.
+                if is_non_actionable_unresolved_call(call_site) {
+                    continue;
+                }
                 if let Some((target, strategy, confidence)) =
                     index.resolve_call(call_site, &import_map, &file.import_bindings)
                 {
@@ -174,9 +180,7 @@ pub fn resolve_calls_with_unresolved<'a>(
                         confidence,
                         strategy,
                     });
-                } else if !is_external_call(call_site, &external_names)
-                    && !is_non_actionable_unresolved_call(call_site)
-                {
+                } else if !is_external_call(call_site, &external_names) {
                     unresolved_call_sites.push(call_site.clone());
                 }
             }
@@ -293,6 +297,11 @@ pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
         return true;
     }
 
+    if is_python_source(call_site.source_path.as_path()) && is_non_actionable_python_call(call_site)
+    {
+        return true;
+    }
+
     if is_setter_like_name(call_site.callee_name.as_str()) || call_site.callee_name == "navigate" {
         return true;
     }
@@ -374,9 +383,14 @@ pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
 
 fn is_non_actionable_test_file(path: &Path) -> bool {
     let path = path.to_string_lossy();
+    let file_name = path.rsplit('/').next().unwrap_or(path.as_ref());
     path.contains("/cypress/")
         || path.contains("/__tests__/")
         || path.contains("/__mocks__/")
+        || path.contains("/tests/")
+        || path.starts_with("tests/")
+        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
+        || file_name.ends_with("_test.py")
         || path.ends_with(".cy.ts")
         || path.ends_with(".cy.tsx")
         || path.ends_with(".cy.js")
@@ -385,6 +399,109 @@ fn is_non_actionable_test_file(path: &Path) -> bool {
         || path.ends_with(".stories.tsx")
         || path.ends_with(".stories.js")
         || path.ends_with(".stories.jsx")
+}
+
+fn is_python_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| matches!(extension, "py" | "pyi"))
+}
+
+fn is_non_actionable_python_call(call_site: &CallSite) -> bool {
+    let name = call_site.callee_name.to_ascii_lowercase();
+    if matches!(
+        name.as_str(),
+        "abs"
+            | "all"
+            | "any"
+            | "bool"
+            | "bytes"
+            | "callable"
+            | "dict"
+            | "enumerate"
+            | "filter"
+            | "float"
+            | "format"
+            | "frozenset"
+            | "getattr"
+            | "hasattr"
+            | "hash"
+            | "int"
+            | "isinstance"
+            | "issubclass"
+            | "iter"
+            | "len"
+            | "list"
+            | "map"
+            | "max"
+            | "min"
+            | "next"
+            | "object"
+            | "open"
+            | "print"
+            | "range"
+            | "repr"
+            | "reversed"
+            | "round"
+            | "set"
+            | "setattr"
+            | "sorted"
+            | "str"
+            | "sum"
+            | "super"
+            | "tuple"
+            | "type"
+            | "vars"
+            | "zip"
+    ) {
+        return true;
+    }
+
+    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let Some((receiver, _)) = hint.rsplit_once('.') else {
+        return false;
+    };
+    if matches!(receiver, "self" | "cls")
+        || receiver.starts_with("self.")
+        || receiver.starts_with("cls.")
+    {
+        return false;
+    }
+    matches!(
+        name.as_str(),
+        "append"
+            | "capitalize"
+            | "casefold"
+            | "copy"
+            | "count"
+            | "discard"
+            | "endswith"
+            | "extend"
+            | "get"
+            | "index"
+            | "insert"
+            | "items"
+            | "keys"
+            | "lower"
+            | "lstrip"
+            | "pop"
+            | "popitem"
+            | "remove"
+            | "reverse"
+            | "rstrip"
+            | "setdefault"
+            | "sort"
+            | "splitlines"
+            | "startswith"
+            | "strip"
+            | "swapcase"
+            | "title"
+            | "upper"
+            | "update"
+            | "values"
+    )
 }
 
 fn is_global_runtime_function(name: &str) -> bool {
@@ -841,6 +958,11 @@ impl<'a> SymbolIndex<'a> {
         import_map: &FxHashMap<String, Vec<&'a NodeData>>,
         import_bindings: &[ImportBinding],
     ) -> Option<(&'a NodeData, ResolutionStrategy, f32)> {
+        if is_python_source(call_site.source_path.as_path())
+            && !self.python_dotted_receiver_has_resolution_evidence(call_site, import_bindings)
+        {
+            return None;
+        }
         let qualified_hint_uses_import_head =
             qualified_hint_import_head_matches(call_site, import_bindings);
 
@@ -915,6 +1037,33 @@ impl<'a> SymbolIndex<'a> {
                 ),
             )
         })
+    }
+
+    fn python_dotted_receiver_has_resolution_evidence(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> bool {
+        let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+            return true;
+        };
+        let Some((receiver, _)) = hint.rsplit_once('.') else {
+            return true;
+        };
+        if matches!(receiver, "self" | "cls")
+            || receiver.starts_with("self.")
+            || receiver.starts_with("cls.")
+        {
+            return true;
+        }
+        let head = receiver.split('.').next().unwrap_or(receiver);
+        if import_bindings
+            .iter()
+            .any(|binding| binding.local_name == head)
+        {
+            return true;
+        }
+        head.chars().next().is_some_and(char::is_uppercase) && self.by_name.contains_key(head)
     }
 
     fn resolve_qualified_import_call(
@@ -1659,6 +1808,91 @@ mod tests {
         assert_eq!(resolved.len(), 1, "method call should resolve");
         assert_eq!(resolved[0].strategy, ResolutionStrategy::Unique);
         assert_eq!(resolved[0].edge.target, target.id);
+    }
+
+    #[test]
+    fn python_builtins_and_container_methods_cannot_resolve_to_app_symbols() {
+        let root = PathBuf::from("/repo");
+        let owner = function_node("src/handler.py", "handle");
+        let unrelated_get = function_node("src/state_service.py", "get");
+        let unrelated_str = function_node("src/string_helper.py", "str");
+        let service_class = class_node("src/query_service.py", "QueryService");
+        let mut real_search = function_node("src/query_service.py", "search");
+        real_search.qualified_name = Some("QueryService.search".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            &root,
+            &[
+                owner.clone(),
+                unrelated_get,
+                unrelated_str,
+                service_class,
+                real_search.clone(),
+            ],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "get".to_owned(),
+                        callee_qualified_hint: Some("state.get".to_owned()),
+                        span: None,
+                    },
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "str".to_owned(),
+                        callee_qualified_hint: Some("str".to_owned()),
+                        span: None,
+                    },
+                    CallSite {
+                        owner_id: owner.id,
+                        owner_file: owner.id,
+                        source_path: root.join("src/handler.py"),
+                        callee_name: "search".to_owned(),
+                        callee_qualified_hint: Some("QueryService.search".to_owned()),
+                        span: None,
+                    },
+                ],
+            }],
+        );
+
+        assert_eq!(outcome.resolved.len(), 1);
+        assert_eq!(outcome.resolved[0].edge.target, real_search.id);
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_untyped_dotted_receiver_stays_unresolved() {
+        let root = PathBuf::from("/repo");
+        let owner = function_node("src/handler.py", "handle");
+        let target = function_node("src/query_service.py", "search");
+        let outcome = resolve_calls_with_unresolved(
+            &root,
+            &[owner.clone(), target],
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "search".to_owned(),
+                    callee_qualified_hint: Some("service.search".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].call_sites[0].callee_name, "search");
     }
 
     #[test]
