@@ -21,6 +21,7 @@
 //! imports (`import requests as r`) are not tracked.
 
 use gather_step_core::{EdgeKind, NodeKind, canonical_route_path, route_qn};
+use std::path::Path;
 
 use crate::{
     frameworks::http_client::{api_virtual_node, push_node_and_consumes_edge},
@@ -57,6 +58,13 @@ fn resolve_consumed_route(
     parsed: &ParsedFile,
     call_site: &EnrichedCallSite,
 ) -> Option<ConsumedRoute> {
+    // Test HTTP clients prove endpoint coverage; they are not production
+    // service consumers. Until source-scope evidence has its own graph surface,
+    // omitting these edges is safer than promoting tests into dependency and
+    // caller reports.
+    if is_test_source(call_site.source_path.as_path()) {
+        return None;
+    }
     let (method, receiver) = http_method_and_receiver(call_site)?;
     let (url, literal_only) = resolve_url(parsed, call_site)?;
     if !receiver_is_http_client(parsed, receiver, &url) {
@@ -67,6 +75,16 @@ fn resolve_consumed_route(
         url,
         literal_only,
     })
+}
+
+fn is_test_source(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let file_name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    normalized.contains("/tests/")
+        || normalized.starts_with("tests/")
+        || normalized.contains("/__tests__/")
+        || (file_name.starts_with("test_") && file_name.ends_with(".py"))
+        || file_name.ends_with("_test.py")
 }
 
 /// Upper-cased HTTP method for a call site, or `None` when the call is not an
@@ -281,7 +299,11 @@ mod tests {
     }
 
     fn parse(dir: &TestDir, file: &str, body: &str) -> crate::tree_sitter::ParsedFile {
-        fs::write(dir.path().join(file), body).expect("fixture should write");
+        let path = dir.path().join(file);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent should create");
+        }
+        fs::write(path, body).expect("fixture should write");
         parse_file_with_frameworks(
             "ingestion",
             dir.path(),
@@ -455,6 +477,26 @@ def handler(redis_client, db_session):
 def load(client, path, item_id):
     client.get(path)
     client.get(f"/items/{item_id}")
+"#,
+        );
+
+        assert!(route_ids(&parsed).is_empty());
+        assert_eq!(edge_count(&parsed, EdgeKind::ConsumesApiFrom), 0);
+    }
+
+    #[test]
+    fn test_client_calls_do_not_become_production_consumers() {
+        let dir = TestDir::new("test-client-scope");
+        let parsed = parse(
+            &dir,
+            "tests/test_assets.py",
+            r#"
+from starlette.testclient import TestClient
+
+
+def test_delete_asset(test_client: TestClient):
+    response = test_client.delete("/api/v1/assets/asset-1")
+    assert response.status_code == 204
 "#,
         );
 
