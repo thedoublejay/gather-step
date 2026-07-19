@@ -128,11 +128,6 @@ fn daemon_call_timed_out(error: &Error) -> bool {
 
 fn daemon_timeout(request: &DaemonRequest) -> Duration {
     match request {
-        DaemonRequest::Doctor { .. }
-        | DaemonRequest::Search { .. }
-        | DaemonRequest::Status { .. }
-        | DaemonRequest::CrossRepoDeps { .. }
-        | DaemonRequest::WhoConsumes { .. } => Duration::from_secs(2),
         DaemonRequest::Pack { .. } | DaemonRequest::Impact { .. } => Duration::from_secs(10),
         _ => Duration::from_secs(5),
     }
@@ -257,6 +252,8 @@ mod tests {
     #[cfg(unix)]
     use anyhow::Result;
     use gather_step_storage::GraphStoreError;
+    #[cfg(unix)]
+    use gather_step_storage::WorkspaceStores;
     #[cfg(unix)]
     use indicatif::MultiProgress;
     #[cfg(unix)]
@@ -425,6 +422,7 @@ mod tests {
     async fn try_daemon_after_lock_retries_through_holder_daemon() -> Result<()> {
         let workspace = TestWorkspace::new("lock-retry");
         let app = app(workspace.path());
+        drop(WorkspaceStores::open(app.data_dir.join("storage"))?);
         let Some(daemon) = bind_daemon_or_skip(&app)? else {
             return Ok(());
         };

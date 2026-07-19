@@ -26,7 +26,7 @@ const RETENTION_DAYS: i64 = 90;
 /// without writing its finish row (crash, `kill -9`, power loss) and is
 /// finalized as `abandoned` so the dashboard stops counting it as in-flight.
 const STALE_RUNNING_THRESHOLD_MS: i64 = 6 * 60 * 60 * 1000;
-const BUSY_RETRY_ATTEMPTS: u32 = 4;
+const BUSY_RETRY_ATTEMPTS: u32 = 8;
 const BUSY_RETRY_BASE_DELAY: Duration = Duration::from_millis(25);
 const IDENTITY_KEY_READ_RETRIES: u32 = 20;
 const IDENTITY_KEY_READ_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -606,7 +606,11 @@ impl TelemetryStore {
                     supported: TELEMETRY_SCHEMA_VERSION,
                 });
             }
-            connection.pragma_update(None, "journal_mode", "WAL")?;
+            let journal_mode: String =
+                connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            if !journal_mode.eq_ignore_ascii_case("wal") {
+                connection.pragma_update(None, "journal_mode", "WAL")?;
+            }
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let stored_version: i64 =

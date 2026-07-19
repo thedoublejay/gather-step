@@ -504,15 +504,23 @@ fn emit_agent_graph(
                 None,
             ));
         }
-        "addNode" | "add_node" => {
-            // Gate on arg 0 specifically being a string literal (mirror addEdge);
-            // `literal_argument` is the first literal in *any* arg, which would
-            // wrongly read `addNode(dynamicName, "label")` as a node named "label".
-            let Some(name) = call_site
-                .raw_arguments
-                .as_deref()
-                .and_then(|raw| graph_node_argument(raw, 0))
-            else {
+        callee @ ("addNode" | "add_node") => {
+            // LangGraph.js requires a literal node name. Its Python API also
+            // accepts a callable and derives the node name from that symbol.
+            // Keep those contracts distinct: accepting an identifier for the
+            // JavaScript form would fabricate a node for
+            // `addNode(dynamicName, "label")`.
+            let Some(raw_arguments) = call_site.raw_arguments.as_deref() else {
+                return;
+            };
+            let name = if callee == "addNode" {
+                extract_call_argument(raw_arguments, 0)
+                    .map(str::trim)
+                    .and_then(string_literal)
+            } else {
+                graph_node_argument(raw_arguments, 0)
+            };
+            let Some(name) = name else {
                 return;
             };
             if name.is_empty() {

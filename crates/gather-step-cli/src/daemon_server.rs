@@ -1126,6 +1126,7 @@ mod tests {
     async fn daemon_serves_status_requests_and_cleans_up_runtime_files() -> Result<()> {
         let workspace = TestWorkspace::new("status");
         let app = app(workspace.path());
+        drop(WorkspaceStores::open(app.data_dir.join("storage"))?);
         let Some(daemon) = bind_daemon_or_skip(&app)? else {
             return Ok(());
         };

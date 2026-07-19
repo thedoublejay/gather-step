@@ -1232,7 +1232,7 @@ mod tests {
             )
             .expect("metadata update should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let response = trace_event_tool(
             &ctx,
@@ -1358,7 +1358,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let response = trace_agent_tool(
             &ctx,
@@ -1463,7 +1463,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let response = trace_route_tool(
             &ctx,
@@ -1610,7 +1610,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let blast = event_blast_radius_tool(
             &ctx,
@@ -1685,7 +1685,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let error = event_blast_radius_tool(
             &ctx,
@@ -1748,7 +1748,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let error = trace_agent_tool(
             &ctx,
@@ -1819,7 +1819,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let response = trace_agent_tool(
             &ctx,

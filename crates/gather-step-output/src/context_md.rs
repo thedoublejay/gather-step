@@ -1122,7 +1122,7 @@ mod tests {
             NodeKind::Route,
             "__virtual__",
             "",
-            &format!("{method} {path}"),
+            format!("{method} {path}"),
             &qualified_name,
         )
     }

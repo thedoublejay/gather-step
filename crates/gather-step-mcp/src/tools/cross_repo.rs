@@ -365,11 +365,11 @@ pub fn get_shared_type_usage_tool(
         })
         .collect::<Result<Vec<_>, McpServerError>>()?;
     let edges_contributed = matched.iter().map(|(_, edge_count)| edge_count).sum();
-    let matches = matched
+    let type_matches = matched
         .into_iter()
         .map(|(matched, _)| matched)
         .collect::<Vec<_>>();
-    let source_scopes = matches
+    let source_scopes = type_matches
         .iter()
         .flat_map(|matched| &matched.usages)
         .flat_map(|usage| &usage.files)
@@ -381,7 +381,7 @@ pub fn get_shared_type_usage_tool(
         data: SharedTypeUsageData {
             coverage: QueryCoverage::workspace(&registry, "shared_type_usage", edges_contributed)
                 .with_source_scopes(source_scopes),
-            matches,
+            matches: type_matches,
             type_name: request.type_name,
         },
     })

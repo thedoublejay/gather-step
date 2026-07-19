@@ -640,7 +640,10 @@ fn cli_commands_work_on_indexed_fixture_workspace() {
             .as_str()
             .expect("each repo should carry a freshness verdict");
         assert!(
-            matches!(freshness, "fresh" | "stale" | "never_indexed" | "unknown"),
+            matches!(
+                freshness,
+                "fresh" | "stale" | "never_indexed" | "history_not_synced" | "unknown"
+            ),
             "unexpected freshness verdict in status output: {freshness}"
         );
     }

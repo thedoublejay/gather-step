@@ -2506,8 +2506,10 @@ def handle(sink: JobSink):
         );
         let root = temp.path();
         let owner = function_node("src/handler.py", "handle");
-        let interface = class_node("src/ports.py", "JobSink");
-        let unrelated = class_node("src/sinks.py", "UnrelatedPublisher");
+        let mut interface = class_node("src/ports.py", "JobSink");
+        interface.qualified_name = Some("JobSink".to_owned());
+        let mut unrelated = class_node("src/sinks.py", "UnrelatedPublisher");
+        unrelated.qualified_name = Some("UnrelatedPublisher".to_owned());
         let mut unrelated_publish = function_node("src/sinks.py", "unrelated_publish");
         unrelated_publish.name = "publish".to_owned();
         unrelated_publish.qualified_name = Some("UnrelatedPublisher.publish".to_owned());
@@ -2523,7 +2525,9 @@ def handle(sink: JobSink):
         // must sort by stable class identity before applying the cap.
         for index in (0..10).rev() {
             let class_name = format!("JobSink{index:02}");
-            symbols.push(class_node("src/sinks.py", &class_name));
+            let mut implementation = class_node("src/sinks.py", &class_name);
+            implementation.qualified_name = Some(class_name.clone());
+            symbols.push(implementation);
             let mut method = function_node("src/sinks.py", &format!("publish_{index:02}"));
             method.name = "publish".to_owned();
             method.qualified_name = Some(format!("{class_name}.publish"));

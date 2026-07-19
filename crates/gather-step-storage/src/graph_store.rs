@@ -4346,6 +4346,7 @@ mod tests {
     #[test]
     fn open_read_retrying_opens_when_uncontended() {
         let graph_path = temp_db_path("read-retry-uncontended");
+        drop(GraphStoreDb::open(&graph_path).expect("create graph before read-only open"));
         let store =
             GraphStoreDb::open_read_retrying(&graph_path).expect("uncontended read open succeeds");
         drop(store);

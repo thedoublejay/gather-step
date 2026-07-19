@@ -178,7 +178,7 @@ mod tests {
             )
             .expect("metadata update should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
 
         let schema = get_graph_schema(&ctx).expect("schema should load");
@@ -222,7 +222,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path.clone(), graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path.clone(), graph_path))
             .expect("context should open");
 
         registry
@@ -295,7 +295,7 @@ mod tests {
         let registry_path = temp.path().join("registry.json");
 
         GraphStoreDb::open(&graph_path).expect("graph store should open");
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
 
         let error = ctx
@@ -354,7 +354,7 @@ mod tests {
             )
             .expect("repo registration should succeed");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
 
         // Before Tantivy is indexed the search returns nothing (reader refresh
@@ -501,7 +501,7 @@ mod tests {
                     EdgeData {
                         source: caller.id,
                         target: shared_symbol.id,
-                        kind: EdgeKind::UsesShared,
+                        kind: EdgeKind::Defines,
                         metadata: EdgeMetadata {
                             confidence: Some(980),
                             ..EdgeMetadata::default()
@@ -1584,7 +1584,7 @@ mod tests {
         let registry = RegistryStore::open(&registry_path).expect("registry should open");
         drop(registry);
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let server = GatherStepMcpServer::new(ctx);
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
@@ -1952,7 +1952,7 @@ export function createOrder(): string {
         }
         drop(registry);
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let server = GatherStepMcpServer::new(ctx);
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
@@ -2168,7 +2168,7 @@ export function createOrder(): string {
             )
             .expect("frontend repo should register");
 
-        let ctx = McpContext::open(McpServerConfig::new(registry_path, graph_path))
+        let ctx = McpContext::open_test(McpServerConfig::new(registry_path, graph_path))
             .expect("context should open");
         let server = GatherStepMcpServer::new(ctx);
         let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);

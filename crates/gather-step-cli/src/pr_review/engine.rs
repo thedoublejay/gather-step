@@ -240,7 +240,7 @@ mod tests {
     use std::fs;
 
     use gather_step_core::NodeKind;
-    use gather_step_storage::{GraphStore, GraphStoreDb, IndexingOptions};
+    use gather_step_storage::{GraphStore, IndexingOptions, StorageCoordinator};
 
     use crate::pr_review::{artifact_root::create_artifact_root, test_helpers::TempDir};
 
@@ -398,10 +398,12 @@ mod tests {
         // Pre-create the storage root so OverlayEngine doesn't immediately error.
         fs::create_dir_all(&artifact_root.storage_root).expect("create storage root");
 
-        // The overlay engine needs a valid redb graph file to open — write a
-        // minimal graph store so open_read_only doesn't fail.
-        let graph_path = artifact_root.storage_root.join("graph.redb");
-        drop(GraphStoreDb::open(&graph_path).expect("create graph store"));
+        // The overlay fallback opens a read-only coordinator, so initialize
+        // every required store rather than creating only the graph file.
+        drop(
+            StorageCoordinator::open(&artifact_root.storage_root)
+                .expect("initialize review storage"),
+        );
 
         let engine = OverlayEngine::new();
         let snapshot = engine
