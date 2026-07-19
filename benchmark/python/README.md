@@ -14,6 +14,20 @@ Both paths are gitignored. Use aliases such as `py-external-alpha` and
 manifest documents the fields expected by the external corpus harness without
 including real paths.
 
+Run every entry whose `indexability.status` is `ready` and write one comparable,
+alias-only aggregate artifact:
+
+```sh
+cargo run -p gather-step-bench -- python-corpus \
+  --manifest benchmark/python/external-corpus.local.yaml \
+  --output-dir benchmark/python/external-results
+```
+
+Entries in any other state remain in the report with their blocker but are not
+indexed. The committed neutral planning oracle supplies precision/recall gates;
+the external corpus command supplies scale, storage, and indexability evidence
+without committing private paths or source-derived identities.
+
 Neutral fixture check:
 
 ```sh
