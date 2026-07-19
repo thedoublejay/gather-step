@@ -96,12 +96,15 @@ where
                 .unwrap_or_else(|| event.metadata().name().to_owned()),
             context_json: None,
         };
-        if let Ok(mut events) = TELEMETRY_EVENTS.lock() {
-            if events.len() == TELEMETRY_EVENT_LIMIT {
-                events.pop_front();
-            }
-            events.push_back(telemetry_event);
+        // The guarded VecDeque stays valid across a poisoning panic, so
+        // recover it rather than silently dropping events out of the counts.
+        let mut events = TELEMETRY_EVENTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if events.len() == TELEMETRY_EVENT_LIMIT {
+            events.pop_front();
         }
+        events.push_back(telemetry_event);
     }
 }
 
@@ -116,8 +119,9 @@ pub fn telemetry_counts() -> (u32, u32) {
 pub fn take_telemetry_events() -> Vec<gather_step_storage::TelemetryErrorEvent> {
     TELEMETRY_EVENTS
         .lock()
-        .map(|mut events| events.drain(..).collect())
-        .unwrap_or_default()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .collect()
 }
 
 pub fn mark_telemetry_recovery_event() {
@@ -135,9 +139,10 @@ pub fn reset_telemetry_run_state() {
     TELEMETRY_RESULT_COUNT.store(-1, Ordering::Relaxed);
     TELEMETRY_RESULT_KIND.store(0, Ordering::Relaxed);
     gather_step_storage::graph_store::reset_graph_open_retry_count();
-    if let Ok(mut events) = TELEMETRY_EVENTS.lock() {
-        events.clear();
-    }
+    TELEMETRY_EVENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 }
 
 #[must_use]

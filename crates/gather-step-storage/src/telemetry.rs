@@ -7,7 +7,7 @@ use std::{
         Arc, LazyLock,
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rand::RngExt as _;
@@ -28,8 +28,16 @@ const RETENTION_DAYS: i64 = 90;
 const STALE_RUNNING_THRESHOLD_MS: i64 = 6 * 60 * 60 * 1000;
 const BUSY_RETRY_ATTEMPTS: u32 = 8;
 const BUSY_RETRY_BASE_DELAY: Duration = Duration::from_millis(25);
+/// Total wall-clock budget for busy retries: telemetry is best-effort, so a
+/// contended database fails open instead of stalling the user's command.
+/// 2s rides out a full concurrent-CLI burst (500ms loses runs under the
+/// 32-process concurrency test) while bounding the worst-case stall at
+/// roughly budget + one in-flight `busy_timeout`.
+const BUSY_RETRY_BUDGET: Duration = Duration::from_secs(2);
 const IDENTITY_KEY_READ_RETRIES: u32 = 20;
 const IDENTITY_KEY_READ_RETRY_DELAY: Duration = Duration::from_millis(10);
+const PROCESS_START_TOKEN_READ_RETRIES: u32 = 2;
+const PROCESS_START_TOKEN_READ_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS run_log (
@@ -235,6 +243,8 @@ impl TelemetryStore {
                 source,
             })?;
         }
+        // Close the default-umask window before creating any telemetry files.
+        tighten_store_permissions(state_root.as_ref(), &path);
         let identity_key = load_or_create_identity_key(state_root.as_ref())?;
         let store = Self {
             path,
@@ -242,6 +252,7 @@ impl TelemetryStore {
             busy_retries: Arc::new(AtomicU32::new(0)),
         };
         store.initialize()?;
+        tighten_store_permissions(state_root.as_ref(), &store.path);
         Ok(store)
     }
 
@@ -273,11 +284,21 @@ impl TelemetryStore {
         let build_sha = option_env!("GATHER_STEP_BUILD_SHA")
             .or(option_env!("GITHUB_SHA"))
             .map(ToOwned::to_owned);
+        let process_id = process::id();
+        let start_token = process_start_token(process_id);
+        let now = now_ms();
+        // Process-liveness probes spawn subprocesses on some platforms, so
+        // stale candidates are resolved before taking the write lock.
+        let stale_candidates = self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            stale_running_candidates(&connection, now, Some(&workspace_hash))
+        })?;
+        let abandoned_run_ids = dead_candidate_run_ids(stale_candidates);
         self.with_busy_retry(|| {
             let mut connection = self.connection()?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            finalize_stale_running(&transaction, now_ms(), Some(workspace_hash.clone()))?;
+            finalize_abandoned(&transaction, now, &abandoned_run_ids)?;
             prune_old_rows(&transaction, &workspace_hash)?;
             transaction.execute(
                 "INSERT INTO run_log (
@@ -295,8 +316,8 @@ impl TelemetryStore {
                     &binary_path,
                     &build_sha,
                     &schema_versions,
-                    i64::from(process::id()),
-                    process_start_token(process::id()),
+                    i64::from(process_id),
+                    &start_token,
                     now_ms(),
                 ],
             )?;
@@ -650,16 +671,33 @@ impl TelemetryStore {
     /// explicit `gather-step log --repair` path.
     pub fn repair_stale_running(&self, workspace_path: &Path) -> Result<usize, TelemetryError> {
         let workspace_hash = self.workspace_hash(workspace_path);
-        self.with_busy_retry(|| {
-            let connection = self.connection()?;
-            finalize_stale_running(&connection, now_ms(), Some(workspace_hash.clone()))
-        })
+        self.finalize_stale_running(Some(&workspace_hash))
     }
 
     pub fn repair_stale_running_all_workspaces(&self) -> Result<usize, TelemetryError> {
-        self.with_busy_retry(|| {
+        self.finalize_stale_running(None)
+    }
+
+    fn finalize_stale_running(
+        &self,
+        workspace_hash_filter: Option<&str>,
+    ) -> Result<usize, TelemetryError> {
+        let now = now_ms();
+        let candidates = self.with_busy_retry(|| {
             let connection = self.connection()?;
-            finalize_stale_running(&connection, now_ms(), None)
+            stale_running_candidates(&connection, now, workspace_hash_filter)
+        })?;
+        let dead_run_ids = dead_candidate_run_ids(candidates);
+        if dead_run_ids.is_empty() {
+            return Ok(0);
+        }
+        self.with_busy_retry(|| {
+            let mut connection = self.connection()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let updated = finalize_abandoned(&transaction, now, &dead_run_ids)?;
+            transaction.commit()?;
+            Ok(updated)
         })
     }
 
@@ -679,13 +717,19 @@ impl TelemetryStore {
         &self,
         mut operation: impl FnMut() -> Result<T, TelemetryError>,
     ) -> Result<T, TelemetryError> {
+        let deadline = Instant::now() + BUSY_RETRY_BUDGET;
         let mut attempt = 0_u32;
         loop {
             match operation() {
                 Ok(value) => return Ok(value),
                 Err(error) if is_sqlite_busy(&error) && attempt < BUSY_RETRY_ATTEMPTS => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(error);
+                    }
                     self.busy_retries.fetch_add(1, Ordering::Relaxed);
-                    std::thread::sleep(BUSY_RETRY_BASE_DELAY * 2_u32.saturating_pow(attempt));
+                    let delay = BUSY_RETRY_BASE_DELAY * 2_u32.saturating_pow(attempt);
+                    std::thread::sleep(delay.min(remaining));
                     attempt += 1;
                 }
                 Err(error) => return Err(error),
@@ -776,9 +820,13 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
         repo_count: row.get(17)?,
         files_parsed: row.get(18)?,
         nodes_created: row.get(19)?,
-        extra_json: raw_extra
-            .as_deref()
-            .and_then(|value| serde_json::from_str(value).ok()),
+        extra_json: raw_extra.as_deref().and_then(|value| {
+            serde_json::from_str(value)
+                .map_err(|error| {
+                    tracing::warn!(%error, "telemetry extra_json failed to deserialize; dropping extras");
+                })
+                .ok()
+        }),
         error_categories: raw_categories
             .as_deref()
             .map(|categories| categories.split('\u{1f}').map(ToOwned::to_owned).collect())
@@ -829,57 +877,88 @@ fn add_column_if_missing(
     Ok(())
 }
 
-/// Rewrite `running` rows older than the stale threshold as `abandoned`.
-/// The true end time of an abandoned process is unknown, so duration fields
-/// remain NULL. Live processes with a matching PID/start token are preserved.
-fn finalize_stale_running(
+/// `(run_id, process_id, process_start_token)` evidence for a stale
+/// `running` row.
+type StaleRunningCandidate = (String, Option<u32>, Option<String>);
+
+/// List `running` rows older than the stale threshold, together with the
+/// PID/start-token evidence needed to decide whether their process still
+/// lives. Read-only so callers can probe liveness outside any write lock.
+fn stale_running_candidates(
     connection: &Connection,
     now: i64,
-    workspace_hash_filter: Option<String>,
+    workspace_hash_filter: Option<&str>,
+) -> Result<Vec<StaleRunningCandidate>, TelemetryError> {
+    let cutoff = now.saturating_sub(STALE_RUNNING_THRESHOLD_MS);
+    let sql = if workspace_hash_filter.is_some() {
+        "SELECT run_id, process_id, process_start_token
+         FROM run_log
+         WHERE exit_status = 'running'
+           AND COALESCE(heartbeat_at_ms, started_at_ms) < ?1
+           AND workspace_hash = ?2"
+    } else {
+        "SELECT run_id, process_id, process_start_token
+         FROM run_log
+         WHERE exit_status = 'running'
+           AND COALESCE(heartbeat_at_ms, started_at_ms) < ?1"
+    };
+    let mut statement = connection.prepare(sql)?;
+    let map = |row: &rusqlite::Row<'_>| {
+        let raw_pid = row.get::<_, Option<i64>>(1)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            raw_pid.and_then(|pid| u32::try_from(pid).ok()),
+            row.get::<_, Option<String>>(2)?,
+        ))
+    };
+    let candidates = if let Some(hash) = workspace_hash_filter {
+        statement
+            .query_map(params![cutoff, hash], map)?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        statement
+            .query_map(params![cutoff], map)?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(candidates)
+}
+
+/// Keep only the candidates whose recorded process is verifiably gone. Runs
+/// the subprocess-backed liveness probes, so call it without holding a
+/// `SQLite` write lock.
+fn dead_candidate_run_ids(candidates: Vec<StaleRunningCandidate>) -> Vec<String> {
+    candidates
+        .into_iter()
+        .filter(|(_, pid, start_token)| {
+            pid.is_none_or(|pid| {
+                matches!(
+                    process_identity(pid, start_token.as_deref()),
+                    ProcessIdentity::Dead | ProcessIdentity::Reused
+                )
+            })
+        })
+        .map(|(run_id, _, _)| run_id)
+        .collect()
+}
+
+/// Rewrite the given runs as `abandoned`. The true end time of an abandoned
+/// process is unknown, so duration fields remain NULL. Status and heartbeat
+/// are re-checked here because liveness was probed outside the transaction:
+/// a run that finished or heartbeated meanwhile is left untouched.
+fn finalize_abandoned(
+    connection: &Connection,
+    now: i64,
+    run_ids: &[String],
 ) -> Result<usize, TelemetryError> {
     let cutoff = now.saturating_sub(STALE_RUNNING_THRESHOLD_MS);
-    let candidates = {
-        let sql = if workspace_hash_filter.is_some() {
-            "SELECT run_id, process_id, process_start_token
-             FROM run_log
-             WHERE exit_status = 'running'
-               AND COALESCE(heartbeat_at_ms, started_at_ms) < ?1
-               AND workspace_hash = ?2"
-        } else {
-            "SELECT run_id, process_id, process_start_token
-             FROM run_log
-             WHERE exit_status = 'running'
-               AND COALESCE(heartbeat_at_ms, started_at_ms) < ?1"
-        };
-        let mut statement = connection.prepare(sql)?;
-        let map = |row: &rusqlite::Row<'_>| {
-            let raw_pid = row.get::<_, Option<i64>>(1)?;
-            Ok((
-                row.get::<_, String>(0)?,
-                raw_pid.and_then(|pid| u32::try_from(pid).ok()),
-                row.get::<_, Option<String>>(2)?,
-            ))
-        };
-        if let Some(hash) = workspace_hash_filter {
-            statement
-                .query_map(params![cutoff, hash], map)?
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            statement
-                .query_map(params![cutoff], map)?
-                .collect::<Result<Vec<_>, _>>()?
-        }
-    };
     let mut updated = 0;
-    for (run_id, pid, start_token) in candidates {
-        if pid.is_some_and(|pid| process_is_same(pid, start_token.as_deref())) {
-            continue;
-        }
+    for run_id in run_ids {
         updated += connection.execute(
             "UPDATE run_log
              SET exit_status = 'abandoned', ended_at_ms = NULL, duration_ms = NULL
-             WHERE run_id = ?1 AND exit_status = 'running'",
-            params![run_id],
+             WHERE run_id = ?1 AND exit_status = 'running'
+               AND COALESCE(heartbeat_at_ms, started_at_ms) < ?2",
+            params![run_id, cutoff],
         )?;
     }
     Ok(updated)
@@ -1000,16 +1079,60 @@ fn identity_key_from_bytes(path: &Path, bytes: &[u8]) -> Result<[u8; 32], Teleme
         })
 }
 
+/// Restrict the telemetry directory (0700) and database plus its `SQLite`
+/// sidecars (0600) to the owning user, tightening pre-existing stores too.
+/// Best-effort: a failed chmod (e.g. a store owned by another user) must not
+/// break telemetry. No-op off Unix.
+#[cfg(unix)]
+fn tighten_store_permissions(state_root: &Path, db_path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let chmod = |path: &Path, mode: u32| {
+        let Ok(metadata) = fs::metadata(path) else {
+            return;
+        };
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o777 != mode {
+            permissions.set_mode(mode);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    };
+    chmod(state_root, 0o700);
+    chmod(&state_root.join(TELEMETRY_IDENTITY_KEY_NAME), 0o600);
+    chmod(db_path, 0o600);
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = db_path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        chmod(Path::new(&sidecar), 0o600);
+    }
+}
+
+#[cfg(not(unix))]
+fn tighten_store_permissions(_state_root: &Path, _db_path: &Path) {}
+
 fn redact_message_excerpt(message: &str) -> String {
+    static SECRET_PAIR: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?i)(?P<key>[A-Za-z0-9_.-]*(?:token|secret|key|password|passwd|auth|credential)[A-Za-z0-9_.-]*)\s*(?:[=:]\s*|\s+)(?:bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)"#,
+        )
+        .expect("valid secret pair redaction regex")
+    });
+    static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+            .expect("valid URL userinfo redaction regex")
+    });
+    // The leading path segment must not start with `/` so `scheme://` URL
+    // authorities survive with only their userinfo redacted above.
     static UNIX_PATH: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?P<prefix>^|[=:"'(\[])\/(?P<path>[^\s,;)"']+)"#)
+        Regex::new(r#"(?P<prefix>^|[\s=:"'(\[])/(?P<path>[^\s,;)"'/][^\s,;)"']*)"#)
             .expect("valid Unix path redaction regex")
     });
     static WINDOWS_PATH: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?P<prefix>^|[=:"'(\[])[A-Za-z]:\\(?P<path>[^\s,;)"']+)"#)
+        Regex::new(r#"(?P<prefix>^|[\s=:"'(\[])[A-Za-z]:\\(?P<path>[^\s,;)"']+)"#)
             .expect("valid Windows path redaction regex")
     });
-    let redacted = UNIX_PATH.replace_all(message, "${prefix}<path>");
+    let redacted = SECRET_PAIR.replace_all(message, "${key}=<redacted>");
+    let redacted = URL_USERINFO.replace_all(&redacted, "${scheme}<redacted>@");
+    let redacted = UNIX_PATH.replace_all(&redacted, "${prefix}<path>");
     let redacted = WINDOWS_PATH.replace_all(&redacted, "${prefix}<path>");
     redacted.chars().take(240).collect()
 }
@@ -1025,11 +1148,28 @@ fn redact_json_value(value: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(values) => serde_json::Value::Object(
             values
                 .iter()
-                .map(|(key, value)| (key.clone(), redact_json_value(value)))
+                .map(|(key, value)| {
+                    let redacted = if sensitive_context_key(key) {
+                        serde_json::Value::String("<redacted>".to_owned())
+                    } else {
+                        redact_json_value(value)
+                    };
+                    (key.clone(), redacted)
+                })
                 .collect(),
         ),
         other => other.clone(),
     }
+}
+
+fn sensitive_context_key(key: &str) -> bool {
+    static SENSITIVE_KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?i)(token|secret|password|passwd|authorization|credential|api[-_.]?key|access[-_.]?key|private[-_.]?key|(^|[_.-])(auth|key)([_.-]|$))",
+        )
+        .expect("valid sensitive context key regex")
+    });
+    SENSITIVE_KEY.is_match(key)
 }
 
 fn process_start_token(pid: u32) -> Option<String> {
@@ -1059,32 +1199,82 @@ fn process_start_token(pid: u32) -> Option<String> {
     }
 }
 
-fn process_is_same(pid: u32, expected_start_token: Option<&str>) -> bool {
-    if !process_is_alive(pid) {
-        return false;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessIdentity {
+    Same,
+    Reused,
+    Dead,
+    Unknown,
+}
+
+fn process_identity(pid: u32, expected_start_token: Option<&str>) -> ProcessIdentity {
+    match process_liveness(pid) {
+        Some(false) => return ProcessIdentity::Dead,
+        None => {
+            tracing::warn!(
+                pid,
+                "process liveness is unsupported on this platform; stale-run identity remains unknown"
+            );
+            return ProcessIdentity::Unknown;
+        }
+        Some(true) => {}
     }
-    match (expected_start_token, process_start_token(pid)) {
-        (Some(expected), Some(actual)) => expected == actual,
-        _ => true,
+    let Some(expected_start_token) = expected_start_token else {
+        tracing::warn!(
+            pid,
+            "recorded process start token is missing; stale-run identity remains unknown"
+        );
+        return ProcessIdentity::Unknown;
+    };
+    for attempt in 0..=PROCESS_START_TOKEN_READ_RETRIES {
+        let identity = alive_process_identity(
+            Some(expected_start_token),
+            process_start_token(pid).as_deref(),
+        );
+        if identity != ProcessIdentity::Unknown {
+            return identity;
+        }
+        if attempt < PROCESS_START_TOKEN_READ_RETRIES {
+            std::thread::sleep(PROCESS_START_TOKEN_READ_RETRY_DELAY);
+        }
+    }
+    tracing::warn!(
+        pid,
+        "process start token unavailable after retries; stale-run identity remains unknown"
+    );
+    ProcessIdentity::Unknown
+}
+
+/// Identity decision for a PID that is already known to be alive.
+///
+/// Matching tokens confirm the recorded process; mismatched tokens prove a
+/// recycled PID. Missing evidence stays explicitly unknown; callers may retry
+/// without incorrectly declaring an unverified PID to be the same process.
+fn alive_process_identity(expected: Option<&str>, actual: Option<&str>) -> ProcessIdentity {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) if expected == actual => ProcessIdentity::Same,
+        (Some(_), Some(_)) => ProcessIdentity::Reused,
+        (Some(_), None) | (None, _) => ProcessIdentity::Unknown,
     }
 }
 
 #[cfg(target_os = "linux")]
-fn process_is_alive(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+fn process_liveness(pid: u32) -> Option<bool> {
+    Some(Path::new("/proc").join(pid.to_string()).exists())
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn process_is_alive(pid: u32) -> bool {
+fn process_liveness(pid: u32) -> Option<bool> {
     process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .status()
-        .is_ok_and(|status| status.success())
+        .ok()
+        .map(|status| status.success())
 }
 
 #[cfg(not(unix))]
-fn process_is_alive(_pid: u32) -> bool {
-    false
+fn process_liveness(_pid: u32) -> Option<bool> {
+    None
 }
 
 fn u64_to_i64(value: u64) -> Option<i64> {
@@ -1443,7 +1633,12 @@ mod tests {
                         level: "ERROR".to_owned(),
                         category: "parse_failure".to_owned(),
                         message: "/private/workspace/assets.py failed to parse".to_owned(),
-                        context_json: None,
+                        context_json: Some(serde_json::json!({
+                            "request": {
+                                "api_token": "context-secret",
+                                "source": "/private/workspace/assets.py"
+                            }
+                        })),
                     }),
                     ..TelemetryRunFinish::default()
                 },
@@ -1457,5 +1652,340 @@ mod tests {
         let excerpt = events[0].message_excerpt.as_deref().expect("excerpt");
         assert!(excerpt.contains("<path>"));
         assert!(!excerpt.contains("/private/workspace"));
+
+        let connection = Connection::open(store.path()).expect("open telemetry database");
+        let context: String = connection
+            .query_row(
+                "SELECT context_json FROM run_errors WHERE run_id = ?1",
+                params![run.run_id],
+                |row| row.get(0),
+            )
+            .expect("stored context");
+        assert!(!context.contains("context-secret"), "{context}");
+        assert!(!context.contains("/private/workspace"), "{context}");
+        assert!(context.contains("<redacted>"), "{context}");
+        assert!(context.contains("<path>"), "{context}");
+    }
+
+    #[test]
+    fn migrate_schema_upgrades_v2_store_to_v3_without_data_loss() {
+        let root = temp_root("migrate-v2");
+        let db_path = root.join(TELEMETRY_DB_NAME);
+        {
+            let connection = Connection::open(&db_path).expect("open raw");
+            connection
+                .execute_batch(
+                    "CREATE TABLE run_log (
+                        run_id TEXT PRIMARY KEY,
+                        started_at_ms INTEGER NOT NULL,
+                        ended_at_ms INTEGER,
+                        command TEXT NOT NULL,
+                        workspace_hash TEXT NOT NULL,
+                        cli_version TEXT NOT NULL,
+                        schema_versions TEXT NOT NULL,
+                        exit_status TEXT NOT NULL,
+                        duration_ms INTEGER,
+                        peak_rss_bytes INTEGER,
+                        repo_count INTEGER,
+                        files_parsed INTEGER,
+                        nodes_created INTEGER,
+                        warn_count INTEGER NOT NULL DEFAULT 0,
+                        error_count INTEGER NOT NULL DEFAULT 0,
+                        recovery_event INTEGER NOT NULL DEFAULT 0,
+                        extra_json TEXT,
+                        result_count INTEGER,
+                        graph_availability TEXT,
+                        build_provenance TEXT
+                    );
+                    CREATE TABLE run_errors (
+                        event_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        occurred_at_ms INTEGER NOT NULL,
+                        level TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        message_hash TEXT NOT NULL,
+                        context_json TEXT,
+                        FOREIGN KEY(run_id) REFERENCES run_log(run_id) ON DELETE CASCADE
+                    );",
+                )
+                .expect("create v2 schema");
+            connection
+                .pragma_update(None, "user_version", 2_i64)
+                .expect("stamp v2");
+            connection
+                .execute(
+                    "INSERT INTO run_log
+                        (run_id, started_at_ms, command, workspace_hash, cli_version,
+                         schema_versions, exit_status, result_count, graph_availability,
+                         build_provenance)
+                     VALUES ('v2-1', ?1, 'index', 'hash', '2.0.0', '{}', 'success', 7,
+                             'available', 'release')",
+                    params![now_ms()],
+                )
+                .expect("seed v2 row");
+            connection
+                .execute(
+                    "INSERT INTO run_errors
+                        (event_id, run_id, occurred_at_ms, level, category, message_hash,
+                         context_json)
+                     VALUES ('v2-error', 'v2-1', ?1, 'ERROR', 'legacy', 'hash', '{}')",
+                    params![now_ms()],
+                )
+                .expect("seed v2 error");
+        }
+
+        let store = TelemetryStore::open(&root).expect("open migrates v2 to v3");
+        let runs = store
+            .list_runs_all_workspaces(10, None, None, false, None, None, None, None)
+            .expect("list");
+        let record = runs
+            .iter()
+            .find(|record| record.run_id == "v2-1")
+            .expect("v2 row preserved");
+        assert_eq!(record.result_count, Some(7));
+        assert_eq!(record.graph_availability.as_deref(), Some("available"));
+        assert_eq!(record.build_provenance.as_deref(), Some("release"));
+        assert_eq!(record.binary_path, None);
+        assert_eq!(record.build_sha, None);
+        drop(store);
+
+        let connection = Connection::open(&db_path).expect("reopen raw");
+        let stored_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(stored_version, TELEMETRY_SCHEMA_VERSION);
+        let columns = |table: &str| -> Vec<String> {
+            let mut statement = connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .expect("table info");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("query columns")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect columns")
+        };
+        let run_log_columns = columns("run_log");
+        for column in [
+            "process_id",
+            "process_start_token",
+            "heartbeat_at_ms",
+            "binary_path",
+            "build_sha",
+        ] {
+            assert!(
+                run_log_columns.iter().any(|existing| existing == column),
+                "run_log is missing v3 column {column}"
+            );
+        }
+        assert!(
+            columns("run_errors")
+                .iter()
+                .any(|existing| existing == "message_excerpt"),
+            "run_errors is missing v3 column message_excerpt"
+        );
+        let (category, excerpt): (String, Option<String>) = connection
+            .query_row(
+                "SELECT category, message_excerpt FROM run_errors WHERE event_id = 'v2-error'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("v2 error row preserved");
+        assert_eq!(category, "legacy");
+        assert_eq!(excerpt, None);
+    }
+
+    #[test]
+    fn begin_run_finalizes_stale_rows_for_its_workspace() {
+        let root = temp_root("begin-stale");
+        let store = TelemetryStore::open(&root).expect("open");
+        let workspace = Path::new("/workspace/begin-stale");
+        let hash = store.workspace_hash(workspace);
+        {
+            let connection = Connection::open(store.path()).expect("open raw");
+            connection
+                .execute(
+                    "INSERT INTO run_log
+                        (run_id, started_at_ms, command, workspace_hash, cli_version,
+                         schema_versions, exit_status)
+                     VALUES ('stale-run', ?1, 'index', ?2, '1.0.0', '{}', 'running')",
+                    params![now_ms() - STALE_RUNNING_THRESHOLD_MS - 1_000, hash],
+                )
+                .expect("seed stale row");
+        }
+
+        store
+            .begin_run("index", workspace, "9.9.9", "release", &schema_versions())
+            .expect("begin");
+        let runs = store
+            .list_runs(workspace, 10, None, None, false, None, None, None, None)
+            .expect("list");
+        let stale = runs
+            .iter()
+            .find(|record| record.run_id == "stale-run")
+            .expect("stale row present");
+        assert_eq!(stale.exit_status, "abandoned");
+    }
+
+    #[test]
+    fn alive_process_token_semantics_are_pinned() {
+        assert_eq!(
+            alive_process_identity(Some("token"), Some("token")),
+            ProcessIdentity::Same
+        );
+        assert_eq!(
+            alive_process_identity(Some("token"), Some("other")),
+            ProcessIdentity::Reused
+        );
+        assert_eq!(
+            alive_process_identity(Some("token"), None),
+            ProcessIdentity::Unknown
+        );
+        assert_eq!(
+            alive_process_identity(None, Some("token")),
+            ProcessIdentity::Unknown
+        );
+        assert_eq!(alive_process_identity(None, None), ProcessIdentity::Unknown);
+    }
+
+    #[test]
+    fn redaction_covers_secrets_urls_and_embedded_paths() {
+        let secret = redact_message_excerpt("request failed: API_TOKEN=s3cr3t retrying");
+        assert!(!secret.contains("s3cr3t"), "{secret}");
+        assert!(secret.contains("API_TOKEN=<redacted>"), "{secret}");
+
+        let password = redact_message_excerpt("db password: hunter2 rejected");
+        assert!(!password.contains("hunter2"), "{password}");
+
+        let authorization = redact_message_excerpt("Authorization: Bearer bearer-secret rejected");
+        assert!(!authorization.contains("bearer-secret"), "{authorization}");
+
+        let flag = redact_message_excerpt("retry with --api-token flag-secret");
+        assert!(!flag.contains("flag-secret"), "{flag}");
+
+        let url = redact_message_excerpt("fetch https://user:hunter2@example.com/callback failed");
+        assert!(!url.contains("hunter2"), "{url}");
+        assert!(url.contains("https://<redacted>@example.com"), "{url}");
+
+        let embedded_path = redact_message_excerpt("opening /private/tmp/gs-1/config.yaml");
+        assert!(!embedded_path.contains("/private"), "{embedded_path}");
+        assert!(embedded_path.contains("opening <path>"), "{embedded_path}");
+
+        let multiple_paths = redact_message_excerpt("copy /var/a.txt to /opt/b.txt done");
+        assert!(!multiple_paths.contains("/var"), "{multiple_paths}");
+        assert!(!multiple_paths.contains("/opt"), "{multiple_paths}");
+        assert_eq!(multiple_paths.matches("<path>").count(), 2);
+
+        let windows_path = redact_message_excerpt("read C:\\Users\\jj\\notes.txt failed");
+        assert!(!windows_path.contains("Users"), "{windows_path}");
+        assert!(windows_path.contains("<path>"), "{windows_path}");
+
+        let truncated = redact_message_excerpt(&"x".repeat(500));
+        assert_eq!(truncated.chars().count(), 240);
+
+        let context = redact_json_value(&serde_json::json!({
+            "api_token": "json-secret",
+            "nested": { "Authorization": "Bearer nested-secret" },
+            "keyboard_layout": "dvorak",
+            "attempt": 2
+        }));
+        let encoded = context.to_string();
+        assert!(!encoded.contains("json-secret"), "{encoded}");
+        assert!(!encoded.contains("nested-secret"), "{encoded}");
+        assert_eq!(context["api_token"], "<redacted>");
+        assert_eq!(context["nested"]["Authorization"], "<redacted>");
+        assert_eq!(context["keyboard_layout"], "dvorak");
+        assert_eq!(context["attempt"], 2);
+    }
+
+    #[test]
+    fn busy_retries_fail_open_within_budget() {
+        let root = temp_root("busy-budget");
+        let store = TelemetryStore::open(&root).expect("open");
+        let run = store
+            .begin_run(
+                "index",
+                Path::new("/ws"),
+                "9.9.9",
+                "release",
+                &schema_versions(),
+            )
+            .expect("begin");
+
+        let blocker = Connection::open(store.path()).expect("open blocker");
+        blocker
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold write lock");
+
+        let started = Instant::now();
+        let result = store.heartbeat(&run);
+        let elapsed = started.elapsed();
+        blocker.execute_batch("COMMIT").expect("release write lock");
+
+        assert!(
+            result.is_err(),
+            "heartbeat must fail open while the db is write-locked"
+        );
+        // Budget (2s) + one in-flight busy_timeout (500ms) + headroom, far
+        // below the ~11s the unbounded retry loop could previously stall.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "busy retries exceeded their wall-clock budget: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_permissions_are_tightened_on_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = temp_root("perms");
+        let store = TelemetryStore::open(&root).expect("open");
+        let run = store
+            .begin_run(
+                "index",
+                Path::new("/ws"),
+                "9.9.9",
+                "release",
+                &schema_versions(),
+            )
+            .expect("begin");
+        store
+            .finish_run(
+                &run,
+                &TelemetryRunFinish {
+                    exit_status: "success".to_owned(),
+                    ..TelemetryRunFinish::default()
+                },
+            )
+            .expect("finish");
+        let db_path = store.path().to_path_buf();
+        let identity_path = root.join(TELEMETRY_IDENTITY_KEY_NAME);
+        drop(store);
+
+        // Loosen a pre-existing store to prove reopening tightens it.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("loosen dir");
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o644)).expect("loosen db");
+        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o644))
+            .expect("loosen identity key");
+        TelemetryStore::open(&root).expect("reopen");
+
+        let mode = |path: &Path| {
+            fs::metadata(path)
+                .map(|metadata| metadata.permissions().mode() & 0o777)
+                .ok()
+        };
+        assert_eq!(mode(&root), Some(0o700));
+        assert_eq!(mode(&db_path), Some(0o600));
+        assert_eq!(mode(&identity_path), Some(0o600));
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", db_path.display()));
+            if let Some(sidecar_mode) = mode(&sidecar) {
+                assert_eq!(
+                    sidecar_mode,
+                    0o600,
+                    "{} is too permissive",
+                    sidecar.display()
+                );
+            }
+        }
     }
 }

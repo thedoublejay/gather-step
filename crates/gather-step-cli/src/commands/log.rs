@@ -96,6 +96,9 @@ struct LogSummary {
 struct LogEventsOutput {
     event: &'static str,
     telemetry_db: String,
+    cleared_rows: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repaired_stale: Option<usize>,
     events: Vec<gather_step_storage::TelemetryEventRecord>,
 }
 
@@ -248,24 +251,8 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
     let store = TelemetryStore::open(&root).context("opening telemetry database")?;
     let telemetry_db = store.path().display().to_string();
 
-    if args.events {
-        if args.all_workspaces {
-            bail!("--events cannot be combined with --all-workspaces; select a workspace");
-        }
-        let events = store
-            .list_events(
-                &app.workspace_path,
-                args.run.as_deref(),
-                args.last.unwrap_or(100),
-            )
-            .context("listing telemetry events")?;
-        let output = LogEventsOutput {
-            event: "log_events",
-            telemetry_db,
-            events,
-        };
-        app.output().emit(&output)?;
-        return Ok(());
+    if args.events && args.all_workspaces {
+        bail!("--events cannot be combined with --all-workspaces; select a workspace");
     }
 
     let repaired_stale = if args.repair {
@@ -295,6 +282,18 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
     } else {
         0
     };
+
+    if args.events {
+        return emit_events(
+            app,
+            &store,
+            args,
+            repaired_stale,
+            cleared_rows,
+            telemetry_db,
+        );
+    }
+
     let since_ms = args
         .since
         .as_deref()
@@ -307,13 +306,7 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
         .map(cutoff_from_age)
         .transpose()
         .context("parsing --before")?;
-    let limit = args.last.unwrap_or_else(|| {
-        if args.summary && args.since.is_some() {
-            usize::MAX
-        } else {
-            20
-        }
-    });
+    let limit = effective_limit(args);
     let records = if args.all_workspaces {
         store.list_runs_all_workspaces(
             limit,
@@ -391,6 +384,73 @@ pub fn run(app: &AppContext, args: &LogArgs) -> Result<()> {
     }
     app.output().line(table.to_string());
     Ok(())
+}
+
+fn emit_events(
+    app: &AppContext,
+    store: &TelemetryStore,
+    args: &LogArgs,
+    repaired_stale: Option<usize>,
+    cleared_rows: usize,
+    telemetry_db: String,
+) -> Result<()> {
+    let events = store
+        .list_events(
+            &app.workspace_path,
+            args.run.as_deref(),
+            args.last.unwrap_or(100),
+        )
+        .context("listing telemetry events")?;
+    let output = LogEventsOutput {
+        event: "log_events",
+        telemetry_db,
+        cleared_rows,
+        repaired_stale,
+        events,
+    };
+    if app.json_output {
+        app.output().emit(&output)?;
+        return Ok(());
+    }
+
+    if let Some(repaired) = output.repaired_stale {
+        app.output()
+            .line(format!("Finalized {repaired} stale running row(s)."));
+    }
+    if output.cleared_rows > 0 {
+        app.output()
+            .line(format!("Cleared {} telemetry row(s).", output.cleared_rows));
+    }
+    if output.events.is_empty() {
+        app.output().line("No telemetry events found.");
+        return Ok(());
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_BORDERS_ONLY);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec!["Occurred", "Level", "Category", "Run", "Message"]);
+    for event in &output.events {
+        table.add_row(vec![
+            Cell::new(format_ms(event.occurred_at_ms)),
+            Cell::new(&event.level),
+            Cell::new(&event.category),
+            Cell::new(&event.run_id),
+            Cell::new(event.message_excerpt.as_deref().unwrap_or("-")),
+        ]);
+    }
+    app.output().line(table.to_string());
+    Ok(())
+}
+
+fn effective_limit(args: &LogArgs) -> usize {
+    args.last.unwrap_or_else(|| {
+        if args.summary && (args.since.is_some() || args.before.is_some()) {
+            usize::MAX
+        } else {
+            20
+        }
+    })
 }
 
 fn cutoff_from_age(value: &str) -> Result<i64> {
@@ -503,5 +563,61 @@ mod tests {
         assert_eq!(slowest.command, "index");
         assert_eq!(slowest.runs, 2);
         assert_eq!(slowest.max_duration_ms, 1200);
+    }
+
+    fn base_args() -> LogArgs {
+        LogArgs {
+            last: None,
+            since: None,
+            before: None,
+            errors_only: false,
+            command: None,
+            status: None,
+            category: None,
+            summary: false,
+            repair: false,
+            clear_before: None,
+            all_workspaces: false,
+            yes: false,
+            events: false,
+            run: None,
+        }
+    }
+
+    #[test]
+    fn summary_time_windows_uncap_the_row_limit() {
+        let mut args = base_args();
+        args.summary = true;
+        assert_eq!(effective_limit(&args), 20);
+
+        args.since = Some("12h".to_owned());
+        assert_eq!(effective_limit(&args), usize::MAX);
+
+        args.since = None;
+        args.before = Some("7d".to_owned());
+        assert_eq!(effective_limit(&args), usize::MAX);
+
+        args.last = Some(5);
+        assert_eq!(effective_limit(&args), 5);
+
+        let mut without_summary = base_args();
+        without_summary.before = Some("7d".to_owned());
+        assert_eq!(effective_limit(&without_summary), 20);
+    }
+
+    #[test]
+    fn age_strings_parse_or_reject() {
+        for valid in ["30s", "5m", "12h", "7d", "0h", "90"] {
+            assert!(cutoff_from_age(valid).is_ok(), "`{valid}` should parse");
+        }
+        for invalid in ["12x", "h", "garbage", "-5d", ""] {
+            assert!(
+                cutoff_from_age(invalid).is_err(),
+                "`{invalid}` should be rejected"
+            );
+        }
+        let zero_age = cutoff_from_age("0h").expect("0h parses");
+        let twelve_hours = cutoff_from_age("12h").expect("12h parses");
+        assert!(zero_age > twelve_hours, "older ages must cut off earlier");
     }
 }
