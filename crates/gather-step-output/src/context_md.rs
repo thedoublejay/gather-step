@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, collections::BTreeSet, fmt::Write as _, path::PathBuf};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt::Write as _,
+    path::PathBuf,
+};
 
 use chrono::{SecondsFormat, Utc};
 use gather_step_analysis::{cross_repo_deps, list_orphan_topics, trace_event, trace_route};
@@ -626,13 +631,16 @@ fn render_events_rule(
     write_header(&mut out, "Events");
     out.push_str("# Event Surface\n\n");
     out.push_str("## Topics And Events\n");
+    let targets = event_targets(graph, repo_names)?;
+    let total_targets = targets.len();
+    let targets = representative_by_repo(targets, DEFAULT_LIMIT);
+    write_logical_limit_notice(&mut out, "event targets", targets.len(), total_targets);
     out.push_str("| Target | Producers | Consumers |\n");
     out.push_str("|---|---|---|\n");
-    let targets = event_targets(graph, repo_names)?;
     if targets.is_empty() {
         out.push_str("| _No event or topic nodes detected_ | - | - |\n");
     }
-    for target in targets.into_iter().take(DEFAULT_LIMIT) {
+    for target in targets {
         let trace = trace_event(graph, target.id, DEFAULT_LIMIT)?;
         let _ = writeln!(
             out,
@@ -652,8 +660,11 @@ fn render_events_rule(
             .first()
             .map(String::as_str)
             .filter(|_| repo_names.len() == 1),
-        DEFAULT_LIMIT,
+        usize::MAX,
     )?;
+    let total_orphans = orphans.len();
+    let orphans = orphans.into_iter().take(DEFAULT_LIMIT).collect::<Vec<_>>();
+    write_logical_limit_notice(&mut out, "orphan targets", orphans.len(), total_orphans);
     if orphans.is_empty() {
         out.push_str("| _No orphan topics detected_ | - | - | - |\n");
     }
@@ -678,13 +689,16 @@ fn render_routes_rule(
     let mut out = String::new();
     write_header(&mut out, "Routes");
     out.push_str("# Route Surface\n\n");
+    let routes = route_targets(graph, repo_names)?;
+    let total_routes = routes.len();
+    let routes = representative_routes(routes, DEFAULT_LIMIT);
+    write_logical_limit_notice(&mut out, "routes", routes.len(), total_routes);
     out.push_str("| Route | Handler Repos | Caller Repos |\n");
     out.push_str("|---|---|---|\n");
-    let routes = route_targets(graph, repo_names)?;
     if routes.is_empty() {
         out.push_str("| _No route nodes detected_ | - | - |\n");
     }
-    for route in routes.into_iter().take(DEFAULT_LIMIT) {
+    for route in routes {
         let trace = trace_route(graph, route.id, DEFAULT_LIMIT)?;
         let _ = writeln!(
             out,
@@ -695,6 +709,66 @@ fn render_routes_rule(
         );
     }
     Ok(out)
+}
+
+fn write_logical_limit_notice(out: &mut String, noun: &str, shown: usize, total: usize) {
+    if total > shown {
+        let _ = writeln!(
+            out,
+            "_Showing {shown} of {total} indexed {noun}; use the live query for the complete set._\n"
+        );
+    }
+}
+
+fn representative_by_repo(
+    nodes: Vec<gather_step_core::NodeData>,
+    limit: usize,
+) -> Vec<gather_step_core::NodeData> {
+    let mut buckets = BTreeMap::<String, VecDeque<gather_step_core::NodeData>>::new();
+    for node in nodes {
+        buckets
+            .entry(node.repo.clone())
+            .or_default()
+            .push_back(node);
+    }
+    round_robin_buckets(buckets, limit)
+}
+
+fn representative_routes(
+    routes: Vec<gather_step_core::NodeData>,
+    limit: usize,
+) -> Vec<gather_step_core::NodeData> {
+    let mut buckets = BTreeMap::<String, VecDeque<gather_step_core::NodeData>>::new();
+    for route in routes {
+        let method = canonical_route_key(&route)
+            .map(|(method, _)| method)
+            .unwrap_or_else(|| "UNKNOWN".to_owned());
+        buckets.entry(method).or_default().push_back(route);
+    }
+    round_robin_buckets(buckets, limit)
+}
+
+fn round_robin_buckets(
+    mut buckets: BTreeMap<String, VecDeque<gather_step_core::NodeData>>,
+    limit: usize,
+) -> Vec<gather_step_core::NodeData> {
+    let mut selected = Vec::with_capacity(limit.min(buckets.values().map(VecDeque::len).sum()));
+    while selected.len() < limit {
+        let mut advanced = false;
+        for bucket in buckets.values_mut() {
+            if let Some(node) = bucket.pop_front() {
+                selected.push(node);
+                advanced = true;
+                if selected.len() == limit {
+                    break;
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    selected
 }
 
 fn render_repo_rule(
@@ -1032,4 +1106,48 @@ fn relativize_path_to_workspace(
         |_| "<outside-workspace>".to_owned(),
         |rel| rel.display().to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use gather_step_core::{NodeKind, virtual_node};
+
+    use super::{representative_routes, route_name, write_logical_limit_notice};
+
+    fn route(method: &str, path: &str) -> gather_step_core::NodeData {
+        let qualified_name = format!("__route__{method}__{path}");
+        virtual_node(
+            NodeKind::Route,
+            "__virtual__",
+            "",
+            &format!("{method} {path}"),
+            &qualified_name,
+        )
+    }
+
+    #[test]
+    fn representative_routes_do_not_let_one_method_exhaust_the_limit() {
+        let mut routes = (0..40)
+            .map(|index| route("DELETE", &format!("/assets/{index}")))
+            .collect::<Vec<_>>();
+        routes.push(route("GET", "/assets"));
+        routes.push(route("POST", "/assets"));
+
+        let selected = representative_routes(routes, 32);
+        let names = selected.iter().map(route_name).collect::<Vec<_>>();
+        assert_eq!(selected.len(), 32);
+        assert!(names.iter().any(|name| name == "GET /assets"));
+        assert!(names.iter().any(|name| name == "POST /assets"));
+    }
+
+    #[test]
+    fn logical_limit_notice_discloses_omitted_items() {
+        let mut output = String::new();
+        write_logical_limit_notice(&mut output, "routes", 32, 33);
+        assert!(output.contains("Showing 32 of 33 indexed routes"));
+
+        output.clear();
+        write_logical_limit_notice(&mut output, "routes", 32, 32);
+        assert!(output.is_empty());
+    }
 }
