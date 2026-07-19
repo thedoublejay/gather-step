@@ -3806,10 +3806,9 @@ fn is_strict_symbol_match(item: &SearchResultItem, target: &str) -> bool {
 }
 
 fn is_canonical_virtual_shared_match(item: &SearchResultItem, target: &str) -> bool {
-    item.repo == "__virtual__"
-        && item.kind.eq_ignore_ascii_case("shared_symbol")
+    item.kind.eq_ignore_ascii_case("shared_symbol")
         && item
-            .file_path
+            .symbol_name
             .rsplit("__")
             .next()
             .is_some_and(|name| name == target)
@@ -6386,11 +6385,11 @@ mod tests {
             consumer_repos: Vec::new(),
             participates: true,
             exact_match: true,
-            file_path: "__shared__sample-contracts__CreateOrderInput".to_owned(),
+            file_path: "src/order-consumer.ts".to_owned(),
             kind: "shared_symbol".to_owned(),
             language: "typescript".to_owned(),
             line_start: None,
-            repo: "__virtual__".to_owned(),
+            repo: "sample-service".to_owned(),
             score: 0.91,
             symbol_id: "canonical".to_owned(),
             symbol_name: "__shared__sample-contracts__CreateOrderInput".to_owned(),

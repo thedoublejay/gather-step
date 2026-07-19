@@ -17,7 +17,7 @@ fn concurrent_cli_runs_are_all_finalized_in_shared_telemetry() {
     fs::create_dir_all(&invalid_workspace).expect("create invalid workspace");
     fs::write(
         valid_workspace.join("gather-step.config.yaml"),
-        "repos: []\n",
+        "repos:\n  - name: sample-service\n    path: .\n",
     )
     .expect("write valid config");
 
