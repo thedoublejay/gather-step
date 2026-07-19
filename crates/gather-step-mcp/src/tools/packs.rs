@@ -15,7 +15,7 @@ use gather_step_analysis::{
     projection_impact_with_payload_contracts,
 };
 use gather_step_core::{
-    EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeId, NodeKind, PayloadContractRecord,
+    EdgeKind, MIGRATION_FILTERS_METADATA_PREFIX, NodeData, NodeId, NodeKind, PayloadContractRecord,
     PayloadSide, PlanningProof, node_id,
 };
 use gather_step_output::evidence::render_evidence_chain;
@@ -3463,7 +3463,7 @@ fn resolve_pack_target(
     if let Ok(node_id) = decode_node_id(target)
         && let Some(node) = ctx.graph().get_node(node_id)?
     {
-        if repo.is_none_or(|selected| node.repo == selected) {
+        if repo.is_none_or(|selected| pack_target_matches_repo(ctx.graph(), &node, selected)) {
             return Ok(ResolvedPackTarget {
                 alternate_anchors: Vec::new(),
                 candidate_count: 1,
@@ -3524,7 +3524,10 @@ fn resolve_pack_target(
     // Anchor 3: event/topic name
     let event_nodes = resolve_event_targets(ctx.graph(), target)?;
     let event_nodes: Vec<_> = match repo {
-        Some(r) => event_nodes.into_iter().filter(|n| n.repo == r).collect(),
+        Some(r) => event_nodes
+            .into_iter()
+            .filter(|node| pack_target_matches_repo(ctx.graph(), node, r))
+            .collect(),
         None => event_nodes,
     };
     if event_nodes.len() == 1 {
@@ -3555,7 +3558,7 @@ fn resolve_pack_target(
     // Anchor 4: route — target looks like `METHOD /path`
     if let Some((method, path)) = parse_route_target(target)
         && let Some(route_node) = resolve_route_target(ctx.graph(), &method, &path)?
-        && repo.is_none_or(|r| route_node.repo == r)
+        && repo.is_none_or(|r| pack_target_matches_repo(ctx.graph(), &route_node, r))
     {
         return Ok(ResolvedPackTarget {
             alternate_anchors: Vec::new(),
@@ -3604,6 +3607,31 @@ fn resolve_pack_target(
         winner_margin: None,
         ranked_alternates: Vec::new(),
     })
+}
+
+/// Virtual transport nodes belong to the participants adjacent to them, not
+/// to the synthetic `__virtual__` namespace used for stable identity. Repo
+/// filters therefore inspect real handlers/callers/producers/consumers. Real
+/// nodes retain ordinary direct repo matching.
+fn pack_target_matches_repo(graph: &impl GraphStore, node: &NodeData, selected_repo: &str) -> bool {
+    if !node.is_virtual {
+        return node.repo == selected_repo;
+    }
+
+    graph
+        .get_outgoing(node.id)
+        .into_iter()
+        .flatten()
+        .chain(graph.get_incoming(node.id).into_iter().flatten())
+        .filter_map(|edge| {
+            let adjacent = if edge.source == node.id {
+                edge.target
+            } else {
+                edge.source
+            };
+            graph.get_node(adjacent).ok().flatten()
+        })
+        .any(|participant| !participant.is_virtual && participant.repo == selected_repo)
 }
 
 fn is_deferred_symbol_resolution(resolution: &str) -> bool {
@@ -4335,7 +4363,10 @@ fn attempt_planning_rescue(
     ) && let Ok(event_nodes) = resolve_event_targets(ctx.graph(), target)
     {
         let event_nodes: Vec<_> = match repo {
-            Some(r) => event_nodes.into_iter().filter(|n| n.repo == r).collect(),
+            Some(r) => event_nodes
+                .into_iter()
+                .filter(|node| pack_target_matches_repo(ctx.graph(), node, r))
+                .collect(),
             None => event_nodes,
         };
         if !event_nodes.is_empty() {
@@ -4366,7 +4397,7 @@ fn attempt_planning_rescue(
     if resolved.resolution != "route_anchor"
         && let Some((method, path)) = parse_route_target(target)
         && let Ok(Some(route_node)) = resolve_route_target(ctx.graph(), &method, &path)
-        && repo.is_none_or(|r| route_node.repo == r)
+        && repo.is_none_or(|r| pack_target_matches_repo(ctx.graph(), &route_node, r))
     {
         let sid = encode_node_id(route_node.id);
         hints.push(format!(
@@ -5146,6 +5177,42 @@ mod tests {
         assert!(is_eventish_kind(NodeKind::Topic));
         assert!(is_eventish_kind(NodeKind::Queue));
         assert!(!is_eventish_kind(NodeKind::Function));
+    }
+
+    #[test]
+    fn virtual_pack_target_uses_adjacent_real_repo_for_filtering() {
+        let temp = TempDb::new("virtual-repo-filter");
+        let store = GraphStoreDb::open(temp.path()).expect("graph should open");
+        let handler_file = file("asset-api", "src/routes/assets.rs");
+        let handler = node(
+            "asset-api",
+            "src/routes/assets.rs",
+            NodeKind::Function,
+            "delete_asset",
+            0,
+        );
+        let route = node(
+            "__virtual__",
+            "__route__DELETE__/assets/:asset_id",
+            NodeKind::Route,
+            "DELETE /assets/:asset_id",
+            0,
+        );
+        store
+            .bulk_insert(
+                &[handler_file.clone(), handler.clone(), route.clone()],
+                &[edge(
+                    handler.id,
+                    route.id,
+                    EdgeKind::Serves,
+                    handler_file.id,
+                )],
+            )
+            .expect("graph seed should succeed");
+
+        assert!(pack_target_matches_repo(&store, &route, "asset-api"));
+        assert!(!pack_target_matches_repo(&store, &route, "asset-worker"));
+        assert!(pack_target_matches_repo(&store, &handler, "asset-api"));
     }
 
     // Evidence-aware planning ranking
