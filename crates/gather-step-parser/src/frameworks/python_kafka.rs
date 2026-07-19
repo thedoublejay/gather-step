@@ -42,6 +42,7 @@ pub fn augment(parsed: &ParsedFile) -> PythonKafkaAugmentation {
             emit_topic(parsed, call_site, &topic, false, &mut augmentation);
         }
     }
+    emit_proxy_producers(parsed, &mut augmentation);
     emit_decorator_consumers(parsed, &mut augmentation);
     augmentation
 }
@@ -52,9 +53,20 @@ pub fn augment(parsed: &ParsedFile) -> PythonKafkaAugmentation {
 /// the heavily-overloaded `send` only counts when its receiver names a Kafka
 /// producer (so `res.send(...)` / `log.send(...)` are not misread as producers).
 fn producer_topic(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<String> {
-    let hint = call_site.callee_qualified_hint.as_deref()?;
+    if !is_producer_call(call_site) {
+        return None;
+    }
+    let raw = call_site.raw_arguments.as_deref()?;
+    let first = split_top_level(raw, ',').into_iter().next()?;
+    resolve_topic(parsed, first)
+}
+
+fn is_producer_call(call_site: &EnrichedCallSite) -> bool {
+    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
     let (receiver, operation) = hint.rsplit_once('.').unwrap_or(("", hint));
-    let is_producer = match operation {
+    match operation {
         "send_and_wait" | "produce" => true,
         "send" => receiver_names_kafka(receiver, "producer"),
         "send_message" => {
@@ -62,13 +74,74 @@ fn producer_topic(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<S
                 || contains_ignore_ascii_case(receiver, "runtime")
         }
         _ => false,
-    };
-    if !is_producer {
+    }
+}
+
+fn emit_proxy_producers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugmentation) {
+    let proxies = parsed
+        .call_sites
+        .iter()
+        .filter_map(|call_site| producer_proxy(parsed, call_site))
+        .collect::<Vec<_>>();
+    for call_site in &parsed.call_sites {
+        for (proxy_name, topic_index) in &proxies {
+            if call_site.callee_name != *proxy_name {
+                continue;
+            }
+            let Some(raw) = call_site.raw_arguments.as_deref() else {
+                continue;
+            };
+            let Some(argument) = split_top_level(raw, ',').get(*topic_index).copied() else {
+                continue;
+            };
+            let Some(topic) = resolve_topic(parsed, argument) else {
+                continue;
+            };
+            let edge_start = augmentation.edges.len();
+            emit_topic(parsed, call_site, &topic, true, augmentation);
+            for edge in &mut augmentation.edges[edge_start..] {
+                edge.metadata.confidence = Some(750);
+                edge.metadata.resolver = Some("python_kafka_producer_proxy".to_owned());
+            }
+        }
+    }
+}
+
+fn producer_proxy(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(String, usize)> {
+    if !is_producer_call(call_site) || producer_topic(parsed, call_site).is_some() {
         return None;
     }
     let raw = call_site.raw_arguments.as_deref()?;
-    let first = split_top_level(raw, ',').into_iter().next()?;
-    resolve_topic(parsed, first)
+    let topic_parameter = split_top_level(raw, ',').into_iter().next()?.trim();
+    if topic_parameter.is_empty()
+        || !topic_parameter
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let owner = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.node.id == call_site.owner_id)?;
+    let signature = owner.node.signature.as_deref()?;
+    let open = signature.find('(')?;
+    let close = signature.rfind(')')?;
+    let parameters = split_top_level(&signature[open + 1..close], ',');
+    let parameter_index = parameters.iter().position(|parameter| {
+        parameter
+            .split([':', '='])
+            .next()
+            .is_some_and(|name| name.trim() == topic_parameter)
+    })?;
+    let receiver_offset = parameters
+        .first()
+        .and_then(|parameter| parameter.split([':', '=']).next())
+        .is_some_and(|name| matches!(name.trim(), "self" | "cls"))
+        .then_some(1)
+        .unwrap_or(0);
+    let call_index = parameter_index.checked_sub(receiver_offset)?;
+    Some((owner.node.name.clone(), call_index))
 }
 
 /// Topics consumed at this call site (the `AIOKafkaConsumer(...)` constructor
@@ -621,6 +694,61 @@ class AssetProcessedPublisher:
             vec!["__event__kafka__asset.processed".to_owned()]
         );
         assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+    }
+
+    #[test]
+    fn one_hop_producer_proxy_resolves_topic_at_call_site() {
+        let dir = TestDir::new("producer-proxy");
+        let parsed = parse(
+            &dir,
+            "publisher.py",
+            r#"
+from enum import Enum
+
+
+class BrokerTopic(str, Enum):
+    AssetQueued = "asset.queued"
+
+
+async def publish(producer, topic, payload):
+    await producer.send_and_wait(topic, payload)
+
+
+async def queue_asset(producer, payload):
+    await publish(producer, BrokerTopic.AssetQueued, payload)
+"#,
+        );
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec!["__event__kafka__asset.queued".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+        assert!(parsed.edges.iter().any(|edge| {
+            edge.kind == EdgeKind::Publishes
+                && edge.metadata.confidence == Some(750)
+                && edge.metadata.resolver.as_deref() == Some("python_kafka_producer_proxy")
+        }));
+    }
+
+    #[test]
+    fn producer_proxy_does_not_fabricate_edges_without_a_static_caller_topic() {
+        let dir = TestDir::new("dynamic-producer-proxy");
+        let parsed = parse(
+            &dir,
+            "publisher.py",
+            r#"
+async def publish(producer, topic, payload):
+    await producer.send_and_wait(topic, payload)
+
+
+async def forward(producer, topic, payload):
+    await publish(producer, topic, payload)
+"#,
+        );
+
+        assert!(event_ids(&parsed).is_empty());
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 0);
     }
 
     #[test]
