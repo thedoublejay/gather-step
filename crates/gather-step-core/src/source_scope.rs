@@ -51,6 +51,9 @@ pub fn classify_source_scope(path: &str) -> SourceScope {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or(file_name);
+    let test_marker = Path::new(file_stem)
+        .extension()
+        .and_then(|marker| marker.to_str());
     let components = normalized.split('/').collect::<Vec<_>>();
 
     if components.iter().any(|component| {
@@ -75,9 +78,8 @@ pub fn classify_source_scope(path: &str) -> SourceScope {
         .any(|component| matches!(*component, "test" | "tests" | "__tests__"))
         || (extension == Some("py")
             && (file_name.starts_with("test_") || file_stem.ends_with("_test")))
-        || (matches!(extension, Some("ts" | "tsx"))
-            && (file_stem.ends_with(".test") || file_stem.ends_with(".spec")))
-        || (matches!(extension, Some("js" | "jsx")) && file_stem.ends_with(".test"))
+        || (matches!(extension, Some("ts" | "tsx")) && matches!(test_marker, Some("test" | "spec")))
+        || (matches!(extension, Some("js" | "jsx")) && test_marker == Some("test"))
         || (extension == Some("rs") && file_stem.ends_with("_test"))
     {
         return SourceScope::Test;
