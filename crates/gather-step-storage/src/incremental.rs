@@ -134,7 +134,9 @@ pub fn snapshot_repo_files(
             path: path.to_path_buf(),
             source,
         })?;
-        if file_metadata.len() > traverse.max_file_size_bytes() {
+        if file_metadata.len() < traverse.min_file_size_bytes()
+            || file_metadata.len() > traverse.max_file_size_bytes()
+        {
             continue;
         }
 
