@@ -135,15 +135,18 @@ pub fn cross_repo_deps<S: GraphStore>(
             let Some(target) = session.node(edge.target)? else {
                 continue;
             };
-            if !target.is_virtual {
+            if !target.is_virtual || !is_dependency_endpoint(edge.kind) {
                 continue;
             }
             virtual_targets.insert((target.id, edge.kind));
         }
     }
 
-    for (virtual_id, _source_kind) in virtual_targets {
+    for (virtual_id, source_kind) in virtual_targets {
         for related in session.incoming(virtual_id)? {
+            if !is_dependency_pair(source_kind, related.kind) {
+                continue;
+            }
             let Some(source) = session.node(related.source)? else {
                 continue;
             };
@@ -156,6 +159,9 @@ pub fn cross_repo_deps<S: GraphStore>(
         }
 
         for related in session.outgoing(virtual_id)? {
+            if !is_dependency_pair(source_kind, related.kind) {
+                continue;
+            }
             let Some(target_node) = session.node(related.target)? else {
                 continue;
             };
@@ -169,6 +175,84 @@ pub fn cross_repo_deps<S: GraphStore>(
     }
 
     Ok(dependencies)
+}
+
+/// Edge kinds that can participate in a directional code/contract dependency.
+/// Ownership, authorship, co-change, deployment co-location, and generic
+/// provenance are deliberately absent: they are useful collaboration evidence
+/// but do not mean one repository calls or consumes another.
+const fn is_dependency_endpoint(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Defines
+            | EdgeKind::Imports
+            | EdgeKind::Exports
+            | EdgeKind::DependsOn
+            | EdgeKind::Publishes
+            | EdgeKind::Consumes
+            | EdgeKind::Triggers
+            | EdgeKind::Serves
+            | EdgeKind::UsesShared
+            | EdgeKind::UsesTypeFrom
+            | EdgeKind::UsesEventFrom
+            | EdgeKind::UsesGuardFrom
+            | EdgeKind::ConsumesApiFrom
+            | EdgeKind::ProducesEventFor
+            | EdgeKind::ImplementsContractFrom
+            | EdgeKind::ConsumesHookFrom
+            | EdgeKind::CrossRepoDepends
+            | EdgeKind::MirrorsValueFrom
+            | EdgeKind::GuardsEnumValue
+            | EdgeKind::CallsMcpTool
+            | EdgeKind::ExposesMcpTool
+    )
+}
+
+fn is_dependency_pair(source: EdgeKind, related: EdgeKind) -> bool {
+    if !is_dependency_endpoint(source) || !is_dependency_endpoint(related) {
+        return false;
+    }
+
+    let event_pair = (is_event_producer(source) && is_event_consumer(related))
+        || (is_event_consumer(source) && is_event_producer(related));
+    let route_pair = (source == EdgeKind::Serves && related == EdgeKind::ConsumesApiFrom)
+        || (source == EdgeKind::ConsumesApiFrom && related == EdgeKind::Serves);
+    let import_pair = (source == EdgeKind::Exports && related == EdgeKind::Imports)
+        || (source == EdgeKind::Imports && related == EdgeKind::Exports);
+    let contract_pair = (source == EdgeKind::Defines && is_contract_consumer(related))
+        || (is_contract_consumer(source) && related == EdgeKind::Defines);
+    let mcp_pair = (source == EdgeKind::ExposesMcpTool && related == EdgeKind::CallsMcpTool)
+        || (source == EdgeKind::CallsMcpTool && related == EdgeKind::ExposesMcpTool);
+    let explicit_pair = source == EdgeKind::CrossRepoDepends
+        || related == EdgeKind::CrossRepoDepends
+        || source == EdgeKind::DependsOn
+        || related == EdgeKind::DependsOn;
+
+    event_pair || route_pair || import_pair || contract_pair || mcp_pair || explicit_pair
+}
+
+const fn is_event_producer(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::Publishes | EdgeKind::ProducesEventFor | EdgeKind::Triggers
+    )
+}
+
+const fn is_event_consumer(kind: EdgeKind) -> bool {
+    matches!(kind, EdgeKind::Consumes | EdgeKind::UsesEventFrom)
+}
+
+const fn is_contract_consumer(kind: EdgeKind) -> bool {
+    matches!(
+        kind,
+        EdgeKind::UsesShared
+            | EdgeKind::UsesTypeFrom
+            | EdgeKind::UsesGuardFrom
+            | EdgeKind::ImplementsContractFrom
+            | EdgeKind::ConsumesHookFrom
+            | EdgeKind::MirrorsValueFrom
+            | EdgeKind::GuardsEnumValue
+    )
 }
 
 #[cfg(test)]
@@ -368,6 +452,106 @@ mod tests {
             b_to_a.contains(&EdgeKind::Publishes),
             "reverse hop must reflect the incoming edge kind (Publishes for repoA), got: {b_to_a:?}"
         );
+    }
+
+    #[test]
+    fn shared_author_does_not_create_code_dependencies() {
+        let temp_db = TempDb::new("cross-repo", "shared-author-not-dependency");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+        let file_a = file("repoA", "src/a.py");
+        let file_b = file("repoB", "src/b.py");
+        let function_a = node("repoA", "src/a.py", "function_a", 0);
+        let function_b = node("repoB", "src/b.py", "function_b", 0);
+        let author = virtual_node(
+            NodeKind::Author,
+            "__virtual__",
+            "",
+            "shared-author",
+            "__author__shared-author",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    file_a.clone(),
+                    file_b.clone(),
+                    function_a.clone(),
+                    function_b.clone(),
+                    author.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: function_a.id,
+                        target: author.id,
+                        kind: EdgeKind::OwnedBy,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: file_a.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: function_b.id,
+                        target: author.id,
+                        kind: EdgeKind::OwnedBy,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: file_b.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("fixture insert");
+
+        assert!(cross_repo_deps(&store, "repoA").expect("deps A").is_empty());
+        assert!(cross_repo_deps(&store, "repoB").expect("deps B").is_empty());
+    }
+
+    #[test]
+    fn consumers_of_same_event_are_not_dependencies_without_a_producer() {
+        let temp_db = TempDb::new("cross-repo", "consumer-peers-not-dependencies");
+        let store = GraphStoreDb::open(temp_db.path()).expect("store should open");
+        let file_a = file("repoA", "src/a.py");
+        let file_b = file("repoB", "src/b.py");
+        let consumer_a = node("repoA", "src/a.py", "consumer_a", 0);
+        let consumer_b = node("repoB", "src/b.py", "consumer_b", 0);
+        let event = virtual_node(
+            NodeKind::Event,
+            "__virtual__",
+            "",
+            "asset.updated",
+            "__event__kafka__asset.updated",
+        );
+
+        store
+            .bulk_insert(
+                &[
+                    file_a.clone(),
+                    file_b.clone(),
+                    consumer_a.clone(),
+                    consumer_b.clone(),
+                    event.clone(),
+                ],
+                &[
+                    EdgeData {
+                        source: consumer_a.id,
+                        target: event.id,
+                        kind: EdgeKind::Consumes,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: file_a.id,
+                        is_cross_file: true,
+                    },
+                    EdgeData {
+                        source: consumer_b.id,
+                        target: event.id,
+                        kind: EdgeKind::Consumes,
+                        metadata: EdgeMetadata::default(),
+                        owner_file: file_b.id,
+                        is_cross_file: true,
+                    },
+                ],
+            )
+            .expect("fixture insert");
+
+        assert!(cross_repo_deps(&store, "repoA").expect("deps A").is_empty());
+        assert!(cross_repo_deps(&store, "repoB").expect("deps B").is_empty());
     }
 
     // ── CoChangesWith advisory-band isolation ─────────────────────────────────
