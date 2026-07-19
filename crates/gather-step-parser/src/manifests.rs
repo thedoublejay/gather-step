@@ -133,8 +133,8 @@ pub fn parse_python_project_manifest_str(
                 })
                 .unwrap_or_else(|| "*".to_owned());
             dependencies.push(ManifestDependency {
-                package: package.clone(),
-                version,
+                package: normalize_python_package_name(package),
+                version: sanitize_dependency_locator(&version),
             });
         }
     }
@@ -181,15 +181,114 @@ fn parse_python_dependency(specification: &str) -> Option<ManifestDependency> {
         .split(';')
         .next()
         .unwrap_or_default()
-        .trim()
-        .to_owned();
+        .trim();
     Some(ManifestDependency {
-        package: package.to_owned(),
+        package: normalize_python_package_name(package),
         version: if version.is_empty() {
             "*".to_owned()
         } else {
-            version
+            sanitize_dependency_locator(version)
         },
+    })
+}
+
+/// PEP 503 name normalization: lowercase, collapse `[-_.]+` runs to `-`, so
+/// spelling variants of one distribution unify on a single graph identity.
+fn normalize_python_package_name(package: &str) -> String {
+    let mut normalized = String::with_capacity(package.len());
+    let mut in_separator = false;
+    for character in package.chars() {
+        if matches!(character, '-' | '_' | '.') {
+            if !in_separator {
+                normalized.push('-');
+            }
+            in_separator = true;
+        } else {
+            in_separator = false;
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+/// Strip credentials from PEP 508 direct-reference URLs so they never reach
+/// searchable symbol names/identities.
+fn sanitize_dependency_locator(version: &str) -> String {
+    if !version.contains("://") && !version.contains('?') {
+        return version.to_owned();
+    }
+    redact_sensitive_query_values(&strip_url_userinfo(version))
+}
+
+fn strip_url_userinfo(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(scheme) = rest.find("://") {
+        let authority_start = scheme + 3;
+        sanitized.push_str(&rest[..authority_start]);
+        let tail = &rest[authority_start..];
+        let authority_end = tail
+            .find(|character: char| {
+                matches!(character, '/' | '?' | '#') || character.is_whitespace()
+            })
+            .unwrap_or(tail.len());
+        let authority = &tail[..authority_end];
+        match authority.rfind('@') {
+            Some(at) => sanitized.push_str(&authority[at + 1..]),
+            None => sanitized.push_str(authority),
+        }
+        rest = &tail[authority_end..];
+    }
+    sanitized.push_str(rest);
+    sanitized
+}
+
+fn redact_sensitive_query_values(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(question) = rest.find('?') {
+        sanitized.push_str(&rest[..=question]);
+        let tail = &rest[question + 1..];
+        let query_end = tail
+            .find(|character: char| character == '#' || character.is_whitespace())
+            .unwrap_or(tail.len());
+        let (query, remainder) = tail.split_at(query_end);
+        let mut first = true;
+        for parameter in query.split('&') {
+            if !first {
+                sanitized.push('&');
+            }
+            first = false;
+            match parameter.split_once('=') {
+                Some((key, _)) if is_sensitive_query_key(key) => {
+                    sanitized.push_str(key);
+                    sanitized.push_str("=redacted");
+                }
+                _ => sanitized.push_str(parameter),
+            }
+        }
+        rest = remainder;
+    }
+    sanitized.push_str(rest);
+    sanitized
+}
+
+fn is_sensitive_query_key(key: &str) -> bool {
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "auth",
+        "key",
+        "sig",
+    ]
+    .iter()
+    .any(|needle| {
+        key.as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
     })
 }
 
@@ -503,6 +602,81 @@ dependencies = ["shared-schemas==2.3.1", "httpx>=0.28"]
 
         assert_eq!(mismatches.len(), 1);
         assert_eq!(mismatches[0].package, "@workspace/shared-contracts");
+    }
+
+    #[test]
+    fn pep_503_spelling_variants_unify_across_manifests() {
+        let requirements = parse_requirements_manifest_str("Shared_Contracts==2.3.1\n");
+        let pyproject = parse_python_project_manifest_str(
+            "[project]\nname = \"asset-api\"\ndependencies = [\"shared.contracts==2.4.0\"]\n",
+        )
+        .expect("pyproject should parse");
+        let poetry = parse_python_project_manifest_str(
+            "[tool.poetry]\nname = \"asset-worker\"\n\n[tool.poetry.dependencies]\n\"Shared.Contracts\" = \"2.5.0\"\n",
+        )
+        .expect("poetry manifest should parse");
+
+        for parsed in [&requirements, &pyproject, &poetry] {
+            assert_eq!(parsed.dependencies[0].package, "shared-contracts");
+        }
+
+        let mismatches = detect_version_mismatches(&[
+            ("service-a".to_owned(), requirements.dependencies[0].clone()),
+            ("service-b".to_owned(), pyproject.dependencies[0].clone()),
+        ]);
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0].package, "shared-contracts");
+        assert_eq!(mismatches[0].versions.len(), 2);
+    }
+
+    #[test]
+    fn direct_reference_credentials_never_reach_symbol_identities() {
+        let bait_reference =
+            "shared-contract @ https://alice:s3cr3t@example.com/pkg.whl?token=abc123&x=1";
+        let manifests = [
+            (
+                "pyproject.toml",
+                format!("[project]\nname = \"asset-api\"\ndependencies = [\"{bait_reference}\"]\n"),
+            ),
+            ("requirements.txt", format!("{bait_reference}\n")),
+        ];
+
+        for (file_path, raw) in manifests {
+            let owner_file = node_id("asset-api", file_path, NodeKind::File, file_path);
+            let repo_node = node_id("asset-api", "__repo__", NodeKind::Repo, "asset-api");
+            let extraction =
+                extract_package_manifest("asset-api", file_path, owner_file, repo_node, &raw)
+                    .expect("extraction should succeed");
+
+            assert!(
+                !extraction.nodes.is_empty(),
+                "{file_path}: shared dependency expected"
+            );
+            let leaks = |field: &str| field.contains("s3cr3t") || field.contains("abc123");
+            for node in &extraction.nodes {
+                assert!(
+                    !leaks(&node.name),
+                    "{file_path}: node.name leaks: {:?}",
+                    node.name
+                );
+                assert!(
+                    !node.qualified_name.as_deref().is_some_and(leaks),
+                    "{file_path}: node.qualified_name leaks: {:?}",
+                    node.qualified_name
+                );
+                assert!(
+                    !node.external_id.as_deref().is_some_and(leaks),
+                    "{file_path}: node.external_id leaks: {:?}",
+                    node.external_id
+                );
+            }
+            assert!(
+                extraction.nodes.iter().any(|node| {
+                    node.name.contains("example.com/pkg.whl") && node.name.contains("x=1")
+                }),
+                "{file_path}: credential-free locator must survive as the version"
+            );
+        }
     }
 
     /// `package.json` files sometimes contain credential fields in their JSON.

@@ -23,7 +23,7 @@
 use gather_step_core::{
     EdgeKind, NodeKind, SourceScope, canonical_route_path, classify_source_scope, route_qn,
 };
-use std::path::Path;
+use std::{cell::OnceCell, path::Path};
 
 use crate::{
     frameworks::http_client::{api_virtual_node, push_node_and_consumes_edge},
@@ -38,11 +38,16 @@ pub struct PythonHttpAugmentation {
     pub edges: Vec<EdgeData>,
 }
 
+/// Source lines split once per file, initialized lazily on the first call
+/// site that actually needs assignment resolution.
+type SourceLines<'a> = OnceCell<Vec<&'a str>>;
+
 #[must_use]
 pub fn augment(parsed: &ParsedFile) -> PythonHttpAugmentation {
     let mut augmentation = PythonHttpAugmentation::default();
+    let lines = SourceLines::new();
     for call_site in &parsed.call_sites {
-        if let Some(route) = resolve_consumed_route(parsed, call_site) {
+        if let Some(route) = resolve_consumed_route(parsed, call_site, &lines) {
             emit_route(parsed, call_site, &route, &mut augmentation);
         }
     }
@@ -56,9 +61,16 @@ struct ConsumedRoute {
 }
 
 /// The route consumed by this call site, if it is a resolvable HTTP-client call.
-fn resolve_consumed_route(
-    parsed: &ParsedFile,
+///
+/// Imported module/client provenance is accepted directly. Generic instance
+/// receivers (`client`, `session`, `http`, `api`) require a URL-shaped target
+/// so data-store calls such as `redis_client.get("key")` are not fabricated
+/// into HTTP routes. Both receiver checks are cheap and run before URL
+/// resolution, so non-client calls like `settings.get(key)` never pay for it.
+fn resolve_consumed_route<'a>(
+    parsed: &'a ParsedFile,
     call_site: &EnrichedCallSite,
+    lines: &'a SourceLines<'a>,
 ) -> Option<ConsumedRoute> {
     // Test HTTP clients prove endpoint coverage; they are not production
     // service consumers. Until source-scope evidence has its own graph surface,
@@ -68,8 +80,13 @@ fn resolve_consumed_route(
         return None;
     }
     let (method, receiver) = http_method_and_receiver(call_site)?;
-    let (url, literal_only) = resolve_url(parsed, call_site)?;
-    if !receiver_is_http_client(parsed, receiver, &url) {
+    let receiver_recognised = receiver_has_http_import(parsed, receiver)
+        || receiver.split('.').any(segment_is_known_http_module);
+    if !receiver_recognised && !receiver.split('.').any(segment_is_generic_http_client) {
+        return None;
+    }
+    let (url, literal_only) = resolve_url(parsed, call_site, lines)?;
+    if !receiver_recognised && !url_looks_like_http_target(&url) {
         return None;
     }
     Some(ConsumedRoute {
@@ -101,19 +118,6 @@ fn http_method_and_receiver(call_site: &EnrichedCallSite) -> Option<(&'static st
     let hint = call_site.callee_qualified_hint.as_deref()?;
     let (receiver, _operation) = hint.rsplit_once('.')?;
     Some((method, receiver))
-}
-
-/// Whether the dotted receiver path names a recognised HTTP client.
-///
-/// Imported module/client provenance is accepted directly. Generic instance
-/// names (`client`, `session`, `api`, `http`) require a URL-shaped target so
-/// data-store calls such as `redis_client.get("key")` are not fabricated into
-/// HTTP routes.
-fn receiver_is_http_client(parsed: &ParsedFile, receiver: &str, url: &str) -> bool {
-    receiver_has_http_import(parsed, receiver)
-        || receiver.split('.').any(segment_is_known_http_module)
-        || (url_looks_like_http_target(url)
-            && receiver.split('.').any(segment_is_generic_http_client))
 }
 
 fn receiver_has_http_import(parsed: &ParsedFile, receiver: &str) -> bool {
@@ -159,19 +163,24 @@ fn url_looks_like_http_target(url: &str) -> bool {
 /// Returns the URL and whether it resolved from string literals alone (used to
 /// band edge confidence). Keyword-only `url=` arguments are intentionally
 /// skipped.
-fn resolve_url(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(String, bool)> {
+fn resolve_url<'a>(
+    parsed: &'a ParsedFile,
+    call_site: &EnrichedCallSite,
+    lines: &'a SourceLines<'a>,
+) -> Option<(String, bool)> {
     let raw = call_site.raw_arguments.as_deref()?;
     let first = split_top_level(raw, ',').into_iter().next()?;
-    resolve_url_expression(parsed, call_site, first, 0)
+    resolve_url_expression(parsed, call_site, first, 0, lines)
 }
 
 /// Resolve a URL expression: a single literal/constant, or a `+`-concatenation
 /// of literals/constants. Returns `None` if any component is dynamic.
-fn resolve_url_expression(
-    parsed: &ParsedFile,
+fn resolve_url_expression<'a>(
+    parsed: &'a ParsedFile,
     call_site: &EnrichedCallSite,
     expression: &str,
     depth: usize,
+    lines: &'a SourceLines<'a>,
 ) -> Option<(String, bool)> {
     if depth > 4 {
         return None;
@@ -179,7 +188,7 @@ fn resolve_url_expression(
     let mut url = String::new();
     let mut literal_only = true;
     for atom in split_top_level(expression, '+') {
-        let (value, is_literal) = resolve_atom(parsed, call_site, atom, depth)?;
+        let (value, is_literal) = resolve_atom(parsed, call_site, atom, depth, lines)?;
         url.push_str(&value);
         literal_only &= is_literal;
     }
@@ -190,11 +199,12 @@ fn resolve_url_expression(
 /// Resolve a single atom to its string value: a quoted literal (`is_literal`
 /// true) or a same-function/module string constant (`is_literal` false).
 /// Returns `None` for dynamic values so junk routes are never invented.
-fn resolve_atom(
-    parsed: &ParsedFile,
+fn resolve_atom<'a>(
+    parsed: &'a ParsedFile,
     call_site: &EnrichedCallSite,
     atom: &str,
     depth: usize,
+    lines: &'a SourceLines<'a>,
 ) -> Option<(String, bool)> {
     let atom = atom.trim();
     if let Some(literal) = adjacent_string_literals(atom) {
@@ -203,11 +213,11 @@ fn resolve_atom(
     if let Some(literal) = string_literal(atom) {
         return Some((literal, true));
     }
-    if let Some(template) = f_string(parsed, call_site, atom, depth) {
+    if let Some(template) = f_string(parsed, call_site, atom, depth, lines) {
         return Some((template, false));
     }
-    if let Some(assignment) = single_assignment(parsed, call_site, atom) {
-        return resolve_url_expression(parsed, call_site, &assignment, depth + 1)
+    if let Some(assignment) = single_assignment(parsed, call_site, atom, lines) {
+        return resolve_url_expression(parsed, call_site, &assignment, depth + 1, lines)
             .map(|(value, _)| (value, false));
     }
     parsed
@@ -259,11 +269,12 @@ fn adjacent_string_literals(expression: &str) -> Option<String> {
     (count > 1).then_some(value)
 }
 
-fn f_string(
-    parsed: &ParsedFile,
+fn f_string<'a>(
+    parsed: &'a ParsedFile,
     call_site: &EnrichedCallSite,
     expression: &str,
     depth: usize,
+    lines: &'a SourceLines<'a>,
 ) -> Option<String> {
     let expression = expression.trim();
     let quote_offset = expression
@@ -295,7 +306,9 @@ fn f_string(
         if interpolation.is_empty() {
             return None;
         }
-        if let Some((resolved, _)) = resolve_atom(parsed, call_site, interpolation, depth + 1) {
+        if let Some((resolved, _)) =
+            resolve_atom(parsed, call_site, interpolation, depth + 1, lines)
+        {
             output.push_str(&resolved);
         } else {
             // An unresolved leading interpolation could be a host/base URL or
@@ -317,10 +330,11 @@ fn f_string(
     Some(output)
 }
 
-fn single_assignment(
-    parsed: &ParsedFile,
+fn single_assignment<'a>(
+    parsed: &'a ParsedFile,
     call_site: &EnrichedCallSite,
     name: &str,
+    lines: &'a SourceLines<'a>,
 ) -> Option<String> {
     if name.is_empty()
         || !name
@@ -329,7 +343,7 @@ fn single_assignment(
     {
         return None;
     }
-    let lines = parsed.source.lines().collect::<Vec<_>>();
+    let lines = lines.get_or_init(|| parsed.source.lines().collect());
     let owner_span = parsed
         .symbols
         .iter()

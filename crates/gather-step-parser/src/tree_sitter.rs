@@ -3177,6 +3177,10 @@ fn resolve_import_path(
     {
         return Some(absolute);
     } else if language == Language::Python
+        && let Some(absolute) = resolve_python_repo_relative_import(repo_root, source)
+    {
+        return Some(absolute);
+    } else if language == Language::Python
         && let Some(absolute) =
             resolve_python_sibling_package_import(repo_root, current_file, source)
     {
@@ -3562,6 +3566,15 @@ fn resolve_python_current_package_import(repo_root: &Path, source: &str) -> Opti
         return None;
     }
     resolve_python_package_subpath(&package_dir, package_name, tail.as_deref())
+}
+
+/// Prefer an existing module inside the indexed repository before scanning
+/// sibling Python projects. Repositories without Python project metadata still
+/// commonly use flat imports such as `from schemas import Model`; resolving a
+/// same-named sibling first can bind the import to an unrelated repository.
+fn resolve_python_repo_relative_import(repo_root: &Path, source: &str) -> Option<PathBuf> {
+    let (package_name, tail) = python_package_root_and_tail(source)?;
+    resolve_python_package_subpath(repo_root, package_name, tail.as_deref())
 }
 
 fn has_python_project_marker(package_dir: &Path) -> bool {
@@ -6485,6 +6498,38 @@ class ItemCreate:
             resolved,
             canonical(shared_root.join("src/shared_models/records.py"))
         );
+    }
+
+    #[test]
+    fn python_repo_relative_import_wins_over_same_named_sibling_package() {
+        let temp_dir = TestDir::new("python-local-before-sibling");
+        let app_root = temp_dir.path().join("api_service");
+        let sibling_root = temp_dir.path().join("schemas_service");
+        fs::create_dir_all(&app_root).expect("app repo should exist");
+        fs::create_dir_all(&sibling_root).expect("sibling repo should exist");
+        fs::write(app_root.join("schemas.py"), "class LocalModel: ...\n")
+            .expect("local schema should write");
+        fs::write(
+            sibling_root.join("pyproject.toml"),
+            "[project]\nname = \"schemas-service\"\n",
+        )
+        .expect("sibling pyproject should write");
+        fs::write(
+            sibling_root.join("schemas.py"),
+            "class UnrelatedModel: ...\n",
+        )
+        .expect("sibling schema should write");
+
+        let resolved = resolve_import_path(
+            &app_root,
+            Path::new("events.py"),
+            "schemas",
+            Language::Python,
+            &PathAliases::empty(),
+        )
+        .expect("repo-relative Python module should resolve");
+
+        assert_eq!(resolved, canonical(app_root.join("schemas.py")));
     }
 
     #[test]

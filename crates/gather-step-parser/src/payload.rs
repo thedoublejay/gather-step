@@ -369,17 +369,21 @@ fn producer_target(
     parsed: &ParsedFile,
     call_site: &crate::tree_sitter::EnrichedCallSite,
 ) -> Option<(gather_step_core::NodeId, NodeKind, String)> {
-    let (_, kind) = producer_messaging_operation(call_site)
-        .or_else(|| payload_messaging_operation(call_site))?;
-    // `producer_messaging_operation` / `payload_messaging_operation` always
-    // return `NodeKind::Event` (canonical messaging identity). Keep the kind
-    // in scope for the return tuple but use the canonical `__event__…`
-    // prefix unconditionally.
+    // Both branches converge on the canonical `NodeKind::Event` identity with
+    // the `__event__…` prefix.
+    let kind = NodeKind::Event;
     let topic_name = if parsed.file.language == Language::Python {
+        // Same receiver gating as the python_kafka pass, so non-Kafka
+        // `.send()`/`.send_message()` clients never fabricate producer events.
+        if !crate::frameworks::python_kafka::is_producer_call(call_site) {
+            return None;
+        }
         let raw_arguments = call_site.raw_arguments.as_deref()?;
         let argument = extract_call_argument(raw_arguments, 0)?;
         crate::frameworks::python_kafka::resolve_topic(parsed, argument, Some(call_site.owner_id))?
     } else {
+        producer_messaging_operation(call_site)
+            .or_else(|| payload_messaging_operation(call_site))?;
         resolve_producer_topic_name(parsed, call_site)?
     };
     let transport = call_site
@@ -1186,5 +1190,68 @@ async def publish_asset(payload: AssetEvent):
                 .map(|field| field.name.as_str())
                 .eq(["asset_id", "revision"])
         }));
+    }
+
+    #[test]
+    fn python_non_kafka_send_message_does_not_fabricate_producer_contract() {
+        let temp = TempDir::new("python-non-kafka-send");
+        let repo_root = temp.path();
+        fs::write(
+            repo_root.join("schemas.py"),
+            r"
+from pydantic import BaseModel
+
+
+class AssetEvent(BaseModel):
+    asset_id: str
+",
+        )
+        .expect("schema fixture");
+        let source = r#"
+from schemas import AssetEvent
+
+
+async def notify(sms_client, payload: AssetEvent):
+    await sms_client.send_message("welcome_email", payload)
+
+
+async def publish(producer, payload: AssetEvent):
+    await producer.send("user-created", payload)
+"#;
+        fs::write(repo_root.join("events.py"), source).expect("event fixture");
+        let parsed = parse_file_with_frameworks(
+            "asset-events",
+            repo_root,
+            &FileEntry {
+                path: "events.py".into(),
+                language: Language::Python,
+                size_bytes: u64::try_from(source.len()).unwrap_or(u64::MAX),
+                content_hash: *blake3::hash(source.as_bytes()).as_bytes(),
+                source_bytes: None,
+            },
+            &[Framework::PythonKafka],
+        )
+        .expect("fixture should parse");
+
+        assert!(
+            !parsed.nodes.iter().any(|node| {
+                node.external_id
+                    .as_deref()
+                    .is_some_and(|id| id.contains("welcome_email"))
+            }),
+            "an SMS client send_message must not fabricate an event node"
+        );
+
+        let inferred = infer_payload_contracts(&parsed);
+        let producer_targets = inferred
+            .iter()
+            .filter(|item| item.record.side == PayloadSide::Producer)
+            .filter_map(|item| item.record.contract_target_qualified_name.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            producer_targets,
+            vec!["__event__kafka__user-created"],
+            "only the genuine Kafka producer call gets a producer contract"
+        );
     }
 }

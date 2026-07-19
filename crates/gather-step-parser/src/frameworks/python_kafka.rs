@@ -18,9 +18,14 @@
 //! Module-level consumer construction (no enclosing function) is not captured,
 //! since call sites require an owning function.
 
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id};
+use rustc_hash::FxHashMap;
 
 use crate::{
     FileEntry, Language,
@@ -36,19 +41,23 @@ pub struct PythonKafkaAugmentation {
     pub edges: Vec<EdgeData>,
 }
 
+type EnumMemberValues = Arc<Vec<(String, String, String)>>;
+type ImportedEnumCache = FxHashMap<PathBuf, EnumMemberValues>;
+
 #[must_use]
 pub fn augment(parsed: &ParsedFile) -> PythonKafkaAugmentation {
     let mut augmentation = PythonKafkaAugmentation::default();
+    let mut imported_enum_cache = ImportedEnumCache::default();
     for call_site in &parsed.call_sites {
-        if let Some(topic) = producer_topic(parsed, call_site) {
+        if let Some(topic) = producer_topic(parsed, call_site, &mut imported_enum_cache) {
             emit_topic(parsed, call_site, &topic, true, &mut augmentation);
         }
-        for topic in consumer_topics(parsed, call_site) {
+        for topic in consumer_topics(parsed, call_site, &mut imported_enum_cache) {
             emit_topic(parsed, call_site, &topic, false, &mut augmentation);
         }
     }
-    emit_proxy_producers(parsed, &mut augmentation);
-    emit_decorator_consumers(parsed, &mut augmentation);
+    emit_proxy_producers(parsed, &mut imported_enum_cache, &mut augmentation);
+    emit_decorator_consumers(parsed, &mut imported_enum_cache, &mut augmentation);
     augmentation
 }
 
@@ -57,16 +66,20 @@ pub fn augment(parsed: &ParsedFile) -> PythonKafkaAugmentation {
 /// `send_and_wait`/`produce` are distinctive enough to match unconditionally;
 /// the heavily-overloaded `send` only counts when its receiver names a Kafka
 /// producer (so `res.send(...)` / `log.send(...)` are not misread as producers).
-fn producer_topic(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<String> {
+fn producer_topic(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Option<String> {
     if !is_producer_call(call_site) {
         return None;
     }
     let raw = call_site.raw_arguments.as_deref()?;
     let first = split_top_level(raw, ',').into_iter().next()?;
-    resolve_topic(parsed, first, Some(call_site.owner_id))
+    resolve_topic_with_cache(parsed, first, Some(call_site.owner_id), imported_enum_cache)
 }
 
-fn is_producer_call(call_site: &EnrichedCallSite) -> bool {
+pub(crate) fn is_producer_call(call_site: &EnrichedCallSite) -> bool {
     let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
         return false;
     };
@@ -82,11 +95,15 @@ fn is_producer_call(call_site: &EnrichedCallSite) -> bool {
     }
 }
 
-fn emit_proxy_producers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugmentation) {
+fn emit_proxy_producers(
+    parsed: &ParsedFile,
+    imported_enum_cache: &mut ImportedEnumCache,
+    augmentation: &mut PythonKafkaAugmentation,
+) {
     let proxies = parsed
         .call_sites
         .iter()
-        .filter_map(|call_site| producer_proxy(parsed, call_site))
+        .filter_map(|call_site| producer_proxy(parsed, call_site, imported_enum_cache))
         .collect::<Vec<_>>();
     for call_site in &parsed.call_sites {
         for (proxy_name, topic_index) in &proxies {
@@ -99,7 +116,12 @@ fn emit_proxy_producers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugme
             let Some(argument) = split_top_level(raw, ',').get(*topic_index).copied() else {
                 continue;
             };
-            let Some(topic) = resolve_topic(parsed, argument, Some(call_site.owner_id)) else {
+            let Some(topic) = resolve_topic_with_cache(
+                parsed,
+                argument,
+                Some(call_site.owner_id),
+                imported_enum_cache,
+            ) else {
                 continue;
             };
             let edge_start = augmentation.edges.len();
@@ -112,8 +134,14 @@ fn emit_proxy_producers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugme
     }
 }
 
-fn producer_proxy(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(String, usize)> {
-    if !is_producer_call(call_site) || producer_topic(parsed, call_site).is_some() {
+fn producer_proxy(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Option<(String, usize)> {
+    if !is_producer_call(call_site)
+        || producer_topic(parsed, call_site, imported_enum_cache).is_some()
+    {
         return None;
     }
     let raw = call_site.raw_arguments.as_deref()?;
@@ -151,9 +179,13 @@ fn producer_proxy(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(
 
 /// Topics consumed at this call site (the `AIOKafkaConsumer(...)` constructor
 /// or a `consumer.subscribe([...])` call), if any.
-fn consumer_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<String> {
+fn consumer_topics(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Vec<String> {
     if call_site.callee_name == "AIOKafkaConsumer" {
-        return constructor_topics(parsed, call_site);
+        return constructor_topics(parsed, call_site, imported_enum_cache);
     }
     let hint = call_site
         .callee_qualified_hint
@@ -161,7 +193,7 @@ fn consumer_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<Str
         .unwrap_or_default();
     let (receiver, operation) = hint.rsplit_once('.').unwrap_or(("", hint));
     if operation == "subscribe" && receiver_names_kafka(receiver, "consumer") {
-        return subscribe_topics(parsed, call_site);
+        return subscribe_topics(parsed, call_site, imported_enum_cache);
     }
     Vec::new()
 }
@@ -169,7 +201,11 @@ fn consumer_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<Str
 /// Leading positional string-literal/constant topics of `AIOKafkaConsumer(...)`.
 /// Stops at the first non-topic argument (a keyword arg or non-static value),
 /// since topics are always the leading positional arguments.
-fn constructor_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<String> {
+fn constructor_topics(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Vec<String> {
     let Some(raw) = call_site.raw_arguments.as_deref() else {
         return Vec::new();
     };
@@ -178,7 +214,12 @@ fn constructor_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<
         if argument.contains('=') {
             break;
         }
-        match resolve_topic(parsed, argument, Some(call_site.owner_id)) {
+        match resolve_topic_with_cache(
+            parsed,
+            argument,
+            Some(call_site.owner_id),
+            imported_enum_cache,
+        ) {
             Some(topic) => topics.push(topic),
             None => break,
         }
@@ -190,7 +231,11 @@ fn constructor_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<
 /// explicit `AIOKafkaConsumer.subscribe` call. Decorator captures already
 /// retain the raw expression, so this path shares the same topic resolver as
 /// producer calls and direct consumers.
-fn emit_decorator_consumers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugmentation) {
+fn emit_decorator_consumers(
+    parsed: &ParsedFile,
+    imported_enum_cache: &mut ImportedEnumCache,
+    augmentation: &mut PythonKafkaAugmentation,
+) {
     for symbol in &parsed.symbols {
         for decorator in &symbol.decorators {
             if !decorator
@@ -207,7 +252,9 @@ fn emit_decorator_consumers(parsed: &ParsedFile, augmentation: &mut PythonKafkaA
             else {
                 continue;
             };
-            let Some(topic) = resolve_topic(parsed, first, Some(symbol.node.id)) else {
+            let Some(topic) =
+                resolve_topic_with_cache(parsed, first, Some(symbol.node.id), imported_enum_cache)
+            else {
                 continue;
             };
             emit_topic_for_owner(
@@ -224,7 +271,11 @@ fn emit_decorator_consumers(parsed: &ParsedFile, augmentation: &mut PythonKafkaA
 }
 
 /// String-literal/constant topics inside the `subscribe([...])` list argument.
-fn subscribe_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<String> {
+fn subscribe_topics(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Vec<String> {
     let Some(raw) = call_site.raw_arguments.as_deref() else {
         return Vec::new();
     };
@@ -238,7 +289,14 @@ fn subscribe_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<St
         .unwrap_or(list);
     split_top_level(inner, ',')
         .iter()
-        .filter_map(|element| resolve_topic(parsed, element, Some(call_site.owner_id)))
+        .filter_map(|element| {
+            resolve_topic_with_cache(
+                parsed,
+                element,
+                Some(call_site.owner_id),
+                imported_enum_cache,
+            )
+        })
         .collect()
 }
 
@@ -341,7 +399,21 @@ pub(crate) fn resolve_topic(
     argument: &str,
     owner_id: Option<gather_step_core::NodeId>,
 ) -> Option<String> {
-    resolve_topic_inner(parsed, argument, owner_id, 0)
+    resolve_topic_with_cache(
+        parsed,
+        argument,
+        owner_id,
+        &mut ImportedEnumCache::default(),
+    )
+}
+
+fn resolve_topic_with_cache(
+    parsed: &ParsedFile,
+    argument: &str,
+    owner_id: Option<gather_step_core::NodeId>,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Option<String> {
+    resolve_topic_inner(parsed, argument, owner_id, 0, imported_enum_cache)
 }
 
 fn resolve_topic_inner(
@@ -349,6 +421,7 @@ fn resolve_topic_inner(
     argument: &str,
     owner_id: Option<gather_step_core::NodeId>,
     depth: usize,
+    imported_enum_cache: &mut ImportedEnumCache,
 ) -> Option<String> {
     if depth > 2 {
         return None;
@@ -366,14 +439,20 @@ fn resolve_topic_inner(
     // Resolve imports before local leaf-name lookup. A namespace-qualified
     // expression such as `module.StreamTopic.Member` must not attach to an
     // unrelated local `StreamTopic` with the same member name.
-    if let Some(value) = imported_enum_member_value(parsed, argument) {
+    if let Some(value) = imported_enum_member_value(parsed, argument, imported_enum_cache) {
         return Some(value);
     }
     if let Some(value) = local_enum_member_value(parsed, argument) {
         return Some(value);
     }
     if let Some(bound) = python_self_attribute_binding(parsed, argument, owner_id) {
-        return resolve_topic_inner(parsed, bound.as_str(), owner_id, depth + 1);
+        return resolve_topic_inner(
+            parsed,
+            bound.as_str(),
+            owner_id,
+            depth + 1,
+            imported_enum_cache,
+        );
     }
     external_enum_member_topic(argument)
 }
@@ -438,7 +517,11 @@ fn python_self_attribute_binding(
 /// this pass remains bounded and parses only the referenced file. The result
 /// is the canonical wire value, so Python wrapper events converge with literal
 /// and cross-language producers/consumers instead of remaining symbolic.
-fn imported_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<String> {
+fn imported_enum_member_value(
+    parsed: &ParsedFile,
+    argument: &str,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Option<String> {
     let (enum_expression, member) = argument.rsplit_once('.')?;
     let (binding, imported_enum) = parsed.import_bindings.iter().find_map(|binding| {
         if binding.local_name == enum_expression && !binding.is_namespace {
@@ -466,10 +549,43 @@ fn imported_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<Str
         None
     })?;
     let path = binding.resolved_path.as_deref()?;
-    let size = usize::try_from(fs::metadata(path).ok()?.len()).ok()?;
-    if size > MAX_IMPORTED_TOPIC_ENUM_BYTES {
+    let members = imported_enum_members(parsed, path, imported_enum_cache)?;
+    let enum_leaf = imported_enum
+        .rsplit('.')
+        .next()
+        .unwrap_or(imported_enum.as_str());
+    members
+        .iter()
+        .find_map(|(candidate_enum, candidate_member, value)| {
+            (candidate_enum.as_str() == enum_leaf && candidate_member.as_str() == member)
+                .then(|| value.clone())
+        })
+}
+
+/// Per-augmentation `(enum leaf, member, value)` cache keyed by resolved path,
+/// so one enum module is read and parsed once without retaining stale entries
+/// across reindex passes in long-running processes.
+fn imported_enum_members(
+    parsed: &ParsedFile,
+    path: &Path,
+    imported_enum_cache: &mut ImportedEnumCache,
+) -> Option<EnumMemberValues> {
+    if let Some(members) = imported_enum_cache.get(path) {
+        return Some(Arc::clone(members));
+    }
+    let metadata = fs::metadata(path).ok()?;
+    if usize::try_from(metadata.len()).ok()? > MAX_IMPORTED_TOPIC_ENUM_BYTES {
         return None;
     }
+    let members = Arc::new(parse_enum_member_values(parsed, path).unwrap_or_default());
+    imported_enum_cache.insert(path.to_path_buf(), Arc::clone(&members));
+    Some(members)
+}
+
+fn parse_enum_member_values(
+    parsed: &ParsedFile,
+    path: &Path,
+) -> Option<Vec<(String, String, String)>> {
     let bytes = fs::read(path).ok()?;
     let parent = path.parent()?;
     let file_name = path.file_name()?.into();
@@ -485,7 +601,21 @@ fn imported_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<Str
         },
     )
     .ok()?;
-    local_enum_member_value(&imported, &format!("{imported_enum}.{member}"))
+    Some(
+        imported
+            .value_mirror_candidates
+            .iter()
+            .filter_map(|candidate| {
+                let crate::ts_js_oxc::ValueMirrorKind::EnumMemberDef { enum_qn, member } =
+                    &candidate.kind
+                else {
+                    return None;
+                };
+                let enum_leaf = enum_qn.rsplit('.').next().unwrap_or(enum_qn).to_owned();
+                Some((enum_leaf, member.clone(), candidate.value.clone()))
+            })
+            .collect(),
+    )
 }
 
 /// Preserve an external enum member as a symbolic topic identity. This is
@@ -921,6 +1051,49 @@ async def consume(message):
         );
         assert_eq!(edge_count(&parsed, EdgeKind::Consumes), 1);
         assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
+    }
+
+    #[test]
+    fn imported_topic_enum_cache_invalidates_when_the_module_changes() {
+        let dir = TestDir::new("imported-enum-cache");
+        let enum_module = |value: &str| {
+            format!(
+                r#"
+from enum import Enum
+
+
+class StreamTopic(str, Enum):
+    JobQueued = "{value}"
+"#
+            )
+        };
+        let consumer = r"
+from topic_defs import StreamTopic
+
+
+@kafka_event(StreamTopic.JobQueued)
+async def consume(message):
+    handle(message)
+";
+        fs::write(dir.path().join("topic_defs.py"), enum_module("jobs.queued"))
+            .expect("topic definition should write");
+        let parsed = parse(&dir, "events.py", consumer);
+        assert_eq!(
+            event_ids(&parsed),
+            vec!["__event__kafka__jobs.queued".to_owned()]
+        );
+
+        fs::write(
+            dir.path().join("topic_defs.py"),
+            enum_module("jobs.queued.v2"),
+        )
+        .expect("topic definition should rewrite");
+        let reparsed = parse(&dir, "events_v2.py", consumer);
+        assert_eq!(
+            event_ids(&reparsed),
+            vec!["__event__kafka__jobs.queued.v2".to_owned()],
+            "a changed enum module must not serve stale cached values"
+        );
     }
 
     #[test]
