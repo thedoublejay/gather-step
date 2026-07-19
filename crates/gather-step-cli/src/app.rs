@@ -39,6 +39,7 @@ static TELEMETRY_REPO_COUNT: AtomicI64 = AtomicI64::new(-1);
 static TELEMETRY_FILES_PARSED: AtomicI64 = AtomicI64::new(-1);
 static TELEMETRY_NODES_CREATED: AtomicI64 = AtomicI64::new(-1);
 static TELEMETRY_RESULT_COUNT: AtomicI64 = AtomicI64::new(-1);
+static TELEMETRY_RESULT_KIND: AtomicU8 = AtomicU8::new(0);
 const TELEMETRY_EVENT_LIMIT: usize = 32;
 static TELEMETRY_EVENTS: LazyLock<Mutex<VecDeque<gather_step_storage::TelemetryErrorEvent>>> =
     LazyLock::new(|| Mutex::new(VecDeque::with_capacity(TELEMETRY_EVENT_LIMIT)));
@@ -132,6 +133,8 @@ pub fn reset_telemetry_run_state() {
     TELEMETRY_FILES_PARSED.store(-1, Ordering::Relaxed);
     TELEMETRY_NODES_CREATED.store(-1, Ordering::Relaxed);
     TELEMETRY_RESULT_COUNT.store(-1, Ordering::Relaxed);
+    TELEMETRY_RESULT_KIND.store(0, Ordering::Relaxed);
+    gather_step_storage::graph_store::reset_graph_open_retry_count();
     if let Ok(mut events) = TELEMETRY_EVENTS.lock() {
         events.clear();
     }
@@ -179,23 +182,42 @@ pub fn mark_telemetry_index_metrics(repo_count: usize, files_parsed: u64, nodes_
     );
 }
 
-pub fn observe_command_payload(payload: &serde_json::Value) {
-    let count = ["result_count", "total_hits", "returned"]
-        .into_iter()
-        .find_map(|key| payload.get(key).and_then(serde_json::Value::as_i64))
-        .or_else(|| {
-            ["hits", "consumers", "dependencies", "items", "records"]
-                .into_iter()
-                .find_map(|key| {
-                    payload
-                        .get(key)
-                        .and_then(serde_json::Value::as_array)
-                        .and_then(|values| i64::try_from(values.len()).ok())
-                })
-        });
-    if let Some(count) = count {
-        TELEMETRY_RESULT_COUNT.store(count, Ordering::Relaxed);
-    }
+pub fn mark_telemetry_result(result: gather_step_storage::TelemetryCommandResult) {
+    TELEMETRY_RESULT_COUNT.store(result.count.max(0), Ordering::Relaxed);
+    let kind = match result.kind {
+        gather_step_storage::TelemetryResultKind::AgentTraceNodes => 1,
+        gather_step_storage::TelemetryResultKind::ConsumerRepos => 2,
+        gather_step_storage::TelemetryResultKind::DependencyEdges => 3,
+        gather_step_storage::TelemetryResultKind::EventLinks => 4,
+        gather_step_storage::TelemetryResultKind::ImpactedFiles => 5,
+        gather_step_storage::TelemetryResultKind::OrphanTargets => 6,
+        gather_step_storage::TelemetryResultKind::SearchHits => 7,
+        gather_step_storage::TelemetryResultKind::TraceNodes => 8,
+    };
+    TELEMETRY_RESULT_KIND.store(kind, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn telemetry_extra() -> Option<gather_step_storage::TelemetryExtra> {
+    let result_kind = match TELEMETRY_RESULT_KIND.load(Ordering::Relaxed) {
+        1 => Some(gather_step_storage::TelemetryResultKind::AgentTraceNodes),
+        2 => Some(gather_step_storage::TelemetryResultKind::ConsumerRepos),
+        3 => Some(gather_step_storage::TelemetryResultKind::DependencyEdges),
+        4 => Some(gather_step_storage::TelemetryResultKind::EventLinks),
+        5 => Some(gather_step_storage::TelemetryResultKind::ImpactedFiles),
+        6 => Some(gather_step_storage::TelemetryResultKind::OrphanTargets),
+        7 => Some(gather_step_storage::TelemetryResultKind::SearchHits),
+        8 => Some(gather_step_storage::TelemetryResultKind::TraceNodes),
+        _ => None,
+    };
+    let graph_open_retries = gather_step_storage::graph_store::graph_open_retry_count();
+    (result_kind.is_some() || graph_open_retries > 0).then_some(
+        gather_step_storage::TelemetryExtra {
+            result_kind,
+            graph_open_retries,
+            telemetry_busy_retries: 0,
+        },
+    )
 }
 
 #[must_use]
@@ -291,9 +313,6 @@ impl Output {
         reason = "Output::emit is the single structured-JSON funnel for CLI commands"
     )]
     pub fn emit<T: serde::Serialize>(&self, value: &T) -> Result<()> {
-        if let Ok(payload) = serde_json::to_value(value) {
-            observe_command_payload(&payload);
-        }
         if self.json {
             println!("{}", serde_json::to_string(value)?);
         }

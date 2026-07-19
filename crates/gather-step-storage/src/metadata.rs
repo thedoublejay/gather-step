@@ -13,7 +13,7 @@ use gather_step_core::{
     PayloadInferenceKind, PayloadSide,
 };
 use gather_step_parser::resolve::ResolutionInput;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::incremental::TrackedPath;
@@ -1035,6 +1035,7 @@ pub struct MetadataStoreDb {
     readers: ConnectionPool,
     path: PathBuf,
     hit_count_buf: Mutex<HitCountBuffer>,
+    read_only: bool,
 }
 
 struct ConnectionPool {
@@ -1057,6 +1058,8 @@ pub enum MetadataStoreError {
     SchemaVersionMismatch { stored: i64, expected: i64 },
     #[error("The metadata store connection-pool mutex was poisoned.")]
     Poisoned,
+    #[error("The metadata store at `{path}` was opened read-only.")]
+    ReadOnly { path: PathBuf },
 }
 
 /// Current metadata schema version.
@@ -1099,6 +1102,24 @@ impl MetadataStoreDb {
             readers: ConnectionPool::new(readers),
             path,
             hit_count_buf: Mutex::new(HitCountBuffer::new()),
+            read_only: false,
+        })
+    }
+
+    /// Open an existing metadata database without creating files, changing
+    /// pragmas on disk, bootstrapping schema, or retaining a writable handle.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, MetadataStoreError> {
+        let path = path.as_ref().to_path_buf();
+        let connection = Self::open_read_only_connection(&path)?;
+        let readers = (0..READER_POOL_SIZE)
+            .map(|_| Self::open_read_only_connection(&path))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            writer: Mutex::new(connection),
+            readers: ConnectionPool::new(readers),
+            path,
+            hit_count_buf: Mutex::new(HitCountBuffer::new()),
+            read_only: true,
         })
     }
 
@@ -1144,6 +1165,14 @@ impl MetadataStoreDb {
         Ok(connection)
     }
 
+    fn open_read_only_connection(path: &Path) -> Result<Connection, MetadataStoreError> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", true)?;
+        Self::validate_schema_version(&connection)?;
+        Ok(connection)
+    }
+
     fn validate_schema_version(connection: &Connection) -> Result<(), MetadataStoreError> {
         let stored = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if stored != METADATA_SCHEMA_VERSION {
@@ -1162,6 +1191,11 @@ impl MetadataStoreDb {
     }
 
     fn lock_writer(&self) -> Result<MutexGuard<'_, Connection>, MetadataStoreError> {
+        if self.read_only {
+            return Err(MetadataStoreError::ReadOnly {
+                path: self.path.clone(),
+            });
+        }
         self.writer.lock().map_err(|_| MetadataStoreError::Poisoned)
     }
 
@@ -1398,6 +1432,9 @@ impl MetadataStoreDb {
     /// Callers that need hit counts to be visible immediately — such as tests
     /// that query the database directly — can call this after a cache hit.
     pub fn flush_hit_counts(&self) {
+        if self.read_only {
+            return;
+        }
         let deltas = match self.hit_count_buf.lock() {
             Ok(mut guard) => guard.drain(),
             Err(_) => return,
@@ -1419,6 +1456,9 @@ impl MetadataStoreDb {
 
     /// Record a hit and flush the buffer to `SQLite` if the threshold is reached.
     fn record_hit(&self, id: CacheRowId) {
+        if self.read_only {
+            return;
+        }
         let should_flush = match self.hit_count_buf.lock() {
             Ok(mut guard) => guard.record(id),
             Err(_) => false,
@@ -2589,6 +2629,9 @@ impl MetadataStoreDb {
 
 impl Drop for MetadataStoreDb {
     fn drop(&mut self) {
+        if self.read_only {
+            return;
+        }
         // Flush any buffered hit-count deltas before closing the connections.
         self.flush_hit_counts();
 

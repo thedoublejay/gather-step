@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 use gather_step_analysis::confidence::{ConfidenceBand, band_of};
-use gather_step_mcp::tools::crud_trace::{CrudTraceRequest, crud_trace_tool};
+use gather_step_mcp::tools::crud_trace::{CrudTraceRequest, crud_trace_coverage, crud_trace_tool};
 use serde_json::json;
 
 use crate::command_render::RenderedCommand;
@@ -119,11 +119,20 @@ pub(crate) fn execute_crud(
             .database_hints
             .retain(|item| item.repo == repo);
     }
+    let registry = ctx.registry_snapshot()?;
+    response.data.coverage = crud_trace_coverage(&registry, repo_filter, &response.data);
+
+    let result_count = response.data.callers.len()
+        + response.data.handlers.len()
+        + response.data.continuation.len()
+        + response.data.entities.len()
+        + response.data.database_hints.len();
 
     let payload = json!({
         "event": "trace_crud_completed",
         "callers": response.data.callers,
         "continuation": response.data.continuation,
+        "coverage": response.data.coverage,
         "database_hints": response.data.database_hints,
         "entities": response.data.entities,
         "handlers": response.data.handlers,
@@ -138,6 +147,13 @@ pub(crate) fn execute_crud(
         "CRUD trace {} {}",
         response.data.method, response.data.path
     )];
+    if response.data.coverage.verdict != "ok" {
+        lines.push(format!(
+            "Coverage: {}; {}",
+            response.data.coverage.verdict,
+            response.data.coverage.limitations.join(" ")
+        ));
+    }
     lines.push("Callers:".to_owned());
     if response.data.callers.is_empty() {
         lines.push("  none".to_owned());
@@ -229,7 +245,12 @@ pub(crate) fn execute_crud(
         lines.push(format!("Repo filter: {repo}"));
     }
 
-    Ok(RenderedCommand::success(payload, lines))
+    Ok(
+        RenderedCommand::success(payload, lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::TraceNodes,
+            result_count,
+        ),
+    )
 }
 
 fn format_confidence(confidence: Option<u16>) -> String {

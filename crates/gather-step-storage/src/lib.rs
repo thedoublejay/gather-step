@@ -81,8 +81,9 @@ pub use search_store::{
 };
 pub use stores::{WorkspaceStores, WorkspaceStoresError};
 pub use telemetry::{
-    TelemetryError, TelemetryErrorEvent, TelemetryEventRecord, TelemetryRun, TelemetryRunFinish,
-    TelemetryRunRecord, TelemetryStore,
+    TelemetryCommandResult, TelemetryError, TelemetryErrorEvent, TelemetryEventRecord,
+    TelemetryExtra, TelemetryResultKind, TelemetryRun, TelemetryRunFinish, TelemetryRunRecord,
+    TelemetryStore,
 };
 pub use watcher::{
     WatchCause, WatchEvent, Watcher, WatcherConfig, WatcherError, WatcherStatus, WorkspaceWatcher,
@@ -187,15 +188,13 @@ impl StorageCoordinator {
         Self { stores }
     }
 
-    /// Open a coordinator with a **read-only** Tantivy search store.
+    /// Open a coordinator whose graph, search, and metadata handles are all
+    /// enforced read-only by their storage backends.
     ///
-    /// Use this for read-only commands (e.g. search, status) that must not
-    /// hold a Tantivy write lock. The graph and metadata stores are still
-    /// opened read-write; only the search index is read-only.
+    /// Use this for query and diagnostic commands. Missing storage remains an
+    /// error; this path never creates or bootstraps generated state.
     pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, StorageCoordinatorError> {
-        Ok(Self::from_stores(WorkspaceStores::open_read_only_search(
-            root,
-        )?))
+        Ok(Self::from_stores(WorkspaceStores::open_read_only(root)?))
     }
 
     /// Open a coordinator with a **read-only** Tantivy search store.

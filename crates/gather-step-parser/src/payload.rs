@@ -17,7 +17,7 @@ use crate::frameworks::nestjs::{
 };
 use crate::path_guard::canonicalize_existing_file_under;
 use crate::top_level_split::split_top_level;
-use crate::traverse::classify_language;
+use crate::traverse::{Language, classify_language};
 use crate::tree_sitter::{ParsedFile, SymbolCapture};
 use rustc_hash::FxHashMap;
 
@@ -375,7 +375,13 @@ fn producer_target(
     // return `NodeKind::Event` (canonical messaging identity). Keep the kind
     // in scope for the return tuple but use the canonical `__event__…`
     // prefix unconditionally.
-    let topic_name = resolve_producer_topic_name(parsed, call_site)?;
+    let topic_name = if parsed.file.language == Language::Python {
+        let raw_arguments = call_site.raw_arguments.as_deref()?;
+        let argument = extract_call_argument(raw_arguments, 0)?;
+        crate::frameworks::python_kafka::resolve_topic(parsed, argument, Some(call_site.owner_id))?
+    } else {
+        resolve_producer_topic_name(parsed, call_site)?
+    };
     let transport = call_site
         .callee_qualified_hint
         .as_deref()
@@ -417,11 +423,12 @@ fn consumer_target(
         .arguments
         .first()
         .and_then(|raw| {
-            resolve_topic_decorator_argument(parsed, raw).or_else(|| quoted_literal_topic_name(raw))
+            resolve_payload_topic_expression(parsed, symbol, raw)
+                .or_else(|| quoted_literal_topic_name(raw))
         })
         .or_else(|| {
             first_decorator_argument(&decorator.raw).and_then(|raw| {
-                resolve_topic_decorator_argument(parsed, &raw)
+                resolve_payload_topic_expression(parsed, symbol, &raw)
                     .or_else(|| quoted_literal_topic_name(&raw))
             })
         })?;
@@ -435,6 +442,18 @@ fn consumer_target(
     let kind = NodeKind::Event;
     let qn = format!("__event__kafka__{name}");
     Some((ref_node_id(kind, &qn), kind, qn))
+}
+
+fn resolve_payload_topic_expression(
+    parsed: &ParsedFile,
+    symbol: &SymbolCapture,
+    raw: &str,
+) -> Option<String> {
+    if parsed.file.language == Language::Python {
+        crate::frameworks::python_kafka::resolve_topic(parsed, raw, Some(symbol.node.id))
+    } else {
+        resolve_topic_decorator_argument(parsed, raw)
+    }
 }
 
 /// Extract the first comma-separated argument from `raw`.

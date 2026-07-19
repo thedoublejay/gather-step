@@ -12,7 +12,7 @@ use crate::{app::AppContext, daemon_proxy};
 
 #[derive(Debug, Args)]
 pub struct WhoConsumesArgs {
-    #[arg(help = "Symbol name to search for; reports the repos that consume what it produces")]
+    #[arg(help = "Symbol name to search for; reports repos with dependency paths to that symbol")]
     pub symbol: String,
 }
 
@@ -53,13 +53,14 @@ pub(crate) fn execute(
     let mut lines = Vec::new();
     if data.consumers.is_empty() {
         lines.push(format!(
-            "No indexed production consumer edges were observed for `{}`.",
+            "No indexed consumer edges were observed for `{}`.",
             data.symbol
         ));
-        lines.push(
-            "Coverage: possible_extraction_gap; verify dynamic, external, and unsupported paths."
-                .to_owned(),
-        );
+        lines.push(format!(
+            "Coverage: {}; {}",
+            data.coverage.verdict,
+            data.coverage.limitations.join(" ")
+        ));
     } else {
         lines.push(format!("Repos consuming `{}`:", data.symbol));
         for consumer in &data.consumers {
@@ -71,31 +72,19 @@ pub(crate) fn execute(
         }
     }
 
-    let edges_contributed = data.consumers.len();
-    let verdict = if edges_contributed == 0 {
-        "possible_extraction_gap"
-    } else {
-        "ok"
-    };
+    let consumer_count = data.consumers.len();
     let payload = json!({
         "event": "who_consumes_completed",
         "symbol": data.symbol,
         "consumers": data.consumers,
-        "coverage": {
-            "repos_considered": repo.into_iter().collect::<Vec<_>>(),
-            "matching_frameworks": [],
-            "extractors_run": ["symbol_consumer_traversal"],
-            "source_scopes": ["production", "unknown"],
-            "edges_contributed": edges_contributed,
-            "verdict": verdict,
-            "limitations": if edges_contributed == 0 {
-                vec!["Dynamic dispatch, external packages, or unsupported framework paths may not be represented."]
-            } else {
-                Vec::<&str>::new()
-            },
-        },
+        "coverage": data.coverage,
     });
-    Ok(RenderedCommand::success(payload, lines))
+    Ok(
+        RenderedCommand::success(payload, lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::ConsumerRepos,
+            consumer_count,
+        ),
+    )
 }
 
 #[cfg(test)]

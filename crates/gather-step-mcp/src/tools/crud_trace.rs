@@ -1,7 +1,7 @@
 use gather_step_analysis::{
     CrudTraceRole, resolve_route_target, trace_crud_route, trace_crud_symbol,
 };
-use gather_step_core::NodeData;
+use gather_step_core::{NodeData, WorkspaceRegistry, classify_source_scope};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,10 @@ use crate::{
         EvidenceSupportMethod,
     },
     ids::{decode_node_id, encode_node_id},
-    tools::labels::{edge_kind_label, evidence_kind_label, node_kind_label},
+    tools::{
+        coverage::QueryCoverage,
+        labels::{edge_kind_label, evidence_kind_label, node_kind_label},
+    },
 };
 
 const DEFAULT_CRUD_LIMIT: usize = 25;
@@ -45,6 +48,7 @@ pub struct CrudTraceResponse {
 pub struct CrudTraceData {
     pub callers: Vec<CrudTraceSymbol>,
     pub continuation: Vec<CrudTraceSymbol>,
+    pub coverage: QueryCoverage,
     pub database_hints: Vec<CrudTraceSymbol>,
     pub entities: Vec<CrudTraceSymbol>,
     pub evidence: Vec<Evidence>,
@@ -90,6 +94,7 @@ pub fn crud_trace_tool(
     request: CrudTraceRequest,
 ) -> Result<CrudTraceResponse, McpServerError> {
     let graph = ctx.graph();
+    let registry = ctx.registry_snapshot()?;
     let limit = ctx.config.capped_limit(request.limit, DEFAULT_CRUD_LIMIT);
     if let Some(symbol_id) = request.symbol_id.as_deref() {
         validate_input_length("symbol_id", symbol_id)?;
@@ -146,6 +151,7 @@ pub fn crud_trace_tool(
             data: CrudTraceData {
                 callers: trace.callers.into_iter().map(symbol).collect(),
                 continuation: trace.continuation.into_iter().map(symbol).collect(),
+                coverage: QueryCoverage::workspace(&registry, "crud_route_traversal", 0),
                 database_hints: trace.database_hints.into_iter().map(symbol).collect(),
                 entities: trace.entities.into_iter().map(symbol).collect(),
                 evidence: Vec::new(),
@@ -176,6 +182,7 @@ pub fn crud_trace_tool(
             meta.budget = budget;
             meta.truncated |= meta.budget.truncated;
         }
+        response.data.coverage = crud_trace_coverage(&registry, None, &response.data);
         response.data.evidence = crud_trace_evidence(&response.data);
         response
     } else {
@@ -183,6 +190,7 @@ pub fn crud_trace_tool(
             data: CrudTraceData {
                 callers: Vec::new(),
                 continuation: Vec::new(),
+                coverage: QueryCoverage::workspace(&registry, "crud_route_traversal", 0),
                 database_hints: Vec::new(),
                 entities: Vec::new(),
                 evidence: Vec::new(),
@@ -205,6 +213,73 @@ pub fn crud_trace_tool(
     };
 
     Ok(response)
+}
+
+/// Recompute CRUD coverage from the response sections that remain visible to
+/// the caller. CLI repo filtering uses this after narrowing the MCP response.
+#[must_use]
+pub fn crud_trace_coverage(
+    registry: &WorkspaceRegistry,
+    repo_scope: Option<&str>,
+    data: &CrudTraceData,
+) -> QueryCoverage {
+    let symbols = data
+        .callers
+        .iter()
+        .chain(&data.continuation)
+        .chain(&data.database_hints)
+        .chain(&data.entities)
+        .chain(&data.handlers)
+        .collect::<Vec<_>>();
+    let edges_contributed = symbols
+        .iter()
+        .filter(|symbol| symbol.edge_kind.is_some())
+        .count();
+    let source_scopes = symbols
+        .iter()
+        .map(|symbol| classify_source_scope(&symbol.file_path).as_str())
+        .collect::<Vec<_>>();
+    let mut repos_considered = symbols
+        .iter()
+        .map(|symbol| symbol.repo.clone())
+        .collect::<Vec<_>>();
+    if let Some(repo) = repo_scope {
+        repos_considered.push(repo.to_owned());
+    } else if repos_considered.is_empty() {
+        repos_considered.extend(registry.repos.keys().cloned());
+    }
+
+    let mut coverage = QueryCoverage::for_repos(
+        registry,
+        repos_considered,
+        "crud_route_traversal",
+        edges_contributed,
+    )
+    .with_source_scopes(source_scopes);
+    if data.target_id.is_none() {
+        return coverage.with_verdict("possible_extraction_gap").with_limitation(
+            "No route or symbol target was resolved; dynamic registration or unsupported syntax may be missing from the graph.",
+        );
+    }
+
+    let route_entry = !data.method.is_empty();
+    let has_downstream = !data.continuation.is_empty()
+        || !data.database_hints.is_empty()
+        || !data.entities.is_empty();
+    if route_entry && data.handlers.is_empty() {
+        coverage = coverage.with_verdict("possible_extraction_gap").with_limitation(
+            "The route has no indexed handler after response scoping; registration may be dynamic or unsupported.",
+        );
+    } else if !has_downstream {
+        coverage = coverage.with_verdict("possible_extraction_gap").with_limitation(
+            "No continuation, entity, or database edge is visible; the endpoint may not persist data or the persistence path may be dynamic or unsupported.",
+        );
+    } else if route_entry && data.callers.is_empty() {
+        coverage = coverage.with_verdict("external_or_dynamic").with_limitation(
+            "The route has no indexed caller after response scoping; callers may be external clients or dynamically constructed.",
+        );
+    }
+    coverage
 }
 
 enum CrudEntry {
@@ -237,7 +312,6 @@ fn crud_trace_evidence(data: &CrudTraceData) -> Vec<Evidence> {
 fn crud_symbol_evidence(data: &CrudTraceData, symbol: &CrudTraceSymbol) -> Evidence {
     let (kind, surface) = match symbol.role.as_str() {
         "handler" => (EvidenceKind::RouteHandler, "route"),
-        "caller" => (EvidenceKind::RouteCaller, "route"),
         "entity" | "collection" | "database_hint" => {
             (EvidenceKind::ProjectionImpact, "persistence")
         }

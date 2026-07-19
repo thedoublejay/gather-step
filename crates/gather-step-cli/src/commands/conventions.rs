@@ -34,7 +34,7 @@ pub fn run(app: &AppContext, _args: ConventionsArgs) -> Result<()> {
 pub(crate) fn run_rendered(app: &AppContext, ctx: &StorageContext) -> Result<RenderedCommand> {
     let registry = RegistryStore::open(ctx.registry_path())
         .with_context(|| format!("opening {}", ctx.registry_path().display()))?;
-    let graph = GraphStoreDb::open(ctx.graph_path())
+    let graph = GraphStoreDb::open_read_retrying(ctx.graph_path())
         .with_context(|| format!("opening {}", ctx.graph_path().display()))?;
     execute(&registry, &graph, app.repo_filter.as_deref())
 }

@@ -351,7 +351,7 @@ fn push_cli_command_surface(body: &mut String, commands: &[(&str, &str)]) {
 fn push_mcp_tool_surface(body: &mut String, tools: &[(&str, &str)]) {
     body.push_str("## MCP Tools\n\n");
     body.push_str(
-        "Run `gather-step mcp serve` (or register via `gather-step setup-mcp`) to expose these to your AI tool over MCP.\n\n",
+        "Run `gather-step serve` (or register via `gather-step setup-mcp`) to expose these to your AI tool over MCP.\n\n",
     );
     if tools.is_empty() {
         body.push_str("_No MCP tools registered._\n\n");

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use gather_step_core::{EdgeKind, NodeId};
+use gather_step_core::{EdgeKind, NodeId, SourceScope, classify_source_scope};
 use gather_step_storage::{GraphStore, GraphStoreError};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
@@ -20,6 +20,7 @@ pub struct CrossRepoHop {
     pub direction: TraceDirection,
     pub line_number: Option<u32>,
     pub confidence: Option<u16>,
+    pub source_scope: SourceScope,
 }
 
 pub type CrossRepoDependencies = BTreeMap<String, BTreeSet<EdgeKind>>;
@@ -53,6 +54,7 @@ pub fn trace_across_repos<S: GraphStore>(
                     }
                     continue;
                 }
+                let source_scope = classify_source_scope(&node.file_path);
                 grouped
                     .entry(node.repo.clone())
                     .or_default()
@@ -64,6 +66,7 @@ pub fn trace_across_repos<S: GraphStore>(
                         direction: TraceDirection::Incoming,
                         line_number: node.span.as_ref().map(|span| span.line_start),
                         confidence: edge.metadata.confidence,
+                        source_scope,
                     });
                 if seen.insert(edge.source.as_bytes()) {
                     queue.push_back((edge.source, depth + 1));
@@ -79,6 +82,7 @@ pub fn trace_across_repos<S: GraphStore>(
                     }
                     continue;
                 }
+                let source_scope = classify_source_scope(&node.file_path);
                 grouped
                     .entry(node.repo.clone())
                     .or_default()
@@ -90,6 +94,7 @@ pub fn trace_across_repos<S: GraphStore>(
                         direction: TraceDirection::Outgoing,
                         line_number: node.span.as_ref().map(|span| span.line_start),
                         confidence: edge.metadata.confidence,
+                        source_scope,
                     });
                 if seen.insert(edge.target.as_bytes()) {
                     queue.push_back((edge.target, depth + 1));
@@ -131,6 +136,9 @@ pub fn cross_repo_deps<S: GraphStore>(
     let mut virtual_targets = FxHashSet::default();
 
     for node in session.nodes_by_repo(repo_name)? {
+        if !classify_source_scope(&node.file_path).contributes_runtime_dependency() {
+            continue;
+        }
         for edge in session.outgoing(node.id)? {
             let Some(target) = session.node(edge.target)? else {
                 continue;
@@ -150,6 +158,9 @@ pub fn cross_repo_deps<S: GraphStore>(
             let Some(source) = session.node(related.source)? else {
                 continue;
             };
+            if !classify_source_scope(&source.file_path).contributes_runtime_dependency() {
+                continue;
+            }
             if source.repo != repo_name {
                 dependencies
                     .entry(source.repo)
@@ -165,6 +176,9 @@ pub fn cross_repo_deps<S: GraphStore>(
             let Some(target_node) = session.node(related.target)? else {
                 continue;
             };
+            if !classify_source_scope(&target_node.file_path).contributes_runtime_dependency() {
+                continue;
+            }
             if target_node.repo != repo_name {
                 dependencies
                     .entry(target_node.repo)

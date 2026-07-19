@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gather_step_analysis::{confidence::band_label, cross_repo_deps, trace_across_repos};
-use gather_step_core::{NodeId, NodeKind};
+use gather_step_core::{NodeId, NodeKind, classify_source_scope};
 use gather_step_storage::GraphStore;
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
@@ -16,7 +16,7 @@ use crate::{
         EvidenceSupportMethod,
     },
     ids::{decode_node_id, encode_node_id},
-    tools::labels::edge_kind_label,
+    tools::{coverage::QueryCoverage, labels::edge_kind_label},
 };
 
 const DEFAULT_TRACE_DEPTH: usize = 2;
@@ -117,6 +117,7 @@ pub struct SharedTypeUsageResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SharedTypeUsageData {
+    pub coverage: QueryCoverage,
     pub matches: Vec<SharedTypeMatch>,
     pub type_name: String,
 }
@@ -318,15 +319,17 @@ pub fn get_shared_type_usage_tool(
     validate_input_length("type_name", &request.type_name)?;
     let graph = ctx.graph();
     let needle = request.type_name.trim();
-    let matches = graph
+    let matched = graph
         .nodes_by_type(NodeKind::SharedSymbol)?
         .into_iter()
         .filter(|node| shared_symbol_matches(node, needle))
         .map(|node| {
             let mut per_repo = BTreeMap::<String, BTreeSet<String>>::new();
+            let mut contributed_edges = 0_usize;
 
             for edge in graph.get_incoming(node.id)? {
                 if let Some(source) = graph.get_node(edge.source)? {
+                    contributed_edges += 1;
                     per_repo
                         .entry(source.repo)
                         .or_default()
@@ -336,6 +339,7 @@ pub fn get_shared_type_usage_tool(
 
             for edge in graph.get_outgoing(node.id)? {
                 if let Some(target) = graph.get_node(edge.target)? {
+                    contributed_edges += 1;
                     per_repo
                         .entry(target.repo)
                         .or_default()
@@ -343,23 +347,40 @@ pub fn get_shared_type_usage_tool(
                 }
             }
 
-            Ok(SharedTypeMatch {
-                external_id: node.external_id,
-                qualified_name: node.qualified_name,
-                symbol_id: encode_node_id(node.id),
-                usages: per_repo
-                    .into_iter()
-                    .map(|(repo, files)| SharedTypeUsageRepo {
-                        files: files.into_iter().collect(),
-                        repo,
-                    })
-                    .collect(),
-            })
+            Ok((
+                SharedTypeMatch {
+                    external_id: node.external_id,
+                    qualified_name: node.qualified_name,
+                    symbol_id: encode_node_id(node.id),
+                    usages: per_repo
+                        .into_iter()
+                        .map(|(repo, files)| SharedTypeUsageRepo {
+                            files: files.into_iter().collect(),
+                            repo,
+                        })
+                        .collect(),
+                },
+                contributed_edges,
+            ))
         })
         .collect::<Result<Vec<_>, McpServerError>>()?;
+    let edges_contributed = matched.iter().map(|(_, edge_count)| edge_count).sum();
+    let matches = matched
+        .into_iter()
+        .map(|(matched, _)| matched)
+        .collect::<Vec<_>>();
+    let source_scopes = matches
+        .iter()
+        .flat_map(|matched| &matched.usages)
+        .flat_map(|usage| &usage.files)
+        .map(|file_path| classify_source_scope(file_path).as_str())
+        .collect::<Vec<_>>();
+    let registry = ctx.registry_snapshot()?;
 
     Ok(SharedTypeUsageResponse {
         data: SharedTypeUsageData {
+            coverage: QueryCoverage::workspace(&registry, "shared_type_usage", edges_contributed)
+                .with_source_scopes(source_scopes),
             matches,
             type_name: request.type_name,
         },

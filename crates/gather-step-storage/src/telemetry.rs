@@ -4,15 +4,15 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        LazyLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use regex::Regex;
-use rusqlite::{Connection, params};
-use serde::Serialize;
+use rusqlite::{Connection, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const TELEMETRY_DB_NAME: &str = "telemetry.db";
@@ -25,6 +25,10 @@ const RETENTION_DAYS: i64 = 90;
 /// without writing its finish row (crash, `kill -9`, power loss) and is
 /// finalized as `abandoned` so the dashboard stops counting it as in-flight.
 const STALE_RUNNING_THRESHOLD_MS: i64 = 6 * 60 * 60 * 1000;
+const BUSY_RETRY_ATTEMPTS: u32 = 4;
+const BUSY_RETRY_BASE_DELAY: Duration = Duration::from_millis(25);
+const IDENTITY_KEY_READ_RETRIES: u32 = 20;
+const IDENTITY_KEY_READ_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS run_log (
@@ -109,11 +113,49 @@ pub enum TelemetryError {
 pub struct TelemetryStore {
     path: PathBuf,
     identity_key: [u8; 32],
+    busy_retries: Arc<AtomicU32>,
 }
 
 #[derive(Clone, Debug)]
 pub struct TelemetryRun {
     pub run_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryResultKind {
+    AgentTraceNodes,
+    ConsumerRepos,
+    DependencyEdges,
+    EventLinks,
+    ImpactedFiles,
+    OrphanTargets,
+    SearchHits,
+    TraceNodes,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TelemetryExtra {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_kind: Option<TelemetryResultKind>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub graph_open_retries: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub telemetry_busy_retries: u32,
+}
+
+impl TelemetryExtra {
+    fn is_empty(&self) -> bool {
+        self.result_kind.is_none()
+            && self.graph_open_retries == 0
+            && self.telemetry_busy_retries == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TelemetryCommandResult {
+    pub kind: TelemetryResultKind,
+    pub count: i64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -126,7 +168,7 @@ pub struct TelemetryRunFinish {
     pub warn_count: u32,
     pub error_count: u32,
     pub recovery_event: bool,
-    pub extra_json: Option<serde_json::Value>,
+    pub extra_json: Option<TelemetryExtra>,
     /// Command-specific result magnitude (e.g. dependency count, trace hops,
     /// search hits) for the `log --summary` view. `None` when not applicable.
     pub result_count: Option<i64>,
@@ -168,6 +210,8 @@ pub struct TelemetryRunRecord {
     pub repo_count: Option<i64>,
     pub files_parsed: Option<i64>,
     pub nodes_created: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_json: Option<TelemetryExtra>,
     pub error_categories: Vec<String>,
 }
 
@@ -191,7 +235,11 @@ impl TelemetryStore {
             })?;
         }
         let identity_key = load_or_create_identity_key(state_root.as_ref())?;
-        let store = Self { path, identity_key };
+        let store = Self {
+            path,
+            identity_key,
+            busy_retries: Arc::new(AtomicU32::new(0)),
+        };
         store.initialize()?;
         Ok(store)
     }
@@ -215,7 +263,6 @@ impl TelemetryStore {
         build_provenance: &str,
         schema_versions: &serde_json::Value,
     ) -> Result<TelemetryRun, TelemetryError> {
-        let connection = self.connection()?;
         let run_id = generate_run_id();
         let schema_versions = serde_json::to_string(schema_versions)?;
         let workspace_hash = self.workspace_hash(workspace_path);
@@ -225,29 +272,33 @@ impl TelemetryStore {
         let build_sha = option_env!("GATHER_STEP_BUILD_SHA")
             .or(option_env!("GITHUB_SHA"))
             .map(ToOwned::to_owned);
-        finalize_stale_running(&connection, now_ms(), Some(workspace_hash.clone()))?;
-        prune_old_rows(&connection, &workspace_hash)?;
-        connection.execute(
-            "INSERT INTO run_log (
-                run_id, started_at_ms, command, workspace_hash, cli_version,
-                build_provenance, binary_path, build_sha, schema_versions,
-                exit_status, process_id, process_start_token, heartbeat_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?12)",
-            params![
-                &run_id,
-                now_ms(),
-                command,
-                workspace_hash,
-                cli_version,
-                build_provenance,
-                binary_path,
-                build_sha,
-                schema_versions,
-                i64::from(process::id()),
-                process_start_token(process::id()),
-                now_ms(),
-            ],
-        )?;
+        self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            finalize_stale_running(&connection, now_ms(), Some(workspace_hash.clone()))?;
+            prune_old_rows(&connection, &workspace_hash)?;
+            connection.execute(
+                "INSERT INTO run_log (
+                    run_id, started_at_ms, command, workspace_hash, cli_version,
+                    build_provenance, binary_path, build_sha, schema_versions,
+                    exit_status, process_id, process_start_token, heartbeat_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?11, ?12)",
+                params![
+                    &run_id,
+                    now_ms(),
+                    command,
+                    &workspace_hash,
+                    cli_version,
+                    build_provenance,
+                    &binary_path,
+                    &build_sha,
+                    &schema_versions,
+                    i64::from(process::id()),
+                    process_start_token(process::id()),
+                    now_ms(),
+                ],
+            )?;
+            Ok(())
+        })?;
         Ok(TelemetryRun { run_id })
     }
 
@@ -256,56 +307,56 @@ impl TelemetryStore {
         run: &TelemetryRun,
         finish: &TelemetryRunFinish,
     ) -> Result<(), TelemetryError> {
-        let mut connection = self.connection()?;
-        let ended_at = now_ms();
-        let extra_json = finish
-            .extra_json
-            .as_ref()
-            .map(redact_json_value)
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "UPDATE run_log
-             SET ended_at_ms = ?1,
-                 exit_status = ?2,
-                 duration_ms = ?1 - started_at_ms,
-                 peak_rss_bytes = ?3,
-                 repo_count = ?4,
-                 files_parsed = ?5,
-                 nodes_created = ?6,
-                 warn_count = ?7,
-                 error_count = ?8,
-                 recovery_event = ?9,
-                 extra_json = ?10,
-                 result_count = ?11,
-                 graph_availability = ?12
-             WHERE run_id = ?13",
-            params![
-                ended_at,
-                finish.exit_status,
-                finish.peak_rss_bytes.and_then(u64_to_i64),
-                finish.repo_count,
-                finish.files_parsed,
-                finish.nodes_created,
-                finish.warn_count,
-                finish.error_count,
-                i64::from(finish.recovery_event),
-                extra_json,
-                finish.result_count,
-                finish.graph_availability,
-                &run.run_id,
-            ],
-        )?;
-        for event in &finish.events {
-            self.record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
-        }
-        if let Some(event) = &finish.error {
-            self.record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
-        }
-        transaction.commit()?;
-        Ok(())
+        self.with_busy_retry(|| {
+            let mut connection = self.connection()?;
+            let ended_at = now_ms();
+            let mut extra = finish.extra_json.clone().unwrap_or_default();
+            extra.telemetry_busy_retries = self.busy_retry_count();
+            let extra_json = (!extra.is_empty())
+                .then(|| serde_json::to_string(&extra))
+                .transpose()?;
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "UPDATE run_log
+                 SET ended_at_ms = ?1,
+                     exit_status = ?2,
+                     duration_ms = ?1 - started_at_ms,
+                     peak_rss_bytes = ?3,
+                     repo_count = ?4,
+                     files_parsed = ?5,
+                     nodes_created = ?6,
+                     warn_count = ?7,
+                     error_count = ?8,
+                     recovery_event = ?9,
+                     extra_json = ?10,
+                     result_count = ?11,
+                     graph_availability = ?12
+                 WHERE run_id = ?13",
+                params![
+                    ended_at,
+                    &finish.exit_status,
+                    finish.peak_rss_bytes.and_then(u64_to_i64),
+                    finish.repo_count,
+                    finish.files_parsed,
+                    finish.nodes_created,
+                    finish.warn_count,
+                    finish.error_count,
+                    i64::from(finish.recovery_event),
+                    extra_json,
+                    finish.result_count,
+                    &finish.graph_availability,
+                    &run.run_id,
+                ],
+            )?;
+            for event in &finish.events {
+                self.record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
+            }
+            if let Some(event) = &finish.error {
+                self.record_error_with_connection(&transaction, &run.run_id, event, ended_at)?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     pub fn mark_panic(
@@ -314,37 +365,41 @@ impl TelemetryStore {
         category: &str,
         message: &str,
     ) -> Result<(), TelemetryError> {
-        let mut connection = self.connection()?;
-        let ended_at = now_ms();
-        let transaction = connection.transaction()?;
-        transaction.execute(
-            "UPDATE run_log
-             SET ended_at_ms = ?1,
-                 exit_status = 'panic',
-                 duration_ms = ?1 - started_at_ms,
-                 error_count = error_count + 1
-             WHERE run_id = ?2",
-            params![ended_at, &run.run_id],
-        )?;
         let event = TelemetryErrorEvent {
             level: "PANIC".to_owned(),
             category: category.to_owned(),
             message: message.to_owned(),
             context_json: None,
         };
-        self.record_error_with_connection(&transaction, &run.run_id, &event, ended_at)?;
-        transaction.commit()?;
-        Ok(())
+        self.with_busy_retry(|| {
+            let mut connection = self.connection()?;
+            let ended_at = now_ms();
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "UPDATE run_log
+                 SET ended_at_ms = ?1,
+                     exit_status = 'panic',
+                     duration_ms = ?1 - started_at_ms,
+                     error_count = error_count + 1
+                 WHERE run_id = ?2",
+                params![ended_at, &run.run_id],
+            )?;
+            self.record_error_with_connection(&transaction, &run.run_id, &event, ended_at)?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     /// Refresh the liveness timestamp for a long-running command.
     pub fn heartbeat(&self, run: &TelemetryRun) -> Result<(), TelemetryError> {
-        let connection = self.connection()?;
-        connection.execute(
-            "UPDATE run_log SET heartbeat_at_ms = ?1 WHERE run_id = ?2 AND exit_status = 'running'",
-            params![now_ms(), &run.run_id],
-        )?;
-        Ok(())
+        self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            connection.execute(
+                "UPDATE run_log SET heartbeat_at_ms = ?1 WHERE run_id = ?2 AND exit_status = 'running'",
+                params![now_ms(), &run.run_id],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn list_runs(
@@ -413,7 +468,7 @@ impl TelemetryStore {
             "SELECT run_id, workspace_hash, started_at_ms, ended_at_ms, command, exit_status,
                     duration_ms, peak_rss_bytes, warn_count, error_count, recovery_event,
                     cli_version, result_count, graph_availability, build_provenance,
-                    binary_path, build_sha, repo_count, files_parsed, nodes_created,
+                    binary_path, build_sha, repo_count, files_parsed, nodes_created, extra_json,
                     (SELECT group_concat(category, char(31))
                      FROM run_errors WHERE run_errors.run_id = run_log.run_id)
              FROM run_log",
@@ -474,21 +529,28 @@ impl TelemetryStore {
         workspace_path: &Path,
         cutoff_ms: i64,
     ) -> Result<usize, TelemetryError> {
-        let connection = self.connection()?;
-        let deleted = connection.execute(
-            "DELETE FROM run_log WHERE workspace_hash = ?1 AND started_at_ms < ?2",
-            params![self.workspace_hash(workspace_path), cutoff_ms],
-        )?;
-        Ok(deleted)
+        let workspace_hash = self.workspace_hash(workspace_path);
+        self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            connection
+                .execute(
+                    "DELETE FROM run_log WHERE workspace_hash = ?1 AND started_at_ms < ?2",
+                    params![&workspace_hash, cutoff_ms],
+                )
+                .map_err(TelemetryError::Sqlite)
+        })
     }
 
     pub fn clear_before_all_workspaces(&self, cutoff_ms: i64) -> Result<usize, TelemetryError> {
-        let connection = self.connection()?;
-        let deleted = connection.execute(
-            "DELETE FROM run_log WHERE started_at_ms < ?1",
-            params![cutoff_ms],
-        )?;
-        Ok(deleted)
+        self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            connection
+                .execute(
+                    "DELETE FROM run_log WHERE started_at_ms < ?1",
+                    params![cutoff_ms],
+                )
+                .map_err(TelemetryError::Sqlite)
+        })
     }
 
     pub fn list_events(
@@ -533,20 +595,33 @@ impl TelemetryStore {
     }
 
     fn initialize(&self) -> Result<(), TelemetryError> {
-        let connection = self.connection()?;
-        let stored_version: i64 =
-            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if stored_version > TELEMETRY_SCHEMA_VERSION {
-            return Err(TelemetryError::UnsupportedSchemaVersion {
-                stored: stored_version,
-                supported: TELEMETRY_SCHEMA_VERSION,
-            });
-        }
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.execute_batch(SCHEMA)?;
-        migrate_schema(&connection, stored_version)?;
-        connection.pragma_update(None, "user_version", TELEMETRY_SCHEMA_VERSION)?;
-        Ok(())
+        self.with_busy_retry(|| {
+            let mut connection = self.connection()?;
+            let observed_version: i64 =
+                connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if observed_version > TELEMETRY_SCHEMA_VERSION {
+                return Err(TelemetryError::UnsupportedSchemaVersion {
+                    stored: observed_version,
+                    supported: TELEMETRY_SCHEMA_VERSION,
+                });
+            }
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let stored_version: i64 =
+                transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if stored_version > TELEMETRY_SCHEMA_VERSION {
+                return Err(TelemetryError::UnsupportedSchemaVersion {
+                    stored: stored_version,
+                    supported: TELEMETRY_SCHEMA_VERSION,
+                });
+            }
+            transaction.execute_batch(SCHEMA)?;
+            migrate_schema(&transaction, stored_version)?;
+            transaction.pragma_update(None, "user_version", TELEMETRY_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     /// Finalize every `running` row older than [`STALE_RUNNING_THRESHOLD_MS`]
@@ -554,17 +629,18 @@ impl TelemetryStore {
     /// is repaired automatically when a new run begins; this method powers the
     /// explicit `gather-step log --repair` path.
     pub fn repair_stale_running(&self, workspace_path: &Path) -> Result<usize, TelemetryError> {
-        let connection = self.connection()?;
-        finalize_stale_running(
-            &connection,
-            now_ms(),
-            Some(self.workspace_hash(workspace_path)),
-        )
+        let workspace_hash = self.workspace_hash(workspace_path);
+        self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            finalize_stale_running(&connection, now_ms(), Some(workspace_hash.clone()))
+        })
     }
 
     pub fn repair_stale_running_all_workspaces(&self) -> Result<usize, TelemetryError> {
-        let connection = self.connection()?;
-        finalize_stale_running(&connection, now_ms(), None)
+        self.with_busy_retry(|| {
+            let connection = self.connection()?;
+            finalize_stale_running(&connection, now_ms(), None)
+        })
     }
 
     fn connection(&self) -> Result<Connection, TelemetryError> {
@@ -572,6 +648,29 @@ impl TelemetryStore {
         connection.busy_timeout(Duration::from_millis(500))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(connection)
+    }
+
+    #[must_use]
+    pub fn busy_retry_count(&self) -> u32 {
+        self.busy_retries.load(Ordering::Relaxed)
+    }
+
+    fn with_busy_retry<T>(
+        &self,
+        mut operation: impl FnMut() -> Result<T, TelemetryError>,
+    ) -> Result<T, TelemetryError> {
+        let mut attempt = 0_u32;
+        loop {
+            match operation() {
+                Ok(value) => return Ok(value),
+                Err(error) if is_sqlite_busy(&error) && attempt < BUSY_RETRY_ATTEMPTS => {
+                    self.busy_retries.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(BUSY_RETRY_BASE_DELAY * 2_u32.saturating_pow(attempt));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn record_error_with_connection(
@@ -610,12 +709,28 @@ impl TelemetryStore {
     }
 }
 
+fn is_sqlite_busy(error: &TelemetryError) -> bool {
+    matches!(
+        error,
+        TelemetryError::Sqlite(error)
+            if matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+    )
+}
+
+const fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord, rusqlite::Error> {
     let peak_rss_bytes: Option<i64> = row.get(7)?;
     let warn_count: i64 = row.get(8)?;
     let error_count: i64 = row.get(9)?;
     let recovery_event: i64 = row.get(10)?;
-    let raw_categories: Option<String> = row.get(20)?;
+    let raw_extra: Option<String> = row.get(20)?;
+    let raw_categories: Option<String> = row.get(21)?;
     Ok(TelemetryRunRecord {
         run_id: row.get(0)?,
         workspace_hash: row.get(1)?,
@@ -637,6 +752,9 @@ fn telemetry_run_from_row(row: &rusqlite::Row<'_>) -> Result<TelemetryRunRecord,
         repo_count: row.get(17)?,
         files_parsed: row.get(18)?,
         nodes_created: row.get(19)?,
+        extra_json: raw_extra
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         error_categories: raw_categories
             .as_deref()
             .map(|categories| categories.split('\u{1f}').map(ToOwned::to_owned).collect())
@@ -799,7 +917,8 @@ fn hash_text(value: &str) -> String {
 fn load_or_create_identity_key(state_root: &Path) -> Result<[u8; 32], TelemetryError> {
     let path = state_root.join(TELEMETRY_IDENTITY_KEY_NAME);
     match fs::read(&path) {
-        Ok(bytes) => return identity_key_from_bytes(&path, bytes),
+        Ok(bytes) if bytes.len() == 32 => return identity_key_from_bytes(&path, bytes),
+        Ok(_) => return read_identity_key_retrying(&path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
             return Err(TelemetryError::ReadIdentityKey { path, source });
@@ -829,14 +948,24 @@ fn load_or_create_identity_key(state_root: &Path) -> Result<[u8; 32], TelemetryE
             identity_key_from_bytes(&path, generated)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let bytes = fs::read(&path).map_err(|source| TelemetryError::ReadIdentityKey {
-                path: path.clone(),
-                source,
-            })?;
-            identity_key_from_bytes(&path, bytes)
+            read_identity_key_retrying(&path)
         }
         Err(source) => Err(TelemetryError::WriteIdentityKey { path, source }),
     }
+}
+
+fn read_identity_key_retrying(path: &Path) -> Result<[u8; 32], TelemetryError> {
+    for attempt in 0..=IDENTITY_KEY_READ_RETRIES {
+        let bytes = fs::read(path).map_err(|source| TelemetryError::ReadIdentityKey {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if bytes.len() == 32 || attempt == IDENTITY_KEY_READ_RETRIES {
+            return identity_key_from_bytes(path, bytes);
+        }
+        std::thread::sleep(IDENTITY_KEY_READ_RETRY_DELAY);
+    }
+    unreachable!("bounded identity-key read loop always returns")
 }
 
 fn identity_key_from_bytes(path: &Path, bytes: Vec<u8>) -> Result<[u8; 32], TelemetryError> {
@@ -981,6 +1110,11 @@ mod tests {
             exit_status: "success".to_owned(),
             result_count: Some(42),
             graph_availability: Some("available".to_owned()),
+            extra_json: Some(TelemetryExtra {
+                result_kind: Some(TelemetryResultKind::SearchHits),
+                graph_open_retries: 2,
+                telemetry_busy_retries: 0,
+            }),
             ..TelemetryRunFinish::default()
         };
         store.finish_run(&run, &finish).expect("finish");
@@ -994,6 +1128,14 @@ mod tests {
             .expect("row present");
         assert_eq!(record.result_count, Some(42));
         assert_eq!(record.graph_availability.as_deref(), Some("available"));
+        assert_eq!(
+            record.extra_json,
+            Some(TelemetryExtra {
+                result_kind: Some(TelemetryResultKind::SearchHits),
+                graph_open_retries: 2,
+                telemetry_busy_retries: store.busy_retry_count(),
+            })
+        );
         assert_eq!(record.build_provenance.as_deref(), Some("release"));
         assert!(record.binary_path.is_some());
     }

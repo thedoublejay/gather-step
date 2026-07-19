@@ -32,6 +32,12 @@ higher-band edges and confirm `hint` edges from source before acting.
 lags their current git HEAD. When it is present the result may be incomplete or \
 outdated — re-run `gather-step index` and re-query before trusting an empty or \
 negative answer.
+- coverage: list-shaped topology responses disclose registered repo scope, registry-detected \
+frameworks, source scopes, concrete contributed edges when retained, verdict, and limitations. \
+Index-time extractor provenance is not persisted, so `extractors_run` is empty. A \
+`possible_extraction_gap` verdict is not proof of absence. Source scope is \
+classified from indexed paths; verify `unknown` evidence and runtime registration before relying \
+on negative results.
 
 Results are read-only and derived on demand; nothing you call here mutates the \
 workspace or the graph.";

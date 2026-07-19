@@ -17,6 +17,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// shard locks are held for microseconds at most.
 const PARSED_FILE_CACHE_CAPACITY: usize = 4_096;
 
+/// Maximum number of concrete implementation edges emitted for one explicitly
+/// Protocol/ABC-typed Python call site. Keeping this small prevents a common
+/// interface method name from fanning out across an unbounded workspace.
+const PYTHON_INTERFACE_DISPATCH_LIMIT: usize = 8;
+
 /// Cache key that namespaces parsed results by both the canonical file path and
 /// the repo root, preventing cross-workspace cache collisions when the same
 /// absolute path appears under two different indexing contexts.
@@ -61,6 +66,7 @@ pub enum ResolutionStrategy {
     SameModule,
     Unique,
     Suffix,
+    PythonInterfaceDispatch,
     FuzzyName,
     Fallback,
 }
@@ -73,6 +79,7 @@ impl ResolutionStrategy {
             Self::SameModule => 0.90,
             Self::Unique => 0.75,
             Self::Suffix => 0.55,
+            Self::PythonInterfaceDispatch => 0.65,
             Self::FuzzyName => 0.40,
             Self::Fallback => 0.30,
         }
@@ -85,6 +92,7 @@ impl ResolutionStrategy {
             Self::SameModule => "same_module",
             Self::Unique => "unique",
             Self::Suffix => "suffix",
+            Self::PythonInterfaceDispatch => "python_interface_dispatch",
             Self::FuzzyName => "fuzzy_name",
             Self::Fallback => "fallback",
         }
@@ -155,31 +163,36 @@ pub fn resolve_calls_with_unresolved<'a>(
                 if is_non_actionable_unresolved_call(call_site) {
                     continue;
                 }
+
+                if let Some((targets, candidate_count)) =
+                    index.resolve_python_interface_dispatch(call_site, &file.import_bindings)
+                {
+                    if targets.is_empty() {
+                        unresolved_call_sites.push(call_site.clone());
+                        continue;
+                    }
+                    let strategy = ResolutionStrategy::PythonInterfaceDispatch;
+                    let confidence = penalize(strategy.base_confidence(), candidate_count);
+                    file_resolved.extend(targets.into_iter().map(|target| {
+                        resolved_call(file, call_site, target, strategy, confidence)
+                    }));
+                    continue;
+                }
+
                 if let Some((target, strategy, confidence)) =
                     index.resolve_call(call_site, &import_map, &file.import_bindings)
                 {
-                    file_resolved.push(ResolvedCall {
-                        edge: EdgeData {
-                            source: call_site.owner_id,
-                            target: target.id,
-                            kind: EdgeKind::Calls,
-                            metadata: EdgeMetadata {
-                                weight: None,
-                                confidence: Some(encode_confidence(confidence)),
-                                timestamp_unix: None,
-                                drift_kind: None,
-                                resolver: Some(strategy.as_str().to_owned()),
-                                guard_has_default: None,
-                                enum_qn: None,
-                                access_mechanism: None,
-                            },
-                            owner_file: file.file_node,
-                            is_cross_file: target.file_path
-                                != file.file_path.to_string_lossy().as_ref(),
-                        },
-                        confidence,
-                        strategy,
-                    });
+                    // A nested dependency call such as
+                    // `self.collection.delete_one(...)` must not resolve back
+                    // to the enclosing `delete_one` method merely because the
+                    // leaf name is unique in the module. Direct
+                    // `self.delete_one(...)` recursion remains valid.
+                    if is_invalid_python_nested_self_target(call_site, target) {
+                        unresolved_call_sites.push(call_site.clone());
+                        continue;
+                    }
+                    file_resolved
+                        .push(resolved_call(file, call_site, target, strategy, confidence));
                 } else if !is_external_call(call_site, &external_names) {
                     unresolved_call_sites.push(call_site.clone());
                 }
@@ -222,6 +235,36 @@ pub fn resolve_calls_with_unresolved<'a>(
     ResolutionOutcome {
         resolved,
         unresolved,
+    }
+}
+
+fn resolved_call(
+    file: &ResolutionInput,
+    call_site: &CallSite,
+    target: &NodeData,
+    strategy: ResolutionStrategy,
+    confidence: f32,
+) -> ResolvedCall {
+    ResolvedCall {
+        edge: EdgeData {
+            source: call_site.owner_id,
+            target: target.id,
+            kind: EdgeKind::Calls,
+            metadata: EdgeMetadata {
+                weight: None,
+                confidence: Some(encode_confidence(confidence)),
+                timestamp_unix: None,
+                drift_kind: None,
+                resolver: Some(strategy.as_str().to_owned()),
+                guard_has_default: None,
+                enum_qn: None,
+                access_mechanism: None,
+            },
+            owner_file: file.file_node,
+            is_cross_file: target.file_path != file.file_path.to_string_lossy().as_ref(),
+        },
+        confidence,
+        strategy,
     }
 }
 
@@ -378,6 +421,14 @@ pub fn is_non_actionable_unresolved_call(call_site: &CallSite) -> bool {
         return true;
     }
 
+    // Python service interfaces commonly expose a typed `delete(...)`
+    // operation. HTTP clients were already filtered above, so keep the
+    // remaining Python call available to receiver-type resolution instead of
+    // dropping it as a generic runtime method.
+    if is_python_source(call_site.source_path.as_path()) && name == "delete" {
+        return false;
+    }
+
     is_non_actionable_runtime_hint(hint.as_str(), name.as_str())
 }
 
@@ -405,6 +456,21 @@ fn is_python_source(path: &Path) -> bool {
     path.extension()
         .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|extension| matches!(extension, "py" | "pyi"))
+}
+
+fn is_invalid_python_nested_self_target(call_site: &CallSite, target: &NodeData) -> bool {
+    if target.id != call_site.owner_id || !is_python_source(call_site.source_path.as_path()) {
+        return false;
+    }
+
+    let Some(hint) = call_site.callee_qualified_hint.as_deref() else {
+        return false;
+    };
+    let Some((receiver, _)) = hint.rsplit_once('.') else {
+        return false;
+    };
+
+    receiver.starts_with("self.") || receiver.starts_with("cls.")
 }
 
 fn is_non_actionable_python_call(call_site: &CallSite) -> bool {
@@ -1063,6 +1129,173 @@ impl<'a> SymbolIndex<'a> {
         )
     }
 
+    /// Resolve an explicitly Protocol/ABC-typed receiver to a bounded,
+    /// deterministic set of concrete implementations. Returning `None` means
+    /// the receiver is not an interface and the ordinary concrete-type path
+    /// should run; `Some` prevents arbitrary leaf-name fallback for interface
+    /// dispatch even when no concrete method is available.
+    fn resolve_python_interface_dispatch(
+        &self,
+        call_site: &CallSite,
+        import_bindings: &[ImportBinding],
+    ) -> Option<(Vec<&'a NodeData>, usize)> {
+        if !is_python_source(call_site.source_path.as_path()) {
+            return None;
+        }
+        let hint = call_site.callee_qualified_hint.as_deref()?;
+        let (receiver, method) = hint.rsplit_once('.')?;
+        if matches!(receiver, "self" | "cls") {
+            return None;
+        }
+        let receiver_type =
+            infer_python_receiver_type(&call_site.source_path, receiver, import_bindings)?;
+        let interface_node = self.python_interface_class_node(
+            &call_site.source_path,
+            &receiver_type,
+            import_bindings,
+        )?;
+        let interface = self.load_python_class(&call_site.source_path, interface_node)?;
+        let interface_bases = &interface.base_classes;
+        if !interface_bases.iter().any(|base| {
+            python_type_name(base)
+                .is_some_and(|base| matches!(base.as_str(), "Protocol" | "ABC" | "ABCMeta"))
+        }) {
+            return None;
+        }
+
+        let mut classes = self
+            .by_name
+            .values()
+            .flatten()
+            .copied()
+            .filter(|node| node.kind == gather_step_core::NodeKind::Class)
+            .collect::<Vec<_>>();
+        classes.sort_unstable_by(|left, right| {
+            left.file_path
+                .cmp(&right.file_path)
+                .then(left.qualified_name.cmp(&right.qualified_name))
+                .then(left.id.as_bytes().cmp(&right.id.as_bytes()))
+        });
+        classes.dedup_by_key(|node| node.id);
+
+        let mut targets = Vec::new();
+        let mut seen_targets = FxHashSet::default();
+        for class_node in classes {
+            if class_node.id == interface_node.id
+                || !self.python_class_implements(&call_site.source_path, class_node, interface_node)
+            {
+                continue;
+            }
+            let class_qn = class_node
+                .qualified_name
+                .as_deref()
+                .unwrap_or(class_node.name.as_str());
+            let method_qn = format!("{class_qn}.{method}");
+            let Some(target) = self
+                .by_qualified_name
+                .get(method_qn.as_str())
+                .into_iter()
+                .flatten()
+                .find(|target| target.file_path == class_node.file_path)
+                .copied()
+            else {
+                continue;
+            };
+            if seen_targets.insert(target.id) {
+                targets.push(target);
+            }
+        }
+        let candidate_count = targets.len();
+        targets.truncate(PYTHON_INTERFACE_DISPATCH_LIMIT);
+        Some((targets, candidate_count))
+    }
+
+    fn python_interface_class_node(
+        &self,
+        source_file: &Path,
+        receiver_type: &str,
+        import_bindings: &[ImportBinding],
+    ) -> Option<&'a NodeData> {
+        let local_name = python_type_name(receiver_type)?;
+        if let Some(binding) = import_bindings
+            .iter()
+            .find(|binding| binding.local_name == local_name)
+        {
+            let resolved = binding.resolved_path.as_ref()?;
+            let relative = self.get_relative_path(resolved);
+            let imported_name = binding
+                .imported_name
+                .as_deref()
+                .unwrap_or(local_name.as_str());
+            return self
+                .by_file_and_name
+                .get(&(relative.as_ref(), imported_name))?
+                .iter()
+                .find(|node| node.kind == gather_step_core::NodeKind::Class)
+                .copied();
+        }
+        let relative = self.get_relative_path(source_file);
+        self.by_file_and_name
+            .get(&(relative.as_ref(), local_name.as_str()))?
+            .iter()
+            .find(|node| node.kind == gather_step_core::NodeKind::Class)
+            .copied()
+    }
+
+    fn load_python_class(
+        &self,
+        source_file: &Path,
+        class_node: &NodeData,
+    ) -> Option<crate::tree_sitter::SymbolCapture> {
+        let path = self.repo_root.join(&class_node.file_path);
+        let parsed = self.load_parsed_file(source_file, &path)?;
+        parsed.symbols.into_iter().find(|symbol| {
+            symbol.node.kind == gather_step_core::NodeKind::Class
+                && symbol.node.name == class_node.name
+                && symbol.node.qualified_name == class_node.qualified_name
+        })
+    }
+
+    fn python_class_implements(
+        &self,
+        source_file: &Path,
+        class_node: &NodeData,
+        interface_node: &NodeData,
+    ) -> bool {
+        let path = self.repo_root.join(&class_node.file_path);
+        let Some(parsed) = self.load_parsed_file(source_file, &path) else {
+            return false;
+        };
+        let Some(class_symbol) = parsed.symbols.iter().find(|symbol| {
+            symbol.node.kind == gather_step_core::NodeKind::Class
+                && symbol.node.name == class_node.name
+                && symbol.node.qualified_name == class_node.qualified_name
+        }) else {
+            return false;
+        };
+        class_symbol.base_classes.iter().any(|base| {
+            let Some(base_name) = python_type_name(base) else {
+                return false;
+            };
+            if class_node.file_path == interface_node.file_path {
+                return base_name == interface_node.name;
+            }
+            parsed.import_bindings.iter().any(|binding| {
+                let binding_matches = binding.local_name == base_name
+                    || (binding.is_namespace && base.starts_with(&binding.local_name));
+                let imported_matches = binding
+                    .imported_name
+                    .as_deref()
+                    .unwrap_or(base_name.as_str())
+                    == interface_node.name;
+                let path_matches = binding.resolved_path.as_ref().is_some_and(|resolved| {
+                    self.get_relative_path(resolved).as_ref() == interface_node.file_path
+                });
+                binding_matches && imported_matches && path_matches
+            })
+        })
+    }
+
     fn resolve_python_method_with_mro(
         &self,
         source_file: &Path,
@@ -1633,9 +1866,9 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        CallSite, ImportBinding, ResolutionInput, ResolutionStrategy, SymbolIndex,
-        fuzzy_similarity, is_non_actionable_unresolved_call, resolve_calls,
-        resolve_calls_with_unresolved,
+        CallSite, ImportBinding, PYTHON_INTERFACE_DISPATCH_LIMIT, ResolutionInput,
+        ResolutionStrategy, SymbolIndex, fuzzy_similarity, is_non_actionable_unresolved_call,
+        resolve_calls, resolve_calls_with_unresolved,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2230,6 +2463,153 @@ class AssetRepository(BaseRepository):
         assert_eq!(outcome.resolved.len(), 1);
         assert_eq!(outcome.resolved[0].edge.target, target.id);
         assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_protocol_dispatch_is_deterministically_capped_with_provenance() {
+        let temp = TempDir::new("python-protocol-dispatch");
+        temp.write(
+            "pyproject.toml",
+            "[project]\nname = \"python-protocol-dispatch\"\nversion = \"0.1.0\"\n",
+        );
+        temp.write(
+            "src/ports.py",
+            r#"
+from typing import Protocol
+
+class JobSink(Protocol):
+    def publish(self, payload): ...
+"#,
+        );
+        let mut sink_source = "from ports import JobSink\n\n".to_owned();
+        for index in 0..10 {
+            sink_source.push_str(&format!(
+                "class JobSink{index:02}(JobSink):\n    def publish(self, payload):\n        pass\n\n"
+            ));
+        }
+        sink_source
+            .push_str("class UnrelatedPublisher:\n    def publish(self, payload):\n        pass\n");
+        temp.write("src/sinks.py", &sink_source);
+        temp.write(
+            "src/handler.py",
+            r#"
+from ports import JobSink
+
+def handle(sink: JobSink):
+    sink.publish({"state": "ready"})
+"#,
+        );
+        let root = temp.path();
+        let owner = function_node("src/handler.py", "handle");
+        let interface = class_node("src/ports.py", "JobSink");
+        let unrelated = class_node("src/sinks.py", "UnrelatedPublisher");
+        let mut unrelated_publish = function_node("src/sinks.py", "unrelated_publish");
+        unrelated_publish.name = "publish".to_owned();
+        unrelated_publish.qualified_name = Some("UnrelatedPublisher.publish".to_owned());
+
+        let mut symbols = vec![
+            owner.clone(),
+            interface,
+            unrelated,
+            unrelated_publish.clone(),
+        ];
+        let mut implementation_methods = Vec::new();
+        // Deliberately supply symbols in reverse declaration order. Dispatch
+        // must sort by stable class identity before applying the cap.
+        for index in (0..10).rev() {
+            let class_name = format!("JobSink{index:02}");
+            symbols.push(class_node("src/sinks.py", &class_name));
+            let mut method = function_node("src/sinks.py", &format!("publish_{index:02}"));
+            method.name = "publish".to_owned();
+            method.qualified_name = Some(format!("{class_name}.publish"));
+            implementation_methods.push((index, method.clone()));
+            symbols.push(method);
+        }
+        implementation_methods.sort_unstable_by_key(|(index, _)| *index);
+        let expected_targets = implementation_methods
+            .iter()
+            .take(PYTHON_INTERFACE_DISPATCH_LIMIT)
+            .map(|(_, method)| method.id)
+            .collect::<Vec<_>>();
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            &symbols,
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/handler.py"),
+                import_bindings: vec![ImportBinding {
+                    local_name: "JobSink".to_owned(),
+                    imported_name: Some("JobSink".to_owned()),
+                    source: "ports".to_owned(),
+                    resolved_path: Some(root.join("src/ports.py")),
+                    is_default: false,
+                    is_namespace: false,
+                    is_type_only: false,
+                }],
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/handler.py"),
+                    callee_name: "publish".to_owned(),
+                    callee_qualified_hint: Some("sink.publish".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        let targets = outcome
+            .resolved
+            .iter()
+            .map(|resolved| resolved.edge.target)
+            .collect::<Vec<_>>();
+        assert_eq!(targets, expected_targets);
+        assert_eq!(targets.len(), PYTHON_INTERFACE_DISPATCH_LIMIT);
+        assert!(!targets.contains(&unrelated_publish.id));
+        assert!(outcome.resolved.iter().all(|resolved| {
+            resolved.strategy == ResolutionStrategy::PythonInterfaceDispatch
+                && resolved.edge.metadata.resolver.as_deref() == Some("python_interface_dispatch")
+                && resolved.edge.metadata.confidence == Some(342)
+        }));
+        assert!(outcome.unresolved.is_empty());
+    }
+
+    #[test]
+    fn python_nested_self_dependency_call_cannot_resolve_to_enclosing_method() {
+        let temp = TempDir::new("python-nested-self-dependency");
+        temp.write(
+            "src/asset_repository.py",
+            r#"
+class AssetRepository:
+    def delete_one(self, asset_id: str):
+        return self.collection.delete_one({"asset_id": asset_id})
+"#,
+        );
+        let root = temp.path();
+        let mut owner = function_node("src/asset_repository.py", "delete_one");
+        owner.qualified_name = Some("AssetRepository.delete_one".to_owned());
+
+        let outcome = resolve_calls_with_unresolved(
+            root,
+            std::slice::from_ref(&owner),
+            &[ResolutionInput {
+                file_node: owner.id,
+                file_path: root.join("src/asset_repository.py"),
+                import_bindings: Vec::new(),
+                call_sites: vec![CallSite {
+                    owner_id: owner.id,
+                    owner_file: owner.id,
+                    source_path: root.join("src/asset_repository.py"),
+                    callee_name: "delete_one".to_owned(),
+                    callee_qualified_hint: Some("self.collection.delete_one".to_owned()),
+                    span: None,
+                }],
+            }],
+        );
+
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(outcome.unresolved.len(), 1);
+        assert_eq!(outcome.unresolved[0].call_sites.len(), 1);
     }
 
     #[test]

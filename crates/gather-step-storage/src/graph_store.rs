@@ -2,6 +2,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use gather_step_core::{
@@ -9,8 +10,9 @@ use gather_step_core::{
     NodeId, NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO,
 };
 use redb::{
-    Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadableDatabase,
-    ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
+    Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadOnlyDatabase,
+    ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, StorageError,
+    TableDefinition,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -26,6 +28,16 @@ type NodeIdBytes = [u8; 16];
 /// a burst of parallel readers without stalling a genuinely stuck open.
 const READ_OPEN_LOCK_RETRIES: u32 = 6;
 const READ_OPEN_LOCK_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(40);
+static READ_OPEN_RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
+
+pub fn reset_graph_open_retry_count() {
+    READ_OPEN_RETRY_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn graph_open_retry_count() -> u32 {
+    READ_OPEN_RETRY_COUNT.load(Ordering::Relaxed)
+}
 #[cfg(any(test, feature = "test-support"))]
 type AttributedEdge = (EdgeData, String, bool, NodeKind, String, bool, NodeKind);
 type StringId = u32;
@@ -647,8 +659,22 @@ pub trait GraphStore {
     fn bulk_insert(&self, nodes: &[NodeData], edges: &[EdgeData]) -> Result<(), GraphStoreError>;
 }
 
+enum GraphDatabase {
+    ReadWrite(Database),
+    ReadOnly(ReadOnlyDatabase),
+}
+
+impl GraphDatabase {
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match self {
+            Self::ReadWrite(database) => database.begin_read(),
+            Self::ReadOnly(database) => database.begin_read(),
+        }
+    }
+}
+
 pub struct GraphStoreDb {
-    db: Database,
+    db: GraphDatabase,
     path: PathBuf,
     /// Active-`BulkModeGuard` reference count. When > 0, write
     /// transactions use `Durability::None` to skip fsync. The counter
@@ -681,6 +707,8 @@ pub enum GraphStoreError {
     },
     #[error("graph store error: {0}")]
     Storage(String),
+    #[error("graph storage `{path}` was opened read-only; this operation requires a writer")]
+    ReadOnly { path: PathBuf },
     #[error(
         "graph index at `{path}` is corrupt or incomplete; run `gather-step index --auto-recover` to rebuild generated state, or run `gather-step clean && gather-step index`"
     )]
@@ -759,7 +787,7 @@ impl GraphStoreDb {
         }
 
         let store = Self {
-            db,
+            db: GraphDatabase::ReadWrite(db),
             path,
             bulk_mode: std::sync::atomic::AtomicUsize::new(0),
         };
@@ -771,31 +799,51 @@ impl GraphStoreDb {
         Ok(store)
     }
 
-    /// Open the graph for a read-only command, retrying briefly while the
+    /// Open the graph with an OS-level read-only file handle, retrying briefly while the
     /// database is held by another *transient* gather-step process.
     ///
-    /// redb is single-process: a concurrent reader holding the file open makes
-    /// `open` fail with [`GraphStoreError::StorageHeld`]. Such holders are
-    /// short-lived (a parallel CLI query), so a bounded backoff lets contending
-    /// reads serialize instead of failing outright — this is what fixes
-    /// `graph_locked` under parallel read load. A lock held by a long-lived
-    /// daemon instead surfaces as [`GraphStoreError::StorageHeldByDaemon`] and is
-    /// deliberately NOT retried: that holder never releases on its own, so we
-    /// fail fast and let the caller route to the daemon (or report a version
-    /// skew) rather than stall for the whole backoff budget.
+    /// An active writer can make the read-only open fail with
+    /// [`GraphStoreError::StorageHeld`]. A bounded backoff absorbs short writer
+    /// transactions without weakening the OS-level read-only contract. A lock
+    /// held by a long-lived daemon instead surfaces as
+    /// [`GraphStoreError::StorageHeldByDaemon`] and is deliberately not retried:
+    /// callers should route to that daemon rather than stall for the full
+    /// backoff budget.
     pub fn open_read_retrying(path: impl AsRef<Path>) -> Result<Self, GraphStoreError> {
         let path = path.as_ref();
         let mut attempt: u32 = 0;
         loop {
-            match Self::open(path) {
+            match Self::open_read_only(path) {
                 Ok(store) => return Ok(store),
                 Err(GraphStoreError::StorageHeld { .. }) if attempt < READ_OPEN_LOCK_RETRIES => {
+                    READ_OPEN_RETRY_COUNT.fetch_add(1, Ordering::Relaxed);
                     std::thread::sleep(READ_OPEN_LOCK_BASE_BACKOFF * 2u32.saturating_pow(attempt));
                     attempt += 1;
                 }
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn open_read_only(path: &Path) -> Result<Self, GraphStoreError> {
+        if path.is_dir() {
+            return Err(GraphStoreError::Io(std::io::Error::new(
+                ErrorKind::IsADirectory,
+                format!("graph store path must be a file: {}", path.display()),
+            )));
+        }
+        let mut builder = Database::builder();
+        builder.set_cache_size(DEFAULT_GRAPH_CACHE_BYTES);
+        let db = builder
+            .open_read_only(path)
+            .map_err(|error| Self::map_open_error(path, error))?;
+        let store = Self {
+            db: GraphDatabase::ReadOnly(db),
+            path: path.to_path_buf(),
+            bulk_mode: std::sync::atomic::AtomicUsize::new(0),
+        };
+        store.validate_schema_version()?;
+        Ok(store)
     }
 
     fn write_schema_version(&self) -> Result<(), GraphStoreError> {
@@ -823,7 +871,7 @@ impl GraphStoreDb {
     /// gather-step has no production users yet, so no implicit-v0
     /// compatibility shim is needed.
     fn validate_schema_version(&self) -> Result<(), GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let table = match read_txn.open_table(GRAPH_SCHEMA) {
             Ok(t) => t,
             // No schema table — the store predates the strict check and
@@ -872,7 +920,14 @@ impl GraphStoreDb {
     /// store at the time of the call — redb returns
     /// `DatabaseError::TransactionInProgress` otherwise.
     pub fn check_integrity(&mut self) -> Result<bool, GraphStoreError> {
-        self.db.check_integrity().map_err(GraphStoreError::storage)
+        match &mut self.db {
+            GraphDatabase::ReadWrite(database) => {
+                database.check_integrity().map_err(GraphStoreError::storage)
+            }
+            GraphDatabase::ReadOnly(_) => Err(GraphStoreError::ReadOnly {
+                path: self.path.clone(),
+            }),
+        }
     }
 
     fn map_open_error(path: &Path, error: DatabaseError) -> GraphStoreError {
@@ -909,7 +964,7 @@ impl GraphStoreDb {
     }
 
     pub fn table_footprints(&self) -> Result<Vec<GraphTableFootprint>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let mut tables = Vec::new();
 
         macro_rules! record_table {
@@ -1001,7 +1056,14 @@ impl GraphStoreDb {
     /// Compact the database to reclaim dead space from delete/rewrite cycles.
     /// Must be called when no transactions are open.
     pub fn compact(&mut self) -> Result<bool, GraphStoreError> {
-        self.db.compact().map_err(GraphStoreError::storage)
+        match &mut self.db {
+            GraphDatabase::ReadWrite(database) => {
+                database.compact().map_err(GraphStoreError::storage)
+            }
+            GraphDatabase::ReadOnly(_) => Err(GraphStoreError::ReadOnly {
+                path: self.path.clone(),
+            }),
+        }
     }
 
     /// Bytes the on-disk file holds beyond live data — i.e. free pages
@@ -1010,7 +1072,15 @@ impl GraphStoreDb {
     /// large gap here because redb grows the backing file in regions and never
     /// shrinks it in place.
     pub fn reclaimable_bytes(&self) -> Result<u64, GraphStoreError> {
-        let write_txn = self.db.begin_write().map_err(GraphStoreError::storage)?;
+        let database = match &self.db {
+            GraphDatabase::ReadWrite(database) => database,
+            GraphDatabase::ReadOnly(_) => {
+                return Err(GraphStoreError::ReadOnly {
+                    path: self.path.clone(),
+                });
+            }
+        };
+        let write_txn = database.begin_write().map_err(GraphStoreError::storage)?;
         let stats = write_txn.stats().map_err(GraphStoreError::storage)?;
         write_txn.abort().map_err(GraphStoreError::storage)?;
         let file_len = std::fs::metadata(&self.path).map_or(0, |meta| meta.len());
@@ -1107,7 +1177,7 @@ impl GraphStoreDb {
     /// monorepo) with a single pass over the EDGES table and a tiny in-memory
     /// `node_id → repo_id` cache. One read transaction; one EDGES scan.
     pub fn count_cross_repo_edges(&self) -> Result<u64, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes = match read_txn.open_table(NODES) {
             Ok(nodes) => nodes,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
@@ -1168,7 +1238,7 @@ impl GraphStoreDb {
     /// [`Self::count_virtual_other_cross_repo_edges`] this must equal
     /// [`Self::count_cross_repo_edges`].
     pub fn count_true_cross_repo_edges(&self) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes = match read_txn.open_table(NODES) {
             Ok(nodes) => nodes,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
@@ -1248,7 +1318,7 @@ impl GraphStoreDb {
     /// [`Self::count_history_ownership_edges`] this must equal
     /// [`Self::count_cross_repo_edges`].
     pub fn count_virtual_other_cross_repo_edges(&self) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes = match read_txn.open_table(NODES) {
             Ok(nodes) => nodes,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
@@ -1340,7 +1410,7 @@ impl GraphStoreDb {
     /// Counts edges with `target.repo == VIRTUAL_NODE_REPO && target.kind == kind`,
     /// skipping same-repo pairs.
     fn count_virtual_target_edges_by_kind(&self, kind: NodeKind) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes = match read_txn.open_table(NODES) {
             Ok(nodes) => nodes,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
@@ -1393,7 +1463,15 @@ impl GraphStoreDb {
     }
 
     pub(crate) fn begin_write_txn(&self) -> Result<redb::WriteTransaction, GraphStoreError> {
-        let mut write_txn = self.db.begin_write().map_err(GraphStoreError::storage)?;
+        let database = match &self.db {
+            GraphDatabase::ReadWrite(database) => database,
+            GraphDatabase::ReadOnly(_) => {
+                return Err(GraphStoreError::ReadOnly {
+                    path: self.path.clone(),
+                });
+            }
+        };
+        let mut write_txn = database.begin_write().map_err(GraphStoreError::storage)?;
         // The graph store is a derived projection of source content. If a crash
         // loses the last committed batch, the coordinator can rebuild it by
         // reindexing files. In bulk mode we skip fsync entirely for speed; in
@@ -3382,7 +3460,7 @@ impl GraphStoreDb {
     /// - `total_edges` — total number of edges in the graph, equivalent to
     ///   [`Self::count_edges`].
     pub fn count_edge_summary(&self) -> Result<EdgeCountSummary, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes = match read_txn.open_table(NODES) {
             Ok(nodes) => nodes,
             Err(error) if Self::is_missing_table_error(&error) => {
@@ -3481,7 +3559,7 @@ impl GraphStoreDb {
     /// examples and tests; never call from production code paths.
     #[cfg(any(test, feature = "test-support"))]
     pub fn all_edges_attributed(&self) -> Result<Vec<AttributedEdge>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes_table = match read_txn.open_table(NODES) {
             Ok(t) => t,
             Err(e) if Self::is_missing_table_error(&e) => return Ok(Vec::new()),
@@ -3624,7 +3702,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn get_node(&self, id: NodeId) -> Result<Option<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let nodes = match read_txn.open_table(NODES) {
             Ok(nodes) => nodes,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(None),
@@ -3653,7 +3731,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn get_outgoing(&self, source: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let edges = match read_txn.open_multimap_table(EDGES_OUT) {
             Ok(edges) => edges,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -3673,7 +3751,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn get_incoming(&self, target: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let edges = match read_txn.open_multimap_table(EDGES_IN) {
             Ok(edges) => edges,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -3693,7 +3771,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn edges_by_owner(&self, owner_file: NodeId) -> Result<Vec<EdgeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let edges = match read_txn.open_multimap_table(EDGES_BY_OWNER) {
             Ok(edges) => edges,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -3745,7 +3823,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn nodes_by_file(&self, repo: &str, file_path: &str) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let Some(repo_id) = Self::lookup_repo_id(&read_txn, repo)? else {
             return Ok(Vec::new());
         };
@@ -3770,7 +3848,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn nodes_by_type(&self, kind: NodeKind) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let by_type = match read_txn.open_multimap_table(BY_TYPE) {
             Ok(by_type) => by_type,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -3795,7 +3873,7 @@ impl GraphStore for GraphStoreDb {
             return Ok(Vec::new());
         }
 
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let candidates = match read_txn.open_multimap_table(CROSS_FILE_CANDIDATES) {
             Ok(candidates) => candidates,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -3820,7 +3898,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn nodes_by_repo(&self, repo: &str) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let Some(repo_id) = Self::lookup_repo_id(&read_txn, repo)? else {
             return Ok(Vec::new());
         };
@@ -3839,7 +3917,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn count_nodes_by_repo(&self, repo: &str) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let Some(repo_id) = Self::lookup_repo_id(&read_txn, repo)? else {
             return Ok(0);
         };
@@ -3855,7 +3933,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn count_edges_by_owner_repo(&self, repo: &str) -> Result<u64, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let Some(repo_id) = Self::lookup_repo_id(&read_txn, repo)? else {
             return Ok(0);
         };
@@ -3902,7 +3980,7 @@ impl GraphStore for GraphStoreDb {
         repo: &str,
         kind: NodeKind,
     ) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let Some(repo_id) = Self::lookup_repo_id(&read_txn, repo)? else {
             return Ok(0);
         };
@@ -3936,7 +4014,7 @@ impl GraphStore for GraphStoreDb {
         kind: NodeKind,
         external_id: &str,
     ) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let by_external_id = match read_txn.open_multimap_table(BY_EXTERNAL_ID) {
             Ok(by_external_id) => by_external_id,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -3955,7 +4033,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn count_nodes_by_kind(&self, kind: NodeKind) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let by_type = match read_txn.open_multimap_table(BY_TYPE) {
             Ok(by_type) => by_type,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
@@ -3968,7 +4046,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn count_edges_by_kind(&self, kind: EdgeKind) -> Result<usize, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let edge_kind_counts = match read_txn.open_table(EDGE_KIND_COUNTS) {
             Ok(edge_kind_counts) => edge_kind_counts,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(0),
@@ -3986,7 +4064,7 @@ impl GraphStore for GraphStoreDb {
         &self,
         normalized_name: &str,
     ) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let index = match read_txn.open_multimap_table(EVENT_FAMILY_INDEX) {
             Ok(index) => index,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -4004,7 +4082,7 @@ impl GraphStore for GraphStoreDb {
     }
 
     fn nodes_by_route_key(&self, canonical_key: &str) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let index = match read_txn.open_multimap_table(ROUTE_KEY_INDEX) {
             Ok(index) => index,
             Err(error) if Self::is_missing_table_error(&error) => return Ok(Vec::new()),
@@ -4023,7 +4101,7 @@ impl GraphStore for GraphStoreDb {
         &self,
         short_name: &str,
     ) -> Result<Vec<NodeData>, GraphStoreError> {
-        let read_txn = self.db.begin_read().map_err(GraphStoreError::storage)?;
+        let read_txn = self.begin_read_txn()?;
         let index = match read_txn.open_multimap_table(SHARED_SYMBOL_NAME_INDEX) {
             Ok(index) => index,
             Err(error) if Self::is_missing_table_error(&error) => {
@@ -4787,7 +4865,7 @@ mod tests {
             .expect("external id lookup should succeed");
         assert_eq!(loaded, vec![pr.clone()]);
 
-        let read_txn = store.db.begin_read().expect("read txn should open");
+        let read_txn = store.begin_read_txn().expect("read txn should open");
         let by_external_id = read_txn
             .open_multimap_table(BY_EXTERNAL_ID)
             .expect("by_external_id table should open");
@@ -4817,7 +4895,7 @@ mod tests {
             .bulk_insert(std::slice::from_ref(&new_node), &[])
             .expect("new node should replace old one");
 
-        let read_txn = store.db.begin_read().expect("read txn should open");
+        let read_txn = store.begin_read_txn().expect("read txn should open");
         let candidates = read_txn
             .open_multimap_table(CROSS_FILE_CANDIDATES)
             .expect("candidate table should open");
@@ -5540,7 +5618,7 @@ mod tests {
             2
         );
 
-        let read_txn = store.db.begin_read().expect("read txn should open");
+        let read_txn = store.begin_read_txn().expect("read txn should open");
         let edge_kind_counts = read_txn
             .open_table(EDGE_KIND_COUNTS)
             .expect("edge kind counts table should open");

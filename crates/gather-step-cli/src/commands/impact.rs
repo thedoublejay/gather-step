@@ -347,6 +347,12 @@ pub fn execute(
             .map(|candidate| candidate.output)
             .collect(),
     };
+    let result_count = payload
+        .matches
+        .iter()
+        .flat_map(|item| &item.impacted_files)
+        .map(|repo| repo.files.len())
+        .sum();
 
     let mut lines = vec![format!("Impact for symbol {}:", payload.symbol)];
     for item in &payload.matches {
@@ -399,7 +405,12 @@ pub fn execute(
         }
     }
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::ImpactedFiles,
+            result_count,
+        ),
+    )
 }
 
 fn render_field_impact_lines(report: &ProjectionImpactReport) -> Vec<String> {

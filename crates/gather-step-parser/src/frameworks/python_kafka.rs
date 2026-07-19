@@ -18,12 +18,17 @@
 //! Module-level consumer construction (no enclosing function) is not captured,
 //! since call sites require an owning function.
 
+use std::{fs, sync::Arc};
+
 use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id};
 
 use crate::{
+    FileEntry, Language,
     top_level_split::split_top_level,
-    tree_sitter::{EnrichedCallSite, ParsedFile},
+    tree_sitter::{EnrichedCallSite, ParsedFile, parse_file},
 };
+
+const MAX_IMPORTED_TOPIC_ENUM_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PythonKafkaAugmentation {
@@ -58,7 +63,7 @@ fn producer_topic(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<S
     }
     let raw = call_site.raw_arguments.as_deref()?;
     let first = split_top_level(raw, ',').into_iter().next()?;
-    resolve_topic(parsed, first)
+    resolve_topic(parsed, first, Some(call_site.owner_id))
 }
 
 fn is_producer_call(call_site: &EnrichedCallSite) -> bool {
@@ -94,7 +99,7 @@ fn emit_proxy_producers(parsed: &ParsedFile, augmentation: &mut PythonKafkaAugme
             let Some(argument) = split_top_level(raw, ',').get(*topic_index).copied() else {
                 continue;
             };
-            let Some(topic) = resolve_topic(parsed, argument) else {
+            let Some(topic) = resolve_topic(parsed, argument, Some(call_site.owner_id)) else {
                 continue;
             };
             let edge_start = augmentation.edges.len();
@@ -173,7 +178,7 @@ fn constructor_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<
         if argument.contains('=') {
             break;
         }
-        match resolve_topic(parsed, argument) {
+        match resolve_topic(parsed, argument, Some(call_site.owner_id)) {
             Some(topic) => topics.push(topic),
             None => break,
         }
@@ -202,7 +207,7 @@ fn emit_decorator_consumers(parsed: &ParsedFile, augmentation: &mut PythonKafkaA
             else {
                 continue;
             };
-            let Some(topic) = resolve_topic(parsed, first) else {
+            let Some(topic) = resolve_topic(parsed, first, Some(symbol.node.id)) else {
                 continue;
             };
             emit_topic_for_owner(
@@ -233,7 +238,7 @@ fn subscribe_topics(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Vec<St
         .unwrap_or(list);
     split_top_level(inner, ',')
         .iter()
-        .filter_map(|element| resolve_topic(parsed, element))
+        .filter_map(|element| resolve_topic(parsed, element, Some(call_site.owner_id)))
         .collect()
 }
 
@@ -331,11 +336,20 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 /// wrapper-library pattern where an external event/topic enum is the only stable
 /// static identity. A narrow `self.field = Enum.Member` scan handles producer
 /// classes that bind their topic once in `__init__`.
-fn resolve_topic(parsed: &ParsedFile, argument: &str) -> Option<String> {
-    resolve_topic_inner(parsed, argument, 0)
+pub(crate) fn resolve_topic(
+    parsed: &ParsedFile,
+    argument: &str,
+    owner_id: Option<gather_step_core::NodeId>,
+) -> Option<String> {
+    resolve_topic_inner(parsed, argument, owner_id, 0)
 }
 
-fn resolve_topic_inner(parsed: &ParsedFile, argument: &str, depth: usize) -> Option<String> {
+fn resolve_topic_inner(
+    parsed: &ParsedFile,
+    argument: &str,
+    owner_id: Option<gather_step_core::NodeId>,
+    depth: usize,
+) -> Option<String> {
     if depth > 2 {
         return None;
     }
@@ -349,11 +363,17 @@ fn resolve_topic_inner(parsed: &ParsedFile, argument: &str, depth: usize) -> Opt
     if let Some(value) = parsed.constant_strings.get(argument) {
         return Some(value.clone());
     }
+    // Resolve imports before local leaf-name lookup. A namespace-qualified
+    // expression such as `module.StreamTopic.Member` must not attach to an
+    // unrelated local `StreamTopic` with the same member name.
+    if let Some(value) = imported_enum_member_value(parsed, argument) {
+        return Some(value);
+    }
     if let Some(value) = local_enum_member_value(parsed, argument) {
         return Some(value);
     }
-    if let Some(bound) = python_self_attribute_binding(parsed, argument) {
-        return resolve_topic_inner(parsed, bound.as_str(), depth + 1);
+    if let Some(bound) = python_self_attribute_binding(parsed, argument, owner_id) {
+        return resolve_topic_inner(parsed, bound.as_str(), owner_id, depth + 1);
     }
     external_enum_member_topic(argument)
 }
@@ -374,14 +394,98 @@ fn local_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<String
     })
 }
 
-fn python_self_attribute_binding(parsed: &ParsedFile, argument: &str) -> Option<String> {
+fn python_self_attribute_binding(
+    parsed: &ParsedFile,
+    argument: &str,
+    owner_id: Option<gather_step_core::NodeId>,
+) -> Option<String> {
     if !argument.starts_with("self.") {
         return None;
     }
-    parsed.source.lines().find_map(|line| {
+    let owner = parsed
+        .symbols
+        .iter()
+        .find(|symbol| Some(symbol.node.id) == owner_id)?;
+    let class_name = owner.node.qualified_name.as_deref()?.rsplit_once('.')?.0;
+    let class_span = parsed
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.node.kind == NodeKind::Class
+                && symbol.node.qualified_name.as_deref() == Some(class_name)
+        })?
+        .node
+        .span
+        .as_ref()?;
+    let lines = parsed.source.lines().collect::<Vec<_>>();
+    let start = usize::try_from(class_span.line_start.saturating_sub(1)).unwrap_or(0);
+    let end = usize::try_from(class_span.line_end())
+        .unwrap_or(lines.len())
+        .min(lines.len());
+    let mut bindings = lines[start.min(end)..end].iter().filter_map(|line| {
         let (left, right) = line.trim().split_once('=')?;
         (left.trim() == argument).then(|| right.trim().to_owned())
-    })
+    });
+    let first = bindings.next()?;
+    // The parser does not yet carry class ownership on assignments. Refuse a
+    // file-wide binding when another class reuses the same attribute with a
+    // different topic; choosing the first would silently cross-wire events.
+    bindings.all(|binding| binding == first).then_some(first)
+}
+
+/// Resolve a directly imported Python enum member from its defining file.
+/// Import paths have already passed the parser's allowed-root/symlink checks;
+/// this pass remains bounded and parses only the referenced file. The result
+/// is the canonical wire value, so Python wrapper events converge with literal
+/// and cross-language producers/consumers instead of remaining symbolic.
+fn imported_enum_member_value(parsed: &ParsedFile, argument: &str) -> Option<String> {
+    let (enum_expression, member) = argument.rsplit_once('.')?;
+    let (binding, imported_enum) = parsed.import_bindings.iter().find_map(|binding| {
+        if binding.local_name == enum_expression && !binding.is_namespace {
+            let imported = binding
+                .imported_name
+                .as_deref()
+                .unwrap_or(binding.local_name.as_str());
+            return Some((binding, imported.to_owned()));
+        }
+        if binding.is_namespace {
+            if let Some(imported) = enum_expression
+                .strip_prefix(binding.source.as_str())
+                .and_then(|value| value.strip_prefix('.'))
+                && !imported.is_empty()
+            {
+                return Some((binding, imported.to_owned()));
+            }
+            let imported = enum_expression
+                .strip_prefix(binding.local_name.as_str())?
+                .strip_prefix('.')?;
+            if !imported.is_empty() {
+                return Some((binding, imported.to_owned()));
+            }
+        }
+        None
+    })?;
+    let path = binding.resolved_path.as_deref()?;
+    let size = usize::try_from(fs::metadata(path).ok()?.len()).ok()?;
+    if size > MAX_IMPORTED_TOPIC_ENUM_BYTES {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    let parent = path.parent()?;
+    let file_name = path.file_name()?.into();
+    let imported = parse_file(
+        &parsed.file_node.repo,
+        parent,
+        &FileEntry {
+            path: file_name,
+            language: Language::Python,
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            content_hash: *blake3::hash(&bytes).as_bytes(),
+            source_bytes: Some(Arc::from(bytes.into_boxed_slice())),
+        },
+    )
+    .ok()?;
+    local_enum_member_value(&imported, &format!("{imported_enum}.{member}"))
 }
 
 /// Preserve an external enum member as a symbolic topic identity. This is
@@ -782,6 +886,41 @@ async def consume(message):
         );
         assert_eq!(edge_count(&parsed, EdgeKind::Consumes), 1);
         assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 2);
+    }
+
+    #[test]
+    fn imported_topic_enum_resolves_to_canonical_wire_value() {
+        let dir = TestDir::new("imported-enum");
+        fs::write(
+            dir.path().join("topic_defs.py"),
+            r#"
+from enum import Enum
+
+
+class StreamTopic(str, Enum):
+    JobQueued = "jobs.queued"
+"#,
+        )
+        .expect("topic definition should write");
+        let parsed = parse(
+            &dir,
+            "events.py",
+            r#"
+from topic_defs import StreamTopic
+
+
+@kafka_event(StreamTopic.JobQueued)
+async def consume(message):
+    await KafkaRuntime.get().send_message(StreamTopic.JobQueued, message)
+"#,
+        );
+
+        assert_eq!(
+            event_ids(&parsed),
+            vec!["__event__kafka__jobs.queued".to_owned()]
+        );
+        assert_eq!(edge_count(&parsed, EdgeKind::Consumes), 1);
+        assert_eq!(edge_count(&parsed, EdgeKind::Publishes), 1);
     }
 
     #[test]

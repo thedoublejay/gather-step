@@ -18,14 +18,14 @@ This changelog lists significant user-visible changes. The latest release is sho
 
 ### Fixed
 
-- **Empty graph answers now disclose coverage.** Consumer and event queries qualify negative results with matched-framework and extracted-edge coverage so missing extraction cannot masquerade as proof of absence.
+- **List-shaped graph answers now disclose coverage.** Consumer, event, route/CRUD, agent, orphan, and shared-type queries report registered repo scope, registry-detected frameworks, path-classified source scopes, concrete contributed edges when retained, verdicts, and limitations. Index-time extractor provenance is explicitly unavailable rather than inferred, and aggregate tools disclose when exact edge identities are not retained. Virtual or unresolved evidence remains `unknown`, so an empty result is not presented as proof of production absence.
 - **Telemetry is workspace-aware and diagnostically useful.** Runs retain recoverable error summaries, graph availability, command outcomes, and workspace identity; daemon duplicate starts and stale-run repair no longer inflate error reporting.
-- **Indexing and search correctness tightened.** Language and size exclusions are enforced consistently, generated-surface limits are balanced, search matching semantics are explicit, virtual pack targets require graph evidence, and runtime dependencies no longer imply source ownership.
+- **Indexing and search correctness tightened.** Language and size exclusions are enforced consistently, top-level route/event limits are disclosed, search matching semantics are explicit, virtual pack targets require graph evidence, and runtime dependencies no longer imply source ownership.
 - **Framework false positives reduced.** Python test clients no longer appear as production API consumers, and unsupported always-on framework hints are not reported as detected source evidence.
 
 ### Changed
 
-- **Every visible CLI command has a useful description.** Trace documentation now matches the implemented command surface, and redundant MCP aliases were removed from the advertised tool catalog.
+- **Every visible CLI command has a useful description.** Trace and exact-consumer documentation now match the implemented command surface, canonical server examples use `gather-step serve`, and removed MCP aliases are no longer advertised.
 - **Status and route surfaces are more truthful.** Status separates graph state from git freshness, TanStack file routes and FastAPI mounts are recognized, and event/runtime/contract labels describe the evidence actually indexed.
 - **Dependencies refreshed.** Rust direct and transitive dependencies were updated, including Oxc 0.140.0 and Tokio 1.53.0; Astro moved to 7.1.1 with its Bun lockfile regenerated; pinned workflow actions were advanced to their current releases.
 - **Workspace packages report `5.16.0`.** Cargo workspace crates and website package metadata now carry the minor-release version.

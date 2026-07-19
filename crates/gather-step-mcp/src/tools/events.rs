@@ -3,7 +3,7 @@ use gather_step_analysis::{
     list_orphan_topics, resolve_agent_targets, resolve_event_targets, resolve_route_target,
     trace_agent,
 };
-use gather_step_core::{NodeId, NodeKind, WorkspaceRegistry};
+use gather_step_core::{NodeId, NodeKind, WorkspaceRegistry, classify_source_scope};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,10 @@ use crate::{
         EvidenceSupportMethod,
     },
     ids::encode_node_id,
-    tools::labels::{edge_kind_label, node_kind_label},
+    tools::{
+        coverage::QueryCoverage,
+        labels::{edge_kind_label, node_kind_label},
+    },
 };
 
 const DEFAULT_TOPOLOGY_LIMIT: usize = 25;
@@ -71,6 +74,7 @@ pub struct TraceEventResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct TraceEventData {
+    pub coverage: QueryCoverage,
     pub matches: Vec<EventTraceResult>,
     pub returned: usize,
     pub target: String,
@@ -162,6 +166,7 @@ pub struct TraceAgentResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct TraceAgentData {
+    pub coverage: QueryCoverage,
     pub edges: Vec<AgentEdgeItem>,
     pub nodes: Vec<AgentNodeItem>,
     pub target: String,
@@ -203,6 +208,7 @@ pub struct ListOrphanTopicsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListOrphanTopicsData {
+    pub coverage: QueryCoverage,
     pub evidence: Vec<Evidence>,
     pub orphans: Vec<OrphanTopicItem>,
     pub returned: usize,
@@ -222,6 +228,7 @@ pub struct OrphanTopicItem {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct TraceRouteData {
     pub callers: Vec<TopologySymbol>,
+    pub coverage: QueryCoverage,
     pub handlers: Vec<TopologySymbol>,
     pub method: String,
     pub path: String,
@@ -260,6 +267,7 @@ pub struct TopologySymbol {
     pub line_start: Option<u32>,
     pub repo: String,
     pub role: String,
+    pub source_scope: String,
     pub symbol_id: String,
     pub symbol_kind: String,
     pub symbol_name: String,
@@ -290,6 +298,7 @@ pub fn trace_event_tool(
                         entry.node_id,
                         entry.repo,
                         entry.file_path,
+                        entry.source_scope.as_str().to_owned(),
                         entry.line_number,
                         entry.confidence,
                         entry.symbol_name,
@@ -309,6 +318,7 @@ pub fn trace_event_tool(
                         entry.node_id,
                         entry.repo,
                         entry.file_path,
+                        entry.source_scope.as_str().to_owned(),
                         entry.line_number,
                         entry.confidence,
                         entry.symbol_name,
@@ -328,8 +338,35 @@ pub fn trace_event_tool(
         sort_topology_symbols(&mut result.producers);
         sort_topology_symbols(&mut result.consumers);
     }
+    let edges_contributed = matches
+        .iter()
+        .map(|result| result.producers.len() + result.consumers.len())
+        .sum();
+    let source_scopes = matches
+        .iter()
+        .flat_map(|result| result.producers.iter().chain(&result.consumers))
+        .map(|symbol| symbol.source_scope.clone())
+        .collect::<Vec<_>>();
+    let missing_producer = matches.iter().any(|result| result.producers.is_empty());
+    let missing_consumer = matches.iter().any(|result| result.consumers.is_empty());
+    let mut coverage = QueryCoverage::workspace(&registry, "event_topology", edges_contributed)
+        .with_source_scopes(source_scopes);
+    if !matches.is_empty() && (missing_producer || missing_consumer) {
+        coverage = coverage.with_verdict("external_or_dynamic");
+        if missing_producer {
+            coverage = coverage.with_limitation(
+                "At least one matched event has no indexed producer; it may be external, dynamic, or unsupported.",
+            );
+        }
+        if missing_consumer {
+            coverage = coverage.with_limitation(
+                "At least one matched event has no indexed consumer; it may be external, dynamic, or unsupported.",
+            );
+        }
+    }
     let mut response = TraceEventResponse {
         data: TraceEventData {
+            coverage,
             returned: matches.len(),
             matches,
             target: request.target,
@@ -370,6 +407,24 @@ pub fn trace_route_tool(
 
     let response = if let Some(route) = route {
         let trace = gather_step_analysis::trace_route(graph, route.id, limit)?;
+        let edges_contributed = trace.callers.len() + trace.handlers.len();
+        let source_scopes = trace
+            .callers
+            .iter()
+            .chain(&trace.handlers)
+            .map(|entry| entry.source_scope.as_str())
+            .collect::<Vec<_>>();
+        let mut coverage = QueryCoverage::workspace(&registry, "route_topology", edges_contributed)
+            .with_source_scopes(source_scopes);
+        if trace.handlers.is_empty() {
+            coverage = coverage.with_verdict("possible_extraction_gap").with_limitation(
+                "The route target has no indexed handler; route registration may be dynamic or unsupported.",
+            );
+        } else if trace.callers.is_empty() {
+            coverage = coverage.with_verdict("external_or_dynamic").with_limitation(
+                "The route has an indexed handler but no indexed caller; callers may be external clients or dynamically constructed.",
+            );
+        }
         let mut response = TraceRouteResponse {
             data: TraceRouteData {
                 callers: trace
@@ -381,6 +436,7 @@ pub fn trace_route_tool(
                             entry.node_id,
                             entry.repo,
                             entry.file_path,
+                            entry.source_scope.as_str().to_owned(),
                             entry.line_number,
                             entry.confidence,
                             entry.symbol_name,
@@ -390,6 +446,7 @@ pub fn trace_route_tool(
                         )
                     })
                     .collect(),
+                coverage,
                 handlers: trace
                     .handlers
                     .into_iter()
@@ -399,6 +456,7 @@ pub fn trace_route_tool(
                             entry.node_id,
                             entry.repo,
                             entry.file_path,
+                            entry.source_scope.as_str().to_owned(),
                             entry.line_number,
                             entry.confidence,
                             entry.symbol_name,
@@ -437,6 +495,7 @@ pub fn trace_route_tool(
         TraceRouteResponse {
             data: TraceRouteData {
                 callers: Vec::new(),
+                coverage: QueryCoverage::workspace(&registry, "route_topology", 0),
                 handlers: Vec::new(),
                 method: request.method,
                 path: request.path,
@@ -539,9 +598,18 @@ pub fn trace_agent_tool(
         .capped_limit(request.limit, DEFAULT_TOPOLOGY_LIMIT);
     let target = resolve_single_agent_target(graph, &request.target)?;
     let trace = trace_agent(graph, target.id, depth, limit)?;
+    let registry = ctx.registry_snapshot()?;
+    let edges_contributed = trace.edges.len();
+    let source_scopes = trace
+        .nodes
+        .iter()
+        .map(|node| classify_source_scope(&node.file_path).as_str())
+        .collect::<Vec<_>>();
 
     let mut response = TraceAgentResponse {
         data: TraceAgentData {
+            coverage: QueryCoverage::workspace(&registry, "agent_topology", edges_contributed)
+                .with_source_scopes(source_scopes),
             edges: trace
                 .edges
                 .into_iter()
@@ -652,6 +720,7 @@ pub fn list_orphan_topics_tool(
     let limit = ctx
         .config
         .capped_limit(request.limit, DEFAULT_TOPOLOGY_LIMIT * 4);
+    let registry = ctx.registry_snapshot()?;
     let orphans = list_orphan_topics(ctx.graph(), request.repo.as_deref(), limit)?
         .into_iter()
         .map(|orphan| OrphanTopicItem {
@@ -664,9 +733,27 @@ pub fn list_orphan_topics_tool(
             target_id: encode_node_id(orphan.target.id),
         })
         .collect::<Vec<_>>();
+    let edges_contributed = orphans
+        .iter()
+        .map(|orphan| orphan.producers + orphan.consumers)
+        .sum();
+    let mut coverage = QueryCoverage::scoped(
+        &registry,
+        request.repo.as_deref(),
+        "orphan_event_scan",
+        edges_contributed,
+    );
+    if !orphans.is_empty() {
+        coverage = coverage
+            .with_verdict("possible_extraction_gap")
+            .with_limitation(
+                "Orphan classifications describe indexed edges only; missing producers or consumers may be external, dynamic, or unsupported.",
+            );
+    }
     let evidence = orphans.iter().map(orphan_topic_evidence).collect();
     Ok(ListOrphanTopicsResponse {
         data: ListOrphanTopicsData {
+            coverage,
             evidence,
             returned: orphans.len(),
             orphans,
@@ -737,6 +824,7 @@ fn topology_symbol(
     node_id: NodeId,
     repo: String,
     file_path: String,
+    source_scope: String,
     line_start: Option<u32>,
     confidence: Option<u16>,
     symbol_name: String,
@@ -793,6 +881,7 @@ fn topology_symbol(
         line_start,
         repo,
         role: role_label,
+        source_scope,
         symbol_id,
         symbol_kind,
         symbol_name,
@@ -1757,6 +1846,11 @@ mod tests {
         let response = TraceRouteResponse {
             data: TraceRouteData {
                 callers: Vec::new(),
+                coverage: crate::tools::coverage::QueryCoverage::workspace(
+                    &gather_step_core::WorkspaceRegistry::default(),
+                    "route_topology",
+                    0,
+                ),
                 handlers: Vec::new(),
                 method: "GET".to_owned(),
                 path: "/orders".to_owned(),

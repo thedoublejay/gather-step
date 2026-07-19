@@ -130,7 +130,7 @@ pub const CLI_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "who-consumes",
-        "Find which repos consume what a symbol's file produces",
+        "Find repos with dependency paths to an exact symbol",
     ),
     (
         "projection-impact",
@@ -273,7 +273,7 @@ pub enum Command {
     #[command(
         name = "who-consumes",
         visible_alias = "who_consumes",
-        about = "Find which repos consume what a symbol's file produces"
+        about = "Find repos with dependency paths to an exact symbol"
     )]
     WhoConsumes(who_consumes::WhoConsumesArgs),
     #[command(about = "Trace projected fields, filters, and backfill evidence")]
@@ -548,6 +548,7 @@ fn telemetry_finish_fields(command: &str, result: &Result<CliOutcome>) -> Teleme
         recovery_event: app::telemetry_recovery_event(),
         graph_availability,
         result_count,
+        extra_json: app::telemetry_extra(),
         events,
         error,
         ..TelemetryRunFinish::default()

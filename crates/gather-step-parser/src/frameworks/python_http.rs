@@ -166,13 +166,14 @@ fn url_looks_like_http_target(url: &str) -> bool {
 fn resolve_url(parsed: &ParsedFile, call_site: &EnrichedCallSite) -> Option<(String, bool)> {
     let raw = call_site.raw_arguments.as_deref()?;
     let first = split_top_level(raw, ',').into_iter().next()?;
-    resolve_url_expression(parsed, first, 0)
+    resolve_url_expression(parsed, call_site, first, 0)
 }
 
 /// Resolve a URL expression: a single literal/constant, or a `+`-concatenation
 /// of literals/constants. Returns `None` if any component is dynamic.
 fn resolve_url_expression(
     parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
     expression: &str,
     depth: usize,
 ) -> Option<(String, bool)> {
@@ -182,7 +183,7 @@ fn resolve_url_expression(
     let mut url = String::new();
     let mut literal_only = true;
     for atom in split_top_level(expression, '+') {
-        let (value, is_literal) = resolve_atom(parsed, atom, depth)?;
+        let (value, is_literal) = resolve_atom(parsed, call_site, atom, depth)?;
         url.push_str(&value);
         literal_only &= is_literal;
     }
@@ -191,9 +192,14 @@ fn resolve_url_expression(
 }
 
 /// Resolve a single atom to its string value: a quoted literal (`is_literal`
-/// true) or a module-level string constant (`is_literal` false). Returns `None`
-/// for dynamic values (variables, f-strings) so junk routes are never invented.
-fn resolve_atom(parsed: &ParsedFile, atom: &str, depth: usize) -> Option<(String, bool)> {
+/// true) or a same-function/module string constant (`is_literal` false).
+/// Returns `None` for dynamic values so junk routes are never invented.
+fn resolve_atom(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    atom: &str,
+    depth: usize,
+) -> Option<(String, bool)> {
     let atom = atom.trim();
     if let Some(literal) = adjacent_string_literals(atom) {
         return Some((literal, true));
@@ -201,14 +207,17 @@ fn resolve_atom(parsed: &ParsedFile, atom: &str, depth: usize) -> Option<(String
     if let Some(literal) = string_literal(atom) {
         return Some((literal, true));
     }
-    if let Some(template) = f_string(parsed, atom, depth) {
+    if let Some(template) = f_string(parsed, call_site, atom, depth) {
         return Some((template, false));
     }
-    if let Some(value) = parsed.constant_strings.get(atom) {
-        return Some((value.clone(), false));
+    if let Some(assignment) = single_assignment(parsed, call_site, atom) {
+        return resolve_url_expression(parsed, call_site, &assignment, depth + 1)
+            .map(|(value, _)| (value, false));
     }
-    let assignment = single_assignment(&parsed.source, atom)?;
-    resolve_url_expression(parsed, assignment, depth + 1).map(|(value, _)| (value, false))
+    parsed
+        .constant_strings
+        .get(atom)
+        .map(|value| (value.clone(), false))
 }
 
 /// Inner text of a plain quoted string literal, or `None` for prefixed strings
@@ -254,7 +263,12 @@ fn adjacent_string_literals(expression: &str) -> Option<String> {
     (count > 1).then_some(value)
 }
 
-fn f_string(parsed: &ParsedFile, expression: &str, depth: usize) -> Option<String> {
+fn f_string(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    expression: &str,
+    depth: usize,
+) -> Option<String> {
     let expression = expression.trim();
     let quote_offset = expression
         .char_indices()
@@ -285,9 +299,16 @@ fn f_string(parsed: &ParsedFile, expression: &str, depth: usize) -> Option<Strin
         if interpolation.is_empty() {
             return None;
         }
-        if let Some((resolved, _)) = resolve_atom(parsed, interpolation, depth + 1) {
+        if let Some((resolved, _)) = resolve_atom(parsed, call_site, interpolation, depth + 1) {
             output.push_str(&resolved);
         } else {
+            // An unresolved leading interpolation could be a host/base URL or
+            // an arbitrary path prefix. Emitting it as `/:name/...` invents a
+            // route. Once a stable literal prefix exists, preserving a later
+            // interpolation as a route parameter is safe.
+            if output.is_empty() {
+                return None;
+            }
             let parameter = interpolation
                 .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
                 .filter(|part| !part.is_empty())
@@ -301,7 +322,11 @@ fn f_string(parsed: &ParsedFile, expression: &str, depth: usize) -> Option<Strin
     Some(output)
 }
 
-fn single_assignment<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+fn single_assignment(
+    parsed: &ParsedFile,
+    call_site: &EnrichedCallSite,
+    name: &str,
+) -> Option<String> {
     if name.is_empty()
         || !name
             .chars()
@@ -309,7 +334,41 @@ fn single_assignment<'a>(source: &'a str, name: &str) -> Option<&'a str> {
     {
         return None;
     }
-    let mut values = source.lines().filter_map(|line| {
+    let lines = parsed.source.lines().collect::<Vec<_>>();
+    let owner_span = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.node.id == call_site.owner_id)
+        .and_then(|symbol| symbol.node.span.as_ref());
+    let scoped_lines = owner_span.map_or_else(
+        || lines.as_slice(),
+        |span| {
+            let start = usize::try_from(span.line_start.saturating_sub(1)).unwrap_or(0);
+            let call_line = call_site
+                .span
+                .as_ref()
+                .map_or(span.line_end(), |call_span| call_span.line_start);
+            let end = usize::try_from(call_line.saturating_sub(1))
+                .unwrap_or(lines.len())
+                .min(lines.len());
+            &lines[start.min(end)..end]
+        },
+    );
+    let owner_indent = scoped_lines
+        .first()
+        .map_or(0, |line| line.len().saturating_sub(line.trim_start().len()));
+    let body_indent = scoped_lines
+        .iter()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .map(|line| line.len().saturating_sub(line.trim_start().len()))
+        .filter(|indent| *indent > owner_indent)
+        .min();
+    let mut values = scoped_lines.iter().filter_map(|line| {
+        let indent = line.len().saturating_sub(line.trim_start().len());
+        if body_indent.is_some_and(|expected| indent != expected) {
+            return None;
+        }
         let line = line.trim();
         let rest = line.strip_prefix(name)?;
         if rest
@@ -320,7 +379,7 @@ fn single_assignment<'a>(source: &'a str, name: &str) -> Option<&'a str> {
             return None;
         }
         let value = rest.trim_start().strip_prefix('=')?.trim();
-        (!value.is_empty()).then_some(value)
+        (!value.is_empty()).then(|| value.to_owned())
     });
     let value = values.next()?;
     values.next().is_none().then_some(value)
@@ -601,6 +660,54 @@ def load(client, path, item_id):
             vec!["__route__GET__/items/:item_id".to_owned()]
         );
         assert_eq!(edge_count(&parsed, EdgeKind::ConsumesApiFrom), 1);
+    }
+
+    #[test]
+    fn assignments_do_not_cross_function_boundaries() {
+        let dir = TestDir::new("function-local-assignment");
+        let parsed = parse(
+            &dir,
+            "client.py",
+            r#"
+import httpx
+
+
+def first():
+    target = "/first"
+    return httpx.get(target)
+
+
+def second():
+    target = "/second"
+    return httpx.get(target)
+"#,
+        );
+
+        assert_eq!(
+            route_ids(&parsed),
+            vec![
+                "__route__GET__/first".to_owned(),
+                "__route__GET__/second".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unresolved_leading_f_string_value_does_not_invent_route_prefix() {
+        let dir = TestDir::new("dynamic-leading-template");
+        let parsed = parse(
+            &dir,
+            "client.py",
+            r#"
+import httpx
+
+
+def load(base_url):
+    return httpx.get(f"{base_url}/items")
+"#,
+        );
+
+        assert!(route_ids(&parsed).is_empty());
     }
 
     #[test]

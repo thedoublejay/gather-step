@@ -69,6 +69,8 @@ Used automatically when the assistant needs the direct delegated work of a funct
 
 Confidence-bearing edges in these responses (cross-repo hops, trace/route/event/agent edges, transport links) carry an additive `confidence_band` field — `extracted` (numeric confidence ≥ 900), `inferred` (500–899), or `hint` (< 500) — alongside the raw numeric `confidence`, so the tier is legible without knowing the scale. Query response metadata also carries `index_stale`: the list of repos whose index lags their current git HEAD, present only when the index is behind, so a genuinely empty result is distinguishable from one produced against a stale index.
 
+List-shaped topology responses (`who_consumes`, event/route/CRUD/agent traces, orphan scans, and shared-type usage) also include `coverage`: registered repo scope, registry-detected frameworks, path-classified source scopes, concrete contributed edges when exact identities are retained, a verdict, and limitations. Index-time extractor provenance is not persisted, so `extractors_run` is empty; aggregate tools may report zero contributed edges with an explicit limitation. Virtual, external, or unresolved evidence can remain `unknown`; treat empty results as possible extraction gaps.
+
 ### `trace_impact`
 
 > "What features, repos, or pages could be affected if I change this symbol?"
@@ -109,7 +111,7 @@ Used automatically when the assistant needs a transitive downstream walk from an
 
 > "Which topics or events have only producers or only consumers?"
 
-Used automatically for event-topology audits, dead-path investigation, and integration checks where the assistant needs to surface incomplete or stale async wiring.
+Used automatically for event-topology audits where the assistant needs to surface indexed producer/consumer asymmetry for source or runtime verification. An orphan classification is not proof that a path is dead.
 
 ### `cross_repo_deps`
 
@@ -294,12 +296,6 @@ Used automatically when the assistant needs a broader stitched view that combine
 
 Used automatically when the assistant wants a bounded task-shaped retrieval and already knows which mode it wants, such as `planning`, `debug`, `fix`, `review`, or `change_impact`.
 
-### `get_context_pack`
-
-> "Return the context pack for this target."
-
-Alias of `context_pack`. It exists for client compatibility and returns the same bounded pack response.
-
 ### `planning_pack`
 
 > "I’m about to work on this area. What do I need to understand first?"
@@ -341,12 +337,6 @@ Used automatically when the assistant needs review-oriented context such as impa
 > "What is the full blast radius if this changes?"
 
 Used automatically when the assistant needs the richest impact-oriented context pack, including cross-repo dependents, bridges, and identified gaps.
-
-### `get_change_impact_pack`
-
-> "Return the change-impact pack for this target."
-
-Alias of `change_impact_pack`. It exists for client compatibility and returns the same impact-focused pack.
 
 ### `batch_query`
 

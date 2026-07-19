@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use gather_step_core::{EdgeData, EdgeKind, NodeData, NodeId, NodeKind, route_qn};
+use gather_step_core::{
+    EdgeData, EdgeKind, NodeData, NodeId, NodeKind, SourceScope, classify_source_scope, route_qn,
+};
 use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashSet;
 use thiserror::Error;
@@ -41,6 +43,7 @@ pub struct TopologyMatch {
     pub node_kind: NodeKind,
     pub repo: String,
     pub resolver: Option<String>,
+    pub source_scope: SourceScope,
     pub symbol_name: String,
 }
 
@@ -1005,6 +1008,7 @@ fn downstream_hops(
 }
 
 fn match_from_edge(node: NodeData, edge: &EdgeData) -> TopologyMatch {
+    let source_scope = classify_source_scope(&node.file_path);
     TopologyMatch {
         edge_kind: edge.kind,
         confidence: edge.metadata.confidence,
@@ -1014,6 +1018,7 @@ fn match_from_edge(node: NodeData, edge: &EdgeData) -> TopologyMatch {
         node_kind: node.kind,
         repo: node.repo,
         resolver: edge.metadata.resolver.clone(),
+        source_scope,
         symbol_name: node.name,
     }
 }

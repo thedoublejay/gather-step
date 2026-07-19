@@ -4,7 +4,8 @@ use gather_step_analysis::{
     event_blast_radius, list_orphan_topics, rank_event_targets, resolve_agent_targets,
     resolve_event_targets, trace_agent, trace_event,
 };
-use gather_step_core::{NodeData, NodeId};
+use gather_step_core::{NodeData, NodeId, RegistryStore, WorkspaceRegistry, classify_source_scope};
+use gather_step_mcp::tools::coverage::QueryCoverage;
 use gather_step_storage::GraphStore;
 use gather_step_storage::StorageCoordinator;
 use serde::Serialize;
@@ -72,19 +73,8 @@ struct EventsOutput {
     producers: Vec<TopologyMatchOutput>,
     consumers: Vec<TopologyMatchOutput>,
     blast_radius: Vec<BlastRadiusNodeOutput>,
-    coverage: CoverageOutput,
+    coverage: QueryCoverage,
     truncated: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct CoverageOutput {
-    repos_considered: Vec<String>,
-    matching_frameworks: Vec<String>,
-    extractors_run: Vec<String>,
-    source_scopes: Vec<String>,
-    edges_contributed: usize,
-    verdict: &'static str,
-    limitations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +94,7 @@ struct TopologyMatchOutput {
     node_kind: String,
     edge_kind: String,
     confidence: Option<u16>,
+    source_scope: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +112,7 @@ struct BlastRadiusNodeOutput {
 struct AgentTraceOutput {
     event: &'static str,
     target: EventTargetOutput,
+    coverage: QueryCoverage,
     nodes: Vec<AgentTraceNodeOutput>,
     edges: Vec<AgentTraceEdgeOutput>,
     truncated: bool,
@@ -197,11 +189,18 @@ fn run_trace_rendered(
     args: &TraceArgs,
 ) -> Result<RenderedCommand> {
     let storage = ctx.open_storage_coordinator()?;
-    execute_trace(&storage, app.repo_filter.as_deref(), args)
+    let registry = RegistryStore::open(ctx.registry_path())?;
+    execute_trace(
+        &storage,
+        registry.registry(),
+        app.repo_filter.as_deref(),
+        args,
+    )
 }
 
 pub(crate) fn execute_trace(
     storage: &StorageCoordinator,
+    registry: &WorkspaceRegistry,
     repo_filter: Option<&str>,
     args: &TraceArgs,
 ) -> Result<RenderedCommand> {
@@ -227,6 +226,7 @@ pub(crate) fn execute_trace(
             node_kind: item.node_kind.to_string(),
             edge_kind: item.edge_kind.to_string(),
             confidence: item.confidence,
+            source_scope: item.source_scope.as_str().to_owned(),
         })
         .collect::<Vec<_>>();
     let consumers = trace
@@ -240,9 +240,10 @@ pub(crate) fn execute_trace(
             node_kind: item.node_kind.to_string(),
             edge_kind: item.edge_kind.to_string(),
             confidence: item.confidence,
+            source_scope: item.source_scope.as_str().to_owned(),
         })
         .collect::<Vec<_>>();
-    let coverage = topology_coverage(repo_filter, &producers, &consumers);
+    let coverage = topology_coverage(registry, repo_filter, &producers, &consumers);
     let payload = EventsOutput {
         event: "events_trace_completed",
         target: EventTargetOutput {
@@ -258,6 +259,7 @@ pub(crate) fn execute_trace(
         coverage,
         truncated: trace.truncated,
     };
+    let result_count = payload.producers.len() + payload.consumers.len();
 
     let mut lines = vec![format!(
         "Target: {} {}:{}",
@@ -276,7 +278,7 @@ pub(crate) fn execute_trace(
     }
     lines.push("Consumers:".to_owned());
     if payload.consumers.is_empty() {
-        lines.push("  no indexed production edges observed".to_owned());
+        lines.push("  no indexed consumer edges observed".to_owned());
     } else {
         for consumer in &payload.consumers {
             lines.push(format!(
@@ -302,44 +304,56 @@ pub(crate) fn execute_trace(
         }
     }
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::EventLinks,
+            result_count,
+        ),
+    )
 }
 
 fn topology_coverage(
+    registry: &WorkspaceRegistry,
     repo_filter: Option<&str>,
     producers: &[TopologyMatchOutput],
     consumers: &[TopologyMatchOutput],
-) -> CoverageOutput {
-    let mut repos_considered = std::collections::BTreeSet::new();
-    repos_considered.extend(repo_filter.map(str::to_owned));
-    repos_considered.extend(producers.iter().map(|item| item.repo.clone()));
-    repos_considered.extend(consumers.iter().map(|item| item.repo.clone()));
-    let mut limitations = Vec::new();
+) -> QueryCoverage {
+    let mut repos_considered = producers
+        .iter()
+        .chain(consumers)
+        .map(|item| item.repo.clone())
+        .collect::<Vec<_>>();
+    if let Some(repo) = repo_filter {
+        repos_considered.push(repo.to_owned());
+    }
+    let mut coverage = QueryCoverage::for_repos(
+        registry,
+        repos_considered,
+        "event_topology",
+        producers.len() + consumers.len(),
+    )
+    .with_source_scopes(
+        producers
+            .iter()
+            .chain(consumers)
+            .map(|item| item.source_scope.clone()),
+    );
     if producers.is_empty() {
-        limitations.push(
+        coverage.limitations.push(
             "No producer edge was observed; the source may be external, dynamic, or unsupported."
                 .to_owned(),
         );
     }
     if consumers.is_empty() {
-        limitations.push(
+        coverage.limitations.push(
             "No consumer edge was observed; verify detected frameworks and dynamic registration."
                 .to_owned(),
         );
     }
-    CoverageOutput {
-        repos_considered: repos_considered.into_iter().collect(),
-        matching_frameworks: Vec::new(),
-        extractors_run: vec!["event_topology".to_owned()],
-        source_scopes: vec!["production".to_owned(), "unknown".to_owned()],
-        edges_contributed: producers.len() + consumers.len(),
-        verdict: if limitations.is_empty() {
-            "ok"
-        } else {
-            "possible_extraction_gap"
-        },
-        limitations,
+    if producers.is_empty() || consumers.is_empty() {
+        coverage.verdict = "possible_extraction_gap".to_owned();
     }
+    coverage
 }
 
 fn run_blast_radius_rendered(
@@ -348,11 +362,18 @@ fn run_blast_radius_rendered(
     args: &BlastRadiusArgs,
 ) -> Result<RenderedCommand> {
     let storage = ctx.open_storage_coordinator()?;
-    execute_blast_radius(&storage, app.repo_filter.as_deref(), args)
+    let registry = RegistryStore::open(ctx.registry_path())?;
+    execute_blast_radius(
+        &storage,
+        registry.registry(),
+        app.repo_filter.as_deref(),
+        args,
+    )
 }
 
 pub(crate) fn execute_blast_radius(
     storage: &StorageCoordinator,
+    registry: &WorkspaceRegistry,
     repo_filter: Option<&str>,
     args: &BlastRadiusArgs,
 ) -> Result<RenderedCommand> {
@@ -361,6 +382,7 @@ pub(crate) fn execute_blast_radius(
 
     let blast_radius =
         event_blast_radius(storage.graph(), selection.target.id, args.depth, args.limit)?;
+    let edges_contributed = blast_radius.edges.len();
     let blast_radius_nodes = blast_radius
         .nodes
         .into_iter()
@@ -374,7 +396,17 @@ pub(crate) fn execute_blast_radius(
             cumulative_confidence: node.cumulative_confidence,
         })
         .collect::<Vec<_>>();
-    let edges_contributed = blast_radius_nodes.len();
+    let source_scopes = blast_radius_nodes
+        .iter()
+        .map(|node| classify_source_scope(&node.file_path).as_str())
+        .collect::<Vec<_>>();
+    let mut repos_considered = blast_radius_nodes
+        .iter()
+        .map(|node| node.repo.clone())
+        .collect::<Vec<_>>();
+    if let Some(repo) = repo_filter {
+        repos_considered.push(repo.to_owned());
+    }
     let payload = EventsOutput {
         event: "events_blast_radius_completed",
         target: EventTargetOutput {
@@ -387,15 +419,13 @@ pub(crate) fn execute_blast_radius(
         producers: Vec::new(),
         consumers: Vec::new(),
         blast_radius: blast_radius_nodes,
-        coverage: CoverageOutput {
-            repos_considered: repo_filter.into_iter().map(str::to_owned).collect(),
-            matching_frameworks: Vec::new(),
-            extractors_run: vec!["event_blast_radius".to_owned()],
-            source_scopes: vec!["production".to_owned(), "unknown".to_owned()],
+        coverage: QueryCoverage::for_repos(
+            registry,
+            repos_considered,
+            "event_blast_radius",
             edges_contributed,
-            verdict: "ok",
-            limitations: Vec::new(),
-        },
+        )
+        .with_source_scopes(source_scopes),
         truncated: blast_radius.truncated,
     };
 
@@ -404,6 +434,13 @@ pub(crate) fn execute_blast_radius(
         lines.push(format!(
             "  depth={} {} {}:{}",
             node.depth, node.name, node.repo, node.file_path
+        ));
+    }
+    if payload.coverage.verdict != "ok" {
+        lines.push(format!(
+            "Coverage: {}; {}",
+            payload.coverage.verdict,
+            payload.coverage.limitations.join(" ")
         ));
     }
     if !payload.alternates.is_empty() {
@@ -416,7 +453,12 @@ pub(crate) fn execute_blast_radius(
         }
     }
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::EventLinks,
+            edges_contributed,
+        ),
+    )
 }
 
 fn node_id_hex(id: NodeId) -> String {
@@ -435,11 +477,18 @@ fn run_agent_trace_rendered(
     args: &AgentTraceArgs,
 ) -> Result<RenderedCommand> {
     let storage = ctx.open_storage_coordinator()?;
-    execute_agent_trace(&storage, app.repo_filter.as_deref(), args)
+    let registry = RegistryStore::open(ctx.registry_path())?;
+    execute_agent_trace(
+        &storage,
+        registry.registry(),
+        app.repo_filter.as_deref(),
+        args,
+    )
 }
 
 pub(crate) fn execute_agent_trace(
     storage: &StorageCoordinator,
+    registry: &WorkspaceRegistry,
     repo_filter: Option<&str>,
     args: &AgentTraceArgs,
 ) -> Result<RenderedCommand> {
@@ -466,6 +515,21 @@ pub(crate) fn execute_agent_trace(
     };
 
     let trace = trace_agent(storage.graph(), target.id, args.depth, args.limit)?;
+    let edges_contributed = trace.edges.len();
+    let source_scopes = trace
+        .nodes
+        .iter()
+        .map(|node| classify_source_scope(&node.file_path).as_str())
+        .collect::<Vec<_>>();
+    let mut repos_considered = trace
+        .nodes
+        .iter()
+        .map(|node| node.repo.clone())
+        .collect::<Vec<_>>();
+    repos_considered.push(trace.target.repo.clone());
+    if let Some(repo) = repo_filter {
+        repos_considered.push(repo.to_owned());
+    }
     let payload = AgentTraceOutput {
         event: "events_agent_trace_completed",
         target: EventTargetOutput {
@@ -474,6 +538,13 @@ pub(crate) fn execute_agent_trace(
             name: trace.target.name.clone(),
             node_kind: trace.target.kind.to_string(),
         },
+        coverage: QueryCoverage::for_repos(
+            registry,
+            repos_considered,
+            "agent_topology",
+            edges_contributed,
+        )
+        .with_source_scopes(source_scopes),
         nodes: trace
             .nodes
             .into_iter()
@@ -499,6 +570,7 @@ pub(crate) fn execute_agent_trace(
             .collect(),
         truncated: trace.truncated,
     };
+    let result_count = payload.nodes.len();
 
     let mut lines = vec![format!(
         "Agent trace from {} ({})",
@@ -527,13 +599,26 @@ pub(crate) fn execute_agent_trace(
     if payload.truncated {
         lines.push("  (truncated)".to_owned());
     }
+    if payload.coverage.verdict != "ok" {
+        lines.push(format!(
+            "Coverage: {}; {}",
+            payload.coverage.verdict,
+            payload.coverage.limitations.join(" ")
+        ));
+    }
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::AgentTraceNodes,
+            result_count,
+        ),
+    )
 }
 
 #[derive(Debug, Serialize)]
 struct OrphansOutput {
     event: &'static str,
+    coverage: QueryCoverage,
     orphans: Vec<OrphanOutput>,
 }
 
@@ -553,17 +638,39 @@ fn run_orphans_rendered(
     args: &OrphansArgs,
 ) -> Result<RenderedCommand> {
     let storage = ctx.open_storage_coordinator()?;
-    execute_orphans(&storage, app.repo_filter.as_deref(), args)
+    let registry = RegistryStore::open(ctx.registry_path())?;
+    execute_orphans(
+        &storage,
+        registry.registry(),
+        app.repo_filter.as_deref(),
+        args,
+    )
 }
 
 pub(crate) fn execute_orphans(
     storage: &StorageCoordinator,
+    registry: &WorkspaceRegistry,
     repo_filter: Option<&str>,
     args: &OrphansArgs,
 ) -> Result<RenderedCommand> {
     let orphans = list_orphan_topics(storage.graph(), repo_filter, args.limit)?;
+    let edges_contributed = orphans
+        .iter()
+        .map(|item| item.producers + item.consumers)
+        .sum();
+    let coverage = QueryCoverage::scoped(
+        registry,
+        repo_filter,
+        "orphan_event_scan",
+        edges_contributed,
+    )
+    .with_verdict("possible_extraction_gap")
+    .with_limitation(
+        "Orphan classifications describe indexed edges only; missing producers or consumers may be external, dynamic, or unsupported.",
+    );
     let payload = OrphansOutput {
         event: "events_orphans_completed",
+        coverage,
         orphans: orphans
             .into_iter()
             .map(|item| OrphanOutput {
@@ -576,6 +683,7 @@ pub(crate) fn execute_orphans(
             })
             .collect(),
     };
+    let result_count = payload.orphans.len();
     let mut lines = Vec::new();
     if payload.orphans.is_empty() {
         lines.push("No orphan topics found.".to_owned());
@@ -587,8 +695,18 @@ pub(crate) fn execute_orphans(
             ));
         }
     }
+    lines.push(format!(
+        "Coverage: {}; {}",
+        payload.coverage.verdict,
+        payload.coverage.limitations.join(" ")
+    ));
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::OrphanTargets,
+            result_count,
+        ),
+    )
 }
 
 struct SelectedEventTarget {
@@ -602,10 +720,15 @@ fn select_event_target(
     repo_filter: Option<&str>,
     subject: &str,
 ) -> Result<SelectedEventTarget> {
-    let mut candidates = targets
-        .into_iter()
-        .filter(|target| repo_filter.is_none_or(|repo| target.repo == repo))
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for target in targets {
+        if let Some(repo) = repo_filter
+            && !event_target_has_repo_evidence(graph, target.id, repo)?
+        {
+            continue;
+        }
+        candidates.push(target);
+    }
 
     rank_event_targets(graph, &mut candidates, subject)
         .map_err(|error| anyhow::anyhow!("Failed to rank event targets: {error}"))?;
@@ -633,6 +756,30 @@ fn select_event_target(
     }
 }
 
+fn event_target_has_repo_evidence(
+    graph: &impl GraphStore,
+    target_id: NodeId,
+    repo: &str,
+) -> Result<bool> {
+    for edge in graph.get_incoming(target_id)? {
+        if graph
+            .get_node(edge.source)?
+            .is_some_and(|node| !node.is_virtual && node.repo == repo)
+        {
+            return Ok(true);
+        }
+    }
+    for edge in graph.get_outgoing(target_id)? {
+        if graph
+            .get_node(edge.target)?
+            .is_some_and(|node| !node.is_virtual && node.repo == repo)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -643,8 +790,8 @@ mod tests {
     };
 
     use gather_step_core::{
-        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, node_id, topic_qn,
-        virtual_node,
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, Visibility, WorkspaceRegistry,
+        node_id, topic_qn, virtual_node,
     };
     use gather_step_storage::{GraphStore, GraphStoreDb, StorageCoordinator};
 
@@ -789,6 +936,50 @@ mod tests {
         assert_eq!(selected.alternates[0].name, "order.sync");
     }
 
+    #[test]
+    fn select_event_target_scopes_canonical_virtual_node_by_adjacent_repo() {
+        let temp = TempDb::new("repo-scope");
+        let store = GraphStoreDb::open(temp.path()).expect("graph should open");
+        let file = file("backend_standard", "src/events.ts");
+        let target = virtual_node(
+            NodeKind::Topic,
+            "backend_standard",
+            "src/events.ts",
+            "order.created",
+            topic_qn("kafka", "order.created"),
+        );
+        let producer = symbol("backend_standard", "src/events.ts", "emitOrder", 0);
+
+        store
+            .bulk_insert(
+                &[file.clone(), target.clone(), producer.clone()],
+                &[EdgeData {
+                    source: producer.id,
+                    target: target.id,
+                    kind: EdgeKind::Publishes,
+                    metadata: EdgeMetadata::default(),
+                    owner_file: file.id,
+                    is_cross_file: true,
+                }],
+            )
+            .expect("graph should write");
+
+        let persisted = store
+            .get_node(target.id)
+            .expect("target lookup should succeed")
+            .expect("target should exist");
+        assert_eq!(persisted.repo, "__virtual__");
+
+        let selected = select_event_target(
+            &store,
+            vec![persisted],
+            Some("backend_standard"),
+            "order.created",
+        )
+        .expect("adjacent repo evidence should select the canonical target");
+        assert_eq!(selected.target.id, target.id);
+    }
+
     fn file(repo: &str, file_path: &str) -> NodeData {
         NodeData {
             id: node_id(repo, file_path, NodeKind::File, file_path),
@@ -893,7 +1084,7 @@ mod tests {
             limit: 25,
             depth: 8,
         };
-        let err = execute_agent_trace(&storage, None, &args)
+        let err = execute_agent_trace(&storage, &WorkspaceRegistry::default(), None, &args)
             .expect_err("ambiguous agent target should fail");
 
         let msg = err.to_string();
@@ -938,7 +1129,12 @@ mod tests {
             limit: 25,
             depth: 8,
         };
-        let result = execute_agent_trace(&storage, Some("repo_alpha"), &args);
+        let result = execute_agent_trace(
+            &storage,
+            &WorkspaceRegistry::default(),
+            Some("repo_alpha"),
+            &args,
+        );
         assert!(
             result.is_ok(),
             "repo-filtered trace should succeed: {result:?}"

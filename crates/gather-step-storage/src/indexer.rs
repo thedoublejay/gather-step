@@ -440,8 +440,23 @@ fn fastapi_file_facts(repo_root: &Path, parsed: &ParsedFile) -> FastapiFileFacts
 }
 
 fn normalized_repo_path(repo_root: &Path, path: &Path) -> String {
-    let path = path.strip_prefix(repo_root).unwrap_or(path);
-    normalize_path_separators(&path.to_string_lossy()).into_owned()
+    let normalized = path.strip_prefix(repo_root).map_or_else(
+        |_| {
+            // Import resolution may canonicalize an absolute path while the
+            // traversal keeps the caller-provided repo root (notably `/var` vs
+            // `/private/var` on macOS). Compare canonical identities before
+            // falling back to the original path so imported router mounts join the
+            // same repo-relative identity as the parsed child file.
+            repo_root
+                .canonicalize()
+                .ok()
+                .zip(path.canonicalize().ok())
+                .and_then(|(root, path)| path.strip_prefix(root).ok().map(Path::to_path_buf))
+                .unwrap_or_else(|| path.to_path_buf())
+        },
+        Path::to_path_buf,
+    );
+    normalize_path_separators(&normalized.to_string_lossy()).into_owned()
 }
 
 fn router_identity(file_path: &str, variable: &str) -> String {

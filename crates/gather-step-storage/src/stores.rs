@@ -50,6 +50,27 @@ impl WorkspaceStores {
         })
     }
 
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, WorkspaceStoresError> {
+        let root = root.as_ref().to_path_buf();
+        let graph = Arc::new(GraphStoreDb::open_read_retrying(root.join("graph.redb"))?);
+        let search = Arc::new(TantivySearchStore::open_read_only(root.join("search"))?);
+        let metadata = Arc::new(MetadataStoreDb::open_read_only(
+            root.join("metadata.sqlite"),
+        )?);
+        Ok(Self {
+            root,
+            graph,
+            search,
+            metadata,
+        })
+    }
+
+    /// Open read-only graph/search stores with writable metadata.
+    ///
+    /// MCP pack queries use this hybrid because pack caches and call statistics
+    /// are metadata writes, while graph and search access remain query-only.
+    /// Callers that do not need those cache writes should use
+    /// [`Self::open_read_only`] so all three backends are protected.
     pub fn open_read_only_search(root: impl AsRef<Path>) -> Result<Self, WorkspaceStoresError> {
         let root = root.as_ref().to_path_buf();
         let graph = Arc::new(GraphStoreDb::open_read_retrying(root.join("graph.redb"))?);

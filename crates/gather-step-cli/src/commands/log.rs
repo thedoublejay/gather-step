@@ -470,6 +470,7 @@ mod tests {
             repo_count: None,
             files_parsed: None,
             nodes_created: None,
+            extra_json: None,
             error_categories: Vec::new(),
         }
     }

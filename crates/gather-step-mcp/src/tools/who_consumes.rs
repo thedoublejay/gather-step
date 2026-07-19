@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use gather_step_core::classify_source_scope;
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -7,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::{McpContext, validate_input_length},
     error::McpServerError,
-    tools::search::{SearchRequest, search_symbols},
+    tools::{
+        coverage::QueryCoverage,
+        search::{SearchRequest, search_symbols},
+    },
 };
 
 const WHO_CONSUMES_SEARCH_LIMIT: usize = 25;
@@ -30,6 +34,7 @@ pub struct WhoConsumesResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct WhoConsumesData {
     pub consumers: Vec<ConsumerRepo>,
+    pub coverage: QueryCoverage,
     pub symbol: String,
 }
 
@@ -112,11 +117,42 @@ pub fn who_consumes_tool(
             linking_symbols: linking_symbols.into_iter().collect(),
             repo,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let registry = ctx.registry_snapshot()?;
+    let mut repos_considered = search
+        .data
+        .results
+        .iter()
+        .map(|hit| hit.repo.clone())
+        .chain(consumers.iter().map(|consumer| consumer.repo.clone()))
+        .collect::<Vec<_>>();
+    if let Some(repo) = &request.repo {
+        repos_considered.push(repo.clone());
+    }
+    let source_scopes = search
+        .data
+        .results
+        .iter()
+        .map(|hit| classify_source_scope(&hit.file_path).as_str())
+        .collect::<Vec<_>>();
+    let mut coverage = QueryCoverage::for_repos(
+        &registry,
+        repos_considered,
+        "symbol_consumer_traversal",
+        0,
+    )
+    .with_source_scopes(source_scopes)
+    .with_limitation(
+        "who_consumes returns repository aggregates and does not retain exact contributing edge identities or consumer file paths; edges_contributed is therefore zero and source_scopes cover producer hits only.",
+    );
+    if !consumers.is_empty() {
+        coverage = coverage.with_verdict("ok");
+    }
 
     Ok(WhoConsumesResponse {
         data: WhoConsumesData {
             consumers,
+            coverage,
             symbol: request.symbol,
         },
     })
@@ -522,6 +558,11 @@ mod tests {
                     linking_symbols: vec!["CREDIT_AGENT_CONFIGS".to_owned()],
                     repo: "service-ui".to_owned(),
                 }],
+                coverage: crate::tools::coverage::QueryCoverage::workspace(
+                    &gather_step_core::WorkspaceRegistry::default(),
+                    "symbol_consumer_traversal",
+                    1,
+                ),
                 symbol: "CREDIT_AGENT_CONFIGS".to_owned(),
             },
         };

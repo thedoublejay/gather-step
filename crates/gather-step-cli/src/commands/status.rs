@@ -7,6 +7,7 @@ use gather_step_analysis::{
 };
 use gather_step_core::{DepthLevel, RegistryStore};
 use gather_step_mcp::output::redact::relativize_to_workspace;
+use gather_step_parser::frameworks::registry::{PackId, PackRegistry};
 use gather_step_storage::{ContextPackStats, GraphStore, MetadataStore, StorageCoordinator};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -50,6 +51,8 @@ struct RepoStatusOutput {
     metadata_file_count: usize,
     unresolved_inputs: usize,
     frameworks: Vec<String>,
+    eligible_extractor_packs: Vec<String>,
+    extractor_pack_basis: &'static str,
     semantic_health: SemanticHealthReport,
 }
 
@@ -180,6 +183,7 @@ pub(crate) fn execute(
     storage: &StorageCoordinator,
     repo_filter: Option<&str>,
 ) -> Result<RenderedCommand> {
+    let pack_registry = PackRegistry::builtin();
     let repos = registry
         .registry()
         .repos
@@ -200,6 +204,14 @@ pub(crate) fn execute(
                 .graph()
                 .count_nodes_by_repo(repo)
                 .with_context(|| format!("counting graph nodes for `{repo}`"))?;
+            let has_indexed_ts_js = metadata_rows.iter().any(|row| {
+                matches!(
+                    std::path::Path::new(&row.file_path)
+                        .extension()
+                        .and_then(std::ffi::OsStr::to_str),
+                    Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+                )
+            });
             let semantic_health = semantic_health_for_repo(
                 storage.graph(),
                 storage.metadata(),
@@ -244,6 +256,12 @@ pub(crate) fn execute(
                 metadata_file_count: metadata_rows.len(),
                 unresolved_inputs,
                 frameworks: registered.frameworks.clone(),
+                eligible_extractor_packs: eligible_pack_names(
+                    &pack_registry,
+                    &registered.path,
+                    has_indexed_ts_js,
+                ),
+                extractor_pack_basis: "live_filesystem_detection_with_indexed_language_gate",
                 semantic_health,
             })
         })
@@ -343,6 +361,7 @@ pub(crate) fn execute(
         "Unresolved",
         "Semantic",
         "Frameworks",
+        "Eligible Extractors (live)",
     ]);
     for repo in &payload.repos {
         repo_table.add_row(vec![
@@ -363,6 +382,11 @@ pub(crate) fn execute(
             } else {
                 repo.frameworks.join(",")
             }),
+            Cell::new(if repo.eligible_extractor_packs.is_empty() {
+                "-".to_owned()
+            } else {
+                repo.eligible_extractor_packs.join(",")
+            }),
         ]);
     }
     lines.push(repo_table.to_string());
@@ -382,6 +406,28 @@ pub(crate) fn execute(
     ));
 
     Ok(RenderedCommand::success(json!(payload), lines))
+}
+
+fn eligible_pack_names(
+    registry: &PackRegistry,
+    repo_path: &std::path::Path,
+    has_indexed_ts_js: bool,
+) -> Vec<String> {
+    if !repo_path.exists() {
+        return Vec::new();
+    }
+    registry
+        .detect(repo_path)
+        .into_iter()
+        .filter(|pack| {
+            has_indexed_ts_js || !matches!(*pack, PackId::SharedLib | PackId::FrontendHooks)
+        })
+        .filter_map(|pack| {
+            serde_json::to_value(pack)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+        })
+        .collect()
 }
 
 fn format_semantic_summary(health: &SemanticHealthReport) -> String {

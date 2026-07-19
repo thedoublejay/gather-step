@@ -185,6 +185,7 @@ pub(crate) fn execute(
         total_hits: payload_hits.len(),
         hits: payload_hits,
     };
+    let result_count = payload.total_hits;
     let mut lines = Vec::new();
     if payload.hits.is_empty() {
         lines.push("No matches found.".to_owned());
@@ -225,7 +226,12 @@ pub(crate) fn execute(
         lines.push(table.to_string());
     }
 
-    Ok(RenderedCommand::success(json!(payload), lines))
+    Ok(
+        RenderedCommand::success(json!(payload), lines).with_telemetry_result(
+            gather_step_storage::TelemetryResultKind::SearchHits,
+            result_count,
+        ),
+    )
 }
 
 /// Annotate symbol hits with exact consumer reachability. File and module hits

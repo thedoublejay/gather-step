@@ -24,7 +24,8 @@ cargo run -p gather-step-bench -- python-corpus \
 ```
 
 Entries in any other state remain in the report with their blocker but are not
-indexed. The committed neutral planning oracle supplies precision/recall gates;
+indexed. The committed neutral planning oracle gates coverage, ranking accuracy,
+expected file/repo recall, unresolved gaps, stability, and latency;
 the external corpus command supplies scale, storage, and indexability evidence
 without committing private paths or source-derived identities.
 
@@ -37,6 +38,11 @@ cargo run -p gather-step-bench -- planning-oracle \
   --thresholds benchmark/python/thresholds.yaml \
   --output-dir /tmp/gather-step-python-oracle
 ```
+
+CI runs this neutral planning oracle on every Rust-affecting change and fails
+when one of those committed planning-quality thresholds regresses. Proof
+precision is reported for diagnosis but is not currently a separate gate.
+External corpus manifests remain local-only and are not required by CI.
 
 Neutral speed/storage check:
 

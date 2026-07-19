@@ -5265,7 +5265,7 @@ mod tests {
             span: None,
             is_virtual: matches!(
                 kind,
-                NodeKind::SharedSymbol | NodeKind::Event | NodeKind::Topic
+                NodeKind::SharedSymbol | NodeKind::Event | NodeKind::Topic | NodeKind::Route
             ),
             ai_role: None,
         }
