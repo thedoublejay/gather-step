@@ -31,6 +31,7 @@ pub struct InferredPayloadContract {
 pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContract> {
     let mut inferred = Vec::new();
     let mut context = PayloadInferenceContext::new(parsed);
+    let source = &*parsed.source;
 
     for call_site in &parsed.call_sites {
         let Some((target, target_kind, target_qualified_name)) = producer_target(parsed, call_site)
@@ -43,9 +44,25 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
         let Some(payload_expr) = extract_payload_argument(raw_args) else {
             continue;
         };
-        let Some(fields) = parse_object_literal_fields(payload_expr) else {
-            continue;
-        };
+        let (fields, source_type_name, inference_kind, confidence) =
+            if let Some(fields) = parse_object_literal_fields(payload_expr) {
+                (fields, None, PayloadInferenceKind::LiteralObject, 950)
+            } else if let Some((source_type_name, fields)) = infer_producer_fields(
+                &mut context,
+                parsed,
+                call_site.owner_id,
+                payload_expr,
+                source,
+            ) {
+                (
+                    fields,
+                    Some(source_type_name),
+                    PayloadInferenceKind::TypedParameter,
+                    900,
+                )
+            } else {
+                continue;
+            };
         if fields.is_empty() {
             continue;
         }
@@ -61,10 +78,10 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
             content_type: "application/json".to_owned(),
             schema_format: "normalized_object".to_owned(),
             side: PayloadSide::Producer,
-            inference_kind: PayloadInferenceKind::LiteralObject,
-            confidence: 950,
+            inference_kind,
+            confidence,
             fields: fields.clone(),
-            source_type_name: None,
+            source_type_name: source_type_name.clone(),
         };
         inferred.push(InferredPayloadContract {
             node: payload_contract_node(
@@ -77,7 +94,7 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
                 target,
                 kind: EdgeKind::ContractOn,
                 metadata: EdgeMetadata {
-                    confidence: Some(950),
+                    confidence: Some(confidence),
                     ..EdgeMetadata::default()
                 },
                 owner_file: parsed.file_node.id,
@@ -93,15 +110,13 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
                 source_symbol_node_id: call_site.owner_id,
                 line_start: call_site.span.as_ref().map(|span| span.line_start),
                 side: PayloadSide::Producer,
-                inference_kind: PayloadInferenceKind::LiteralObject,
-                confidence: 950,
-                source_type_name: None,
+                inference_kind,
+                confidence,
+                source_type_name,
                 contract,
             },
         });
     }
-
-    let source = &*parsed.source;
 
     for symbol in &parsed.symbols {
         let Some((target, target_kind, target_qualified_name)) = consumer_target(parsed, symbol)
@@ -174,6 +189,39 @@ pub fn infer_payload_contracts(parsed: &ParsedFile) -> Vec<InferredPayloadContra
     inferred.extend(crate::frameworks::python_payload::infer(parsed));
 
     inferred
+}
+
+fn infer_producer_fields(
+    context: &mut PayloadInferenceContext,
+    parsed: &ParsedFile,
+    owner_id: gather_step_core::NodeId,
+    payload_expression: &str,
+    source: &str,
+) -> Option<(String, Vec<PayloadField>)> {
+    let payload_name = payload_expression.trim();
+    if payload_name.is_empty()
+        || !payload_name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let owner = parsed
+        .symbols
+        .iter()
+        .find(|symbol| symbol.node.id == owner_id)?;
+    let signature = owner.node.signature.as_deref()?;
+    let open = signature.find('(')?;
+    let close = find_matching_close(signature, open)?;
+    let annotation = split_top_level(&signature[open + 1..close], ',')
+        .into_iter()
+        .find_map(|parameter| {
+            let (name, annotation) = parameter.trim().split_once(':')?;
+            (name.trim() == payload_name).then_some(annotation)
+        })?;
+    let type_name = crate::frameworks::python_payload::annotation_type_head(annotation);
+    let fields = extract_named_type_fields(context, parsed, source, &type_name)?;
+    Some((type_name, fields))
 }
 
 #[derive(Debug)]
@@ -341,7 +389,10 @@ fn payload_messaging_operation(
 ) -> Option<(&str, NodeKind)> {
     let hint = call_site.callee_qualified_hint.as_deref()?;
     let operation = hint.rsplit('.').next().unwrap_or(hint);
-    if operation.eq_ignore_ascii_case("emit") || operation.eq_ignore_ascii_case("send") {
+    if operation.eq_ignore_ascii_case("emit")
+        || operation.eq_ignore_ascii_case("send")
+        || operation.eq_ignore_ascii_case("send_message")
+    {
         // Align with `producer_messaging_operation`: payload contracts for
         // messaging producers target the canonical `NodeKind::Event` virtual
         // node so producer and consumer contracts converge on a single
@@ -359,7 +410,7 @@ fn consumer_target(
     let decorator = symbol.decorators.iter().find(|decorator| {
         matches!(
             decorator.name.as_str(),
-            "MessagePattern" | "EventPattern" | "CustomEventPattern"
+            "MessagePattern" | "EventPattern" | "CustomEventPattern" | "kafka_event"
         )
     })?;
     let name = decorator
@@ -459,12 +510,9 @@ fn infer_consumer_fields(
     let open = signature.find('(')?;
     let close = find_matching_close(signature, open)?;
     let params = &signature[open + 1..close];
-    let first = split_top_level(params, ',')
+    let (_, type_expr) = split_top_level(params, ',')
         .into_iter()
-        .next()?
-        .trim()
-        .to_owned();
-    let (_, type_expr) = first.split_once(':')?;
+        .find_map(|parameter| parameter.trim().split_once(':'))?;
     let type_expr = type_expr.trim();
     if let Some(fields) = parse_inline_type_literal(type_expr) {
         return Some((None, fields));
@@ -511,7 +559,9 @@ fn extract_local_named_type_fields(source: &str, type_name: &str) -> Option<Vec<
             return parse_type_literal_fields(block);
         }
     }
-    extract_class_fields(source, type_name)
+    extract_class_fields(source, type_name).or_else(|| {
+        crate::frameworks::python_payload::imported_python_contract_fields(source, type_name)
+    })
 }
 
 fn extract_braced_block(input: &str) -> Option<&str> {
@@ -1035,5 +1085,87 @@ export class Orders {
                 .any(|item| item.record.side == PayloadSide::Consumer),
             "unresolvable decorator expressions must not emit a ContractOn edge"
         );
+    }
+
+    #[test]
+    fn python_kafka_decorator_and_typed_payload_share_event_contract() {
+        let temp = TempDir::new("python-kafka-contract");
+        let repo_root = temp.path();
+        fs::write(
+            repo_root.join("pyproject.toml"),
+            "[project]\nname = \"asset-events\"\n",
+        )
+        .expect("project manifest");
+        fs::write(
+            repo_root.join("schemas.py"),
+            r#"
+from pydantic import BaseModel
+
+
+class AssetEvent(BaseModel):
+    asset_id: str
+    revision: int
+"#,
+        )
+        .expect("schema fixture");
+        let source = r#"
+from enum import Enum
+from schemas import AssetEvent
+
+
+class BrokerTopic(str, Enum):
+    AssetQueued = "asset.queued"
+
+
+@kafka_event(BrokerTopic.AssetQueued)
+async def consume_asset(payload: AssetEvent):
+    return payload.asset_id
+
+
+async def publish_asset(payload: AssetEvent):
+    await KafkaRuntime.get().send_message(BrokerTopic.AssetQueued, payload)
+"#;
+        fs::write(repo_root.join("events.py"), source).expect("event fixture");
+        let parsed = parse_file_with_frameworks(
+            "asset-events",
+            repo_root,
+            &FileEntry {
+                path: "events.py".into(),
+                language: Language::Python,
+                size_bytes: u64::try_from(source.len()).unwrap_or(u64::MAX),
+                content_hash: *blake3::hash(source.as_bytes()).as_bytes(),
+                source_bytes: None,
+            },
+            &[Framework::PythonKafka],
+        )
+        .expect("fixture should parse");
+
+        let inferred = infer_payload_contracts(&parsed);
+        let contracts = inferred
+            .iter()
+            .filter(|item| {
+                item.record.contract_target_qualified_name.as_deref()
+                    == Some("__event__kafka__asset.queued")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(contracts.len(), 2);
+        assert!(
+            contracts
+                .iter()
+                .any(|item| item.record.side == PayloadSide::Consumer)
+        );
+        assert!(
+            contracts
+                .iter()
+                .any(|item| item.record.side == PayloadSide::Producer)
+        );
+        assert!(contracts.iter().all(|item| {
+            item.record
+                .contract
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .eq(["asset_id", "revision"])
+        }));
     }
 }
