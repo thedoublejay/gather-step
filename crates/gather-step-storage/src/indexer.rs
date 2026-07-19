@@ -2222,10 +2222,9 @@ impl RepoIndexer {
 }
 
 fn build_manifest_batch(repo: &str, repo_root: &Path, indexed_at: i64) -> Option<FileBatch> {
-    let raw = read_indexable_manifest(repo_root)?;
-    let manifest_meta = file_metadata_stamp(repo_root.join("package.json")).ok();
+    let (file_path, raw) = read_indexable_manifest(repo_root)?;
+    let manifest_meta = file_metadata_stamp(repo_root.join(&file_path)).ok();
 
-    let file_path = "package.json".to_owned();
     let file_node = NodeData {
         id: node_id(repo, &file_path, NodeKind::File, &file_path),
         kind: NodeKind::File,
@@ -2841,18 +2840,22 @@ fn is_path_alias_config_path(path: &str) -> bool {
 }
 
 fn has_indexable_manifest(repo_root: &Path) -> bool {
-    let manifest_path = repo_root.join("package.json");
-    let Ok(metadata) = fs::symlink_metadata(&manifest_path) else {
-        return false;
-    };
-    !metadata.file_type().is_symlink() && metadata.is_file()
+    indexable_manifest_path(repo_root).is_some()
 }
 
-fn read_indexable_manifest(repo_root: &Path) -> Option<String> {
-    if !has_indexable_manifest(repo_root) {
-        return None;
-    }
-    fs::read_to_string(repo_root.join("package.json")).ok()
+fn indexable_manifest_path(repo_root: &Path) -> Option<&'static str> {
+    ["package.json", "pyproject.toml", "requirements.txt"]
+        .into_iter()
+        .find(|relative| {
+            fs::symlink_metadata(repo_root.join(relative))
+                .is_ok_and(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
+        })
+}
+
+fn read_indexable_manifest(repo_root: &Path) -> Option<(String, String)> {
+    let relative = indexable_manifest_path(repo_root)?;
+    let raw = fs::read_to_string(repo_root.join(relative)).ok()?;
+    Some((relative.to_owned(), raw))
 }
 
 /// Whether a path's Mongo findings are noise rather than live-code signal:

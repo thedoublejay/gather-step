@@ -30,6 +30,8 @@ pub struct VersionMismatch {
 pub enum ManifestError {
     #[error("failed to parse package manifest: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("failed to parse Python project manifest: {0}")]
+    Toml(#[from] toml::de::Error),
 }
 
 pub fn parse_package_manifest_str(raw: &str) -> Result<ParsedPackageManifest, ManifestError> {
@@ -66,6 +68,138 @@ pub fn parse_package_manifest_str(raw: &str) -> Result<ParsedPackageManifest, Ma
     })
 }
 
+pub fn parse_python_project_manifest_str(
+    raw: &str,
+) -> Result<ParsedPackageManifest, ManifestError> {
+    let manifest = toml::from_str::<toml::Value>(raw)?;
+    let project = manifest.get("project").and_then(toml::Value::as_table);
+    let poetry = manifest
+        .get("tool")
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(toml::Value::as_table);
+    let package_name = project
+        .and_then(|project| project.get("name"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| {
+            poetry
+                .and_then(|poetry| poetry.get("name"))
+                .and_then(toml::Value::as_str)
+        })
+        .map(ToOwned::to_owned);
+
+    let mut dependencies = Vec::new();
+    if let Some(entries) = project
+        .and_then(|project| project.get("dependencies"))
+        .and_then(toml::Value::as_array)
+    {
+        dependencies.extend(
+            entries
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .filter_map(parse_python_dependency),
+        );
+    }
+    if let Some(groups) = project
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(toml::Value::as_table)
+    {
+        for entries in groups.values().filter_map(toml::Value::as_array) {
+            dependencies.extend(
+                entries
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .filter_map(parse_python_dependency),
+            );
+        }
+    }
+    if let Some(entries) = poetry
+        .and_then(|poetry| poetry.get("dependencies"))
+        .and_then(toml::Value::as_table)
+    {
+        for (package, constraint) in entries {
+            if package.eq_ignore_ascii_case("python") {
+                continue;
+            }
+            let version = constraint
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    constraint
+                        .get("version")
+                        .and_then(toml::Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "*".to_owned());
+            dependencies.push(ManifestDependency {
+                package: package.clone(),
+                version,
+            });
+        }
+    }
+    sort_dependencies(&mut dependencies);
+    Ok(ParsedPackageManifest {
+        package_name,
+        dependencies,
+    })
+}
+
+#[must_use]
+pub fn parse_requirements_manifest_str(raw: &str) -> ParsedPackageManifest {
+    let mut dependencies = raw
+        .lines()
+        .filter_map(|line| line.split('#').next())
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('-'))
+        .filter_map(parse_python_dependency)
+        .collect::<Vec<_>>();
+    sort_dependencies(&mut dependencies);
+    ParsedPackageManifest {
+        package_name: None,
+        dependencies,
+    }
+}
+
+fn parse_python_dependency(specification: &str) -> Option<ManifestDependency> {
+    let specification = specification.trim();
+    let package_end = specification
+        .find(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '<' | '>' | '=' | '!' | '~' | '[' | ';')
+        })
+        .unwrap_or(specification.len());
+    let package = specification[..package_end].trim();
+    if package.is_empty()
+        || !package.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return None;
+    }
+    let version = specification[package_end..]
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    Some(ManifestDependency {
+        package: package.to_owned(),
+        version: if version.is_empty() {
+            "*".to_owned()
+        } else {
+            version
+        },
+    })
+}
+
+fn sort_dependencies(dependencies: &mut Vec<ManifestDependency>) {
+    dependencies.sort_by(|left, right| {
+        left.package
+            .cmp(&right.package)
+            .then(left.version.cmp(&right.version))
+    });
+    dependencies.dedup();
+}
+
 pub fn extract_package_manifest(
     repo: &str,
     file_path: &str,
@@ -73,7 +207,17 @@ pub fn extract_package_manifest(
     owner_repo_node: NodeId,
     raw: &str,
 ) -> Result<ManifestExtraction, ManifestError> {
-    let parsed = parse_package_manifest_str(raw)?;
+    let parsed = if file_path.ends_with("pyproject.toml") {
+        parse_python_project_manifest_str(raw)?
+    } else if file_path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("requirements") && name.ends_with(".txt"))
+    {
+        parse_requirements_manifest_str(raw)
+    } else {
+        parse_package_manifest_str(raw)?
+    };
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
 
@@ -171,12 +315,14 @@ fn manifest_edge(source: NodeId, target: NodeId, kind: EdgeKind, owner_file: Nod
 }
 
 fn is_shared_dependency(package: &str) -> bool {
+    let normalized = package.to_ascii_lowercase().replace('_', "-");
     package.starts_with("@workspace/")
         || package.starts_with("@shared/")
-        || package.contains("shared")
-        || package.contains("contract")
-        || package.contains("schema")
-        || package.contains("types")
+        || normalized.contains("shared")
+        || normalized.contains("contract")
+        || normalized.contains("schema")
+        || normalized.contains("types")
+        || normalized.ends_with("common-lib")
 }
 
 #[cfg(test)]
@@ -186,7 +332,8 @@ mod tests {
 
     use super::{
         ManifestDependency, detect_version_mismatches, extract_package_manifest,
-        parse_package_manifest_str,
+        parse_package_manifest_str, parse_python_project_manifest_str,
+        parse_requirements_manifest_str,
     };
 
     #[test]
@@ -230,6 +377,99 @@ mod tests {
                 .iter()
                 .any(|edge| edge.kind == gather_step_core::EdgeKind::UsesShared)
         );
+    }
+
+    #[test]
+    fn parses_pep_621_and_poetry_dependencies() {
+        let pep621 = parse_python_project_manifest_str(
+            r#"
+[project]
+name = "asset-api"
+dependencies = [
+  "shared-schemas>=2.3",
+  "httpx>=0.28",
+  "common-lib @ git+https://example.invalid/common-lib@1.4.0",
+]
+
+[project.optional-dependencies]
+worker = ["shared-events==3.1"]
+"#,
+        )
+        .expect("PEP 621 manifest should parse");
+        assert_eq!(pep621.package_name.as_deref(), Some("asset-api"));
+        assert!(pep621.dependencies.iter().any(|dependency| {
+            dependency.package == "common-lib" && dependency.version.contains("1.4.0")
+        }));
+        assert!(
+            pep621
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.package == "shared-events")
+        );
+
+        let poetry = parse_python_project_manifest_str(
+            r#"
+[tool.poetry]
+name = "asset-worker"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+shared-contracts = { version = "^4.0" }
+"#,
+        )
+        .expect("Poetry manifest should parse");
+        assert_eq!(poetry.package_name.as_deref(), Some("asset-worker"));
+        assert_eq!(poetry.dependencies.len(), 1);
+        assert_eq!(poetry.dependencies[0].package, "shared-contracts");
+    }
+
+    #[test]
+    fn parses_requirements_without_options_comments_or_environment_markers() {
+        let parsed = parse_requirements_manifest_str(
+            r#"
+# runtime dependencies
+shared-schemas==2.3.1
+common_lib @ git+https://example.invalid/common-lib@1.4.0
+httpx>=0.28 ; python_version >= "3.12"
+-r requirements/dev.txt
+"#,
+        );
+
+        assert_eq!(parsed.dependencies.len(), 3);
+        assert!(
+            parsed.dependencies.iter().any(|dependency| {
+                dependency.package == "httpx" && dependency.version == ">=0.28"
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_shared_dependencies_from_python_manifest() {
+        let owner_file = node_id(
+            "asset-api",
+            "pyproject.toml",
+            NodeKind::File,
+            "pyproject.toml",
+        );
+        let repo_node = node_id("asset-api", "__repo__", NodeKind::Repo, "asset-api");
+        let extraction = extract_package_manifest(
+            "asset-api",
+            "pyproject.toml",
+            owner_file,
+            repo_node,
+            r#"
+[project]
+name = "asset-api"
+dependencies = ["shared-schemas==2.3.1", "httpx>=0.28"]
+"#,
+        )
+        .expect("Python manifest extraction should succeed");
+
+        assert!(extraction.nodes.iter().any(|node| {
+            node.kind == NodeKind::SharedSymbol
+                && node.external_id.as_deref() == Some("__shared__shared-schemas@==2.3.1__package")
+        }));
+        assert!(!extraction.nodes.iter().any(|node| node.name == "httpx"));
     }
 
     #[test]
