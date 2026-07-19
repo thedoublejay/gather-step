@@ -827,9 +827,11 @@ impl SearchStore for TantivySearchStore {
         self.ensure_writer_health_for_reads();
         self.refresh_reader_if_needed()?;
 
-        let qualified_name_hits = self.execute_exact_qualified_name(trimmed, limit, filters)?;
-        if !qualified_name_hits.is_empty() {
-            return Ok(qualified_name_hits);
+        if is_qualified_name_query(trimmed) {
+            let qualified_name_hits = self.execute_exact_qualified_name(trimmed, limit, filters)?;
+            if !qualified_name_hits.is_empty() {
+                return Ok(qualified_name_hits);
+            }
         }
 
         let exact_hits = self.execute_search(trimmed, limit, true, false, filters)?;
@@ -875,6 +877,10 @@ impl SearchStore for TantivySearchStore {
         }
         self.commit()
     }
+}
+
+fn is_qualified_name_query(query: &str) -> bool {
+    query.contains("::") || query.contains('.') || query.contains('#')
 }
 
 impl SearchDocument {
@@ -2052,6 +2058,50 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "publishAsset");
         assert!(hits[0].exact_match);
+    }
+
+    #[test]
+    fn bare_symbol_lookup_keeps_canonical_shared_candidates() {
+        let store = TantivySearchStore::open(temp_search_dir("bare-symbol-candidates"))
+            .expect("store should open");
+        let mut declaration = node("CreateOrderInput", "src/order.ts");
+        declaration.kind = NodeKind::Type;
+        declaration.id = node_id(
+            "service-a",
+            "src/order.ts",
+            NodeKind::Type,
+            "CreateOrderInput",
+        );
+        declaration.qualified_name = Some("CreateOrderInput".to_owned());
+
+        let canonical_name = "__shared__sample-contracts__CreateOrderInput";
+        let mut canonical = node(canonical_name, canonical_name);
+        canonical.kind = NodeKind::SharedSymbol;
+        canonical.id = node_id(
+            "__virtual__",
+            canonical_name,
+            NodeKind::SharedSymbol,
+            canonical_name,
+        );
+        canonical.repo = "__virtual__".to_owned();
+        canonical.qualified_name = Some(canonical_name.to_owned());
+        canonical.signature = None;
+        canonical.is_virtual = true;
+
+        store
+            .index_symbols(&[
+                SearchDocument::from_node(&declaration, 1),
+                SearchDocument::from_node(&canonical, 1),
+            ])
+            .expect("documents should index");
+
+        let hits = store
+            .search("CreateOrderInput", 10)
+            .expect("bare symbol search should succeed");
+        let hit_ids = hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>();
+
+        assert!(hit_ids.contains(&declaration.id));
+        assert!(hit_ids.contains(&canonical.id));
     }
 
     #[test]

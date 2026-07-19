@@ -3662,9 +3662,7 @@ fn choose_pack_target(
             .collect::<std::collections::BTreeSet<_>>();
         let mut enriched_exact = strict_exact;
         enriched_exact.extend(broad_exact.into_iter().filter(|item| {
-            !preferred_ids.contains(item.symbol_id.as_str())
-                && (is_low_packability_kind(&item.kind)
-                    || is_canonical_virtual_shared_match(item, target))
+            !preferred_ids.contains(item.symbol_id.as_str()) && is_low_packability_kind(&item.kind)
         }));
         return resolve_exact_pack_candidates(ctx, results, enriched_exact, target, repo);
     }
@@ -3803,15 +3801,6 @@ fn resolve_exact_pack_candidates(
 
 fn is_strict_symbol_match(item: &SearchResultItem, target: &str) -> bool {
     item.symbol_name == target
-}
-
-fn is_canonical_virtual_shared_match(item: &SearchResultItem, target: &str) -> bool {
-    item.kind.eq_ignore_ascii_case("shared_symbol")
-        && item
-            .symbol_name
-            .rsplit("__")
-            .next()
-            .is_some_and(|name| name == target)
 }
 
 fn prune_low_packability_exact_matches(
@@ -6376,32 +6365,6 @@ mod tests {
         assert!(!super::is_strict_symbol_match(
             &noisy,
             "DocumentReportGenerationQueuedEvent"
-        ));
-    }
-
-    #[test]
-    fn canonical_virtual_shared_match_keeps_the_contract_anchor() {
-        let canonical = SearchResultItem {
-            consumer_repos: Vec::new(),
-            participates: true,
-            exact_match: true,
-            file_path: "src/order-consumer.ts".to_owned(),
-            kind: "shared_symbol".to_owned(),
-            language: "typescript".to_owned(),
-            line_start: None,
-            repo: "sample-service".to_owned(),
-            score: 0.91,
-            symbol_id: "canonical".to_owned(),
-            symbol_name: "__shared__sample-contracts__CreateOrderInput".to_owned(),
-        };
-
-        assert!(super::is_canonical_virtual_shared_match(
-            &canonical,
-            "CreateOrderInput"
-        ));
-        assert!(!super::is_canonical_virtual_shared_match(
-            &canonical,
-            "CreateOrderResult"
         ));
     }
 
