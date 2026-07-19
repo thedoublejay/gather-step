@@ -27,7 +27,7 @@ This changelog lists significant user-visible changes. The latest release is sho
 
 - **Every visible CLI command has a useful description.** Trace documentation now matches the implemented command surface, and redundant MCP aliases were removed from the advertised tool catalog.
 - **Status and route surfaces are more truthful.** Status separates graph state from git freshness, TanStack file routes and FastAPI mounts are recognized, and event/runtime/contract labels describe the evidence actually indexed.
-- **Dependencies refreshed.** Rust direct and transitive dependencies were updated, including Oxc 0.140.0 and Tokio 1.53.0; Astro moved to 7.1.1 with its Bun lockfile regenerated.
+- **Dependencies refreshed.** Rust direct and transitive dependencies were updated, including Oxc 0.140.0 and Tokio 1.53.0; Astro moved to 7.1.1 with its Bun lockfile regenerated; pinned workflow actions were advanced to their current releases.
 - **Workspace packages report `5.16.0`.** Cargo workspace crates and website package metadata now carry the minor-release version.
 
 ## v5.15.1 (2026-07-13)

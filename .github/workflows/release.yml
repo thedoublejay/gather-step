@@ -26,21 +26,21 @@ jobs:
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
       # the build job a high-value target for a malicious tag retag.
-      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-nextest
       # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
       # the build job a high-value target for a malicious tag retag.
-      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-deny
       # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
       # the build job a high-value target for a malicious tag retag.
-      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-shear
       - name: Check formatting
@@ -158,7 +158,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           draft: true
           files: dist/*.tar.gz
