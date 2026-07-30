@@ -4182,6 +4182,20 @@ fn cross_repo_named_import_edge(
     repo_root: &Path,
     binding: &ImportBinding,
 ) -> Option<(NodeData, EdgeData)> {
+    if !parsed
+        .source_path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| {
+            matches!(
+                extension,
+                "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs"
+            )
+        })
+    {
+        return None;
+    }
+
     if binding.is_default
         || binding.is_namespace
         || binding.is_type_only

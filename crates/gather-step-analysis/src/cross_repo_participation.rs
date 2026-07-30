@@ -247,8 +247,33 @@ pub fn cross_repo_consumers_for_symbol<S: GraphStore>(
         return Ok(Vec::new());
     }
 
-    let producer_repo = target.repo;
+    let producer_repo = target.repo.clone();
     let mut consumers = BTreeSet::<String>::new();
+
+    // Regular named imports from sibling TypeScript/JavaScript packages retain
+    // an exact virtual SharedSymbol keyed to the producer repo, file, and
+    // imported name. Link that provenance surface back to the real declaration
+    // without widening to same-named symbols in another file or repository.
+    for surface in store.nodes_by_shared_symbol_name(&target.name)? {
+        if !surface.is_virtual
+            || surface.repo != producer_repo
+            || surface.file_path != target.file_path
+        {
+            continue;
+        }
+        for edge in session.incoming(surface.id)? {
+            if !is_direct_consumer_edge(edge.kind) {
+                continue;
+            }
+            if let Some(source) = session.node(edge.source)?
+                && !source.is_virtual
+                && is_foreign_repo(&source.repo, &producer_repo)
+            {
+                consumers.insert(source.repo);
+            }
+        }
+    }
+
     let mut queue = VecDeque::from([symbol_id]);
     let mut visited = BTreeSet::from([symbol_id]);
 
