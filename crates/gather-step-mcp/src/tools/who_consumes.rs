@@ -408,6 +408,11 @@ mod tests {
         let common_lib_root = fixture_root.join("common-lib");
         let consumer_root = fixture_root.join("alert");
 
+        fs::write(
+            fixture_root.join("package.json"),
+            r#"{ "private": true, "workspaces": ["common-lib", "alert"] }"#,
+        )
+        .expect("workspace package");
         fs::create_dir_all(common_lib_root.join("src/temporal/constants"))
             .expect("common-lib source dir");
         fs::write(
