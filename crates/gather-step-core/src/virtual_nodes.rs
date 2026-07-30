@@ -170,6 +170,27 @@ pub fn shared_symbol_qn_unversioned(package: &str, symbol: &str) -> String {
     format!("__shared__{package}__{symbol}")
 }
 
+/// Exact cross-repo import identity for a named symbol declaration.
+///
+/// Length-prefixing the producer components prevents ambiguous concatenation
+/// while retaining `__{symbol}` as the trailing segment used by the shared
+/// symbol name index.
+#[must_use]
+pub fn shared_import_symbol_qn(
+    producer_repo: &str,
+    producer_file_path: &str,
+    symbol: &str,
+) -> String {
+    let producer_repo = producer_repo.trim();
+    let producer_file_path = producer_file_path.trim();
+    let symbol = symbol.trim();
+    format!(
+        "__shared_import__{}:{producer_repo}{}:{producer_file_path}__{symbol}",
+        producer_repo.len(),
+        producer_file_path.len()
+    )
+}
+
 #[must_use]
 pub fn parse_shared_symbol_qn(qualified_name: &str) -> Option<SharedSymbolRef<'_>> {
     let body = qualified_name.strip_prefix("__shared__")?;

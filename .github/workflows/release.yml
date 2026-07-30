@@ -11,13 +11,17 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_NET_RETRY: 10
+  CARGO_HTTP_MULTIPLEXING: false
+
 jobs:
   verify:
     name: Verify Release Tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: 1.96.0
           components: clippy, rustfmt
@@ -26,21 +30,21 @@ jobs:
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
       # the build job a high-value target for a malicious tag retag.
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-nextest
       # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
       # the build job a high-value target for a malicious tag retag.
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-deny
       # Pinned to a specific SHA (was @v2). The deepsec scan flagged the
       # mutable major-version tag as a supply-chain risk on this privileged
       # release workflow because attestations:write + id-token:write make
       # the build job a high-value target for a malicious tag retag.
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-shear
       - name: Check formatting
@@ -82,10 +86,10 @@ jobs:
       REF_NAME: ${{ github.ref_name }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      # Pinned to a specific SHA (was dtolnay/rust-toolchain@master, 2026-07-02)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned to a specific SHA (was dtolnay/rust-toolchain@master, 2026-07-30)
       # to avoid a supply-chain vector under `attestations: write` + `id-token: write`.
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: 1.96.0
           targets: ${{ matrix.target }}
@@ -180,7 +184,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checkout Homebrew tap
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: thedoublejay/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

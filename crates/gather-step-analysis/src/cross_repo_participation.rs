@@ -16,7 +16,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use gather_step_core::{EdgeKind, NodeId, NodeKind, VIRTUAL_NODE_REPO};
+use gather_step_core::{
+    EdgeKind, NodeId, NodeKind, VIRTUAL_NODE_REPO, shared_import_symbol_qn, virtual_node_id,
+};
 use gather_step_storage::{GraphStore, GraphStoreError};
 use rustc_hash::FxHashMap;
 
@@ -247,8 +249,30 @@ pub fn cross_repo_consumers_for_symbol<S: GraphStore>(
         return Ok(Vec::new());
     }
 
-    let producer_repo = target.repo;
+    let producer_repo = target.repo.clone();
     let mut consumers = BTreeSet::<String>::new();
+
+    // Regular named imports from sibling TypeScript/JavaScript packages retain
+    // an exact virtual SharedSymbol whose stable identity includes the producer
+    // repo, file, and imported name. Reconstruct that identity directly so the
+    // lookup cannot widen to same-named symbols elsewhere.
+    let import_surface_qn =
+        shared_import_symbol_qn(&producer_repo, &target.file_path, &target.name);
+    let import_surface_id = virtual_node_id(NodeKind::SharedSymbol, &import_surface_qn);
+    if let Some(surface) = session.node(import_surface_id)? {
+        for edge in session.incoming(surface.id)? {
+            if !is_direct_consumer_edge(edge.kind) {
+                continue;
+            }
+            if let Some(source) = session.node(edge.source)?
+                && !source.is_virtual
+                && is_foreign_repo(&source.repo, &producer_repo)
+            {
+                consumers.insert(source.repo);
+            }
+        }
+    }
+
     let mut queue = VecDeque::from([symbol_id]);
     let mut visited = BTreeSet::from([symbol_id]);
 

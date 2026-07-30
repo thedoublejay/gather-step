@@ -5,6 +5,22 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.16.1 (2026-07-30)
+
+**Exact sibling-repository consumers for named imports, plus dependency maintenance.** This patch release closes a false-negative path in cross-repository blast-radius queries without changing the index schema or command surface.
+
+### Fixed
+
+- **Named imports retain their cross-repository consumer provenance.** When an imported symbol resolves into a registered sibling repository, TypeScript and JavaScript indexing records an exact shared-symbol usage edge. Queries such as `who-consumes TaskQueueEnum` now retain consumers that previously disappeared behind an extraction gap.
+- **Consumer attribution remains symbol-accurate.** Default, namespace, type-only, and contract-like imports keep their existing handling, so the new provenance does not broaden unrelated symbols into consumers.
+
+### Changed
+
+- **Rust dependencies refreshed within the existing compatibility policy.** Compatible direct requirements and transitive lockfile packages were advanced while incompatible `gix` and `rmcp` requirement updates remain deferred.
+- **Website dependencies refreshed.** Astro moved to 7.1.6 and Starlight to 0.41.5 with the Bun lockfile regenerated.
+- **Pinned GitHub Actions refreshed.** `actions/checkout` moved to 7.0.1, `taiki-e/install-action` to 2.85.4, and the pinned `dtolnay/rust-toolchain` implementation to its current commit; the remaining workflow actions were already current.
+- **Workspace packages report `5.16.1`.** Cargo workspace crates and website package metadata now carry the patch-release version.
+
 ## v5.16.0 (2026-07-19)
 
 **Python tracing, telemetry correctness, and honest empty-result reporting.** This release substantially expands source-derived Python graph coverage while making operational diagnostics and query limitations visible instead of silently returning misleading negatives.

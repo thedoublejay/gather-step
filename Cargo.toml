@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "5.16.0"
+version = "5.16.1"
 authors = ["JJ Adonis"]
 edition = "2024"
 rust-version = "1.96"
@@ -24,15 +24,15 @@ homepage = "https://github.com/thedoublejay/gather-step"
 description = "High-performance multi-repo codebase intelligence engine"
 
 [workspace.dependencies]
-gather-step = { path = "crates/gather-step-cli", version = "5.16.0" }
-gather-step-analysis = { path = "crates/gather-step-analysis", version = "5.16.0" }
-gather-step-core = { path = "crates/gather-step-core", version = "5.16.0" }
-gather-step-deploy = { path = "crates/gather-step-deploy", version = "5.16.0" }
-gather-step-git = { path = "crates/gather-step-git", version = "5.16.0" }
-gather-step-mcp = { path = "crates/gather-step-mcp", version = "5.16.0" }
-gather-step-output = { path = "crates/gather-step-output", version = "5.16.0" }
-gather-step-parser = { path = "crates/gather-step-parser", version = "5.16.0" }
-gather-step-storage = { path = "crates/gather-step-storage", version = "5.16.0" }
+gather-step = { path = "crates/gather-step-cli", version = "5.16.1" }
+gather-step-analysis = { path = "crates/gather-step-analysis", version = "5.16.1" }
+gather-step-core = { path = "crates/gather-step-core", version = "5.16.1" }
+gather-step-deploy = { path = "crates/gather-step-deploy", version = "5.16.1" }
+gather-step-git = { path = "crates/gather-step-git", version = "5.16.1" }
+gather-step-mcp = { path = "crates/gather-step-mcp", version = "5.16.1" }
+gather-step-output = { path = "crates/gather-step-output", version = "5.16.1" }
+gather-step-parser = { path = "crates/gather-step-parser", version = "5.16.1" }
+gather-step-storage = { path = "crates/gather-step-storage", version = "5.16.1" }
 
 tree-sitter = "=0.26.11"
 tree-sitter-typescript = "0.23.2"
@@ -46,7 +46,7 @@ tantivy = "=0.26.1"
 rusqlite = { version = "=0.40.1", features = ["bundled"] }
 rayon = "1.12"
 kanal = "0.1.1"
-clap = { version = "4.6.2", features = ["derive"] }
+clap = { version = "4.6.4", features = ["derive"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["chrono", "env-filter", "json"] }
 thiserror = "2.0.19"
@@ -56,22 +56,22 @@ console = "0.16.4"
 comfy-table = "7.2.2"
 chrono = { version = "0.4.45", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 serde_norway = "0.9.42"
-toml = "1.1.3"
+toml = "1.1.4"
 toml_edit = "0.25.13"
 bitcode = "0.6.9"
 blake3 = "1.8.5"
 dirs = "6"
 rand = "=0.10.2"
 subtle = "2.6.1"
-ignore = "0.4.30"
+ignore = "0.4.31"
 globset = "0.4.19"
 rustc-hash = "2.1.3"
 hashbrown = "=0.17.1"
 parking_lot = "=0.12.5"
-tokio = { version = "1.53.0", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net", "io-util"] }
-tokio-util = "0.7.18"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net", "io-util"] }
+tokio-util = "0.7.19"
 # Pinned to the 9.0.0-rc.4 prerelease: the 9.0 stable line is not yet published and
 # the rc carries the cross-platform watcher fixes the indexer's file-watch path depends on.
 notify = "=9.0.0-rc.4"
@@ -83,7 +83,7 @@ similar = "3.1.1"
 lru = "=0.18.1"
 quick_cache = "0.7.0"
 smallvec = { version = "=1.15.2", features = ["serde"] }
-camino = "1.2.4"
+camino = "1.2.5"
 aho-corasick = "1.1.4"
 memchr = "2.8.3"
 libc = "0.2"
