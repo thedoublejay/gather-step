@@ -12,7 +12,8 @@ use camino::Utf8PathBuf;
 
 use gather_step_core::{
     EdgeData, EdgeKind, EdgeMetadata, GatherStepConfig, NodeData, NodeKind, SourceSpan, Visibility,
-    node_id, ref_node_id, shared_package_root, shared_symbol_qn_unversioned, virtual_node,
+    node_id, ref_node_id, shared_import_symbol_qn, shared_package_root,
+    shared_symbol_qn_unversioned, virtual_node,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -4208,11 +4209,15 @@ fn cross_repo_named_import_edge(
     if imported_name.is_empty() {
         return None;
     }
-    let package = shared_package_root(&binding.source)?;
+    shared_package_root(&binding.source)?;
     let resolved = binding.resolved_path.as_ref()?;
     let (producer_repo, producer_relative_path) = external_repo_file_identity(repo_root, resolved)?;
     let producer_relative_path = path_to_utf8(&producer_relative_path);
-    let qualified_name = shared_symbol_qn_unversioned(package, imported_name);
+    let qualified_name = shared_import_symbol_qn(
+        &producer_repo,
+        producer_relative_path.as_str(),
+        imported_name,
+    );
     let shared_node = virtual_node(
         NodeKind::SharedSymbol,
         producer_repo,

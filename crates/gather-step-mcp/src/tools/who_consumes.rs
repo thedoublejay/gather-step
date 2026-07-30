@@ -165,7 +165,7 @@ mod tests {
     use gather_step_analysis::cross_repo_consumers_for_symbol;
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, RegistryStore, SourceSpan,
-        Visibility, node_id, virtual_node,
+        Visibility, node_id, shared_import_symbol_qn, virtual_node, virtual_node_id,
     };
     use gather_step_storage::{GraphStore, IndexingOptions, RepoIndexer, StorageCoordinator};
 
@@ -475,13 +475,17 @@ export const workerConfig = {
                 .graph()
                 .nodes_by_shared_symbol_name("TaskQueueEnum")
                 .expect("shared-symbol lookup");
+            let expected_surface_id = virtual_node_id(
+                NodeKind::SharedSymbol,
+                &shared_import_symbol_qn(
+                    "common-lib",
+                    "src/temporal/constants/task-queue.enum.ts",
+                    "TaskQueueEnum",
+                ),
+            );
             let surface = surfaces
                 .iter()
-                .find(|node| {
-                    node.is_virtual
-                        && node.repo == "common-lib"
-                        && node.file_path == "src/temporal/constants/task-queue.enum.ts"
-                })
+                .find(|node| node.id == expected_surface_id)
                 .unwrap_or_else(|| {
                     panic!("named-import provenance surface missing: {surfaces:#?}")
                 });
