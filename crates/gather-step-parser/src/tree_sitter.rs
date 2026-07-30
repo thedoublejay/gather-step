@@ -3947,6 +3947,16 @@ fn apply_workspace_semantic_edges(parsed: &mut ParsedFile, repo_root: &Path) {
             }
         }
 
+        if let Some((node, edge)) = cross_repo_named_import_edge(parsed, repo_root, binding) {
+            if should_add_semantic_node(parsed, &node) && seen_node_ids.insert(node.id) {
+                added_nodes.push(node);
+            }
+            let key = (edge.source, edge.target, edge.kind, edge.owner_file);
+            if seen_edge_keys.insert(key) {
+                added_edges.push(edge);
+            }
+        }
+
         if !binding.is_type_only && !is_contract_like_import_binding(repo_root, binding) {
             continue;
         }
@@ -4157,6 +4167,54 @@ fn external_import_file_edge(
         is_cross_file: true,
     };
     Some((target_file, edge))
+}
+
+/// Preserve exact-symbol provenance for regular named imports that resolve into
+/// a separately indexed sibling repository.
+///
+/// The file-level [`EdgeKind::Imports`] edge is intentionally too broad for
+/// `who-consumes`: widening it to every declaration in the imported file would
+/// make unrelated co-located symbols inherit the same consumers. A virtual
+/// `SharedSymbol` keyed by package and imported name lets the query retain the
+/// exact binding while keeping the real producer repository as its owner.
+fn cross_repo_named_import_edge(
+    parsed: &ParsedFile,
+    repo_root: &Path,
+    binding: &ImportBinding,
+) -> Option<(NodeData, EdgeData)> {
+    if binding.is_default
+        || binding.is_namespace
+        || binding.is_type_only
+        || is_contract_like_import_binding(repo_root, binding)
+    {
+        return None;
+    }
+
+    let imported_name = binding.imported_name.as_deref()?.trim();
+    if imported_name.is_empty() {
+        return None;
+    }
+    let package = shared_package_root(&binding.source)?;
+    let resolved = binding.resolved_path.as_ref()?;
+    let (producer_repo, producer_relative_path) = external_repo_file_identity(repo_root, resolved)?;
+    let producer_relative_path = path_to_utf8(&producer_relative_path);
+    let qualified_name = shared_symbol_qn_unversioned(package, imported_name);
+    let shared_node = virtual_node(
+        NodeKind::SharedSymbol,
+        producer_repo,
+        producer_relative_path.as_str(),
+        imported_name,
+        qualified_name,
+    );
+    let edge = EdgeData {
+        source: parsed.file_node.id,
+        target: shared_node.id,
+        kind: EdgeKind::UsesShared,
+        metadata: EdgeMetadata::default(),
+        owner_file: parsed.file_node.id,
+        is_cross_file: true,
+    };
+    Some((shared_node, edge))
 }
 
 fn external_file_node_from_resolved_path(repo_root: &Path, resolved: &Path) -> Option<NodeData> {

@@ -163,10 +163,10 @@ mod tests {
     use std::{env, fs};
 
     use gather_step_core::{
-        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, SourceSpan, Visibility,
-        node_id, virtual_node,
+        EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, RegistryStore, SourceSpan,
+        Visibility, node_id, virtual_node,
     };
-    use gather_step_storage::{GraphStore, StorageCoordinator};
+    use gather_step_storage::{GraphStore, IndexingOptions, RepoIndexer, StorageCoordinator};
 
     use crate::{McpServerConfig, config::McpContext};
 
@@ -399,6 +399,106 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&storage_root);
+    }
+
+    #[test]
+    fn who_consumes_reports_regular_named_imports_from_sibling_repos() {
+        let fixture_root = unique_storage_root("gather-step-mcp-who-consumes-named-import");
+        let storage_root = fixture_root.join("storage");
+        let common_lib_root = fixture_root.join("common-lib");
+        let consumer_root = fixture_root.join("alert");
+
+        fs::create_dir_all(common_lib_root.join("src/temporal/constants"))
+            .expect("common-lib source dir");
+        fs::write(
+            common_lib_root.join("package.json"),
+            r#"{
+  "name": "@example/common-lib",
+  "exports": {
+    "./temporal/constants/task-queue.enum": "./src/temporal/constants/task-queue.enum.ts"
+  }
+}"#,
+        )
+        .expect("common-lib package");
+        fs::write(
+            common_lib_root.join("src/temporal/constants/task-queue.enum.ts"),
+            r"
+export enum TaskQueueEnum {
+  Alert = 'alert',
+}
+",
+        )
+        .expect("shared enum");
+
+        fs::create_dir_all(consumer_root.join("src")).expect("consumer source dir");
+        fs::write(
+            consumer_root.join("package.json"),
+            r#"{
+  "name": "@example/alert",
+  "dependencies": {
+    "@example/common-lib": "1.0.0"
+  }
+}"#,
+        )
+        .expect("consumer package");
+        fs::write(
+            consumer_root.join("src/worker.config.ts"),
+            r"
+import { TaskQueueEnum } from '@example/common-lib/temporal/constants/task-queue.enum';
+
+export const workerConfig = {
+  taskQueue: TaskQueueEnum.Alert,
+};
+",
+        )
+        .expect("consumer source");
+
+        let indexer =
+            RepoIndexer::open(&storage_root, IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("common-lib", &common_lib_root, None)
+            .expect("common-lib index");
+        indexer
+            .index_repo("alert", &consumer_root, None)
+            .expect("consumer index");
+        drop(indexer);
+
+        let registry_path = storage_root.join("registry.json");
+        let mut registry = RegistryStore::open(&registry_path).expect("registry");
+        registry
+            .register_repo("common-lib", &common_lib_root, None)
+            .expect("common-lib registration");
+        registry
+            .register_repo("alert", &consumer_root, None)
+            .expect("consumer registration");
+
+        let ctx = McpContext::open(McpServerConfig::new(
+            registry_path,
+            storage_root.join("graph.redb"),
+        ))
+        .expect("context should open");
+        let response = who_consumes_tool(
+            &ctx,
+            WhoConsumesRequest {
+                symbol: "TaskQueueEnum".to_owned(),
+                repo: None,
+            },
+        )
+        .expect("who_consumes should succeed");
+
+        assert_eq!(
+            response
+                .data
+                .consumers
+                .iter()
+                .map(|consumer| consumer.repo.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alert"],
+            "regular named imports must retain exact-symbol consumer provenance"
+        );
+
+        drop(ctx);
+        let _ = fs::remove_dir_all(&fixture_root);
     }
 
     /// Two distinct producing repos define a symbol with the same name and each
