@@ -162,6 +162,7 @@ pub fn who_consumes_tool(
 mod tests {
     use std::{env, fs};
 
+    use gather_step_analysis::cross_repo_consumers_for_symbol;
     use gather_step_core::{
         EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeId, NodeKind, RegistryStore, SourceSpan,
         Visibility, node_id, virtual_node,
@@ -467,6 +468,50 @@ export const workerConfig = {
             .index_repo("alert", &consumer_root, None)
             .expect("consumer index");
         drop(indexer);
+
+        {
+            let storage = StorageCoordinator::open(&storage_root).expect("coordinator opens");
+            let surfaces = storage
+                .graph()
+                .nodes_by_shared_symbol_name("TaskQueueEnum")
+                .expect("shared-symbol lookup");
+            let surface = surfaces
+                .iter()
+                .find(|node| {
+                    node.is_virtual
+                        && node.repo == "common-lib"
+                        && node.file_path == "src/temporal/constants/task-queue.enum.ts"
+                })
+                .unwrap_or_else(|| {
+                    panic!("named-import provenance surface missing: {surfaces:#?}")
+                });
+            let incoming = storage
+                .graph()
+                .get_incoming(surface.id)
+                .expect("surface incoming edges");
+            assert!(
+                incoming
+                    .iter()
+                    .any(|edge| edge.kind == EdgeKind::UsesShared),
+                "named-import provenance edge missing: {incoming:#?}"
+            );
+
+            let producer = storage
+                .graph()
+                .nodes_by_repo("common-lib")
+                .expect("producer nodes")
+                .into_iter()
+                .find(|node| {
+                    !node.is_virtual && node.kind == NodeKind::Type && node.name == "TaskQueueEnum"
+                })
+                .expect("real enum declaration");
+            assert_eq!(
+                cross_repo_consumers_for_symbol(storage.graph(), producer.id)
+                    .expect("symbol consumer traversal"),
+                vec!["alert"],
+                "graph traversal must bridge the import surface to the real declaration"
+            );
+        }
 
         let registry_path = storage_root.join("registry.json");
         let mut registry = RegistryStore::open(&registry_path).expect("registry");
