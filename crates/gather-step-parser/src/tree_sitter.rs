@@ -1401,6 +1401,50 @@ impl<'a> ParseState<'a> {
         self.import_bindings.push(binding);
     }
 
+    /// Record `export ... from './other'` as a file-level [`EdgeKind::Imports`]
+    /// edge to the re-exported file.
+    ///
+    /// Plain same-repo imports deliberately stop at the `module-import::`
+    /// specifier stub, but a barrel that re-exports a declaration is the surface
+    /// a sibling repo's package-root import resolves to. Without this edge the
+    /// barrel is a dead end and consumer queries cannot get from the package
+    /// entry back to the declaration it re-exports.
+    pub(crate) fn push_reexport_file_edge(&mut self, resolved: Option<&Path>) {
+        let Some(relative) =
+            resolved.and_then(|path| crate::resolve::path_relative_to_repo(self.repo_root, path))
+        else {
+            return;
+        };
+        let relative = path_to_utf8(&relative);
+        let relative_str = relative.as_str();
+        if relative_str == self.file_path() {
+            return;
+        }
+        let target = NodeData {
+            id: node_id(self.repo, relative_str, NodeKind::File, relative_str),
+            kind: NodeKind::File,
+            repo: self.repo.to_owned(),
+            file_path: relative_str.to_owned(),
+            name: relative_str.to_owned(),
+            qualified_name: Some(format!("{}::{relative_str}", self.repo)),
+            external_id: None,
+            signature: None,
+            visibility: None,
+            span: None,
+            is_virtual: false,
+            ai_role: None,
+        };
+        self.edges.push(EdgeData {
+            source: self.file_node.id,
+            target: target.id,
+            kind: EdgeKind::Imports,
+            metadata: EdgeMetadata::default(),
+            owner_file: self.file_node.id,
+            is_cross_file: true,
+        });
+        self.nodes.push(target);
+    }
+
     /// Span-form variant of [`push_call_site`] used by the Oxc visitor —
     /// takes a [`SourceSpan`] directly instead of a tree-sitter `Node`.
     pub(crate) fn push_call_site_with_span(
@@ -3136,6 +3180,18 @@ pub(crate) fn resolve_import_path_pub(
     resolve_import_path(repo_root, current_file, source, language, aliases)
 }
 
+/// Append `extension` to `path`'s file name instead of replacing its current
+/// one, so `documents.use-case` becomes `documents.use-case.ts`.
+fn append_extension(path: &Path, extension: &str) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    let mut appended = file_name.to_os_string();
+    appended.push(".");
+    appended.push(extension);
+    path.with_file_name(appended)
+}
+
 fn resolve_import_path(
     repo_root: &Path,
     current_file: &Path,
@@ -3204,8 +3260,19 @@ fn resolve_import_path(
             base_path.join("__init__.py"),
             base_path.join("__init__.pyi"),
         ],
+        // `with_extension` REPLACES a trailing dotted segment, so it turns
+        // `./documents.use-case` into `documents.ts` and never reaches
+        // `documents.use-case.ts` — i.e. the whole NestJS naming convention.
+        // The appended forms are tried first for that reason; the substituting
+        // forms stay because ESM sources legitimately spell TypeScript imports
+        // with a `.js` suffix (`./foo.js` -> `foo.ts`).
         _ => vec![
             base_path.clone(),
+            append_extension(base_path, "ts"),
+            append_extension(base_path, "d.ts"),
+            append_extension(base_path, "tsx"),
+            append_extension(base_path, "js"),
+            append_extension(base_path, "jsx"),
             base_path.with_extension("ts"),
             base_path.with_extension("d.ts"),
             base_path.with_extension("tsx"),
@@ -6517,6 +6584,36 @@ class ItemCreate:
         );
 
         assert!(resolved.is_none());
+    }
+
+    /// `Path::with_extension` REPLACES the trailing dotted segment, so probing
+    /// `./documents.use-case` as `documents.ts` never reaches
+    /// `documents.use-case.ts`. That is the whole `NestJS` file-naming convention
+    /// (`*.service.ts`, `*.controller.ts`, `*.enum.ts`), so the extension
+    /// candidates must be appended, not substituted.
+    #[test]
+    fn relative_imports_resolve_dotted_filenames() {
+        let temp_dir = TestDir::new("dotted-filename-import");
+        fs::create_dir_all(temp_dir.path().join("src")).expect("src dir should exist");
+        fs::write(
+            temp_dir.path().join("src/documents.use-case.ts"),
+            "export class DocumentsUseCase {}\n",
+        )
+        .expect("fixture should write");
+
+        let resolved = resolve_import_path(
+            temp_dir.path(),
+            Path::new("src/documents.controller.ts"),
+            "./documents.use-case",
+            Language::TypeScript,
+            &PathAliases::empty(),
+        );
+
+        assert_eq!(
+            resolved,
+            Some(temp_dir.path().join("src/documents.use-case.ts")),
+            "a dotted filename must resolve by appending the extension"
+        );
     }
 
     #[test]

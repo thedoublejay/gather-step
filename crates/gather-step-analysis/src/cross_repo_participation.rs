@@ -17,9 +17,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use gather_step_core::{
-    EdgeKind, NodeId, NodeKind, VIRTUAL_NODE_REPO, shared_import_symbol_qn, virtual_node_id,
+    EdgeKind, NodeData, NodeId, NodeKind, VIRTUAL_NODE_REPO, node_id, shared_import_symbol_qn,
+    virtual_node_id,
 };
-use gather_step_storage::{GraphStore, GraphStoreError};
+use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashMap;
 
 /// Map each file in `repo` to the set of *foreign* repos (repos other than
@@ -256,10 +257,18 @@ pub fn cross_repo_consumers_for_symbol<S: GraphStore>(
     // an exact virtual SharedSymbol whose stable identity includes the producer
     // repo, file, and imported name. Reconstruct that identity directly so the
     // lookup cannot widen to same-named symbols elsewhere.
-    let import_surface_qn =
-        shared_import_symbol_qn(&producer_repo, &target.file_path, &target.name);
-    let import_surface_id = virtual_node_id(NodeKind::SharedSymbol, &import_surface_qn);
-    if let Some(surface) = session.node(import_surface_id)? {
+    // A consumer importing from the package root resolves to the package entry,
+    // so the surface it recorded is keyed by the *barrel* file rather than by
+    // the declaring file. Without the barrel anchors, every symbol a library
+    // re-exports through `index.ts` reports zero consumers.
+    let mut anchor_paths = vec![target.file_path.clone()];
+    anchor_paths.extend(barrel_anchor_paths(session.as_ref(), &target)?);
+    for anchor_path in anchor_paths {
+        let import_surface_qn = shared_import_symbol_qn(&producer_repo, &anchor_path, &target.name);
+        let import_surface_id = virtual_node_id(NodeKind::SharedSymbol, &import_surface_qn);
+        let Some(surface) = session.node(import_surface_id)? else {
+            continue;
+        };
         for edge in session.incoming(surface.id)? {
             if !is_direct_consumer_edge(edge.kind) {
                 continue;
@@ -325,6 +334,63 @@ pub fn cross_repo_consumers_for_symbol<S: GraphStore>(
     Ok(consumers.into_iter().collect())
 }
 
+/// Hop limit on the barrel chain walked back from a declaration's own file.
+/// Libraries routinely nest barrels (`src/index.ts` -> `src/use-cases/index.ts`
+/// -> `src/use-cases/archive.ts`), but the chain is short in practice.
+const MAX_BARREL_REEXPORT_HOPS: usize = 4;
+
+/// Repo-relative files a named-import [`NodeKind::SharedSymbol`] surface for
+/// `target` could be anchored at, nearest first.
+///
+/// A consumer importing from the package root resolves to the package entry, so
+/// the surface it recorded is keyed by the *barrel* file rather than by the file
+/// declaring the symbol. Probing only the declaring file therefore misses every
+/// consumer of a symbol re-exported through `index.ts`. Same-repo files that
+/// (transitively) import the declaring file are exactly those candidate barrels.
+///
+/// The surface identity also encodes the imported name, so a candidate only
+/// contributes consumers when a foreign repo imported `target.name` from a
+/// specifier that resolved to that exact file — widening the anchor set cannot
+/// borrow an unrelated symbol's consumers.
+fn barrel_anchor_paths(
+    session: &dyn GraphReadSession,
+    target: &NodeData,
+) -> Result<Vec<String>, GraphStoreError> {
+    let declaring_file = node_id(
+        &target.repo,
+        &target.file_path,
+        NodeKind::File,
+        &target.file_path,
+    );
+    let mut anchors = Vec::new();
+    let mut visited = BTreeSet::from([declaring_file]);
+    let mut frontier = vec![declaring_file];
+
+    for _ in 0..MAX_BARREL_REEXPORT_HOPS {
+        let mut next = Vec::new();
+        for current in frontier {
+            for edge in session.incoming(current)? {
+                if edge.kind != EdgeKind::Imports || !visited.insert(edge.source) {
+                    continue;
+                }
+                if let Some(importer) = session.node(edge.source)?
+                    && importer.kind == NodeKind::File
+                    && importer.repo == target.repo
+                {
+                    anchors.push(importer.file_path);
+                    next.push(importer.id);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    Ok(anchors)
+}
+
 /// A repo is a foreign consumer when it is neither the analysed `repo` nor the
 /// synthetic [`VIRTUAL_NODE_REPO`] (virtual transport stubs are never a real
 /// consuming repo, and same-repo consumers are excluded by design).
@@ -338,14 +404,19 @@ fn is_foreign_repo(candidate: &str, repo: &str) -> bool {
 const fn is_producer_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
-        EdgeKind::Serves | EdgeKind::Publishes | EdgeKind::ProducesEventFor
+        EdgeKind::Serves | EdgeKind::Publishes | EdgeKind::ProducesEventFor | EdgeKind::Provides
     )
 }
 
 const fn is_virtual_consumer_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
-        EdgeKind::Consumes | EdgeKind::ConsumesApiFrom | EdgeKind::UsesEventFrom
+        EdgeKind::Consumes
+            | EdgeKind::ConsumesApiFrom
+            | EdgeKind::UsesEventFrom
+            // Injection into a converged `__di__` node, whose producer half is
+            // `EdgeKind::Provides`.
+            | EdgeKind::DependsOn
     )
 }
 

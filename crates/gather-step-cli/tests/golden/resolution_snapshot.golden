@@ -1,4 +1,4 @@
-ServiceAController	DependsOn	__di__EventBusClient	none	none
+ServiceAController	DependsOn	__di__16:backend_standard__EventBusClient	none	none
 ServiceAController	UsesDecorator	ServiceAController::@Controller	none	none
 ServiceAController.constructor	UsesDecorator	ServiceAController.constructor::@Controller	none	none
 ServiceAController.handleOrderCreated	Consumes	__event__kafka__order.created	none	none
