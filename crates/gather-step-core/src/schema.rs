@@ -93,6 +93,11 @@ pub enum EdgeKind {
     References = 6,
     DependsOn = 7,
     UsesDecorator = 8,
+    /// A provider declaration supplies an injectable token; the target is the
+    /// converged `__di__` node its injectors reach via [`Self::DependsOn`].
+    /// Producer counterpart to `DependsOn`, mirroring
+    /// [`Self::ExposesMcpTool`] / [`Self::CallsMcpTool`].
+    Provides = 9,
     Publishes = 20,
     Consumes = 21,
     Triggers = 22,
@@ -415,6 +420,7 @@ impl EdgeKind {
             Self::Implements => "implements",
             Self::References => "references",
             Self::DependsOn => "depends_on",
+            Self::Provides => "provides",
             Self::UsesDecorator => "uses_decorator",
             Self::Publishes => "publishes",
             Self::Consumes => "consumes",
@@ -587,6 +593,7 @@ impl EdgeKind {
             | Self::Extends
             | Self::Implements
             | Self::DependsOn
+            | Self::Provides
             | Self::PersistsTo
             | Self::ChangedIn
             | Self::IntroducedBy
@@ -628,6 +635,7 @@ impl EdgeKind {
             Self::Implements,
             Self::References,
             Self::DependsOn,
+            Self::Provides,
             Self::UsesDecorator,
             Self::Publishes,
             Self::Consumes,
@@ -758,6 +766,7 @@ impl TryFrom<u8> for EdgeKind {
             5 => Ok(Self::Implements),
             6 => Ok(Self::References),
             7 => Ok(Self::DependsOn),
+            9 => Ok(Self::Provides),
             8 => Ok(Self::UsesDecorator),
             20 => Ok(Self::Publishes),
             21 => Ok(Self::Consumes),
@@ -1207,7 +1216,7 @@ mod tests {
 
     #[test]
     fn edge_kind_invalid_u8_rejects() {
-        for value in [9_u8, 19, 33, 39, 46, 59, 63, 79, 96, 106, 255] {
+        for value in [10_u8, 19, 33, 39, 46, 59, 63, 79, 96, 106, 255] {
             assert!(EdgeKind::try_from(value).is_err(), "{value} should reject");
         }
     }

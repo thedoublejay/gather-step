@@ -404,14 +404,19 @@ fn is_foreign_repo(candidate: &str, repo: &str) -> bool {
 const fn is_producer_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
-        EdgeKind::Serves | EdgeKind::Publishes | EdgeKind::ProducesEventFor
+        EdgeKind::Serves | EdgeKind::Publishes | EdgeKind::ProducesEventFor | EdgeKind::Provides
     )
 }
 
 const fn is_virtual_consumer_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
-        EdgeKind::Consumes | EdgeKind::ConsumesApiFrom | EdgeKind::UsesEventFrom
+        EdgeKind::Consumes
+            | EdgeKind::ConsumesApiFrom
+            | EdgeKind::UsesEventFrom
+            // Injection into a converged `__di__` node, whose producer half is
+            // `EdgeKind::Provides`.
+            | EdgeKind::DependsOn
     )
 }
 

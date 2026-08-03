@@ -3,7 +3,8 @@ use std::sync::OnceLock;
 
 use camino::Utf8PathBuf;
 use gather_step_core::{
-    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, node_id, ref_node_id, route_qn,
+    EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, SourceSpan, node_id, ref_node_id,
+    route_qn,
 };
 use memchr::memmem;
 use quick_cache::{Weighter, sync::Cache};
@@ -34,8 +35,14 @@ pub fn augment(parsed: &ParsedFile) -> NestjsAugmentation {
 
     for symbol in &parsed.symbols {
         if symbol.node.kind == NodeKind::Class {
-            if has_decorator(symbol, "Controller") {
+            // `@Injectable()` classes both consume (their own constructor
+            // dependencies) and produce (they are the provider other classes
+            // inject), so they need both halves of the DI edge pair.
+            if has_decorator(symbol, "Controller") || has_decorator(symbol, "Injectable") {
                 add_di_edges(parsed, symbol, &mut augmentation);
+            }
+            if has_decorator(symbol, "Injectable") {
+                add_provider_edge(parsed, symbol, &mut augmentation);
             }
             if has_decorator(symbol, "Schema") {
                 add_entity_node(symbol, &mut augmentation);
@@ -1184,28 +1191,49 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+/// Qualified name of the converged dependency-injection node for `token`.
+///
+/// The repository is part of the identity. These nodes are keyed by a bare
+/// provider name or string token, and unrelated repositories routinely each
+/// define their own `ConfigService` or `CACHE_MANAGER`; a workspace-wide node
+/// would collapse them into one hub and make every injector in one repo look
+/// like a consumer of the other's provider.
+fn di_token_qn(repo: &str, token: &str) -> String {
+    format!("__di__{}:{repo}__{token}", repo.len())
+}
+
+/// The virtual node both halves of a DI pair converge on.
+fn di_token_node(
+    parsed: &ParsedFile,
+    name: &str,
+    qualified_name: String,
+    span: Option<SourceSpan>,
+) -> NodeData {
+    NodeData {
+        id: ref_node_id(NodeKind::Class, &qualified_name),
+        kind: NodeKind::Class,
+        repo: parsed.file_node.repo.clone(),
+        file_path: parsed.file_node.file_path.clone(),
+        name: name.to_owned(),
+        qualified_name: Some(qualified_name.clone()),
+        external_id: Some(qualified_name),
+        signature: None,
+        visibility: None,
+        span,
+        is_virtual: true,
+        ai_role: None,
+    }
+}
+
 fn add_di_edges(
     parsed: &ParsedFile,
     symbol: &SymbolCapture,
     augmentation: &mut NestjsAugmentation,
 ) {
     for dependency in &symbol.constructor_dependencies {
-        let qualified_name = format!("__di__{dependency}");
-        let dependency_node = NodeData {
-            id: ref_node_id(NodeKind::Class, &qualified_name),
-            kind: NodeKind::Class,
-            repo: parsed.file_node.repo.clone(),
-            file_path: parsed.file_node.file_path.clone(),
-            name: dependency.clone(),
-            qualified_name: Some(qualified_name.clone()),
-            external_id: Some(qualified_name),
-            signature: None,
-            visibility: None,
-            span: symbol.node.span.clone(),
-            is_virtual: true,
-            ai_role: None,
-        };
-        augmentation.nodes.push(dependency_node.clone());
+        let qualified_name = di_token_qn(&parsed.file_node.repo, dependency);
+        let dependency_node =
+            di_token_node(parsed, dependency, qualified_name, symbol.node.span.clone());
         augmentation.edges.push(EdgeData {
             source: symbol.node.id,
             target: dependency_node.id,
@@ -1214,7 +1242,38 @@ fn add_di_edges(
             owner_file: symbol.file_node,
             is_cross_file: false,
         });
+        augmentation.nodes.push(dependency_node);
     }
+}
+
+/// Emit the producer half of dependency injection: an `@Injectable()` class
+/// supplies the token its injectors reach through [`add_di_edges`].
+///
+/// Without it the `__di__` node is one-sided — injectors point at it and no
+/// definition does — so no traversal can get from a provider to the classes
+/// that inject it, and DI coupling stays invisible to impact and consumer
+/// queries.
+fn add_provider_edge(
+    parsed: &ParsedFile,
+    symbol: &SymbolCapture,
+    augmentation: &mut NestjsAugmentation,
+) {
+    let qualified_name = di_token_qn(&parsed.file_node.repo, &symbol.node.name);
+    let provided = di_token_node(
+        parsed,
+        &symbol.node.name,
+        qualified_name,
+        symbol.node.span.clone(),
+    );
+    augmentation.edges.push(EdgeData {
+        source: symbol.node.id,
+        target: provided.id,
+        kind: EdgeKind::Provides,
+        metadata: EdgeMetadata::default(),
+        owner_file: symbol.file_node,
+        is_cross_file: false,
+    });
+    augmentation.nodes.push(provided);
 }
 
 fn add_entity_node(symbol: &SymbolCapture, augmentation: &mut NestjsAugmentation) {
@@ -2627,8 +2686,9 @@ fn virtual_node(
 /// `"InjectModel"` and their token/model reference in `literal_argument`.
 ///
 /// QN conventions:
-/// - `@Inject('TOKEN')` → `__di__TOKEN`
-/// - `@InjectModel(Product.name)` → `__di__model__Product`  (`.name` suffix is stripped)
+/// QNs are built by [`di_token_qn`], so `@Inject('TOKEN')` converges on the
+/// repo-scoped node for `TOKEN` and `@InjectModel(Product.name)` on the one for
+/// `model__Product` (the `.name` suffix is stripped).
 fn add_inject_edges(parsed: &ParsedFile, augmentation: &mut NestjsAugmentation) {
     // Only match `Inject` / `InjectModel` when they are imported from a NestJS
     // package. A user-defined function named `Inject` called outside of a
@@ -2655,7 +2715,7 @@ fn add_inject_edges(parsed: &ParsedFile, augmentation: &mut NestjsAugmentation) 
                 if token.is_empty() {
                     continue;
                 }
-                format!("__di__{token}")
+                di_token_qn(&parsed.file_node.repo, &token)
             }
             "InjectModel" => {
                 if !inject_model_from_nestjs {
@@ -2675,25 +2735,17 @@ fn add_inject_edges(parsed: &ParsedFile, augmentation: &mut NestjsAugmentation) 
                 if model.is_empty() {
                     continue;
                 }
-                format!("__di__model__{model}")
+                di_token_qn(&parsed.file_node.repo, &format!("model__{model}"))
             }
             _ => continue,
         };
 
-        let dep_node = NodeData {
-            id: ref_node_id(NodeKind::Class, &token_arg),
-            kind: NodeKind::Class,
-            repo: parsed.file_node.repo.clone(),
-            file_path: parsed.file_node.file_path.clone(),
-            name: token_arg.clone(),
-            qualified_name: Some(token_arg.clone()),
-            external_id: Some(token_arg.clone()),
-            signature: None,
-            visibility: None,
-            span: call_site.span.clone(),
-            is_virtual: true,
-            ai_role: None,
-        };
+        let dep_node = di_token_node(
+            parsed,
+            &token_arg,
+            token_arg.clone(),
+            call_site.span.clone(),
+        );
         augmentation.nodes.push(dep_node.clone());
         augmentation.edges.push(EdgeData {
             source: call_site.owner_id,
@@ -3776,13 +3828,14 @@ export class CacheService {
         )
         .expect("inject fixture should parse");
 
+        let cache_token = super::di_token_qn("cache-service", "CACHE_MANAGER");
         let di_node = parsed
             .nodes
             .iter()
-            .find(|n| n.external_id.as_deref() == Some("__di__CACHE_MANAGER"));
+            .find(|n| n.external_id.as_deref() == Some(cache_token.as_str()));
         assert!(
             di_node.is_some(),
-            "@Inject('CACHE_MANAGER') should produce a virtual node with QN __di__CACHE_MANAGER, \
+            "@Inject('CACHE_MANAGER') should produce a virtual node with QN {cache_token}, \
              got nodes: {:?}",
             parsed
                 .nodes
@@ -3798,7 +3851,98 @@ export class CacheService {
             .any(|e| e.kind == gather_step_core::EdgeKind::DependsOn && e.target == di_node.id);
         assert!(
             has_depends_on,
-            "a DependsOn edge should point to the __di__CACHE_MANAGER node"
+            "a DependsOn edge should point to the {cache_token} node"
+        );
+    }
+
+    /// The `__di__` node used to be one-sided: injectors pointed at it and no
+    /// provider definition did, so nothing could get from a provider back to
+    /// the classes that inject it. The `@Injectable()` declaration must supply
+    /// the producer half on the very node its injectors converge on.
+    #[test]
+    fn injectable_provider_and_its_injector_converge_on_one_di_node() {
+        let temp_dir = TestDir::new("di-provider");
+        fs::write(
+            temp_dir.path().join("archive.use-case.ts"),
+            r"
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class ArchiveDocumentsUseCase {}
+",
+        )
+        .expect("use-case fixture should write");
+        fs::write(
+            temp_dir.path().join("documents.controller.ts"),
+            r"
+import { Controller } from '@nestjs/common';
+import { ArchiveDocumentsUseCase } from './archive.use-case';
+
+@Controller('documents')
+export class DocumentsController {
+  constructor(private readonly archiveDocumentsUseCase: ArchiveDocumentsUseCase) {}
+}
+",
+        )
+        .expect("controller fixture should write");
+
+        let entry = |path: &str| crate::FileEntry {
+            path: path.into(),
+            language: Language::TypeScript,
+            size_bytes: 0,
+            content_hash: [0; 32],
+            source_bytes: None,
+        };
+        let provider = parse_file("docs-api", temp_dir.path(), &entry("archive.use-case.ts"))
+            .expect("provider should parse");
+        let consumer = parse_file(
+            "docs-api",
+            temp_dir.path(),
+            &entry("documents.controller.ts"),
+        )
+        .expect("consumer should parse");
+
+        let token = super::di_token_qn("docs-api", "ArchiveDocumentsUseCase");
+        let di_node = provider
+            .nodes
+            .iter()
+            .find(|node| node.external_id.as_deref() == Some(token.as_str()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "@Injectable() should emit the provider node {token}, got: {:?}",
+                    provider
+                        .nodes
+                        .iter()
+                        .map(|n| n.external_id.as_deref())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            provider
+                .edges
+                .iter()
+                .any(|edge| edge.kind == gather_step_core::EdgeKind::Provides
+                    && edge.target == di_node.id),
+            "the provider class must supply its own DI token"
+        );
+        assert!(
+            consumer
+                .edges
+                .iter()
+                .any(|edge| edge.kind == gather_step_core::EdgeKind::DependsOn
+                    && edge.target == di_node.id),
+            "the injector must depend on the very node the provider supplies"
+        );
+    }
+
+    /// Two repositories each defining their own `ConfigService` must not share
+    /// one DI hub, or every injector in one would look like a consumer of the
+    /// other's provider.
+    #[test]
+    fn di_tokens_are_scoped_per_repo() {
+        assert_ne!(
+            super::di_token_qn("alert", "ConfigService"),
+            super::di_token_qn("report", "ConfigService")
         );
     }
 
@@ -3840,13 +3984,14 @@ export class ProductRepository {
         )
         .expect("inject-model fixture should parse");
 
+        let model_token = super::di_token_qn("sample-service", "model__Product");
         let di_node = parsed
             .nodes
             .iter()
-            .find(|n| n.external_id.as_deref() == Some("__di__model__Product"));
+            .find(|n| n.external_id.as_deref() == Some(model_token.as_str()));
         assert!(
             di_node.is_some(),
-            "@InjectModel(Product.name) should produce a virtual node with QN __di__model__Product, \
+            "@InjectModel(Product.name) should produce a virtual node with QN {model_token}, \
              got nodes: {:?}",
             parsed
                 .nodes
@@ -3862,7 +4007,7 @@ export class ProductRepository {
             .any(|e| e.kind == gather_step_core::EdgeKind::DependsOn && e.target == di_node.id);
         assert!(
             has_depends_on,
-            "a DependsOn edge should point to the __di__model__Product node"
+            "a DependsOn edge should point to the {model_token} node"
         );
     }
 

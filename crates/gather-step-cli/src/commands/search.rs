@@ -244,7 +244,10 @@ pub(crate) fn execute(
 fn annotate_cross_repo(storage: &StorageCoordinator, hits: &mut [SearchHitOutput]) {
     let mut file_lookup = CrossRepoConsumerLookup::new();
     for hit in hits.iter_mut() {
-        let consumer_repos = if matches!(hit.node_kind.as_str(), "file" | "module") {
+        // `node_kind` is rendered from `NodeKind`'s Debug form ("File", "Module"),
+        // so this must compare against that casing — matching lowercase silently
+        // never fired and sent file/module hits down the symbol path instead.
+        let consumer_repos = if matches!(hit.node_kind.as_str(), "File" | "Module") {
             file_lookup.consumer_repos(storage.graph(), &hit.repo, &hit.file_path)
         } else {
             cross_repo_consumers_for_symbol(storage.graph(), hit.node_id)
