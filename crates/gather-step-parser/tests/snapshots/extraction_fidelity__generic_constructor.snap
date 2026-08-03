@@ -18,10 +18,10 @@ ParsedSummary {
             kind: "Class",
             name: "Repo<A, B>",
             qualified_name: Some(
-                "__di__Repo<A, B>",
+                "__di__19:extraction-fixtures__Repo<A, B>",
             ),
             external_id: Some(
-                "__di__Repo<A, B>",
+                "__di__19:extraction-fixtures__Repo<A, B>",
             ),
             signature: None,
             is_virtual: true,
@@ -30,10 +30,10 @@ ParsedSummary {
             kind: "Class",
             name: "Service<Generic<T>>",
             qualified_name: Some(
-                "__di__Service<Generic<T>>",
+                "__di__19:extraction-fixtures__Service<Generic<T>>",
             ),
             external_id: Some(
-                "__di__Service<Generic<T>>",
+                "__di__19:extraction-fixtures__Service<Generic<T>>",
             ),
             signature: None,
             is_virtual: true,
@@ -245,12 +245,12 @@ ParsedSummary {
         EdgeSummary {
             kind: "DependsOn",
             source: "GenericController",
-            target: "__di__Repo<A, B>",
+            target: "__di__19:extraction-fixtures__Repo<A, B>",
         },
         EdgeSummary {
             kind: "DependsOn",
             source: "GenericController",
-            target: "__di__Service<Generic<T>>",
+            target: "__di__19:extraction-fixtures__Service<Generic<T>>",
         },
         EdgeSummary {
             kind: "Exports",
