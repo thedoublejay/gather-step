@@ -19,6 +19,8 @@ This changelog lists significant user-visible changes. The latest release is sho
 ### Changed
 
 - **`who-consumes` reports its cross-repository scope honestly.** An empty result for a symbol that was located now returns the `ok` verdict rather than `possible_extraction_gap`, since the cross-repository question was asked and answered exactly. Coverage carries an explicit limitation, and the CLI reports "No cross-repo consumers were observed" with a pointer to `trace` / `impact`, so a symbol consumed only inside its own repository no longer reads as a missing edge.
+- **Rust dependencies refreshed within the existing compatibility policy.** The `oxc` parser crates moved in lockstep from 0.140.0 to 0.142.0, the compatible `clap` requirement advanced, and transitive lockfile packages were updated. Incompatible `gix` and `rmcp` requirement updates remain deferred.
+- **Website dependencies refreshed.** Starlight moved to 0.41.6 with the Bun lockfile regenerated.
 
 ## v5.16.1 (2026-07-30)
 
