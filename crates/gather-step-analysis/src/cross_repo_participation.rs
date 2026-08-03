@@ -264,8 +264,7 @@ pub fn cross_repo_consumers_for_symbol<S: GraphStore>(
     let mut anchor_paths = vec![target.file_path.clone()];
     anchor_paths.extend(barrel_anchor_paths(session.as_ref(), &target)?);
     for anchor_path in anchor_paths {
-        let import_surface_qn =
-            shared_import_symbol_qn(&producer_repo, &anchor_path, &target.name);
+        let import_surface_qn = shared_import_symbol_qn(&producer_repo, &anchor_path, &target.name);
         let import_surface_id = virtual_node_id(NodeKind::SharedSymbol, &import_surface_qn);
         let Some(surface) = session.node(import_surface_id)? else {
             continue;

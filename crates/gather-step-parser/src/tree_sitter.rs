@@ -1410,8 +1410,8 @@ impl<'a> ParseState<'a> {
     /// barrel is a dead end and consumer queries cannot get from the package
     /// entry back to the declaration it re-exports.
     pub(crate) fn push_reexport_file_edge(&mut self, resolved: Option<&Path>) {
-        let Some(relative) = resolved
-            .and_then(|path| crate::resolve::path_relative_to_repo(self.repo_root, path))
+        let Some(relative) =
+            resolved.and_then(|path| crate::resolve::path_relative_to_repo(self.repo_root, path))
         else {
             return;
         };
