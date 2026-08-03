@@ -5,6 +5,19 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.16.2 (2026-08-03)
+
+**Barrel-exported symbols keep their cross-repository consumers, and `who-consumes` stops reading an empty result as a broken index.** This patch release closes two false-negative paths in consumer queries without changing the index schema or command surface.
+
+### Fixed
+
+- **Relative imports of dotted filenames resolve again.** Import resolution probed candidate extensions with `Path::with_extension`, which *replaces* a trailing dotted segment — so `./documents.use-case` was probed as `documents.ts` and never reached `documents.use-case.ts`. Extensions are now appended as well as substituted, which restores resolution for the `*.service.ts` / `*.controller.ts` / `*.use-case.ts` / `*.enum.ts` naming convention used across NestJS codebases. The substituting forms are retained so ESM sources that spell TypeScript imports with a `.js` suffix keep working.
+- **Barrel re-exports no longer sever a declaration from its consumers.** `export { Thing } from './thing'` now records a file-level import edge to the re-exported file. A sibling repository importing from the package root resolves to the package entry, so the shared-symbol surface it records is keyed by the barrel rather than by the declaring file; consumer traversal now probes those barrel anchors too. Queries such as `who-consumes ArchiveDocumentsUseCase` retain consumers that previously disappeared entirely for anything a library exports through `index.ts`.
+
+### Changed
+
+- **`who-consumes` reports its cross-repository scope honestly.** An empty result for a symbol that was located now returns the `ok` verdict rather than `possible_extraction_gap`, since the cross-repository question was asked and answered exactly. Coverage carries an explicit limitation, and the CLI reports "No cross-repo consumers were observed" with a pointer to `trace` / `impact`, so a symbol consumed only inside its own repository no longer reads as a missing edge.
+
 ## v5.16.1 (2026-07-30)
 
 **Exact sibling-repository consumers for named imports, plus dependency maintenance.** This patch release closes a false-negative path in cross-repository blast-radius queries without changing the index schema or command surface.

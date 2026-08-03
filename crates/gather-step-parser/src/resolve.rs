@@ -2062,7 +2062,7 @@ fn relative_to_repo(root: &Path, path: &Path) -> String {
 /// same directory through an alias (for example `/var` and `/private/var` on
 /// macOS). The direct path is kept as the fast path; canonicalization is only
 /// used when lexical prefix matching fails.
-fn path_relative_to_repo(root: &Path, path: &Path) -> Option<PathBuf> {
+pub(crate) fn path_relative_to_repo(root: &Path, path: &Path) -> Option<PathBuf> {
     // Traversal-relative paths are already repo-relative; resolving them
     // through the CWD would silently point outside the repo.
     if path.is_relative() {

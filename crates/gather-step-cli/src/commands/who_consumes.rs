@@ -53,9 +53,13 @@ pub(crate) fn execute(
     let mut lines = Vec::new();
     if data.consumers.is_empty() {
         lines.push(format!(
-            "No indexed consumer edges were observed for `{}`.",
+            "No cross-repo consumers were observed for `{}`.",
             data.symbol
         ));
+        lines.push(
+            "who-consumes reports other repositories only; callers inside the producing repo are not listed. For in-repo usage run `gather-step trace <symbol>` or `gather-step impact`."
+                .to_owned(),
+        );
         lines.push(format!(
             "Coverage: {}; {}",
             data.coverage.verdict,

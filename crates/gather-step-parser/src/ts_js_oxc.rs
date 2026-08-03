@@ -872,7 +872,7 @@ fn visit_import_declaration(
     let source_specifier = decl.source.value.to_string();
     let bindings = import_bindings_from_decl(decl);
     let stmt_span = ctx.span(decl.span);
-    push_imports(state, &source_specifier, bindings, &stmt_span);
+    push_imports(state, &source_specifier, bindings, &stmt_span, false);
 }
 
 fn visit_export_all_declaration(
@@ -899,6 +899,7 @@ fn visit_export_all_declaration(
             is_type_only: decl.export_kind == ImportOrExportKind::Type,
         }],
         &stmt_span,
+        true,
     );
 }
 
@@ -911,7 +912,7 @@ fn visit_export_named_declaration(
         let source_specifier = source.value.to_string();
         let bindings = import_bindings_from_named_export(decl);
         let stmt_span = ctx.span(decl.span);
-        push_imports(state, &source_specifier, bindings, &stmt_span);
+        push_imports(state, &source_specifier, bindings, &stmt_span, true);
         return;
     }
 
@@ -2369,6 +2370,7 @@ fn push_imports(
     source_specifier: &str,
     bindings: Vec<ImportBinding>,
     stmt_span: &SourceSpan,
+    is_reexport: bool,
 ) {
     use crate::tree_sitter::resolve_import_path_pub;
     use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, NodeData, NodeKind, ref_node_id};
@@ -2380,6 +2382,10 @@ fn push_imports(
         state.file().language,
         state.path_aliases(),
     );
+
+    if is_reexport {
+        state.push_reexport_file_edge(resolved_path.as_deref());
+    }
 
     let mut is_new_module = false;
     let module_id = {

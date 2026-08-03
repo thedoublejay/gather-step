@@ -99,10 +99,12 @@ pub fn who_consumes_tool(
     // `annotate_cross_repo`; reuse it instead of walking the graph a second
     // time per hit. File/module hits carry only file-level participation, which
     // who-consumes does not attribute to an exact symbol.
+    let mut symbol_hits = 0_usize;
     for hit in &search.data.results {
         if matches!(hit.kind.as_str(), "file" | "module") {
             continue;
         }
+        symbol_hits += 1;
         for consumer_repo in &hit.consumer_repos {
             consumers
                 .entry(consumer_repo.clone())
@@ -144,8 +146,15 @@ pub fn who_consumes_tool(
     .with_source_scopes(source_scopes)
     .with_limitation(
         "who_consumes returns repository aggregates and does not retain exact contributing edge identities or consumer file paths; edges_contributed is therefore zero and source_scopes cover producer hits only.",
+    )
+    .with_limitation(
+        "who_consumes reports foreign repositories only. Consumers inside the producing repo are excluded by design, so an empty result means no *cross-repo* consumer, not that the symbol is unused; use `trace` or `impact` for in-repo usage.",
     );
-    if !consumers.is_empty() {
+    // An empty result is an exact answer whenever the symbol itself was located:
+    // the cross-repo question was asked and answered. Reserving the
+    // `possible_extraction_gap` verdict for "the symbol was never found" stops a
+    // same-repo-only consumer from reading as a broken index.
+    if !consumers.is_empty() || symbol_hits > 0 {
         coverage = coverage.with_verdict("ok");
     }
 
@@ -552,6 +561,101 @@ export const workerConfig = {
         );
 
         drop(ctx);
+        let _ = fs::remove_dir_all(&fixture_root);
+    }
+
+    /// A sibling repo importing from the *package root* resolves to the barrel
+    /// entry (`src/index.ts`), so the named-import surface is anchored there —
+    /// not at the file that declares the symbol. The traversal must still bridge
+    /// the barrel hop back to the real declaration, otherwise every symbol a
+    /// library exports through `index.ts` reports zero consumers.
+    #[test]
+    fn who_consumes_reports_barrel_reexported_symbols_from_sibling_repos() {
+        let fixture_root = unique_storage_root("gather-step-mcp-who-consumes-barrel");
+        let storage_root = fixture_root.join("storage");
+        let common_lib_root = fixture_root.join("common-lib");
+        let consumer_root = fixture_root.join("alert");
+
+        fs::write(
+            fixture_root.join("package.json"),
+            r#"{ "private": true, "workspaces": ["common-lib", "alert"] }"#,
+        )
+        .expect("workspace package");
+        fs::create_dir_all(common_lib_root.join("src/constants")).expect("common-lib source dir");
+        fs::write(
+            common_lib_root.join("package.json"),
+            r#"{
+  "name": "@example/common-lib",
+  "main": "./src/index.ts"
+}"#,
+        )
+        .expect("common-lib package");
+        fs::write(
+            common_lib_root.join("src/index.ts"),
+            "export { TaskQueueEnum } from './constants/task-queue.enum';\n",
+        )
+        .expect("barrel");
+        fs::write(
+            common_lib_root.join("src/constants/task-queue.enum.ts"),
+            r"
+export enum TaskQueueEnum {
+  Alert = 'alert',
+}
+",
+        )
+        .expect("shared enum");
+
+        fs::create_dir_all(consumer_root.join("src")).expect("consumer source dir");
+        fs::write(
+            consumer_root.join("package.json"),
+            r#"{
+  "name": "@example/alert",
+  "dependencies": {
+    "@example/common-lib": "1.0.0"
+  }
+}"#,
+        )
+        .expect("consumer package");
+        fs::write(
+            consumer_root.join("src/worker.config.ts"),
+            r"
+import { TaskQueueEnum } from '@example/common-lib';
+
+export const workerConfig = {
+  taskQueue: TaskQueueEnum.Alert,
+};
+",
+        )
+        .expect("consumer source");
+
+        let indexer =
+            RepoIndexer::open(&storage_root, IndexingOptions::default()).expect("indexer");
+        indexer
+            .index_repo("common-lib", &common_lib_root, None)
+            .expect("common-lib index");
+        indexer
+            .index_repo("alert", &consumer_root, None)
+            .expect("consumer index");
+        drop(indexer);
+
+        let storage = StorageCoordinator::open(&storage_root).expect("coordinator opens");
+        let producer = storage
+            .graph()
+            .nodes_by_repo("common-lib")
+            .expect("producer nodes")
+            .into_iter()
+            .find(|node| {
+                !node.is_virtual && node.kind == NodeKind::Type && node.name == "TaskQueueEnum"
+            })
+            .expect("real enum declaration");
+        assert_eq!(
+            cross_repo_consumers_for_symbol(storage.graph(), producer.id)
+                .expect("symbol consumer traversal"),
+            vec!["alert"],
+            "a barrel re-export must not sever the declaration from its consumers"
+        );
+        drop(storage);
+
         let _ = fs::remove_dir_all(&fixture_root);
     }
 
