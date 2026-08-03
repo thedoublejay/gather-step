@@ -15,6 +15,16 @@ ParsedSummary {
             is_virtual: false,
         },
         NodeSummary {
+            kind: "File",
+            name: "y.ts",
+            qualified_name: Some(
+                "extraction-fixtures::y.ts",
+            ),
+            external_id: None,
+            signature: None,
+            is_virtual: false,
+        },
+        NodeSummary {
             kind: "Function",
             name: "useImports",
             qualified_name: Some(
@@ -112,6 +122,11 @@ ParsedSummary {
             kind: "Exports",
             source: "module::extraction-fixtures::import_comment_bindings.ts",
             target: "useImports",
+        },
+        EdgeSummary {
+            kind: "Imports",
+            source: "extraction-fixtures::import_comment_bindings.ts",
+            target: "extraction-fixtures::y.ts",
         },
         EdgeSummary {
             kind: "Imports",

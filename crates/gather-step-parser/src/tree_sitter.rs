@@ -6588,7 +6588,7 @@ class ItemCreate:
 
     /// `Path::with_extension` REPLACES the trailing dotted segment, so probing
     /// `./documents.use-case` as `documents.ts` never reaches
-    /// `documents.use-case.ts`. That is the whole NestJS file-naming convention
+    /// `documents.use-case.ts`. That is the whole `NestJS` file-naming convention
     /// (`*.service.ts`, `*.controller.ts`, `*.enum.ts`), so the extension
     /// candidates must be appended, not substituted.
     #[test]
