@@ -5,6 +5,16 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.16.3 (2026-08-04)
+
+**PR review now fails closed when its baseline is known to be stale.** This patch release prevents baseline drift from producing authoritative-looking structural findings without changing the report schema or command surface.
+
+### Fixed
+
+- **Stale baselines no longer emit structural false positives.** When the workspace HEAD, local base ref, upstream base ref, working tree, or recorded index commit fails a baseline check, `pr-review` keeps changed-file and safety metadata but suppresses baseline-derived route, symbol, payload-contract, AI-contract, event, removed-surface-risk, contract-alignment, decorator, and deployment findings. This prevents upstream-only enum changes from appearing as PR-owned `value_mirror_incomplete` risks when a local `main` lags `origin/main`.
+- **Suppression is explicit in every report.** `metadata.warnings` explains that structural findings were withheld and tells the caller how to refresh the base and index. `--no-baseline-check` remains the explicit opt-out for environments that intentionally accept the current baseline.
+- **Both stale paths have end-to-end regressions.** Fixtures cover a persistent index that predates `--base` and a local base branch that lags its upstream while the feature branch starts from the upstream commit.
+
 ## v5.16.2 (2026-08-03)
 
 **Barrel-exported symbols keep their cross-repository consumers, and `who-consumes` stops reading an empty result as a broken index.** This patch release closes two false-negative paths in consumer queries without changing the index schema or command surface.
