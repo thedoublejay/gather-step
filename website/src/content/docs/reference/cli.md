@@ -1001,7 +1001,7 @@ gather-step [GLOBAL FLAGS] pr-review init-set --query <QUERY> [--output <PATH>] 
 | `--format <FORMAT>` | enum | `markdown` | `markdown` emits a human-readable Markdown report. `json` emits compact machine-readable JSON. `github-comment` emits Markdown truncated to GitHub's 65 536-char comment limit. `braingent` emits Markdown with YAML frontmatter for [Braingent](https://braingent.dev) archival. |
 | `--keep-cache` | bool flag | false | Keep the review artifact directory after the run, including failed runs (failed artifacts are marked `Quarantined` so `pr-review clean` can find them). Cache hits are available when a retained matching artifact already exists. |
 | `--github-comment-file <PATH>` | path | — | Write the GitHub-comment-formatted output to this file in addition to stdout. Accepted with any `--format` for scripting convenience. |
-| `--no-baseline-check` | bool flag | false | Suppress the warning emitted when the workspace HEAD does not match `--base`. Use in CI environments where the workspace is always checked out at the feature branch. |
+| `--no-baseline-check` | bool flag | false | Skip checks that the workspace index, working tree, local base ref, and upstream base ref agree with `--base`. When a check fails, the default report keeps changed-file metadata but suppresses baseline-derived structural findings. Use this flag only to accept the current baseline explicitly, such as in CI where the workspace is intentionally checked out at the feature branch. |
 | `--json` | bool flag | false | **Deprecated.** Use `--format json` instead. Emits JSON output; equivalent to `--format json`. |
 | `--strict` | bool flag | false | **Deprecated.** Use `--severity strict` instead. |
 
