@@ -300,17 +300,15 @@ fn is_segment_suffix(consumer: &[String], server: &[String]) -> bool {
 
 /// Extract `(method, canonical_path)` from a Route virtual node's QN.
 ///
-/// Route QNs follow the form `__route__<METHOD>__<path>`.
+/// Route identities use the structured `__route__` or `__api_call__` forms.
 fn parse_route_qn(node: &gather_step_core::NodeData) -> (String, String) {
     let qn = node
         .qualified_name
         .as_deref()
         .or(node.external_id.as_deref())
         .unwrap_or("");
-    if let Some(suffix) = qn.strip_prefix("__route__")
-        && let Some((method, path)) = suffix.split_once("__")
-    {
-        return (method.to_owned(), path.to_owned());
+    if let Some(route) = gather_step_core::parse_route_qn(qn) {
+        return route;
     }
     // Fallback: use the node name as-is.
     ("UNKNOWN".to_owned(), node.name.clone())

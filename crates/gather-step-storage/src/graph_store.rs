@@ -7,7 +7,7 @@ use std::{
 
 use gather_step_core::{
     AccessMechanism, EdgeData, EdgeKind, EdgeMetadata, MIGRATION_FILTERS_METADATA_PREFIX, NodeData,
-    NodeId, NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO,
+    NodeId, NodeKind, ResolverStrategy, VIRTUAL_NODE_REPO, parse_route_qn,
 };
 use redb::{
     Database, DatabaseError, Durability, MultimapTable, MultimapTableDefinition, ReadOnlyDatabase,
@@ -1835,20 +1835,7 @@ impl GraphStoreDb {
             return None;
         }
         let ext = node.external_id.as_deref()?;
-        let suffix = ext
-            .strip_prefix("__route__")
-            .or_else(|| ext.strip_prefix("__api_call__"))?;
-        let (method, path) = suffix.split_once("__")?;
-        let method = if method.eq_ignore_ascii_case("FETCH") {
-            "GET".to_owned()
-        } else {
-            method.to_ascii_uppercase()
-        };
-        let path = if path.starts_with('/') {
-            path.to_owned()
-        } else {
-            format!("/{path}")
-        };
+        let (method, path) = parse_route_qn(ext)?;
         Some(format!("{method}__{path}"))
     }
 

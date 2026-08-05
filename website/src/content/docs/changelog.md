@@ -5,6 +5,20 @@ description: "User-visible changes to gather-step, listed by release. Updated ma
 
 This changelog lists significant user-visible changes. The latest release is shown in full at the top; earlier releases are collapsed under [Earlier releases](#earlier-releases) at the bottom of the page.
 
+## v5.17.0 (2026-08-06)
+
+**PR review now uses the same canonical HTTP route identity as storage and topology analysis.** This minor release fixes a long-standing silent data-loss path that became observable after structured tracing telemetry arrived in the 5.16.x line.
+
+### Fixed
+
+- **Client-side API calls no longer disappear from route deltas.** `pr-review` now accepts both `__route__` and `__api_call__` virtual route identities, so a route represented as a server handler in one snapshot and a client call in the other is not falsely reported as removed or added.
+- **Route method and path aliases compare consistently.** Client `FETCH` identities match `GET` routes, and paths receive the same leading-slash, URL, query/fragment, trailing-slash, and parameter normalization used when route nodes are created.
+
+### Changed
+
+- **Route identity has one parser in `gather-step-core`.** Storage indexing, event topology, transport linking, evidence annotation, context output, canonical analysis, MCP CRUD trace, and PR-review extraction delegate to the documented inverse of the route qualified-name producer instead of maintaining divergent decoders.
+- **Workspace packages report `5.17.0`.** Cargo workspace crates and website package metadata now carry the minor-release version.
+
 ## v5.16.3 (2026-08-04)
 
 **PR review now fails closed when its baseline is known to be stale.** This patch release prevents baseline drift from producing authoritative-looking structural findings without changing the report schema or command surface.

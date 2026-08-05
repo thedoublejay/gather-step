@@ -9,7 +9,7 @@
 /// `MAX_HOPS` edges); paths longer than that are not reported.
 use std::collections::{VecDeque, hash_map::Entry};
 
-use gather_step_core::{EdgeKind, NodeId, VirtualNodeKind};
+use gather_step_core::{EdgeKind, NodeId, VirtualNodeKind, parse_route_qn};
 use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashMap;
 
@@ -298,17 +298,15 @@ fn resolve_via(session: &dyn GraphReadSession, node_id: NodeId) -> ViaNode {
 /// Parse a virtual-node QN into a [`VirtualNodeKind`].
 ///
 /// Recognised prefixes:
-/// - `__route__<METHOD>__<path>` → [`VirtualNodeKind::Route`]
+/// - `__route__<METHOD>__<path>` / `__api_call__<METHOD>__<path>` → [`VirtualNodeKind::Route`]
 /// - `__queue__<protocol>__<name>` → [`VirtualNodeKind::Queue`]
 /// - `__topic__<protocol>__<name>` → [`VirtualNodeKind::Topic`]
 /// - `__event__<transport>__<name>` → [`VirtualNodeKind::Event`]
 fn parse_virtual_node_kind(qn: &str) -> ViaNode {
-    if let Some(suffix) = qn.strip_prefix("__route__")
-        && let Some((method, path)) = suffix.split_once("__")
-    {
+    if let Some((method, canonical_path)) = parse_route_qn(qn) {
         return Some(VirtualNodeKind::Route {
-            method: method.to_owned(),
-            canonical_path: path.to_owned(),
+            method,
+            canonical_path,
         });
     } else if let Some(suffix) = qn.strip_prefix("__queue__")
         && let Some((protocol, name)) = suffix.split_once("__")
@@ -335,12 +333,23 @@ fn parse_virtual_node_kind(qn: &str) -> ViaNode {
 
 #[cfg(test)]
 mod tests {
-    use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata};
+    use gather_step_core::{EdgeData, EdgeKind, EdgeMetadata, VirtualNodeKind};
     use gather_step_storage::GraphStore;
 
     use crate::test_utils::{TempDb, file_node, symbol_node};
 
-    use super::evidence_chain_for;
+    use super::{evidence_chain_for, parse_virtual_node_kind};
+
+    #[test]
+    fn api_call_via_nodes_use_canonical_route_identity() {
+        assert_eq!(
+            parse_virtual_node_kind("__api_call__FETCH__orders?active=true"),
+            Some(VirtualNodeKind::Route {
+                method: "GET".to_owned(),
+                canonical_path: "/orders".to_owned(),
+            })
+        );
+    }
 
     #[test]
     fn same_node_returns_empty_chain() {

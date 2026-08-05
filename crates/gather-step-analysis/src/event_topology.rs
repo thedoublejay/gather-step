@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use gather_step_core::{
-    EdgeData, EdgeKind, NodeData, NodeId, NodeKind, SourceScope, classify_source_scope, route_qn,
+    EdgeData, EdgeKind, NodeData, NodeId, NodeKind, SourceScope, classify_source_scope,
+    parse_route_qn, route_qn,
 };
 use gather_step_storage::{GraphReadSession, GraphStore, GraphStoreError};
 use rustc_hash::FxHashSet;
@@ -489,21 +490,7 @@ fn canonical_route_key_for_node(node: &NodeData) -> Option<(String, String)> {
 }
 
 fn canonical_route_key(external_id: &str) -> Option<(String, String)> {
-    let suffix = external_id
-        .strip_prefix("__route__")
-        .or_else(|| external_id.strip_prefix("__api_call__"))?;
-    let (method, path) = suffix.split_once("__")?;
-    let method = if method.eq_ignore_ascii_case("FETCH") {
-        "GET".to_owned()
-    } else {
-        method.to_ascii_uppercase()
-    };
-    let path = if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("/{path}")
-    };
-    Some((method, path))
+    parse_route_qn(external_id)
 }
 
 fn normalized_event_family_query(target: &str) -> Option<String> {

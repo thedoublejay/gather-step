@@ -1,7 +1,8 @@
 use std::fmt;
 
 use gather_step_core::{
-    NodeData, NodeKind, canonical_route_path, parse_shared_symbol_qn, shared_package_root,
+    NodeData, NodeKind, canonical_route_path, parse_route_qn, parse_shared_symbol_qn,
+    shared_package_root,
 };
 use tracing::debug;
 
@@ -108,19 +109,15 @@ pub fn canonical_for_node(node: &NodeData) -> Option<Canonical> {
 
 /// Parse a route external-id in either of the two accepted forms:
 ///
-/// - `"__route__METHOD__path"` (double-underscore, produced by [`route_qn`])
+/// - `"__route__METHOD__path"` or `"__api_call__METHOD__path"` (structured identity)
 /// - `"METHOD path"` (space-delimited, used internally by virtual helpers)
 ///
 /// Returns `(method, path)` or `None` if neither form matches.
 fn parse_route_external_id(external_id: &str) -> Option<(String, String)> {
-    // Double-underscore form: __route__GET__/api/alerts
-    if let Some(suffix) = external_id
-        .strip_prefix("__route__")
-        .or_else(|| external_id.strip_prefix("__api_call__"))
-    {
-        let (method, path) = suffix.split_once("__")?;
-        return Some((method.to_owned(), path.to_owned()));
+    if let Some(route) = parse_route_qn(external_id) {
+        return Some(route);
     }
+
     // Space-delimited form: GET /api/alerts
     let (method, path) = external_id.split_once(' ')?;
     Some((method.to_owned(), path.to_owned()))

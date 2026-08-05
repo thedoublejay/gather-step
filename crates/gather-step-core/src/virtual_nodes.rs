@@ -56,6 +56,32 @@ pub fn route_qn(method: &str, path: &str) -> String {
     format!("__route__{method}__{path}")
 }
 
+/// Parse the structured external-id forms used by virtual [`NodeKind::Route`]
+/// nodes into their canonical `(method, path)` identity.
+///
+/// This is the inverse of [`route_qn`] for valid route methods. It also accepts
+/// the `__api_call__` family emitted for client-side HTTP calls, aliases the
+/// extractor-level `FETCH` method to `GET`, and applies [`canonical_route_path`]
+/// so every route consumer uses the same path grammar.
+#[must_use]
+pub fn parse_route_qn(qn: &str) -> Option<(String, String)> {
+    let suffix = qn
+        .strip_prefix("__route__")
+        .or_else(|| qn.strip_prefix("__api_call__"))?;
+    let (method, path) = suffix.split_once("__")?;
+    let method = method.trim();
+    if method.is_empty() || path.trim().is_empty() {
+        return None;
+    }
+
+    let method = if method.eq_ignore_ascii_case("FETCH") {
+        "GET".to_owned()
+    } else {
+        method.to_ascii_uppercase()
+    };
+    Some((method, canonical_route_path(path)))
+}
+
 #[must_use]
 pub fn topic_qn(protocol: &str, name: &str) -> String {
     let mut protocol = protocol.trim().to_owned();
@@ -401,10 +427,10 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        broker_qn, config_map_qn, database_qn, deployment_qn, env_var_qn, llm_model_qn,
-        mcp_tool_qn, parse_shared_symbol_qn, prompt_qn, queue_qn, route_qn, secret_qn,
-        shared_package_root, shared_symbol_qn, shared_symbol_qn_unversioned, topic_qn,
-        value_mirror_qn, vector_index_qn, virtual_node, virtual_node_id,
+        broker_qn, canonical_route_path, config_map_qn, database_qn, deployment_qn, env_var_qn,
+        llm_model_qn, mcp_tool_qn, parse_route_qn, parse_shared_symbol_qn, prompt_qn, queue_qn,
+        route_qn, secret_qn, shared_package_root, shared_symbol_qn, shared_symbol_qn_unversioned,
+        topic_qn, value_mirror_qn, vector_index_qn, virtual_node, virtual_node_id,
     };
     use crate::NodeKind;
 
@@ -440,6 +466,65 @@ mod tests {
             route_qn("GET", "/v1/orders/:id"),
             "__route__GET__/v1/orders/:id"
         );
+    }
+
+    #[test]
+    fn route_qn_round_trips_through_the_canonical_parser() {
+        let methods = ["get", "GET", "fetch", "FETCH", "Post"];
+        let paths = [
+            "/x",
+            "x",
+            "https://example.com/x",
+            "/x?q=1",
+            "/x#fragment",
+            "",
+            "  /x  ",
+        ];
+
+        for method in methods {
+            for path in paths {
+                let expected_method = if method.eq_ignore_ascii_case("FETCH") {
+                    "GET".to_owned()
+                } else {
+                    method.trim().to_ascii_uppercase()
+                };
+                assert_eq!(
+                    parse_route_qn(&route_qn(method, path)),
+                    Some((expected_method, canonical_route_path(path))),
+                    "method={method:?}, path={path:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_route_qn_accepts_both_virtual_route_prefixes() {
+        assert_eq!(
+            parse_route_qn("__route__GET__/api/alerts"),
+            Some(("GET".to_owned(), "/api/alerts".to_owned()))
+        );
+        assert_eq!(
+            parse_route_qn("__api_call__fetch__api/alerts?active=true"),
+            Some(("GET".to_owned(), "/api/alerts".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_route_qn_rejects_malformed_and_foreign_ids() {
+        for qn in [
+            "__route__GET",
+            "__route____/api/alerts",
+            "__route__GET__",
+            "__route__GET__   ",
+            "__api_call__GET",
+            "__queue__bullmq__emails",
+            "__topic__kafka__orders",
+            "__event__kafka__orders",
+            "GET /api/alerts",
+            "",
+        ] {
+            assert_eq!(parse_route_qn(qn), None, "should reject {qn:?}");
+        }
     }
 
     #[test]
