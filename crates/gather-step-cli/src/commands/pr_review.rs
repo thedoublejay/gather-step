@@ -168,14 +168,13 @@ pub struct PrReviewArgs {
     #[arg(long, value_name = "PATH")]
     pub github_comment_file: Option<PathBuf>,
 
-    /// Skip the check that verifies the workspace HEAD matches `--base`.
+    /// Skip checks that verify the workspace index and refs match `--base`.
     ///
-    /// By default, `pr-review` warns when the workspace's current HEAD differs
-    /// from the resolved base SHA, because the baseline index may then represent
-    /// the feature branch rather than the base ref.  Pass this flag when you
-    /// intentionally index from a different ref (e.g. in CI where the workspace
-    /// is always checked out at the feature branch and the base is accessed via
-    /// `--base`).
+    /// By default, `pr-review` suppresses structural findings when these checks
+    /// fail because the baseline side of the comparison is not trustworthy.
+    /// Pass this flag only when you intentionally accept the current baseline
+    /// (e.g. in CI where the workspace is checked out at the feature branch and
+    /// the base is accessed via `--base`).
     #[arg(long)]
     pub no_baseline_check: bool,
 }
@@ -967,6 +966,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
 
     // ── 2. Resolve refs and changed files ─────────────────────────────────
     let mut baseline_warnings: Vec<String> = Vec::new();
+    let mut baseline_findings_reliable = true;
     let resolution = if uses_synthetic_worktree {
         let target = review_target
             .clone()
@@ -1000,6 +1000,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         let ws_short = &ws_head.sha[..ws_head.sha.len().min(12)];
                         let base_short = &change.base_sha[..change.base_sha.len().min(12)];
                         if ws_head.sha != change.base_sha {
+                            baseline_findings_reliable = false;
                             baseline_warnings.push(format!(
                                 "Repo `{}` HEAD {ws_short} does not match --base {base_short}; \
                                  the baseline index may not represent the base reference. \
@@ -1010,6 +1011,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                         }
                     }
                     Err(e) => {
+                        baseline_findings_reliable = false;
                         tracing::warn!(
                             error = %e,
                             repo = %change.repo_name,
@@ -1026,24 +1028,27 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                 if let Some(warning) =
                     upstream_divergence_warning(&spec.git_repo_root, &args.base, &change.repo_name)
                 {
+                    baseline_findings_reliable = false;
                     baseline_warnings.push(warning);
                 }
                 if let Some(warning) =
                     dirty_worktree_warning(&spec.git_repo_root, &change.repo_name)
                 {
+                    baseline_findings_reliable = false;
                     baseline_warnings.push(warning);
                 }
             }
-            baseline_warnings.extend(baseline_index_warnings(
-                &baseline_workspace_paths,
-                |repo_name, _| {
-                    per_repo_changes
-                        .repos
-                        .iter()
-                        .find(|change| change.repo_name == repo_name)
-                        .map(|change| change.base_sha.clone())
-                },
-            ));
+            let index_check = baseline_index_check(&baseline_workspace_paths, |repo_name, _| {
+                per_repo_changes
+                    .repos
+                    .iter()
+                    .find(|change| change.repo_name == repo_name)
+                    .map(|change| change.base_sha.clone())
+            });
+            if index_check.known_stale {
+                baseline_findings_reliable = false;
+            }
+            baseline_warnings.extend(index_check.warnings);
         }
 
         ReviewResolution {
@@ -1073,6 +1078,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     let ws_short = &ws_head.sha[..ws_head.sha.len().min(12)];
                     let base_short = &base_sha[..base_sha.len().min(12)];
                     if ws_head.sha != base_sha {
+                        baseline_findings_reliable = false;
                         baseline_warnings.push(format!(
                             "The workspace HEAD {ws_short} does not match --base {base_short}; \
                              the baseline index may not represent the base reference. \
@@ -1082,6 +1088,7 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     }
                 }
                 Err(e) => {
+                    baseline_findings_reliable = false;
                     tracing::warn!(error = %e, "Could not resolve workspace HEAD for the baseline check.");
                     baseline_warnings.push(format!(
                         "Could not resolve workspace HEAD during the baseline check: {e}. \
@@ -1092,12 +1099,14 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             }
             if let Some(warning) = upstream_divergence_warning(&app.workspace_path, &args.base, "")
             {
+                baseline_findings_reliable = false;
                 baseline_warnings.push(warning);
             }
             if let Some(warning) = dirty_worktree_warning(&app.workspace_path, "") {
+                baseline_findings_reliable = false;
                 baseline_warnings.push(warning);
             }
-            baseline_warnings.extend(baseline_index_warnings(
+            let index_check = baseline_index_check(
                 &baseline_workspace_paths,
                 // Repos with their own git root resolve --base locally; repos
                 // that are plain subdirectories of the workspace git repo
@@ -1109,7 +1118,11 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
                     }
                     Err(_) => None,
                 },
-            ));
+            );
+            if index_check.known_stale {
+                baseline_findings_reliable = false;
+            }
+            baseline_warnings.extend(index_check.warnings);
         }
 
         let diff_base_sha =
@@ -1131,6 +1144,16 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
             synthetic_target: None,
         }
     };
+
+    if !baseline_findings_reliable {
+        baseline_warnings.push(
+            "Structural findings were suppressed because the baseline checks failed; routes, \
+             symbols, contracts, events, decorators, and deployment deltas would not be \
+             trustworthy. Refresh the base ref and rebuild the workspace index, or pass \
+             --no-baseline-check to accept the current baseline explicitly."
+                .to_owned(),
+        );
+    }
 
     let ReviewResolution {
         base_sha,
@@ -1561,7 +1584,47 @@ pub fn run_inner(app: &AppContext, args: &PrReviewRunArgs) -> Result<(String, bo
         deployment_deltas,
     ) = {
         let baseline_graph_exists = ws_paths.storage_root.join("graph.redb").exists();
-        if baseline_graph_exists {
+        if !baseline_findings_reliable {
+            tracing::warn!(
+                "Baseline checks failed. Suppressing structural PR-review findings instead of \
+                 comparing against a known-unreliable baseline."
+            );
+            (
+                RouteDeltas {
+                    unavailable: routes_unavailable,
+                    ..RouteDeltas::default()
+                },
+                SymbolDeltas {
+                    unavailable: symbols_unavailable,
+                    ..SymbolDeltas::default()
+                },
+                PayloadContractDeltas {
+                    unavailable: payload_contracts_unavailable,
+                    ..PayloadContractDeltas::default()
+                },
+                AiContractDeltas {
+                    unavailable: ai_contracts_unavailable,
+                    ..AiContractDeltas::default()
+                },
+                EventDeltas {
+                    unavailable: events_unavailable,
+                    ..EventDeltas::default()
+                },
+                vec![],
+                ContractAlignments {
+                    unavailable: contract_alignments_unavailable,
+                    ..ContractAlignments::default()
+                },
+                DecoratorDeltas {
+                    unavailable: decorators_unavailable,
+                    ..DecoratorDeltas::default()
+                },
+                DeploymentDeltas {
+                    unavailable: deployment_unavailable,
+                    ..DeploymentDeltas::default()
+                },
+            )
+        } else if baseline_graph_exists {
             let review_coord = gather_step_storage::StorageCoordinator::open_read_only(
                 &artifact_root.storage_root,
             );
@@ -2275,14 +2338,20 @@ fn dirty_worktree_warning(git_root: &Path, repo_name: &str) -> Option<String> {
 /// last-indexed commit does not match the SHA this review treats as `--base`.
 /// `base_sha_for_repo` returns `None` for repos that do not participate in
 /// the review (or where the base ref does not resolve), which skips them.
-fn baseline_index_warnings(
+#[derive(Debug, Default)]
+struct BaselineIndexCheck {
+    warnings: Vec<String>,
+    known_stale: bool,
+}
+
+fn baseline_index_check(
     workspace_paths: &WorkspacePaths,
     base_sha_for_repo: impl Fn(&str, &Path) -> Option<String>,
-) -> Vec<String> {
-    let mut warnings = Vec::new();
+) -> BaselineIndexCheck {
+    let mut check = BaselineIndexCheck::default();
     let metadata_path = workspace_paths.storage_root.join("metadata.sqlite");
     if !workspace_paths.registry_path.exists() || !metadata_path.exists() {
-        return warnings;
+        return check;
     }
     let registry = match RegistryStore::open(&workspace_paths.registry_path) {
         Ok(registry) => registry,
@@ -2291,18 +2360,18 @@ fn baseline_index_warnings(
                 error = %e,
                 "Could not read the workspace registry for the baseline index check."
             );
-            return warnings;
+            return check;
         }
     };
     let metadata = match MetadataStoreDb::open(&metadata_path) {
         Ok(metadata) => metadata,
         Err(e) => {
-            warnings.push(format!(
+            check.warnings.push(format!(
                 "Could not open the workspace metadata store to verify baseline index \
                  freshness: {e}. The baseline index may not represent --base; pass \
                  --no-baseline-check to suppress this warning."
             ));
-            return warnings;
+            return check;
         }
     };
     for (repo_name, registered) in &registry.registry().repos {
@@ -2314,7 +2383,8 @@ fn baseline_index_warnings(
                 if indexed_sha != base_sha {
                     let indexed_short = &indexed_sha[..indexed_sha.len().min(12)];
                     let base_short = &base_sha[..base_sha.len().min(12)];
-                    warnings.push(format!(
+                    check.known_stale = true;
+                    check.warnings.push(format!(
                         "The baseline index for repo `{repo_name}` was built at {indexed_short}, \
                          which does not match --base {base_short}; the baseline side of the delta \
                          is stale. Run `gather-step index` with the workspace at --base, or pass \
@@ -2323,7 +2393,7 @@ fn baseline_index_warnings(
                 }
             }
             Ok(None) => {
-                warnings.push(format!(
+                check.warnings.push(format!(
                     "Repo `{repo_name}` has no recorded indexed commit; the baseline index may \
                      not represent --base. Run `gather-step index`, or pass --no-baseline-check \
                      to suppress this warning."
@@ -2335,14 +2405,14 @@ fn baseline_index_warnings(
                     repo = %repo_name,
                     "Could not read the indexed commit SHA for the baseline index check."
                 );
-                warnings.push(format!(
+                check.warnings.push(format!(
                     "Could not verify baseline index freshness for repo `{repo_name}`: {e}. \
                      Pass --no-baseline-check to suppress this warning."
                 ));
             }
         }
     }
-    warnings
+    check
 }
 
 /// Default-base workspace paths for an arbitrary root. Delegates to the single
@@ -3331,7 +3401,6 @@ mod tests {
             "repos:\n  - name: myrepo\n    path: myrepo\nindexing:\n  workspace_concurrency: 1\n",
         )
         .unwrap();
-
         // Initial repo content
         let src = ws.join("myrepo/src");
         fs::create_dir_all(&src).unwrap();
@@ -3371,6 +3440,165 @@ mod tests {
         git_run(&ws, &["checkout", "main"]);
 
         (ws, base_sha, head_sha)
+    }
+
+    /// Create a workspace where the persistent index predates `--base` and
+    /// therefore contains a symbol that is absent from both base and head.
+    /// Comparing that stale graph with the review graph would falsely report
+    /// the symbol as removed by the PR.
+    fn build_stale_baseline_false_delta_fixture(root: &Path) -> (PathBuf, String, String) {
+        let ws = root.to_path_buf();
+
+        fs::write(
+            ws.join("gather-step.config.yaml"),
+            "repos:\n  - name: myrepo\n    path: myrepo\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+        fs::write(ws.join(".gitignore"), ".gather-step/\n").unwrap();
+
+        let src = ws.join("myrepo/src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            ws.join("myrepo/package.json"),
+            r#"{"name":"myrepo","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            src.join("stale_status.ts"),
+            "export enum LegacyFindingResolutionStatusEnum {\n  DueSoon = 'due_soon',\n}\n",
+        )
+        .unwrap();
+
+        git_run(&ws, &["init", "--initial-branch=main"]);
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "stale indexed state"]);
+
+        let indexed_sha = git_head_sha(&ws);
+        index_baseline_workspace(&ws);
+        let paths = workspace_paths_for_root(&ws);
+        let metadata = MetadataStoreDb::open(paths.storage_root.join("metadata.sqlite"))
+            .expect("metadata store");
+        metadata
+            .set_last_commit_sha("myrepo", &indexed_sha, 0)
+            .expect("record indexed sha");
+        drop(metadata);
+
+        fs::remove_file(src.join("stale_status.ts")).unwrap();
+        fs::write(
+            src.join("current_status.ts"),
+            "export enum FindingResolutionStatusEnum {\n  Resolved = 'resolved',\n}\n",
+        )
+        .unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(
+            &ws,
+            &["commit", "--message", "advance base past stale enum"],
+        );
+        let base_sha = git_head_sha(&ws);
+
+        git_run(&ws, &["checkout", "-b", "feature/unrelated-change"]);
+        fs::write(ws.join("myrepo/README.md"), "Feature documentation.\n").unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "head: update docs"]);
+        let head_sha = git_head_sha(&ws);
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, base_sha, head_sha)
+    }
+
+    /// Create a clone whose local `main` and baseline index both lag
+    /// `origin/main`. The feature branch starts from the upstream commit, so a
+    /// review against local `main` would otherwise attribute upstream enum
+    /// changes to the PR.
+    fn build_lagging_local_base_false_delta_fixture(root: &Path) -> (PathBuf, String) {
+        let origin = root.join("origin");
+        fs::create_dir_all(origin.join("backend/src")).unwrap();
+        fs::create_dir_all(origin.join("frontend/src")).unwrap();
+        fs::write(
+            origin.join("gather-step.config.yaml"),
+            "repos:\n  - name: backend\n    path: backend\n  - name: frontend\n    path: frontend\nindexing:\n  workspace_concurrency: 1\n",
+        )
+        .unwrap();
+        fs::write(origin.join(".gitignore"), ".gather-step/\n").unwrap();
+        fs::write(
+            origin.join("backend/package.json"),
+            r#"{"name":"backend","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            origin.join("frontend/package.json"),
+            r#"{"name":"frontend","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        fs::write(
+            origin.join("backend/src/status.ts"),
+            "export type FindingResolutionStatus =\n  | 'finding.resolved'\n  | 'finding.in_progress';\n",
+        )
+        .unwrap();
+        fs::write(
+            origin.join("frontend/src/status-filters.ts"),
+            "export const FINDING_RESOLUTION_FILTERS = [\n  'finding.resolved',\n  'finding.in_progress',\n];\n",
+        )
+        .unwrap();
+
+        git_run(&origin, &["init", "--initial-branch=main"]);
+        git_run(&origin, &["config", "user.email", "test@example.com"]);
+        git_run(&origin, &["config", "user.name", "Test"]);
+        git_run(&origin, &["config", "commit.gpgsign", "false"]);
+        git_run(&origin, &["config", "tag.gpgsign", "false"]);
+        git_run(&origin, &["add", "."]);
+        git_run(&origin, &["commit", "--message", "initial main"]);
+
+        let ws = root.join("clone");
+        git_run(
+            root,
+            &[
+                "clone",
+                "--quiet",
+                origin.to_str().expect("utf8 origin path"),
+                ws.to_str().expect("utf8 clone path"),
+            ],
+        );
+        git_run(&ws, &["config", "user.email", "test@example.com"]);
+        git_run(&ws, &["config", "user.name", "Test"]);
+        git_run(&ws, &["config", "commit.gpgsign", "false"]);
+        git_run(&ws, &["config", "tag.gpgsign", "false"]);
+        let indexed_sha = git_head_sha(&ws);
+        index_baseline_workspace(&ws);
+        let paths = workspace_paths_for_root(&ws);
+        let metadata = MetadataStoreDb::open(paths.storage_root.join("metadata.sqlite"))
+            .expect("metadata store");
+        for repo in ["backend", "frontend"] {
+            metadata
+                .set_last_commit_sha(repo, &indexed_sha, 0)
+                .expect("record indexed sha");
+        }
+        drop(metadata);
+
+        fs::write(
+            origin.join("backend/src/status.ts"),
+            "export type FindingResolutionStatus =\n  | 'finding.resolved'\n  | 'finding.in_progress'\n  | 'finding.due_soon';\n",
+        )
+        .unwrap();
+        git_run(&origin, &["add", "."]);
+        git_run(&origin, &["commit", "--message", "advance upstream enum"]);
+
+        git_run(&ws, &["fetch", "--quiet", "origin"]);
+        git_run(
+            &ws,
+            &["checkout", "-b", "feature/unrelated-docs", "origin/main"],
+        );
+        fs::write(ws.join("frontend/README.md"), "Feature documentation.\n").unwrap();
+        git_run(&ws, &["add", "."]);
+        git_run(&ws, &["commit", "--message", "head: update docs"]);
+        let head_sha = git_head_sha(&ws);
+        git_run(&ws, &["checkout", "main"]);
+
+        (ws, head_sha)
     }
 
     fn build_large_changed_files_fixture(root: &Path) -> (PathBuf, String, String) {
@@ -6336,8 +6564,10 @@ indexing:
         let temp = TempDir::new("baseline-stale");
         let paths = baseline_fixture(&temp, Some(INDEXED_SHA));
 
-        let warnings = baseline_index_warnings(&paths, |_, _| Some(BASE_SHA.to_owned()));
+        let check = baseline_index_check(&paths, |_, _| Some(BASE_SHA.to_owned()));
+        let warnings = check.warnings;
 
+        assert!(check.known_stale);
         assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
         assert!(
             warnings[0].contains("does not match --base"),
@@ -6356,8 +6586,10 @@ indexing:
         let temp = TempDir::new("baseline-fresh");
         let paths = baseline_fixture(&temp, Some(INDEXED_SHA));
 
-        let warnings = baseline_index_warnings(&paths, |_, _| Some(INDEXED_SHA.to_owned()));
+        let check = baseline_index_check(&paths, |_, _| Some(INDEXED_SHA.to_owned()));
+        let warnings = check.warnings;
 
+        assert!(!check.known_stale);
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
     }
 
@@ -6366,8 +6598,10 @@ indexing:
         let temp = TempDir::new("baseline-never");
         let paths = baseline_fixture(&temp, None);
 
-        let warnings = baseline_index_warnings(&paths, |_, _| Some(BASE_SHA.to_owned()));
+        let check = baseline_index_check(&paths, |_, _| Some(BASE_SHA.to_owned()));
+        let warnings = check.warnings;
 
+        assert!(!check.known_stale);
         assert_eq!(warnings.len(), 1, "warnings: {warnings:?}");
         assert!(
             warnings[0].contains("no recorded indexed commit"),
@@ -6381,8 +6615,10 @@ indexing:
         let temp = TempDir::new("baseline-skip");
         let paths = baseline_fixture(&temp, Some(INDEXED_SHA));
 
-        let warnings = baseline_index_warnings(&paths, |_, _| None);
+        let check = baseline_index_check(&paths, |_, _| None);
+        let warnings = check.warnings;
 
+        assert!(!check.known_stale);
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
     }
 
@@ -6391,8 +6627,10 @@ indexing:
         let temp = TempDir::new("baseline-unindexed");
         let paths = workspace_paths_for_root(temp.path());
 
-        let warnings = baseline_index_warnings(&paths, |_, _| Some(BASE_SHA.to_owned()));
+        let check = baseline_index_check(&paths, |_, _| Some(BASE_SHA.to_owned()));
+        let warnings = check.warnings;
 
+        assert!(!check.known_stale);
         assert!(warnings.is_empty(), "warnings: {warnings:?}");
     }
 
@@ -6460,6 +6698,124 @@ indexing:
                     && w.contains(&base_sha[..12])),
             "expected a stale-baseline-index warning naming the repo and --base; got {warnings:?}"
         );
+    }
+
+    #[test]
+    fn pr_review_suppresses_structural_findings_from_a_stale_baseline() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("stale-false-delta-ws");
+        let cache_tmp = TempDir::new("stale-false-delta-cache");
+        let (ws, base_sha, head_sha) = build_stale_baseline_false_delta_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let mut args = PrReviewRunArgs {
+            base: base_sha,
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: true,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).expect("JSON must parse");
+        let warnings = report_warnings(&rendered);
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("baseline side of the delta is stale")),
+            "expected a stale-baseline warning; got {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Structural findings were suppressed")),
+            "expected the report to explain why structural findings are absent; got {warnings:?}"
+        );
+        assert_eq!(report["symbols"]["added"], serde_json::json!([]));
+        assert_eq!(report["symbols"]["removed"], serde_json::json!([]));
+        assert_eq!(report["symbols"]["changed"], serde_json::json!([]));
+        assert_eq!(
+            report["contract_alignments"]["findings"],
+            serde_json::json!([])
+        );
+        assert_eq!(report["removed_surface_risks"], serde_json::json!([]));
+        assert_eq!(report["evidence"], serde_json::json!([]));
+
+        args.no_baseline_check = true;
+        let (opt_out_rendered, _) =
+            run_inner(&app, &args).expect("The opt-out pr-review run should succeed.");
+        let opt_out_report: serde_json::Value =
+            serde_json::from_str(&opt_out_rendered).expect("opt-out JSON must parse");
+        let opt_out_symbols = &opt_out_report["symbols"];
+        assert!(
+            ["added", "removed", "changed"].iter().any(|key| {
+                opt_out_symbols[*key]
+                    .as_array()
+                    .is_some_and(|values| !values.is_empty())
+            }),
+            "the stale-index fixture must produce the fabricated enum delta when baseline checks \
+             are explicitly disabled: {opt_out_symbols}"
+        );
+    }
+
+    #[test]
+    fn pr_review_suppresses_structural_findings_when_local_base_lags_upstream() {
+        if !git_available() {
+            return;
+        }
+
+        let ws_tmp = TempDir::new("lagging-local-base-ws");
+        let cache_tmp = TempDir::new("lagging-local-base-cache");
+        let (ws, head_sha) = build_lagging_local_base_false_delta_fixture(ws_tmp.path());
+
+        let app = make_app(&ws);
+        let args = PrReviewRunArgs {
+            base: "main".to_owned(),
+            head: head_sha,
+            engine: ReviewEngine::TempIndex,
+            keep_cache: false,
+            cache_root: Some(cache_tmp.path().to_path_buf()),
+            config: None,
+            severity: SeverityMode::Warn,
+            format: OutputFormat::Json,
+            github_comment_file: None,
+            no_baseline_check: false,
+        };
+
+        let (rendered, _) = run_inner(&app, &args).expect("The pr-review run should succeed.");
+        let report: serde_json::Value = serde_json::from_str(&rendered).expect("JSON must parse");
+        let warnings = report_warnings(&rendered);
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("does not match its upstream `origin/main`")),
+            "expected an upstream-divergence warning; got {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Structural findings were suppressed")),
+            "expected the report to explain why structural findings are absent; got {warnings:?}"
+        );
+        assert_eq!(report["symbols"]["added"], serde_json::json!([]));
+        assert_eq!(report["symbols"]["removed"], serde_json::json!([]));
+        assert_eq!(report["symbols"]["changed"], serde_json::json!([]));
+        assert_eq!(
+            report["contract_alignments"]["findings"],
+            serde_json::json!([])
+        );
+        assert_eq!(report["removed_surface_risks"], serde_json::json!([]));
+        assert_eq!(report["evidence"], serde_json::json!([]));
     }
 
     #[test]
