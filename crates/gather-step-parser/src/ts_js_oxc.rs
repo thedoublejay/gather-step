@@ -15,18 +15,18 @@ use oxc_allocator::Allocator;
 #[cfg(feature = "test-support")]
 use oxc_ast::ast::TSModuleDeclarationName;
 use oxc_ast::ast::{
-    Argument, ArrayAssignmentTarget, ArrowFunctionExpression, AssignmentTarget,
+    Argument, ArrayAssignmentTarget, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget,
     AssignmentTargetMaybeDefault, AssignmentTargetProperty, BinaryOperator, BindingPattern,
     CallExpression, ChainElement, Class, ClassElement, Declaration, Decorator,
-    ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
-    ExportNamedDeclaration, Expression, ForStatementInit, ForStatementLeft, Function, FunctionBody,
-    IfStatement, ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind,
-    JSXAttributeItem, JSXAttributeValue, JSXChild, JSXElement, JSXExpression, MemberExpression,
-    MethodDefinition, MethodDefinitionKind, ModuleExportName, NewExpression,
-    ObjectAssignmentTarget, ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind,
-    SimpleAssignmentTarget, Statement, TSAccessibility, TSEnumMemberName,
-    TSImportEqualsDeclaration, TSModuleDeclarationBody, TSTypeName, VariableDeclaration,
-    VariableDeclarator,
+    ExportAllDeclaration, ExportDeclaration, ExportDefaultDeclaration,
+    ExportDefaultDeclarationKind, ExportFromDeclaration, Expression, ForStatementInit,
+    ForStatementLeft, Function, FunctionBody, IfStatement, ImportDeclaration,
+    ImportDeclarationSpecifier, ImportOrExportKind, JSXAttributeItem, JSXAttributeValue, JSXChild,
+    JSXElement, JSXExpression, MemberExpression, MethodDefinition, MethodDefinitionKind,
+    ModuleExportName, NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPropertyKind,
+    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, TSAccessibility,
+    TSEnumMemberName, TSImportEqualsDeclaration, TSModuleDeclarationBody, TSTypeName,
+    VariableDeclaration, VariableDeclarator,
 };
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType, Span};
@@ -649,11 +649,16 @@ fn visit_top_level_statement(
     match stmt {
         Statement::ImportDeclaration(decl) => visit_import_declaration(decl, state, ctx),
         Statement::ExportAllDeclaration(decl) => visit_export_all_declaration(decl, state, ctx),
-        Statement::ExportNamedDeclaration(decl) => visit_export_named_declaration(decl, state, ctx),
+        Statement::ExportDeclaration(decl) => visit_export_declaration(decl, state, ctx),
+        Statement::ExportFromDeclaration(decl) => {
+            visit_export_from_declaration(decl, state, ctx);
+        }
         Statement::ExportDefaultDeclaration(decl) => {
             visit_export_default_declaration(decl, state, ctx);
         }
-        Statement::TSExportAssignment(_) | Statement::TSNamespaceExportDeclaration(_) => {}
+        Statement::ExportNamedDeclaration(_)
+        | Statement::TSExportAssignment(_)
+        | Statement::TSNamespaceExportDeclaration(_) => {}
         // Declarations and regular statements
         _ => visit_statement(stmt, state, ctx),
     }
@@ -845,7 +850,10 @@ fn visit_statement(stmt: &Statement<'_>, state: &mut ParseState<'_>, ctx: &mut V
         // re-dispatched for their import/export side effects.
         Statement::ImportDeclaration(decl) => visit_import_declaration(decl, state, ctx),
         Statement::ExportAllDeclaration(decl) => visit_export_all_declaration(decl, state, ctx),
-        Statement::ExportNamedDeclaration(decl) => visit_export_named_declaration(decl, state, ctx),
+        Statement::ExportDeclaration(decl) => visit_export_declaration(decl, state, ctx),
+        Statement::ExportFromDeclaration(decl) => {
+            visit_export_from_declaration(decl, state, ctx);
+        }
         Statement::ExportDefaultDeclaration(decl) => {
             visit_export_default_declaration(decl, state, ctx);
         }
@@ -903,23 +911,24 @@ fn visit_export_all_declaration(
     );
 }
 
-fn visit_export_named_declaration(
-    decl: &ExportNamedDeclaration<'_>,
+fn visit_export_from_declaration(
+    decl: &ExportFromDeclaration<'_>,
+    state: &mut ParseState<'_>,
+    ctx: &VisitCtx<'_>,
+) {
+    let source_specifier = decl.source.value.to_string();
+    let bindings = import_bindings_from_export_from(decl);
+    let stmt_span = ctx.span(decl.span);
+    push_imports(state, &source_specifier, bindings, &stmt_span, true);
+}
+
+fn visit_export_declaration(
+    decl: &ExportDeclaration<'_>,
     state: &mut ParseState<'_>,
     ctx: &mut VisitCtx<'_>,
 ) {
-    if let Some(source) = &decl.source {
-        let source_specifier = source.value.to_string();
-        let bindings = import_bindings_from_named_export(decl);
-        let stmt_span = ctx.span(decl.span);
-        push_imports(state, &source_specifier, bindings, &stmt_span, true);
-        return;
-    }
-
-    if let Some(declaration) = decl.declaration.as_ref() {
-        let mut child_ctx = ctx.exported_child();
-        visit_inline_declaration(declaration, state, &mut child_ctx);
-    }
+    let mut child_ctx = ctx.exported_child();
+    visit_inline_declaration(&decl.declaration, state, &mut child_ctx);
 }
 
 fn visit_export_default_declaration(
@@ -1493,7 +1502,7 @@ fn visit_arrow_property(
     );
     if ctx.depth < MAX_DEPTH {
         let mut body_ctx = ctx.child_with_owner(func_node.id);
-        visit_function_body(&arrow.body, state, &mut body_ctx);
+        visit_arrow_function_body(&arrow.body, state, &mut body_ctx);
     }
 }
 
@@ -1587,7 +1596,7 @@ fn visit_variable_declarator(
             );
             if ctx.depth < MAX_DEPTH {
                 let mut body_ctx = ctx.child_with_owner(func_node.id);
-                visit_function_body(&arrow.body, state, &mut body_ctx);
+                visit_arrow_function_body(&arrow.body, state, &mut body_ctx);
             }
             return;
         }
@@ -1660,6 +1669,18 @@ fn visit_function_body(
 ) {
     for stmt in &body.statements {
         visit_statement(stmt, state, ctx);
+    }
+}
+
+fn visit_arrow_function_body(
+    body: &ArrowFunctionBody<'_>,
+    state: &mut ParseState<'_>,
+    ctx: &mut VisitCtx<'_>,
+) {
+    if let Some(body) = body.as_function_body() {
+        visit_function_body(body, state, ctx);
+    } else if let Some(expression) = body.as_expression() {
+        visit_expression(expression, state, ctx);
     }
 }
 
@@ -1758,7 +1779,7 @@ fn visit_expression(expr: &Expression<'_>, state: &mut ParseState<'_>, ctx: &mut
         Expression::ClassExpression(class) => visit_class_expression(class, state, ctx),
         Expression::ArrowFunctionExpression(arrow) => {
             let mut body_ctx = ctx.child_no_export();
-            visit_function_body(&arrow.body, state, &mut body_ctx);
+            visit_arrow_function_body(&arrow.body, state, &mut body_ctx);
         }
         Expression::FunctionExpression(func) => {
             if ctx.depth < MAX_DEPTH
@@ -2334,10 +2355,8 @@ fn import_bindings_from_decl(decl: &ImportDeclaration<'_>) -> Vec<ImportBinding>
         .collect()
 }
 
-fn import_bindings_from_named_export(decl: &ExportNamedDeclaration<'_>) -> Vec<ImportBinding> {
-    let Some(source) = decl.source.as_ref().map(|s| s.value.to_string()) else {
-        return Vec::new();
-    };
+fn import_bindings_from_export_from(decl: &ExportFromDeclaration<'_>) -> Vec<ImportBinding> {
+    let source = decl.source.value.to_string();
     let outer_is_type = decl.export_kind == ImportOrExportKind::Type;
     decl.specifiers
         .iter()
@@ -3084,8 +3103,8 @@ fn parse_import_bindings_for_test(file: &FileEntry, source: &str) -> Vec<ImportB
             Statement::ImportDeclaration(decl) => {
                 bindings.extend(import_bindings_from_decl(decl));
             }
-            Statement::ExportNamedDeclaration(decl) => {
-                bindings.extend(import_bindings_from_named_export(decl));
+            Statement::ExportFromDeclaration(decl) => {
+                bindings.extend(import_bindings_from_export_from(decl));
             }
             Statement::ExportAllDeclaration(decl) => {
                 bindings.push(ImportBinding {
@@ -3126,10 +3145,8 @@ fn parse_top_level_declared_names(file: &FileEntry, source: &str) -> Vec<String>
     let mut names: BTreeSet<String> = BTreeSet::new();
     for statement in &parsed.program.body {
         match statement {
-            Statement::ExportNamedDeclaration(decl) => {
-                if let Some(declaration) = decl.declaration.as_ref() {
-                    collect_declaration_names(declaration, &mut names);
-                }
+            Statement::ExportDeclaration(decl) => {
+                collect_declaration_names(&decl.declaration, &mut names);
             }
             Statement::ExportDefaultDeclaration(decl) => match &decl.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
