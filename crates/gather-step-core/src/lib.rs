@@ -44,9 +44,10 @@ pub use source_scope::{SourceScope, classify_source_scope};
 pub use virtual_nodes::{
     VIRTUAL_NODE_REPO, VirtualNodeKind, broker_qn, canonical_route_path, canonical_topology_part,
     canonical_topology_part_or, config_map_qn, database_qn, deployment_qn, env_var_qn,
-    llm_model_qn, mcp_tool_qn, parse_shared_symbol_qn, prompt_qn, queue_qn, route_qn, secret_qn,
-    shared_import_symbol_qn, shared_package_root, shared_symbol_qn, shared_symbol_qn_unversioned,
-    topic_qn, value_mirror_qn, vector_index_qn, virtual_node, virtual_node_id,
+    llm_model_qn, mcp_tool_qn, parse_route_qn, parse_shared_symbol_qn, prompt_qn, queue_qn,
+    route_qn, secret_qn, shared_import_symbol_qn, shared_package_root, shared_symbol_qn,
+    shared_symbol_qn_unversioned, topic_qn, value_mirror_qn, vector_index_qn, virtual_node,
+    virtual_node_id,
 };
 pub use workspace::{
     WorkspaceIndexDelegate, WorkspaceIndexError, WorkspaceRepoResult, WorkspaceStats,

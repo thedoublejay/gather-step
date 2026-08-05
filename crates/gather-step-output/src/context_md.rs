@@ -7,7 +7,7 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use gather_step_analysis::{cross_repo_deps, list_orphan_topics_paged, trace_event, trace_route};
-use gather_step_core::{NodeKind, RegisteredRepo, WorkspaceRegistry};
+use gather_step_core::{NodeKind, RegisteredRepo, WorkspaceRegistry, parse_route_qn};
 use gather_step_storage::{GraphStore, GraphStoreDb, MetadataStore};
 use thiserror::Error;
 
@@ -947,21 +947,7 @@ fn canonical_route_key(node: &gather_step_core::NodeData) -> Option<(String, Str
         .external_id
         .as_deref()
         .or(node.qualified_name.as_deref())?;
-    let suffix = external_id
-        .strip_prefix("__route__")
-        .or_else(|| external_id.strip_prefix("__api_call__"))?;
-    let (method, path) = suffix.split_once("__")?;
-    let method = if method.eq_ignore_ascii_case("FETCH") {
-        "GET".to_owned()
-    } else {
-        method.to_ascii_uppercase()
-    };
-    let path = if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("/{path}")
-    };
-    Some((method, path))
+    parse_route_qn(external_id)
 }
 
 fn route_priority(node: &gather_step_core::NodeData) -> u8 {

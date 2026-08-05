@@ -7,7 +7,7 @@
 //!
 //! - The canonical key for a route is `(method, canonical_path)`, decoded from
 //!   the node's `qualified_name` / `external_id` (format:
-//!   `"__route__{METHOD}__{path}"`).
+//!   `"__route__{METHOD}__{path}"` or `"__api_call__{METHOD}__{path}"`).
 //! - Handler repo / file / line / `handler_qualified_name` are resolved by
 //!   walking `get_incoming(route_id)` filtered by `EdgeKind::Serves`.  The
 //!   first matching non-virtual source node wins.
@@ -15,7 +15,7 @@
 //!   a direct-insertion `GraphStoreDb` without running the indexer.
 
 use anyhow::Result;
-use gather_step_core::{EdgeKind, NodeId, NodeKind};
+use gather_step_core::{EdgeKind, NodeId, NodeKind, parse_route_qn, route_qn};
 use gather_step_storage::GraphStore;
 use rustc_hash::FxHashMap;
 use tracing::warn;
@@ -86,7 +86,9 @@ pub fn find_route_node_id<S: GraphStore>(
     path: &str,
 ) -> Result<Option<NodeId>> {
     let nodes = store.nodes_by_type(NodeKind::Route)?;
-    let want_key = (method.to_ascii_uppercase(), path.to_owned());
+    let Some(want_key) = parse_route_qn(&route_qn(method, path)) else {
+        return Ok(None);
+    };
 
     for node in nodes {
         if !node.is_virtual {
@@ -96,7 +98,7 @@ pub fn find_route_node_id<S: GraphStore>(
             .external_id
             .as_deref()
             .or(node.qualified_name.as_deref());
-        if let Some(key) = qn.and_then(decode_route_qn)
+        if let Some(key) = qn.and_then(parse_route_qn)
             && key == want_key
         {
             return Ok(Some(node.id));
@@ -123,7 +125,7 @@ fn build_route_map<S: GraphStore>(store: &S) -> Result<RouteMap> {
             .as_deref()
             .or(node.qualified_name.as_deref());
 
-        let Some((method, path)) = qn.and_then(decode_route_qn) else {
+        let Some((method, path)) = qn.and_then(parse_route_qn) else {
             warn!(
                 node_id = ?node.id,
                 qn = ?qn,
@@ -151,17 +153,6 @@ fn build_route_map<S: GraphStore>(store: &S) -> Result<RouteMap> {
     }
 
     Ok(map)
-}
-
-/// Decode `"__route__{METHOD}__{path}"` → `(method, path)`.
-/// Returns `None` for any string that doesn't match the pattern.
-fn decode_route_qn(qn: &str) -> Option<(String, String)> {
-    let suffix = qn.strip_prefix("__route__")?;
-    let (method, path) = suffix.split_once("__")?;
-    if method.is_empty() || path.is_empty() {
-        return None;
-    }
-    Some((method.to_ascii_uppercase(), path.to_owned()))
 }
 
 /// Walk incoming edges on `route_id` filtered by `EdgeKind::Serves`.
@@ -306,6 +297,16 @@ mod tests {
         )
     }
 
+    fn route_node_with_external_id(external_id: &str) -> NodeData {
+        virtual_node(
+            NodeKind::Route,
+            "__virtual__",
+            "__virtual__",
+            external_id,
+            external_id,
+        )
+    }
+
     fn serves_edge(handler: &NodeData, route: &NodeData, owner_file: &NodeData) -> EdgeData {
         EdgeData {
             source: handler.id,
@@ -345,6 +346,49 @@ mod tests {
         store
             .bulk_insert(&[f, h, r], &[e])
             .expect("bulk insert should succeed");
+    }
+
+    fn insert_route_with_external_id(
+        store: &GraphStoreDb,
+        repo: &str,
+        file: &str,
+        handler_name: &str,
+        external_id: &str,
+        line: u32,
+    ) {
+        let unique_file = format!("{file}.{handler_name}.route");
+        let f = file_node(repo, &unique_file);
+        let h = handler_node(repo, file, handler_name, line);
+        let r = route_node_with_external_id(external_id);
+        let e = serves_edge(&h, &r, &f);
+        store
+            .bulk_insert(&[f, h, r], &[e])
+            .expect("bulk insert should succeed");
+    }
+
+    fn assert_route_ids_are_equivalent(base_id: &str, head_id: &str) {
+        let (_td_b, baseline) = open_store("route-id-base");
+        let (_td_r, review) = open_store("route-id-review");
+
+        insert_route_with_external_id(&baseline, "api", "src/orders.ts", "listOrders", base_id, 5);
+        insert_route_with_external_id(&review, "api", "src/orders.ts", "listOrders", head_id, 5);
+
+        let deltas = extract_route_deltas(&baseline, &review).expect("should succeed");
+        assert!(
+            deltas.added.is_empty(),
+            "unexpected additions: {:?}",
+            deltas.added
+        );
+        assert!(
+            deltas.removed.is_empty(),
+            "unexpected removals: {:?}",
+            deltas.removed
+        );
+        assert!(
+            deltas.changed.is_empty(),
+            "unexpected changes: {:?}",
+            deltas.changed
+        );
     }
 
     // ── tests ─────────────────────────────────────────────────────────────────
@@ -393,6 +437,59 @@ mod tests {
         assert_eq!(deltas.added[0].path, "/orders");
         assert!(deltas.removed.is_empty(), "no routes should be removed");
         assert!(deltas.changed.is_empty(), "no routes should be changed");
+    }
+
+    #[test]
+    fn route_prefix_changes_do_not_create_deltas() {
+        assert_route_ids_are_equivalent("__route__GET__/orders", "__api_call__GET__/orders");
+    }
+
+    #[test]
+    fn fetch_api_calls_match_get_routes() {
+        assert_route_ids_are_equivalent("__route__GET__/orders", "__api_call__FETCH__/orders");
+    }
+
+    #[test]
+    fn route_paths_without_a_leading_slash_match_canonical_paths() {
+        assert_route_ids_are_equivalent("__api_call__GET__orders", "__route__GET__/orders");
+    }
+
+    #[test]
+    fn api_call_routes_are_reported_when_the_method_is_new() {
+        let (_td_b, baseline) = open_store("api-call-added-base");
+        let (_td_r, review) = open_store("api-call-added-review");
+
+        insert_route_with_external_id(
+            &baseline,
+            "api",
+            "src/orders.ts",
+            "listOrders",
+            "__route__GET__/orders",
+            5,
+        );
+        insert_route_with_external_id(
+            &review,
+            "api",
+            "src/orders.ts",
+            "listOrders",
+            "__api_call__GET__/orders",
+            5,
+        );
+        insert_route_with_external_id(
+            &review,
+            "api",
+            "src/orders.ts",
+            "createOrder",
+            "__api_call__POST__/orders",
+            20,
+        );
+
+        let deltas = extract_route_deltas(&baseline, &review).expect("should succeed");
+        assert_eq!(deltas.added.len(), 1);
+        assert_eq!(deltas.added[0].method, "POST");
+        assert_eq!(deltas.added[0].path, "/orders");
+        assert!(deltas.removed.is_empty());
+        assert!(deltas.changed.is_empty());
     }
 
     /// A route present only in the baseline index appears in `removed`.

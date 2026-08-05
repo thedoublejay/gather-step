@@ -1,7 +1,7 @@
 use gather_step_analysis::{
     CrudTraceRole, resolve_route_target, trace_crud_route, trace_crud_symbol,
 };
-use gather_step_core::{NodeData, WorkspaceRegistry, classify_source_scope};
+use gather_step_core::{NodeData, WorkspaceRegistry, classify_source_scope, parse_route_qn};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -342,13 +342,11 @@ fn crud_symbol_evidence(data: &CrudTraceData, symbol: &CrudTraceSymbol) -> Evide
 }
 
 fn parse_route_target(target: &NodeData) -> Option<(String, String)> {
-    let route = target
+    target
         .external_id
         .as_deref()
-        .or(target.qualified_name.as_deref())?
-        .strip_prefix("__route__")?;
-    let (method, path) = route.split_once("__")?;
-    Some((method.to_owned(), path.to_owned()))
+        .or(target.qualified_name.as_deref())
+        .and_then(parse_route_qn)
 }
 
 fn symbol(entry: gather_step_analysis::CrudTraceEntry) -> CrudTraceSymbol {
